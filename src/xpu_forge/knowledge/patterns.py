@@ -1,0 +1,56 @@
+"""Pattern matching helpers - maps issue types to optimization stages."""
+
+from xpu_forge.models import IssueType, OptimizationStage
+
+
+def get_stage_for_issue(issue_type: IssueType) -> OptimizationStage:
+    mapping = {
+        IssueType.REDUNDANT_COMPUTATION: OptimizationStage.ALGORITHMIC,
+        IssueType.SUBOPTIMAL_ALGORITHM: OptimizationStage.ALGORITHMIC,
+        IssueType.ASSOCIATIVITY_REORDER: OptimizationStage.ALGORITHMIC,
+        IssueType.COMMON_SUBEXPRESSION: OptimizationStage.ALGORITHMIC,
+        IssueType.ALGEBRAIC_SIMPLIFICATION: OptimizationStage.ALGORITHMIC,
+        IssueType.CACHEABLE_INTERMEDIATE: OptimizationStage.ALGORITHMIC,
+        IssueType.LOOP_INVARIANT_CODE: OptimizationStage.ALGORITHMIC,
+        IssueType.UNNECESSARY_MATERIALIZATION: OptimizationStage.ALGORITHMIC,
+        IssueType.GEMM_SIMPLIFICATION: OptimizationStage.ALGORITHMIC,
+        IssueType.REDUCTION_TREE_SUBOPTIMAL: OptimizationStage.ALGORITHMIC,
+        IssueType.DTYPE_FLOAT64: OptimizationStage.DTYPE_FIX,
+        IssueType.DTYPE_PRECISION: OptimizationStage.DTYPE_FIX,
+        IssueType.DTYPE_INPUT_CONVERSION: OptimizationStage.DTYPE_FIX,
+        IssueType.UNFUSED_KERNELS: OptimizationStage.FUSION,
+        IssueType.UNFUSED_ELEMENTWISE: OptimizationStage.FUSION,
+        IssueType.UNFUSED_REDUCTION: OptimizationStage.FUSION,
+        IssueType.FUSION_REGISTER_PRESSURE: OptimizationStage.FUSION,
+        IssueType.FUSION_REPLACES_VENDOR: OptimizationStage.FUSION,
+        IssueType.FUSION_NOOP: OptimizationStage.FUSION,
+        IssueType.MISSING_BOUNDARY_CHECK: OptimizationStage.MEMORY_ACCESS,
+        IssueType.TRANSPOSE_IN_LOOP: OptimizationStage.MEMORY_ACCESS,
+        IssueType.MISSING_TMA: OptimizationStage.MEMORY_ACCESS,
+        IssueType.UNCOALESCED_ACCESS: OptimizationStage.MEMORY_ACCESS,
+        IssueType.DEVICE_HOST_SYNC: OptimizationStage.MEMORY_ACCESS,
+        IssueType.NON_CONTIGUOUS_INPUT: OptimizationStage.MEMORY_ACCESS,
+        IssueType.CACHE_EVICTION_RISK: OptimizationStage.MEMORY_ACCESS,
+        IssueType.LONG_LIVENESS: OptimizationStage.MEMORY_ACCESS,
+        IssueType.HIGH_REGISTER_PRESSURE: OptimizationStage.MEMORY_ACCESS,
+        IssueType.MANUAL_POINTER_ARITHMETIC: OptimizationStage.BLOCK_POINTERS,
+        IssueType.BLOCK_PTR_BOUNDARY_WRONG: OptimizationStage.BLOCK_POINTERS,
+        IssueType.BLOCK_PTR_MULTIPLE_OF_MISUSE: OptimizationStage.BLOCK_POINTERS,
+        IssueType.MISSING_BLOCK_POINTERS: OptimizationStage.BLOCK_POINTERS,
+        IssueType.SUBOPTIMAL_TILE_SIZE: OptimizationStage.XPU_SPECIFIC,
+        IssueType.SUBOPTIMAL_WARPS: OptimizationStage.XPU_SPECIFIC,
+        IssueType.MISSING_GRF_MODE: OptimizationStage.XPU_SPECIFIC,
+        IssueType.NO_SWIZZLING: OptimizationStage.XPU_SPECIFIC,
+        IssueType.REPACK_IN_FORWARD: OptimizationStage.XPU_SPECIFIC,
+        IssueType.MISSING_PACKED_TRANSPOSE: OptimizationStage.XPU_SPECIFIC,
+        IssueType.SERIALIZED_N_TILES: OptimizationStage.XPU_SPECIFIC,
+        IssueType.AUTOTUNE_DUPLICATE_PARAMS: OptimizationStage.AUTOTUNING,
+        IssueType.SIGMOID_SLOW_EXP: OptimizationStage.XPU_SPECIFIC,
+        IssueType.MISSING_PERSISTENT: OptimizationStage.PERSISTENT_KERNEL,
+        IssueType.PERSISTENT_NUM_PROGS_HARDCODED: OptimizationStage.PERSISTENT_KERNEL,
+        # AUTOTUNING
+        IssueType.MISSING_AUTOTUNE: OptimizationStage.AUTOTUNING,
+        IssueType.SUBOPTIMAL_AUTOTUNE_CONFIGS: OptimizationStage.AUTOTUNING,
+        IssueType.AUTOTUNE_KEY_MISSING: OptimizationStage.AUTOTUNING,
+    }
+    return mapping.get(issue_type, OptimizationStage.ANALYSIS)
