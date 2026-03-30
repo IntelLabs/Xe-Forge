@@ -1,3 +1,7 @@
+# Based on Intel XPU Triton benchmark implementation:
+# https://github.com/intel/intel-xpu-backend-for-triton/blob/main/benchmarks/triton_kernels_benchmark/flash_attention_benchmark.py
+# Modified for local benchmarking / XPU tuning
+
 from typing import Callable
 
 import torch
