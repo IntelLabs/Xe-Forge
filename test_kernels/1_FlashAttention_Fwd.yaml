@@ -23,7 +23,7 @@ ci:
       A: 4
       S: 128
       D: 64
-    flop: "2*B*A*S*S*D"
+    flop: "4*B*A*S*S*D"
 
 bench-gpu-old:
   # Llama 3 70B-class: hidden 8192, heads 64 -> D=128
@@ -35,7 +35,7 @@ bench-gpu-old:
       A: 64
       S: 4096
       D: 128
-    flop: "2*B*A*S*S*D"
+    flop: "4*B*A*S*S*D"
 
 bench-gpu-1:
   # Llama 3 8B-class: hidden 4096, heads 32 -> D=128 (very common)
@@ -47,7 +47,7 @@ bench-gpu-1:
       A: 32
       S: 2048
       D: 128
-    flop: "2*B*A*S*S*D"
+    flop: "4*B*A*S*S*D"
 
 bench-gpu-2:
   # Llama 3 8B / Mistral 7B family also often runs at S=4096 (4k context)
@@ -58,7 +58,7 @@ bench-gpu-2:
       A: 32
       S: 4096
       D: 128
-    flop: "2*B*A*S*S*D"
+    flop: "4*B*A*S*S*D"
 
 bench-gpu-3:
   # Llama 3 70B-class: hidden 8192, heads 64 -> D=128
@@ -70,7 +70,7 @@ bench-gpu-3:
       A: 64
       S: 4096
       D: 128
-    flop: "2*B*A*S*S*D"
+    flop: "4*B*A*S*S*D"
 
 bench-gpu-4:
   # “Small batch” prefill or light throughput serving:
@@ -82,7 +82,7 @@ bench-gpu-4:
       A: 32
       S: 2048
       D: 128
-    flop: "2*B*A*S*S*D"
+    flop: "4*B*A*S*S*D"
 
 bench-gpu-5:
   # Falcon 40B: hidden 4544, heads 71 -> D=64 (non power-of-two heads; very “weird-shape” friendly)
@@ -94,7 +94,7 @@ bench-gpu-5:
       A: 71
       S: 2048
       D: 64
-    flop: "2*B*A*S*S*D"
+    flop: "4*B*A*S*S*D"
 
 bench-gpu-6:
   # GPT-NeoX-20B: hidden 6144, heads 64 -> D=96 (classic “non-64/128 head dim”)
@@ -106,7 +106,7 @@ bench-gpu-6:
       A: 64
       S: 2048
       D: 96
-    flop: "2*B*A*S*S*D"
+    flop: "4*B*A*S*S*D"
 
 bench-gpu-7:
   # Long-context serving (8k). Some deployments push 8k+ frequently now.
@@ -118,7 +118,7 @@ bench-gpu-7:
       A: 32
       S: 8192
       D: 128
-    flop: "2*B*A*S*S*D"
+    flop: "4*B*A*S*S*D"
 
 bench-gpu-8:
   # “Weird” seq length (not a neat power-of-two): happens with padding strategies,
@@ -130,7 +130,7 @@ bench-gpu-8:
       A: 32
       S: 3072
       D: 128
-    flop: "2*B*A*S*S*D"
+    flop: "4*B*A*S*S*D"
 
 bench-gpu-9:
   # Qwen 7B / 14B typical inference
@@ -143,7 +143,7 @@ bench-gpu-9:
       A: 32
       S: 8192
       D: 128
-    flop: "2*B*A*S*S*D"
+    flop: "4*B*A*S*S*D"
 
 bench-gpu-10:
   # Qwen long-context serving (16k)
@@ -155,7 +155,7 @@ bench-gpu-10:
       A: 32
       S: 16384
       D: 128
-    flop: "2*B*A*S*S*D"
+    flop: "4*B*A*S*S*D"
 
 bench-gpu-11:
   # Qwen-72B / large dense LLM class
@@ -168,7 +168,7 @@ bench-gpu-11:
       A: 64
       S: 8192
       D: 128
-    flop: "2*B*A*S*S*D"
+    flop: "4*B*A*S*S*D"
 
 bench-gpu:
   # DeepSeek-Coder long context (code models push sequence length)
@@ -180,7 +180,7 @@ bench-gpu:
       A: 40
       S: 16384
       D: 128
-    flop: "2*B*A*S*S*D"
+    flop: "4*B*A*S*S*D"
 
 bench-gpu-13:
   # DeepSeek large MoE inference
@@ -193,7 +193,7 @@ bench-gpu-13:
       A: 48
       S: 8192
       D: 128
-    flop: "2*B*A*S*S*D"
+    flop: "4*B*A*S*S*D"
 
 bench-gpu-14:
   # Mixtral 8x7B (MoE)
@@ -206,7 +206,7 @@ bench-gpu-14:
       A: 32
       S: 4096
       D: 128
-    flop: "2*B*A*S*S*D"
+    flop: "4*B*A*S*S*D"
 
 bench-gpu-15:
   # Mixtral long-context serving
@@ -218,7 +218,7 @@ bench-gpu-15:
       A: 32
       S: 16384
       D: 128
-    flop: "2*B*A*S*S*D"
+    flop: "4*B*A*S*S*D"
 
 bench-gpu-16:
   # Extreme long-context frontier models
@@ -231,7 +231,7 @@ bench-gpu-16:
       A: 32
       S: 32768
       D: 128
-    flop: "2*B*A*S*S*D"
+    flop: "4*B*A*S*S*D"
 
 bench-gpu-17:
   # Small-head MoE variant stress test
@@ -243,7 +243,7 @@ bench-gpu-17:
       A: 64
       S: 4096
       D: 64
-    flop: "2*B*A*S*S*D"
+    flop: "4*B*A*S*S*D"
 
 bench-gpu-18:
   # Asymmetric production batching
@@ -255,4 +255,4 @@ bench-gpu-18:
       A: 32
       S: 2048
       D: 128
-    flop: "2*B*A*S*S*D"
+    flop: "4*B*A*S*S*D"
