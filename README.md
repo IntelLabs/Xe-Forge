@@ -26,10 +26,7 @@ git clone https://github.com/IntelLabs/Xe-Forge
 cd Xe-Forge
 
 # Install with uv
-uv sync --extra xpu
-
-# Or with pip
-pip install -e ".[xpu]"
+uv sync
 ```
 
 ### Environment Setup
