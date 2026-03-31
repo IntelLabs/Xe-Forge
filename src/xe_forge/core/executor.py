@@ -282,6 +282,7 @@ class KernelBenchExecutor:
                 return False
 
             if optimized_model is not None:
+                optimized_model = optimized_model.to(device)
                 if dtype is not None:
                     optimized_model = optimized_model.to(dtype)
                 optimized_fn = optimized_model.forward
