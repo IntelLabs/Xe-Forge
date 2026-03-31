@@ -1,4 +1,4 @@
-# XPU Forge
+# Xe Forge
 [![CodeQL](https://github.com/IntelLabs/XPU-Forge/actions/workflows/codeql-analysis.yml/badge.svg)](https://github.com/IntelLabs/XPU-Forge/actions/workflows/codeql-analysis.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/IntelLabs/XPU-Forge/badge)](https://scorecard.dev/viewer/?uri=github.com/IntelLabs/XPU-Forge)
 
@@ -22,14 +22,11 @@ The optimizer analyzes Triton kernels, identifies performance issues, and applie
 
 ```bash
 # Clone the repository
-git clone https://github.com/IntelLabs/XPU-Forge
-cd XPU-Forge
+git clone https://github.com/IntelLabs/Xe-Forge
+cd Xe-Forge
 
 # Install with uv
-uv sync --extra xpu
-
-# Or with pip
-pip install -e ".[xpu]"
+uv sync
 ```
 
 ### Environment Setup
@@ -56,31 +53,31 @@ All other settings have sensible defaults. See the [Environment Variables Refere
 
 ```bash
 # Basic optimization
-xpu-forge --input kernel.py --spec spec.yaml
+xe-forge --input kernel.py --spec spec.yaml
 
 # With output file
-xpu-forge -i kernel.py -s spec.yaml -o optimized_kernel.py
+xe-forge -i kernel.py -s spec.yaml -o optimized_kernel.py
 
 # Target a specific variant (shapes, inputs)
-xpu-forge -i kernel.py -s spec.yaml -o optimized_kernel.py --variant gpu-config-1
+xe-forge -i kernel.py -s spec.yaml -o optimized_kernel.py --variant gpu-config-1
 
 # Specific stages only
-xpu-forge -i kernel.py -s spec.yaml --stages dtype_fix,xpu_specific
+xe-forge -i kernel.py -s spec.yaml --stages dtype_fix,xpu_specific
 
 # Skip correctness checks (faster iteration)
-xpu-forge -i kernel.py -s spec.yaml --no-correctness
+xe-forge -i kernel.py -s spec.yaml --no-correctness
 
 # Target a specific dtype
-xpu-forge -i kernel.py -s spec.yaml --target-dtype float16
+xe-forge -i kernel.py -s spec.yaml --target-dtype float16
 
 # Use a different LLM model
-xpu-forge -i kernel.py -s spec.yaml --model openai/gpt-4-turbo
+xe-forge -i kernel.py -s spec.yaml --model openai/gpt-4-turbo
 
 # Multiple candidates (pick best)
-xpu-forge -i kernel.py -s spec.yaml --best-k 3
+xe-forge -i kernel.py -s spec.yaml --best-k 3
 
 # Debug mode
-xpu-forge -i kernel.py -s spec.yaml --debug
+xe-forge -i kernel.py -s spec.yaml --debug
 ```
 
 ---
@@ -171,7 +168,7 @@ If you have an existing Triton kernel without a Model wrapper, you can use any L
 
 ```
 I have a Triton kernel that I need to wrap in a KernelBench-style Model class
-for XPU Forge. Here is the kernel:
+for Xe Forge. Here is the kernel:
 
 <paste your kernel code here>
 
@@ -331,13 +328,13 @@ The pipeline applies stages in this order:
 
 ```bash
 # Only memory and XPU stages
-xpu-forge -i kernel.py -s spec.yaml --stages memory_access,xpu_specific
+xe-forge -i kernel.py -s spec.yaml --stages memory_access,xpu_specific
 
 # Only autotuning
-xpu-forge -i kernel.py -s spec.yaml --stages autotuning
+xe-forge -i kernel.py -s spec.yaml --stages autotuning
 
 # Everything except block pointers
-xpu-forge -i kernel.py -s spec.yaml \
+xe-forge -i kernel.py -s spec.yaml \
     --stages algorithmic,dtype_fix,fusion,memory_access,persistent_kernel,xpu_specific,autotuning
 ```
 
@@ -346,7 +343,7 @@ xpu-forge -i kernel.py -s spec.yaml \
 ## CLI Reference
 
 ```
-xpu-forge --input KERNEL --spec SPEC [OPTIONS]
+xe-forge --input KERNEL --spec SPEC [OPTIONS]
 ```
 
 ### Required

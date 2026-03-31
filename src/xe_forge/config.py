@@ -9,7 +9,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from xpu_forge.models import OptimizationStage
+from xe_forge.models import OptimizationStage
 
 
 @dataclass

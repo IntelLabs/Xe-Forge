@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from xpu_forge.models import OptimizationResult
+from xe_forge.models import OptimizationResult
 
 
 class ResultLogger:

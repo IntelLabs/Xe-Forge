@@ -1,6 +1,5 @@
 import logging
-from collections.abc import Callable
-from typing import Any
+from typing import Any, Callable
 
 import dspy
 from dspy.predict.react import _fmt_exc
@@ -82,7 +81,7 @@ class CoVeR(dspy.Module):
 
         # Route each task output to its tools based on the name
         self.tools = tool_dict
-        self.tool_args: dict[str, list[str]] = {}
+        self.tool_args: dict[str, list[str]] = dict()
         for name, tool in self.tools.items():
             assert name, f"Tool name for {tool} is empty!"
             if not name == tool.name:
@@ -200,7 +199,7 @@ class CoVeR(dspy.Module):
                     return None
 
         logger.warning(f"Unable to extract a prediction after {retries} retries!")
-        return {}
+        return dict()
 
     def truncate_trajectory(self, trajectory):
         """Truncates the trajectory so that it fits in the context window.

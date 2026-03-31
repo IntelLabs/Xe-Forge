@@ -1,0 +1,30 @@
+inputs:
+  X:
+    shape: [BATCH, INPUT_SIZE]
+    dtype: float32
+
+inits:
+  - dim: INPUT_SIZE
+  - dim: HIDDEN_SIZE
+  - dim: OUTPUT_SIZE
+
+ci:
+  - params: [X]
+    dtype: float32
+    dims:
+      BATCH: 4
+      INPUT_SIZE: 256
+      HIDDEN_SIZE: 512
+      OUTPUT_SIZE: 128
+    flop: "2*BATCH*HIDDEN_SIZE*INPUT_SIZE + 2*BATCH*OUTPUT_SIZE*HIDDEN_SIZE"
+
+bench-gpu:
+  - params: [X]
+    dtype: float32
+    dims:
+      BATCH: 4096
+      INPUT_SIZE: 2048
+      HIDDEN_SIZE: 4096
+      OUTPUT_SIZE: 1024
+    flop: "2*BATCH*HIDDEN_SIZE*INPUT_SIZE + 2*BATCH*OUTPUT_SIZE*HIDDEN_SIZE"
+

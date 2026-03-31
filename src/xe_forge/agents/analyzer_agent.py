@@ -1,12 +1,14 @@
 """
 Analyzer Agent - LLM-based analysis of Triton kernels for optimization opportunities.
+
 """
 
 import logging
+from typing import List, Optional
 
 import dspy
 
-from xpu_forge.models import DetectedIssue, KernelAnalysis
+from xe_forge.models import DetectedIssue, KernelAnalysis
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +45,7 @@ class AnalysisSignature(dspy.Signature):
 
     FUSION:
       - unfused_kernels, unfused_elementwise, unfused_reduction
-      - fusion_register_pressure, fusion_replaces_vendor, fusion_noop
+      - fusion_register_pressure, fusion_noop
 
     MEMORY ACCESS:
       - missing_boundary_check, transpose_in_loop, missing_tma
@@ -103,9 +105,9 @@ class AnalyzerAgent:
         triton_code: str,
         pytorch_code: str = "",
         kernel_name: str = "kernel",
-        input_shapes: list[tuple] | None = None,
-        flop: float | None = None,
-        target_dtype: str | None = None,
+        input_shapes: Optional[List[tuple]] = None,
+        flop: Optional[float] = None,
+        target_dtype: Optional[str] = None,
     ) -> KernelAnalysis:
         problem_context = self._build_problem_context(input_shapes, flop, target_dtype)
 
@@ -122,8 +124,8 @@ class AnalyzerAgent:
         except Exception as e:
             logger.warning(f"LLM analysis failed: {e}")
 
-        from xpu_forge.knowledge.patterns import get_stage_for_issue
-        from xpu_forge.models import OptimizationStage
+        from xe_forge.models import OptimizationStage
+        from xe_forge.knowledge.patterns import get_stage_for_issue
 
         has_fusion = any(
             get_stage_for_issue(i.issue_type) == OptimizationStage.FUSION for i in issues

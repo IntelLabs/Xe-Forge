@@ -1,5 +1,5 @@
 [project]
-name = "xpu-forge"
+name = "xe-forge"
 version = "0.1.0"
 description = "Multi-stage Triton kernel optimization for Intel XPU"
 authors = [{ name = "Intel Labs" }]
@@ -21,7 +21,7 @@ xpu = ["pytorch-triton-xpu>=3.5.0"]
 wandb = ["weave>=0.52.24"]
 
 [project.scripts]
-xpu-forge = "xpu_forge.cli:main"
+xe-forge = "xe_forge.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=7.0.0", "pytest-cov>=4.0.0", "ruff>=0.9.0"]
@@ -40,7 +40,7 @@ url = "https://download.pytorch.org/whl/xpu"
 explicit = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/xpu_forge"]
+packages = ["src/xe_forge"]
 
 [tool.hatch.metadata]
 allow-direct-references = true
@@ -70,7 +70,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["xpu_forge"]
+known-first-party = ["xe_forge"]
 
 [tool.ruff.format]
 quote-style = "double"

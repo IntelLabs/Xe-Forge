@@ -2,6 +2,8 @@
 Optimizer Agent - Uses ReAct for iterative kernel optimization with tool-based verification.
 """
 
+from __future__ import annotations
+
 import ast
 import logging
 import re
@@ -9,15 +11,15 @@ from collections.abc import Callable
 
 import dspy
 
-from xpu_forge.agents import Optimizer
-from xpu_forge.core import KernelBenchExecutor
-from xpu_forge.knowledge.patterns import get_stage_for_issue
+from xe_forge.agents import Optimizer
+from xe_forge.core import KernelBenchExecutor
+from xe_forge.knowledge.patterns import get_stage_for_issue
 
 try:
-    from xpu_forge.knowledge.loader import KnowledgeBase
+    from xe_forge.knowledge.loader import KnowledgeBase
 except ImportError:
     KnowledgeBase = None
-from xpu_forge.models import (
+from xe_forge.models import (
     DetectedIssue,
     KernelAnalysis,
     OptimizationStage,

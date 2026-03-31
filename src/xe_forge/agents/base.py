@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 
-from xpu_forge import OptimizationStage
-from xpu_forge.models import KernelAnalysis, StageResult
+from xe_forge import OptimizationStage
+from xe_forge.models import KernelAnalysis, StageResult
 
 
 class Optimizer(ABC):

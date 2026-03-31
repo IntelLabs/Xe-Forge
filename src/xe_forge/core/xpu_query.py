@@ -722,7 +722,7 @@ def extract_mnk_from_shapes(
 
 def get_xpu_config_for_pipeline(
     input_shapes: list[tuple[int, ...]] | None = None,
-    config: Any | None = None,  # xpu_forge.config.Config
+    config: Any | None = None,  # xe_forge.config.Config
     dtype: str = "float16",
     device_id: int = 0,
 ) -> dict[str, Any]:

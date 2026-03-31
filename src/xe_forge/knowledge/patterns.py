@@ -1,6 +1,6 @@
 """Pattern matching helpers - maps issue types to optimization stages."""
 
-from xpu_forge.models import IssueType, OptimizationStage
+from xe_forge.models import IssueType, OptimizationStage
 
 
 def get_stage_for_issue(issue_type: IssueType) -> OptimizationStage:

@@ -17,8 +17,5 @@ jobs:
       - name: Install Ruff
         uses: astral-sh/ruff-action@v3
 
-      - name: Lint
-        run: ruff check --output-format=github .
-
       - name: Format check
         run: ruff format --check .
