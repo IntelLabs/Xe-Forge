@@ -26,6 +26,7 @@ from xe_forge.core.spec_loader import (
     load_spec_from_string,
     parse_spec,
 )
+
 # validator module not included — correctness checking is handled by executor
 # from xe_forge.core.validator import KernelValidator
 from xe_forge.core.xpu_query import (

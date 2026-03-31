@@ -64,6 +64,8 @@ class OptimizationSignature(dspy.Signature):
     === CODE REQUIREMENTS ===
     - Include ALL imports, @triton.jit decorator, kernel function, Model class
     - num_warps must be power of 2; block sizes must be powers of 2
+    - NEVER replace @triton.jit kernels with torch.matmul, torch.mm, torch.bmm,
+      or any vendor library (oneDNN, cuBLAS, MKL). Keep all original Triton kernels.
     """
 
     original_code: str = dspy.InputField(desc="Original Triton kernel code for reference")
@@ -75,6 +77,10 @@ class OptimizationSignature(dspy.Signature):
         desc="Problem context: input tensor shapes, dtype, Model init args, and FLOP count. "
         "Use this to choose appropriate tile sizes, understand memory footprint, "
         "and reason about whether the kernel is compute-bound or memory-bound."
+    )
+    vtune_report: str = dspy.InputField(
+        desc="VTune profiling report (Markdown). Empty string if not available. "
+        "Use hotspot and memory-access data to guide which optimizations matter most."
     )
     optimized_code: dspy.Code["python"] = dspy.OutputField(
         desc="Complete optimized Triton kernel code with all imports, decorators, kernel, and Model class."
@@ -103,6 +109,7 @@ class AlgorithmicOptimizationSignature(dspy.Signature):
 
     === CODE REQUIREMENTS ===
     - Include ALL imports, @triton.jit decorator, kernel function, Model class
+    - NEVER replace @triton.jit kernels with torch.matmul, torch.mm, or any vendor library.
     """
 
     original_code: str = dspy.InputField(desc="Original Triton kernel code for reference")
@@ -277,6 +284,29 @@ class OptimizerAgent(Optimizer):
                     "not in kernel code."
                 )
 
+            # Guard against vendor-kernel replacement: the optimized code must
+            # contain every @triton.jit kernel that existed in the original.
+            # The LLM sometimes "fuses" by replacing the Triton kernel with
+            # torch.matmul / torch.mm / oneDNN calls — that is not acceptable.
+            original_kernels = set(re.findall(r"def\s+(\w+)\s*\(", original_code))
+            original_jit_kernels = {
+                name
+                for name in original_kernels
+                if f"@triton.jit" in original_code
+                and re.search(
+                    rf"@triton\.jit[\s\S]{{0,200}}def\s+{re.escape(name)}\s*\(", original_code
+                )
+            }
+            if original_jit_kernels:
+                missing = [k for k in original_jit_kernels if f"def {k}" not in code]
+                if missing:
+                    return (
+                        f"INVALID: Triton kernel(s) {missing} were removed from the optimized code. "
+                        "You must keep all original @triton.jit kernels. "
+                        "Do NOT replace Triton kernels with torch.matmul, torch.mm, "
+                        "oneDNN, or any other vendor library call."
+                    )
+
             if executor and input_shapes:
                 try:
                     comparison = executor.compare_kernels(
@@ -320,6 +350,7 @@ class OptimizerAgent(Optimizer):
         dtype=None,
         pytorch_code="",
         init_args=None,
+        vtune_report="",
     ):
         logger.info(f"Applying optimization stage: {stage.value}")
         original_code = code
@@ -346,7 +377,7 @@ class OptimizerAgent(Optimizer):
 
         # Stages whose purpose is correctness, not speed — don't penalise them
         # for being slower; the performance stages that follow will recover that.
-        CORRECTNESS_ONLY_STAGES = {OptimizationStage.DTYPE_FIX}
+        CORRECTNESS_ONLY_STAGES = {OptimizationStage.DTYPE_FIX, OptimizationStage.ALGORITHMIC}
         skip_speedup = stage in CORRECTNESS_ONLY_STAGES
 
         verify_tool, last_accepted = self._create_verify_tool(
@@ -364,38 +395,39 @@ class OptimizerAgent(Optimizer):
 
         if stage == OptimizationStage.ALGORITHMIC:
             sig = AlgorithmicOptimizationSignature
-            kwargs = {
-                "original_code": original_code,
-                "current_code": code,
-                "pytorch_code": pytorch_code or "",
-                "issues": issues_text,
-                "xpu_config": xpu_text,
-                "problem_context": problem_ctx,
-            }
+            kwargs = dict(
+                original_code=original_code,
+                current_code=code,
+                pytorch_code=pytorch_code or "",
+                issues=issues_text,
+                xpu_config=xpu_text,
+                problem_context=problem_ctx,
+            )
         elif stage == OptimizationStage.AUTOTUNING:
             sig = AutotuneSignature
             # Build autotune-specific context
             suggested_configs = self._build_autotune_configs(xpu_config, input_shapes)
             problem_shapes = self._build_problem_shapes(input_shapes)
-            kwargs = {
-                "original_code": original_code,
-                "current_code": code,
-                "issues": issues_text,
-                "xpu_config": xpu_text,
-                "suggested_autotune_configs": suggested_configs,
-                "problem_shapes": problem_shapes,
-                "problem_context": problem_ctx,
-            }
+            kwargs = dict(
+                original_code=original_code,
+                current_code=code,
+                issues=issues_text,
+                xpu_config=xpu_text,
+                suggested_autotune_configs=suggested_configs,
+                problem_shapes=problem_shapes,
+                problem_context=problem_ctx,
+            )
         else:
             sig = OptimizationSignature
-            kwargs = {
-                "original_code": original_code,
-                "current_code": code,
-                "stage": stage.value,
-                "issues": issues_text,
-                "xpu_config": xpu_text,
-                "problem_context": problem_ctx,
-            }
+            kwargs = dict(
+                original_code=original_code,
+                current_code=code,
+                stage=stage.value,
+                issues=issues_text,
+                xpu_config=xpu_text,
+                problem_context=problem_ctx,
+                vtune_report=vtune_report or "",
+            )
 
         cover = CoVeR(
             signature=sig,
@@ -405,57 +437,110 @@ class OptimizerAgent(Optimizer):
             use_raw_fixer_output=True,
         )
 
+        # Best-of loop: run CoVeR repeatedly within the total iteration budget.
+        # Each successful run starts from the best code found so far and uses
+        # only the remaining iterations — so the total LLM calls never exceeds
+        # max_iterations regardless of how quickly each run succeeds.
+        #
+        # Example with max_iterations=5:
+        #   Run 1 succeeds on iter 1 → 4 iters remaining → run 2 starts from that result
+        #   Run 2 succeeds on iter 2 → 2 iters remaining → run 3 starts from that result
+        #   Run 3 budget=2, fails to improve → stop, return best from run 2
+        best_code = None
+        best_spd = None
+        best_mb = best_ma = best_traj = None
+        iters_used = 0
+
+        current_code_for_run = code  # starts from original, advances to best each run
+
         try:
-            result = cover(**kwargs)
-            if not hasattr(result, "optimized_code") or result.optimized_code is None:
-                return StageResult(
-                    stage=stage,
-                    success=False,
-                    input_code=original_code,
-                    output_code=original_code,
-                    error_message="CoVeR produced no code",
+            while iters_used < self.max_iterations:
+                remaining = self.max_iterations - iters_used
+                cover.max_iters = remaining
+
+                # Point current_code at the best result so far so the LLM
+                # builds on it rather than restarting from scratch each run.
+                run_kwargs = {**kwargs, "current_code": current_code_for_run}
+
+                result = cover(**run_kwargs)
+
+                # Count how many iterations this run consumed by inspecting trajectory
+                traj = result.trajectory if hasattr(result, "trajectory") else {}
+                thoughts_this_run = sum(1 for k in traj if k.startswith("thought_"))
+                iters_used += max(1, thoughts_this_run)
+
+                if not hasattr(result, "optimized_code") or result.optimized_code is None:
+                    break
+
+                code_obj = result.optimized_code
+                candidate = _extract_code_from_response(
+                    code_obj.code if hasattr(code_obj, "code") else str(code_obj)
                 )
 
-            code_obj = result.optimized_code
-            optimized = _extract_code_from_response(
-                code_obj.code if hasattr(code_obj, "code") else str(code_obj)
-            )
-            traj = result.trajectory if hasattr(result, "trajectory") else {}
+                ok, spd, mb, ma, err = self._final_verify(
+                    original_code,
+                    candidate,
+                    kernel_name,
+                    input_shapes,
+                    flop,
+                    dtype,
+                    init_args=init_args,
+                    skip_speedup_check=skip_speedup,
+                    cached_comparison=last_accepted["comparison"],
+                )
 
-            ok, spd, mb, ma, err = self._final_verify(
-                original_code,
-                optimized,
-                kernel_name,
-                input_shapes,
-                flop,
-                dtype,
-                init_args=init_args,
-                skip_speedup_check=skip_speedup,
-                cached_comparison=last_accepted["comparison"],
-            )
+                if not ok:
+                    # This run failed — stop trying, return whatever we have
+                    logger.debug(f"Run failed ({err}), stopping best-of loop")
+                    break
 
-            if ok:
-                logger.info(f"Stage {stage.value} OK" + (f" ({spd:.2f}x)" if spd else ""))
+                # Update best if this run improved speedup
+                if best_spd is None or (spd is not None and spd > best_spd):
+                    logger.info(
+                        f"Stage {stage.value} new best: {spd:.2f}x"
+                        + (f" (was {best_spd:.2f}x)" if best_spd else "")
+                    )
+                    best_code, best_spd, best_mb, best_ma, best_traj = (
+                        candidate,
+                        spd,
+                        mb,
+                        ma,
+                        traj,
+                    )
+                    current_code_for_run = candidate  # next run builds on this
+                    # Reset last_accepted so the next run gets a fresh comparison slot
+                    last_accepted["comparison"] = None
+                else:
+                    # No improvement — stop iterating
+                    logger.info(
+                        f"Stage {stage.value} no improvement ({spd:.2f}x vs best {best_spd:.2f}x), stopping"
+                    )
+                    break
+
+            if best_code is not None:
+                logger.info(
+                    f"Stage {stage.value} OK — best {best_spd:.2f}x"
+                    f" ({self.max_iterations - (self.max_iterations - iters_used)} iters used)"
+                )
                 return StageResult(
                     stage=stage,
                     success=True,
                     input_code=original_code,
-                    output_code=optimized,
-                    changes_made=self._changes(traj),
-                    reasoning=self._reasoning(traj),
-                    speedup=spd,
-                    metrics_before=mb,
-                    metrics_after=ma,
+                    output_code=best_code,
+                    changes_made=self._changes(best_traj or {}),
+                    reasoning=self._reasoning(best_traj or {}),
+                    speedup=best_spd,
+                    metrics_before=best_mb,
+                    metrics_after=best_ma,
                 )
             else:
-                logger.warning(f"Stage {stage.value} failed: {err}")
-                self._dump_kernel(stage, optimized)
+                logger.warning(f"Stage {stage.value} failed: no valid result in budget")
                 return StageResult(
                     stage=stage,
                     success=False,
                     input_code=original_code,
                     output_code=original_code,
-                    error_message=err,
+                    error_message="No valid optimization found within iteration budget",
                 )
         except Exception as e:
             logger.error(f"CoVeR failed: {e}")

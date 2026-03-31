@@ -81,9 +81,7 @@ class KernelSpec:
 
     # Stores numbered variants like bench-gpu-0, bench-gpu-1, ...
     # keyed by their exact YAML key so callers can request them by name.
-    _named_variants: Dict[str, List[VariantSpec]] = field(
-        default_factory=dict, repr=False
-    )
+    _named_variants: Dict[str, List[VariantSpec]] = field(default_factory=dict, repr=False)
 
     # Base-prefix → attribute name for the four standard families.
     _VARIANT_MAP_KEYS = {

@@ -22,6 +22,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import Callable, Dict, List, Optional, Tuple
 
 import dspy
 import httpx
@@ -31,13 +32,15 @@ from xe_forge.agents import AnalyzerAgent, Optimizer, OptimizerAgent, OptimizerR
 from xe_forge.config import Config, get_config
 from xe_forge.core import get_xpu_config_for_pipeline
 from xe_forge.models import (
+    KernelAnalysis,
     OptimizationResult,
     OptimizationStage,
+    StageResult,
 )
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_STAGE_ORDER: list[OptimizationStage] = [
+DEFAULT_STAGE_ORDER: List[OptimizationStage] = [
     OptimizationStage.ANALYSIS,
     OptimizationStage.ALGORITHMIC,
     OptimizationStage.DTYPE_FIX,
@@ -124,7 +127,7 @@ class XeForgePipeline:
             )
             dspy.configure(lm=lm)
         except Exception as e:
-            raise RuntimeError(f"Failed to initialize LLM: {e}") from e
+            raise RuntimeError(f"Failed to initialize LLM: {e}")
 
     def _resolve_tolerances(self, spec=None, variant_type="bench-gpu", rtol=None, atol=None):
         ertol = self.config.optimization.correctness_rtol
@@ -202,7 +205,7 @@ class XeForgePipeline:
                 )
                 orig_r = ex.execute(
                     triton_code,
-                    kernel_name,
+                    None,
                     input_shapes,
                     flop=flop,
                     dtype=dtype,
@@ -213,6 +216,9 @@ class XeForgePipeline:
                     logger.info(
                         f"Original: {orig_r.tflops:.2f} TFLOPS, {orig_r.execution_time_ms:.2f} ms"
                     )
+                if not orig_r.success:
+                    logger.error(f"Baseline FAILED: {orig_r.error_message}")
+                    logger.debug(orig_r.error_traceback)
             except Exception as e:
                 logger.warning(f"Failed to measure original: {e}")
 
@@ -260,7 +266,7 @@ class XeForgePipeline:
             logger.info("=" * 60 + "\nSTAGE: PLANNING\n" + "=" * 60)
             from xe_forge.knowledge.patterns import get_stage_for_issue
 
-            stages_needed: dict[OptimizationStage, list[str]] = {}
+            stages_needed: Dict[OptimizationStage, List[str]] = {}
             for iss in analysis.detected_issues:
                 st = get_stage_for_issue(iss.issue_type)
                 stages_needed.setdefault(st, []).append(iss.issue_type.value)

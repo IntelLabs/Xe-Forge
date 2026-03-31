@@ -4,7 +4,7 @@ Core data models for Triton optimization pipeline
 
 from datetime import datetime
 from enum import Enum, StrEnum
-
+from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
@@ -80,23 +80,23 @@ class IssueType(StrEnum):
 class DetectedIssue(BaseModel):
     issue_type: IssueType
     severity: int = Field(ge=1, le=5, description="1=minor, 5=critical")
-    location: str | None = None
+    location: Optional[str] = None
     description: str
     suggested_fix: str
-    estimated_speedup: str | None = None
+    estimated_speedup: Optional[str] = None
 
 
 class KernelAnalysis(BaseModel):
     kernel_name: str
-    detected_issues: list[DetectedIssue] = Field(default_factory=list)
-    operations: list[str] = Field(default_factory=list)
-    memory_accesses: list[str] = Field(default_factory=list)
+    detected_issues: List[DetectedIssue] = Field(default_factory=list)
+    operations: List[str] = Field(default_factory=list)
+    memory_accesses: List[str] = Field(default_factory=list)
     has_fusion_opportunity: bool = False
     has_algorithmic_opportunity: bool = False
     current_dtype: str = "unknown"
-    tile_sizes: dict[str, int] = Field(default_factory=dict)
-    num_warps: int | None = None
-    num_stages: int | None = None
+    tile_sizes: Dict[str, int] = Field(default_factory=dict)
+    num_warps: Optional[int] = None
+    num_stages: Optional[int] = None
     uses_block_pointers: bool = False
     uses_tma: bool = False
     is_persistent: bool = False
@@ -106,31 +106,31 @@ class StageResult(BaseModel):
     stage: OptimizationStage
     success: bool
     input_code: str
-    output_code: str | None = None
-    changes_made: list[str] = Field(default_factory=list)
-    reasoning: str | None = None
-    error_message: str | None = None
-    metrics_before: dict[str, float] | None = None
-    metrics_after: dict[str, float] | None = None
-    speedup: float | None = None
+    output_code: Optional[str] = None
+    changes_made: List[str] = Field(default_factory=list)
+    reasoning: Optional[str] = None
+    error_message: Optional[str] = None
+    metrics_before: Optional[Dict[str, float]] = None
+    metrics_after: Optional[Dict[str, float]] = None
+    speedup: Optional[float] = None
 
 
 class OptimizationResult(BaseModel):
     kernel_name: str
     timestamp: datetime = Field(default_factory=datetime.now)
     original_code: str
-    optimized_code: str | None = None
-    stages_applied: list[StageResult] = Field(default_factory=list)
-    total_speedup: float | None = None
-    analysis: KernelAnalysis | None = None
+    optimized_code: Optional[str] = None
+    stages_applied: List[StageResult] = Field(default_factory=list)
+    total_speedup: Optional[float] = None
+    analysis: Optional[KernelAnalysis] = None
     success: bool = False
-    error_message: str | None = None
-    original_ms: float | None = None
-    optimized_ms: float | None = None
-    original_tflops: float | None = None
-    optimized_tflops: float | None = None
-    original_memory_bw: float | None = None
-    optimized_memory_bw: float | None = None
+    error_message: Optional[str] = None
+    original_ms: Optional[float] = None
+    optimized_ms: Optional[float] = None
+    original_tflops: Optional[float] = None
+    optimized_tflops: Optional[float] = None
+    original_memory_bw: Optional[float] = None
+    optimized_memory_bw: Optional[float] = None
 
 
 class KnowledgeEntry(BaseModel):
@@ -141,17 +141,17 @@ class KnowledgeEntry(BaseModel):
     pattern_after: str
     description: str
     rationale: str
-    expected_speedup: str | None = None
-    applies_to: list[str] = Field(default_factory=list)
-    prerequisites: list[str] = Field(default_factory=list)
-    examples: list[dict[str, str]] = Field(default_factory=list)
+    expected_speedup: Optional[str] = None
+    applies_to: List[str] = Field(default_factory=list)
+    prerequisites: List[str] = Field(default_factory=list)
+    examples: List[Dict[str, str]] = Field(default_factory=list)
 
 
 class ExecutionResult(BaseModel):
     success: bool
-    execution_time_ms: float | None = None
-    tflops: float | None = None
-    memory_bandwidth_gb: float | None = None
-    output_correct: bool | None = None
-    error_message: str | None = None
-    error_traceback: str | None = None
+    execution_time_ms: Optional[float] = None
+    tflops: Optional[float] = None
+    memory_bandwidth_gb: Optional[float] = None
+    output_correct: Optional[bool] = None
+    error_message: Optional[str] = None
+    error_traceback: Optional[str] = None
