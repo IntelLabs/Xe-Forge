@@ -1,0 +1,35 @@
+inputs:
+  X:
+    shape: [BATCH, IN_FEAT]
+    dtype: float32
+
+inits:
+  - dim: IN_FEAT
+  - dim: OUT_FEAT
+  - dim: BN_EPS
+  - dim: BN_MOMENTUM
+  - dim: SCALE_SHAPE
+
+ci:
+  - params: [X]
+    dtype: float32
+    dims:
+      BATCH: 4
+      IN_FEAT: 512
+      OUT_FEAT: 512
+      BN_EPS: 1e-5
+      BN_MOMENTUM: 0.1
+      SCALE_SHAPE: [1]
+    flop: "2*BATCH*OUT_FEAT*IN_FEAT"
+
+bench-gpu:
+  - params: [X]
+    dtype: float32
+    dims:
+      BATCH: 1024
+      IN_FEAT: 8192
+      OUT_FEAT: 8192
+      BN_EPS: 1e-5
+      BN_MOMENTUM: 0.1
+      SCALE_SHAPE: [1]
+    flop: "2*BATCH*OUT_FEAT*IN_FEAT"

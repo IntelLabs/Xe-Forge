@@ -1,0 +1,258 @@
+
+inputs:
+  Q:
+    shape: [B, A, S, D]
+    dtype: float16
+  K:
+    shape: [B, A, S, D]
+    dtype: float16
+  V:
+    shape: [B, A, S, D]
+    dtype: float16
+
+inits:
+  # Model ctor can take D (head dim) if you want; harmless for fwd-only launchers.
+  - dim: D
+
+ci:
+  - params: [Q, K, V]
+    dtype: float32
+    dims:
+      # Small CI shape: fast correctness sanity
+      B: 1
+      A: 4
+      S: 128
+      D: 64
+    flop: "4*B*A*S*S*D"
+
+bench-gpu-old:
+  # Llama 3 70B-class: hidden 8192, heads 64 -> D=128
+  # S=4096 is a common “bigger model, bigger context” serving shape.
+  - params: [Q, K, V]
+    dtype: float16
+    dims:
+      B: 1
+      A: 64
+      S: 4096
+      D: 128
+    flop: "4*B*A*S*S*D"
+
+bench-gpu-1:
+  # Llama 3 8B-class: hidden 4096, heads 32 -> D=128 (very common)
+  # S=2048 is still a common deployment context window for latency-sensitive serving.
+  - params: [Q, K, V]
+    dtype: float16
+    dims:
+      B: 1
+      A: 32
+      S: 2048
+      D: 128
+    flop: "4*B*A*S*S*D"
+
+bench-gpu-2:
+  # Llama 3 8B / Mistral 7B family also often runs at S=4096 (4k context)
+  - params: [Q, K, V]
+    dtype: float16
+    dims:
+      B: 1
+      A: 32
+      S: 4096
+      D: 128
+    flop: "4*B*A*S*S*D"
+
+bench-gpu-3:
+  # Llama 3 70B-class: hidden 8192, heads 64 -> D=128
+  # S=4096 is a common “bigger model, bigger context” serving shape.
+  - params: [Q, K, V]
+    dtype: float16
+    dims:
+      B: 1
+      A: 64
+      S: 4096
+      D: 128
+    flop: "4*B*A*S*S*D"
+
+bench-gpu-4:
+  # “Small batch” prefill or light throughput serving:
+  # B=2 is common when batching a couple of requests together.
+  - params: [Q, K, V]
+    dtype: float16
+    dims:
+      B: 2
+      A: 32
+      S: 2048
+      D: 128
+    flop: "4*B*A*S*S*D"
+
+bench-gpu-5:
+  # Falcon 40B: hidden 4544, heads 71 -> D=64 (non power-of-two heads; very “weird-shape” friendly)
+  # This is a great stress test for head-count irregularity.
+  - params: [Q, K, V]
+    dtype: float16
+    dims:
+      B: 1
+      A: 71
+      S: 2048
+      D: 64
+    flop: "4*B*A*S*S*D"
+
+bench-gpu-6:
+  # GPT-NeoX-20B: hidden 6144, heads 64 -> D=96 (classic “non-64/128 head dim”)
+  # Useful for testing kernels that assume D in {64,128}.
+  - params: [Q, K, V]
+    dtype: float16
+    dims:
+      B: 1
+      A: 64
+      S: 2048
+      D: 96
+    flop: "4*B*A*S*S*D"
+
+bench-gpu-7:
+  # Long-context serving (8k). Some deployments push 8k+ frequently now.
+  # Choose B=1 to keep it realistic for latency-focused inference.
+  - params: [Q, K, V]
+    dtype: float16
+    dims:
+      B: 1
+      A: 32
+      S: 8192
+      D: 128
+    flop: "4*B*A*S*S*D"
+
+bench-gpu-8:
+  # “Weird” seq length (not a neat power-of-two): happens with padding strategies,
+  # chunking, retrieval-augmented prompts, or mixed request batching.
+  - params: [Q, K, V]
+    dtype: float16
+    dims:
+      B: 1
+      A: 32
+      S: 3072
+      D: 128
+    flop: "4*B*A*S*S*D"
+
+bench-gpu-9:
+  # Qwen 7B / 14B typical inference
+  # Hidden 4096, heads 32 -> D=128
+  # 8k context increasingly common in chat deployments
+  - params: [Q, K, V]
+    dtype: float16
+    dims:
+      B: 1
+      A: 32
+      S: 8192
+      D: 128
+    flop: "4*B*A*S*S*D"
+
+bench-gpu-10:
+  # Qwen long-context serving (16k)
+  # Used in RAG + agent pipelines
+  - params: [Q, K, V]
+    dtype: float16
+    dims:
+      B: 1
+      A: 32
+      S: 16384
+      D: 128
+    flop: "4*B*A*S*S*D"
+
+bench-gpu-11:
+  # Qwen-72B / large dense LLM class
+  # Hidden 8192, heads 64 -> D=128
+  # Production often caps at 8k for cost reasons
+  - params: [Q, K, V]
+    dtype: float16
+    dims:
+      B: 1
+      A: 64
+      S: 8192
+      D: 128
+    flop: "4*B*A*S*S*D"
+
+bench-gpu:
+  # DeepSeek-Coder long context (code models push sequence length)
+  # 16k context realistic for repo-level prompts
+  - params: [Q, K, V]
+    dtype: float16
+    dims:
+      B: 1
+      A: 40
+      S: 16384
+      D: 128
+    flop: "4*B*A*S*S*D"
+
+bench-gpu-13:
+  # DeepSeek large MoE inference
+  # Attention dims stay transformer-standard
+  # Head count sometimes non power-of-two
+  - params: [Q, K, V]
+    dtype: float16
+    dims:
+      B: 1
+      A: 48
+      S: 8192
+      D: 128
+    flop: "4*B*A*S*S*D"
+
+bench-gpu-14:
+  # Mixtral 8x7B (MoE)
+  # Hidden 4096, heads 32 -> D=128
+  # MoE affects FFN, attention stays dense
+  - params: [Q, K, V]
+    dtype: float16
+    dims:
+      B: 2
+      A: 32
+      S: 4096
+      D: 128
+    flop: "4*B*A*S*S*D"
+
+bench-gpu-15:
+  # Mixtral long-context serving
+  # Seen in retrieval + toolformer workloads
+  - params: [Q, K, V]
+    dtype: float16
+    dims:
+      B: 1
+      A: 32
+      S: 16384
+      D: 128
+    flop: "4*B*A*S*S*D"
+
+bench-gpu-16:
+  # Extreme long-context frontier models
+  # 32k attention now realistic (DeepSeek / Qwen extended / Yi-long)
+  # Very expensive → B kept at 1
+  - params: [Q, K, V]
+    dtype: float16
+    dims:
+      B: 1
+      A: 32
+      S: 32768
+      D: 128
+    flop: "4*B*A*S*S*D"
+
+bench-gpu-17:
+  # Small-head MoE variant stress test
+  # Some experimental MoE keep D=64 for memory savings
+  - params: [Q, K, V]
+    dtype: float16
+    dims:
+      B: 4
+      A: 64
+      S: 4096
+      D: 64
+    flop: "4*B*A*S*S*D"
+
+bench-gpu-18:
+  # Asymmetric production batching
+  # Many short prompts batched together
+  - params: [Q, K, V]
+    dtype: float16
+    dims:
+      B: 8
+      A: 32
+      S: 2048
+      D: 128
+    flop: "4*B*A*S*S*D"

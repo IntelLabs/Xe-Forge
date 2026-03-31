@@ -1,0 +1,32 @@
+# kernelbench_gemm_div_sum_scale.yaml
+# KernelBench problem spec (same format you posted earlier)
+
+inputs:
+  X:
+    shape: [BATCH, INPUT_SIZE]
+    dtype: float32
+
+inits:
+  - dim: INPUT_SIZE
+  - dim: HIDDEN_SIZE
+  - dim: SCALING_FACTOR
+
+ci:
+  - params: [X]
+    dtype: float32
+    dims:
+      BATCH: 4
+      INPUT_SIZE: 1024
+      HIDDEN_SIZE: 2048
+      SCALING_FACTOR: 1.5
+    flop: "2*BATCH*HIDDEN_SIZE*INPUT_SIZE"
+
+bench-gpu:
+  - params: [X]
+    dtype: float32
+    dims:
+      BATCH: 100
+      INPUT_SIZE: 8192
+      HIDDEN_SIZE: 8192
+      SCALING_FACTOR: 1.5
+    flop: "2*BATCH*HIDDEN_SIZE*INPUT_SIZE"

@@ -1,0 +1,29 @@
+# kernelbench_linear_gelu_softmax.yaml
+# KernelBench problem spec (same format you posted earlier)
+
+inputs:
+  X:
+    shape: [BATCH, IN_FEAT]
+    dtype: float32
+
+inits:
+  - dim: IN_FEAT
+  - dim: OUT_FEAT
+
+ci:
+  - params: [X]
+    dtype: float32
+    dims:
+      BATCH: 4
+      IN_FEAT: 1024
+      OUT_FEAT: 2048
+    flop: "2*BATCH*OUT_FEAT*IN_FEAT"
+
+bench-gpu:
+  - params: [X]
+    dtype: float32
+    dims:
+      BATCH: 10
+      IN_FEAT: 8192
+      OUT_FEAT: 8192
+    flop: "2*BATCH*OUT_FEAT*IN_FEAT"

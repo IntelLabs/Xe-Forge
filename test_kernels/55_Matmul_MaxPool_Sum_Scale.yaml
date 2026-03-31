@@ -1,0 +1,35 @@
+# kernelbench_linear_pool_sum_scale.yaml
+# KernelBench problem spec (same format as you posted)
+
+inputs:
+  X:
+    shape: [BATCH, IN_FEAT]
+    dtype: float32
+
+inits:
+  - dim: IN_FEAT
+  - dim: OUT_FEAT
+  - dim: KERNEL_SIZE
+  - dim: SCALE_FACTOR
+
+ci:
+  - params: [X]
+    dtype: float32
+    dims:
+      BATCH: 4
+      IN_FEAT: 1024
+      OUT_FEAT: 2048
+      KERNEL_SIZE: 2
+      SCALE_FACTOR: 0.5
+    flop: "2*BATCH*OUT_FEAT*IN_FEAT"
+
+bench-gpu:
+  - params: [X]
+    dtype: float32
+    dims:
+      BATCH: 128
+      IN_FEAT: 32768
+      OUT_FEAT: 32768
+      KERNEL_SIZE: 2
+      SCALE_FACTOR: 0.5
+    flop: "2*BATCH*OUT_FEAT*IN_FEAT"

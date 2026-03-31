@@ -1,0 +1,78 @@
+[project]
+name = "xpu-forge"
+version = "0.1.0"
+description = "Multi-stage Triton kernel optimization for Intel XPU"
+authors = [{ name = "Intel Labs" }]
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24.0",
+  "pydantic>=2.0.0",
+  "dspy-ai>=3.0.0",
+  "litellm>=1.0.0",
+  "python-dotenv>=1.0.0",
+  "PyYAML>=6.0.0",
+  "httpx>=0.24.0",
+  "torch>=2.9.1",
+  "ai-bench @ git+https://github.com/libxsmm/AI-bench@9afa0d8356e42fee09d69d9e5731a5dcb5edd5d2",
+]
+
+[project.optional-dependencies]
+xpu = ["pytorch-triton-xpu>=3.5.0"]
+wandb = ["weave>=0.52.24"]
+
+[project.scripts]
+xpu-forge = "xpu_forge.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=7.0.0", "pytest-cov>=4.0.0", "ruff>=0.9.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
+pytorch-triton-xpu = { index = "pytorch" }
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/xpu"
+explicit = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/xpu_forge"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+exclude = ["test_kernels"]
+
+[tool.ruff.lint]
+select = [
+  "E",   # pycodestyle errors
+  "W",   # pycodestyle warnings
+  "F",   # pyflakes
+  "I",   # isort
+  "Q",   # flake8-quotes
+  "UP",  # pyupgrade
+  "B",   # flake8-bugbear
+  "C4",  # flake8-comprehensions
+  "RUF", # ruff-specific rules
+]
+ignore = [
+  "E501",   # line too long (handled by formatter)
+  "F821",   # undefined name (dspy dynamic attrs)
+  "B008",   # function call in default arg
+  "B006",   # mutable default arg
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["xpu_forge"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+exclude = ["test_kernels"]
