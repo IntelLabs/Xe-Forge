@@ -3,7 +3,7 @@
 CLI for Triton Optimizer
 
 Usage:
-    python -m xpu_forge.cli --input kernel.py --name my_kernel
+    python -m xe_forge.cli --input kernel.py --name my_kernel
 """
 
 import argparse
@@ -11,9 +11,9 @@ import os
 import sys
 from pathlib import Path
 
-from xpu_forge.config import get_config, override_config
-from xpu_forge.models import OptimizationStage
-from xpu_forge.pipeline import XPUForgePipeline
+from xe_forge.config import get_config, override_config
+from xe_forge.models import OptimizationStage
+from xe_forge.pipeline import XeForgePipeline
 
 
 def main():
@@ -25,26 +25,26 @@ def main():
         epilog="""
 Examples:
   # Optimize a Triton kernel
-  python -m xpu_forge.cli --input kernel.py --name gemm_kernel
+  python -m xe_forge.cli --input kernel.py --name gemm_kernel
 
   # Optimize with specific stages
-  python -m xpu_forge.cli --input kernel.py --name kernel \\
+  python -m xe_forge.cli --input kernel.py --name kernel \\
       --stages dtype_fix,fusion,xpu_specific
 
   # Override model
-  python -m xpu_forge.cli --input kernel.py --name kernel \\
+  python -m xe_forge.cli --input kernel.py --name kernel \\
       --model openai/gpt-4o
 
   # Optimize with target dtype
-  python -m xpu_forge.cli --input kernel.py --name kernel \\
+  python -m xe_forge.cli --input kernel.py --name kernel \\
       --target-dtype float16
 
   # Skip correctness checking (performance-only)
-  python -m xpu_forge.cli --input kernel.py --name kernel \\
+  python -m xe_forge.cli --input kernel.py --name kernel \\
       --no-correctness
 
   # Use more lenient tolerances (overrides spec values)
-  python -m xpu_forge.cli --input kernel.py --name kernel \\
+  python -m xe_forge.cli --input kernel.py --name kernel \\
       --rtol 0.1 --atol 1e-3
         """,
     )
@@ -212,7 +212,7 @@ Examples:
     input_shapes = None
     flop = None
     if args.spec:
-        from xpu_forge.core import load_spec
+        from xe_forge.core import load_spec
 
         spec = load_spec(args.spec)
         input_shapes = spec.get_input_shapes(args.variant)
@@ -229,7 +229,7 @@ Examples:
     # Create executor if spec provided
     executor = None
     if args.spec:
-        from xpu_forge.core import KernelBenchExecutor
+        from xe_forge.core import KernelBenchExecutor
 
         executor = KernelBenchExecutor(
             device=config.xpu.device,
@@ -240,7 +240,7 @@ Examples:
         print(f"Executor: KernelBenchExecutor (device={config.xpu.device})")
 
     # Create pipeline and optimize
-    pipeline = XPUForgePipeline(config=config, executor=executor)  # type: ignore
+    pipeline = XeForgePipeline(config=config, executor=executor)  # type: ignore
 
     # Read input file
     with open(args.input) as f:

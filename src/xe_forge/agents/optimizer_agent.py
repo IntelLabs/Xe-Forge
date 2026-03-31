@@ -11,9 +11,9 @@ import re
 
 import dspy
 
-from xpu_forge.agents.base import Optimizer
-from xpu_forge.agents.cover import CoVeR
-from xpu_forge.models import (
+from xe_forge.agents.base import Optimizer
+from xe_forge.agents.cover import CoVeR
+from xe_forge.models import (
     OptimizationStage,
     StageResult,
 )
@@ -540,7 +540,7 @@ class OptimizerAgent(Optimizer):
     def _build_autotune_configs(self, xpu_config, input_shapes):
         """Build suggested autotune configs from hardware info and shapes."""
         try:
-            from xpu_forge.core.xpu_query import (
+            from xe_forge.core.xpu_query import (
                 extract_mnk_from_shapes,
                 get_autotune_configs,
             )
@@ -572,7 +572,7 @@ class OptimizerAgent(Optimizer):
         if not input_shapes:
             return "No input shapes available. Use appropriate key= based on kernel arguments."
         try:
-            from xpu_forge.core.xpu_query import extract_mnk_from_shapes
+            from xe_forge.core.xpu_query import extract_mnk_from_shapes
 
             M, N, K = extract_mnk_from_shapes(input_shapes)
             lines = [f"Input shapes: {input_shapes}"]
@@ -647,7 +647,7 @@ class OptimizerAgent(Optimizer):
 
     def _get_stage_issues(self, analysis, stage):
         """Get issues relevant to this stage."""
-        from xpu_forge.knowledge.patterns import get_stage_for_issue
+        from xe_forge.knowledge.patterns import get_stage_for_issue
 
         return [i for i in analysis.detected_issues if get_stage_for_issue(i.issue_type) == stage]
 

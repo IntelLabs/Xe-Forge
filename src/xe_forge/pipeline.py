@@ -27,10 +27,10 @@ import dspy
 import httpx
 import litellm
 
-from xpu_forge.agents import AnalyzerAgent, Optimizer, OptimizerAgent, OptimizerReActAgent
-from xpu_forge.config import Config, get_config
-from xpu_forge.core import get_xpu_config_for_pipeline
-from xpu_forge.models import (
+from xe_forge.agents import AnalyzerAgent, Optimizer, OptimizerAgent, OptimizerReActAgent
+from xe_forge.config import Config, get_config
+from xe_forge.core import get_xpu_config_for_pipeline
+from xe_forge.models import (
     OptimizationResult,
     OptimizationStage,
 )
@@ -50,7 +50,7 @@ DEFAULT_STAGE_ORDER: list[OptimizationStage] = [
 ]
 
 
-class XPUForgePipeline:
+class XeForgePipeline:
     """Multi-stage optimization pipeline for Triton kernels targeting Intel XPU.
     Uses LLM knowledge (no local knowledge base required)."""
 
@@ -64,7 +64,7 @@ class XPUForgePipeline:
         self._setup_llm()
 
         if executor is None:
-            from xpu_forge.core import KernelBenchExecutor
+            from xe_forge.core import KernelBenchExecutor
 
             executor = KernelBenchExecutor(
                 device=self.config.xpu.device,
@@ -92,7 +92,7 @@ class XPUForgePipeline:
         self.executor = executor
         self.validator = validator
 
-        logger.info("XPUForgePipeline initialized (LLM-knowledge mode)")
+        logger.info("XeForgePipeline initialized (LLM-knowledge mode)")
         logger.info(f"  LLM: {self.config.llm.model}")
         logger.info(
             f"  Agent: {self.config.agent.strategy} (max_iters={self.config.agent.max_iterations})"
@@ -165,7 +165,7 @@ class XPUForgePipeline:
 
         spec, flop, dtype, init_args = None, None, None, None
         if spec_path:
-            from xpu_forge.core.spec_loader import load_spec
+            from xe_forge.core.spec_loader import load_spec
 
             spec = load_spec(spec_path)
             input_shapes = spec.get_input_shapes(variant_type)
@@ -193,7 +193,7 @@ class XPUForgePipeline:
         val_orig_tflops, val_orig_ms = None, None
         if self.executor and input_shapes:
             try:
-                from xpu_forge.core.executor import KernelBenchExecutor
+                from xe_forge.core.executor import KernelBenchExecutor
 
                 ex = (
                     self.executor
@@ -258,7 +258,7 @@ class XPUForgePipeline:
 
             # === PLANNING ===
             logger.info("=" * 60 + "\nSTAGE: PLANNING\n" + "=" * 60)
-            from xpu_forge.knowledge.patterns import get_stage_for_issue
+            from xe_forge.knowledge.patterns import get_stage_for_issue
 
             stages_needed: dict[OptimizationStage, list[str]] = {}
             for iss in analysis.detected_issues:
@@ -326,7 +326,7 @@ class XPUForgePipeline:
             # Measure optimized performance
             if self.executor and input_shapes and current_code != triton_code:
                 try:
-                    from xpu_forge.core.executor import KernelBenchExecutor
+                    from xe_forge.core.executor import KernelBenchExecutor
 
                     ex = (
                         self.executor

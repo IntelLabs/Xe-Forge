@@ -6,7 +6,7 @@ import logging
 
 import dspy
 
-from xpu_forge.models import DetectedIssue, KernelAnalysis
+from xe_forge.models import DetectedIssue, KernelAnalysis
 
 logger = logging.getLogger(__name__)
 
@@ -122,8 +122,8 @@ class AnalyzerAgent:
         except Exception as e:
             logger.warning(f"LLM analysis failed: {e}")
 
-        from xpu_forge.knowledge.patterns import get_stage_for_issue
-        from xpu_forge.models import OptimizationStage
+        from xe_forge.knowledge.patterns import get_stage_for_issue
+        from xe_forge.models import OptimizationStage
 
         has_fusion = any(
             get_stage_for_issue(i.issue_type) == OptimizationStage.FUSION for i in issues

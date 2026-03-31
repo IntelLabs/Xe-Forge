@@ -21,7 +21,7 @@ from ai_bench.harness.runner.benchmark_compare import (
 )
 from ai_bench.utils import count_torch_flop, import_from_path
 
-from xpu_forge.models import ExecutionResult
+from xe_forge.models import ExecutionResult
 
 logger = logging.getLogger(__name__)
 
