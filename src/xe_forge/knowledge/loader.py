@@ -349,14 +349,6 @@ def _load_yaml_file(kb: KnowledgeBase, path: Path) -> None:
                 }
             )
 
-    if isinstance(data, list):
-        for raw in data:
-            if not isinstance(raw, dict):
-                continue
-            entry = _parse_entry(raw, fname)
-            if entry:
-                kb.add_entry(entry)
-
 
 def _parse_constraint(data: dict, source: str) -> Optional[KnowledgeConstraint]:
     try:
