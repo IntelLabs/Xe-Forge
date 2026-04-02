@@ -443,6 +443,42 @@ All settings can be controlled via environment variables or a `.env` file:
 | `KERNEL_DIR` | `./outputs/kernels` | Kernel dump directory |
 
 ---
+ 
+## Knowledge Base
+ 
+Xe Forge ships with an optional knowledge base of validated optimization patterns, constraints, and reference kernels that guide both the analyzer and optimizer agents.
+ 
+### Enabling
+ 
+```bash
+KNOWLEDGE_BASE_ENABLED=true
+KNOWLEDGE_DIR=./knowledge_base   # path to the directory containing the YAML files
+```
+ 
+Both variables have these defaults, so if you place the `knowledge_base/` directory in the repo root no configuration is needed.
+ 
+### What It Contains
+ 
+| File | Contents |
+|------|----------|
+| `algorithmic_patterns.yaml` | CSE, tree reductions, weight caching patterns |
+| `autotuning_patterns.yaml` | XPU config sweeps, EVEN_M/N/K flags, GRF sweep |
+| `correctness.yaml` | Critical rules: device placement, grf_mode usage, dtype contracts |
+| `dtype_optimizations.yaml` | fp16/fp32 accumulator patterns |
+| `fusion_patterns.yaml` | GEMM+activation epilogue fusion, BatchNorm fusion |
+| `memory_patterns.yaml` | Coalescing, pre-zero buffers, mixed-precision I/O |
+| `persistent_kernel_patterns.yaml` | Stream K patterns, grid size thresholds |
+| `xpu_optimizations.yaml` | Tile sizes, swizzling, warp counts, grf_mode as constexpr |
+| `examples/index.yaml` | 19 reference kernels with stage tags |
+| `examples/*.py` | Optimized reference implementations |
+ 
+### How It's Used
+ 
+- **Analyzer** receives the critical constraints so it can detect violations (wrong device placement, missing grf_mode declaration, etc.) before flagging issues.
+- **Optimizer** receives the patterns and examples relevant to the current stage — before/after code pairs and real optimized kernels it can learn from.
+ 
+
+---
 
 ## How It Works
 
