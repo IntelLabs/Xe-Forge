@@ -15,14 +15,14 @@ ci:
       BATCH: 16384
       IN_FEAT: 4096
       OUT_FEAT: 4096
-      SCALE_SHAPE: [2048]
+      SCALE_SHAPE: [4096]
     flop: "2*BATCH*OUT_FEAT*IN_FEAT"
 
 bench-gpu:
   - params: [X]
     dtype: float16
     dims:
-      BATCH: 4096
+      BATCH: 16384
       IN_FEAT: 4096
       OUT_FEAT: 4096
       SCALE_SHAPE: [4096]
