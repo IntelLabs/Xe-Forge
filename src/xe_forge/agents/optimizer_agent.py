@@ -47,9 +47,11 @@ class OptimizationSignature(dspy.Signature):
       tl.advance() for pointer updates.
     XPU_SPECIFIC: BLOCK_M=256, BLOCK_N=256, BLOCK_K=32, num_warps=32,
       GROUP_SIZE_M swizzling.
-      grf_mode is a valid Intel XPU triton.Config() parameter for
-      controlling register file size. Use grf_mode="256" for large
-      register file (good for register-heavy kernels like large GEMMs).
+      GRF MODE: grf_mode is a compiler option, NOT a triton.Config() kwarg.
+      Declare it as tl.constexpr in the kernel signature:
+        grf_mode: tl.constexpr  (values: "default", "128", "256", "auto")
+      Use "auto" — it automatically selects 256-GRF when register spill > 1000 bytes.
+      256-GRF requires num_warps <= 32 (halved thread occupancy).
     PERSISTENT_KERNEL: persistent kernel pattern, tune NUM_PROGS.
     DISCOVERY: apply the open-ended optimization described in the issues field.
       This is a novel optimization not covered by standard stages. Follow the
@@ -176,9 +178,10 @@ class AutotuneSignature(dspy.Signature):
     - Vary num_stages: try 2, 3, 4
     - Include GROUP_SIZE_M for L2 cache swizzling
     - Use key= with the shape arguments that affect tiling
-    - grf_mode is a valid Intel XPU triton.Config parameter. Include
-      grf_mode="256" configs for large-tile kernels where register
-      pressure is high. Also try without grf_mode for smaller tiles.
+    - Do NOT put grf_mode in triton.Config() — it causes TypeError at runtime.
+      grf_mode is a compiler option: declare it as tl.constexpr in the kernel
+      signature. Use grf_mode="auto" (auto-selects 256-GRF if spill > 1000 bytes)
+      or grf_mode="256" for large register file. Requires num_warps <= 32.
 
     === CODE REQUIREMENTS ===
     - Include ALL imports (torch, triton, triton.language as tl)
@@ -354,6 +357,16 @@ class OptimizerAgent(Optimizer):
                     bs = int(bm.group(1))
                     if bs <= 0 or (bs & (bs - 1)) != 0:
                         return f"INVALID {bn}={bs}: Must be power of 2."
+
+            if re.search(r"triton\.Config\s*\([^)]*grf_mode", code):
+                return (
+                    "INVALID: grf_mode cannot be passed to triton.Config(). "
+                    "It is a compiler-level option, not a kernel meta-parameter. "
+                    "To use large GRF: declare grf_mode: tl.constexpr in the kernel "
+                    "signature (values: 'default', '128', '256', 'auto'). "
+                    "'auto' is recommended — it recompiles with 256-GRF only if "
+                    "register spill > 1000 bytes. Remove grf_mode from triton.Config()."
+                )
 
             if stage is not None and stage.value == "fusion":
                 for _vp in [
