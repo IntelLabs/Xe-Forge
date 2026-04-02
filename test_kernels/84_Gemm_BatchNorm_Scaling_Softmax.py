@@ -10,8 +10,7 @@ BLOCK_N = 128
 BLOCK_K = 64
 EPS = 1e-5
 
-# _gemm_bn_scale_kernel is UNCHANGED —
-# it already has .to(tl.float32) on every load, so fp16 inputs upcast automatically
+
 @triton.jit
 def _gemm_bn_scale_kernel(
     a_ptr, w_ptr, bias_ptr, gamma_ptr, beta_ptr, rm_ptr, rv_ptr, scale_ptr, out_ptr,
@@ -39,8 +38,9 @@ def _gemm_bn_scale_kernel(
         acc = tl.dot(a, w, acc)
 
     b  = tl.load(bias_ptr  + offs_n * stride_b,  mask=mask_n, other=0.0).to(tl.float32)
-    rm = tl.load(rm_ptr    + offs_n * stride_rm,  mask=mask_n, other=0.0)   # fp32 already
-    rv = tl.load(rv_ptr    + offs_n * stride_rv,  mask=mask_n, other=0.0)   # fp32 already
+    # ← explicit .to(tl.float32) on running stats — defensive against fp16 buffers
+    rm = tl.load(rm_ptr    + offs_n * stride_rm,  mask=mask_n, other=0.0).to(tl.float32)
+    rv = tl.load(rv_ptr    + offs_n * stride_rv,  mask=mask_n, other=1.0).to(tl.float32)
     g  = tl.load(gamma_ptr + offs_n * stride_g,   mask=mask_n, other=1.0).to(tl.float32)
     be = tl.load(beta_ptr  + offs_n * stride_be,  mask=mask_n, other=0.0).to(tl.float32)
     acc = acc + b[None, :]
@@ -54,7 +54,6 @@ def _gemm_bn_scale_kernel(
     tl.store(out_ptrs, acc, mask=mask_m[:, None] & mask_n[None, :])
 
 
-# _softmax_dim1_kernel is UNCHANGED — only touches fp32 y/out
 @triton.jit
 def _softmax_dim1_kernel(input_ptr, output_ptr, M, N, BLOCK: tl.constexpr):
     row = tl.program_id(0)
@@ -91,15 +90,15 @@ def kernel_function(
     device_xpu = torch.device("xpu")
     orig_device = input_tensor.device
 
-    # move to XPU — x and w stay fp16, everything else fp16 or fp32 as appropriate
-    x  = input_tensor.to(device_xpu)                          # fp16
-    w  = linear_weight.t().contiguous().to(device_xpu)        # fp16, now [K, N]
-    b  = linear_bias.to(device_xpu).contiguous()              # fp16
-    g  = bn_weight.to(device_xpu).contiguous()                # fp16
-    be = bn_bias.to(device_xpu).contiguous()                  # fp16
-    rm = bn_running_mean.to(device_xpu).contiguous()          # fp32 (running stats)
-    rv = bn_running_var.to(device_xpu).contiguous()           # fp32 (running stats)
-    s  = scale.to(device_xpu).contiguous().view(-1)           # fp16
+    x  = input_tensor.to(device_xpu)
+    w  = linear_weight.t().contiguous().to(device_xpu)
+    b  = linear_bias.to(device_xpu).contiguous()
+    g  = bn_weight.to(device_xpu).contiguous()
+    be = bn_bias.to(device_xpu).contiguous()
+    # ← force fp32 regardless of what arrived — defensive against .half() pollution
+    rm = bn_running_mean.to(device_xpu, dtype=torch.float32).contiguous()
+    rv = bn_running_var.to(device_xpu,  dtype=torch.float32).contiguous()
+    s  = scale.to(device_xpu).contiguous().view(-1)
 
     assert x.dtype == torch.float16, "input must be float16"
     assert w.dtype == torch.float16, "weight must be float16"
@@ -108,7 +107,6 @@ def kernel_function(
     K_w, N = w.shape
     assert K == K_w
 
-    # y and out are fp32 — kernel accumulates in fp32, softmax stays fp32
     y   = torch.empty((M, N), device=device_xpu, dtype=torch.float32)
     out = torch.empty_like(y)
 
@@ -139,11 +137,11 @@ bn_momentum = 0.1
 scale_shape = (1,)
 
 
-def get_inputs():
-    return [torch.rand(batch_size, in_features, dtype=torch.float16)]  # ← float16
+def get_inputs(self=None):
+    return [torch.rand(batch_size, in_features, dtype=torch.float16)]
 
 
-def get_init_inputs():
+def get_init_inputs(self=None):
     return [in_features, out_features, bn_eps, bn_momentum, scale_shape]
 
 
@@ -158,22 +156,33 @@ class Model(nn.Module):
             tuple(scale_shape) if isinstance(scale_shape, (list, tuple)) else (int(scale_shape),)
         )
 
-        # gemm weight/bias → fp16
         self.gemm = nn.Linear(self.in_features, self.out_features, bias=True)
-        self.gemm.weight = nn.Parameter(self.gemm.weight.to(torch.float16))  # ← float16
-        self.gemm.bias   = nn.Parameter(self.gemm.bias.to(torch.float16))    # ← float16
+        self.gemm.weight = nn.Parameter(self.gemm.weight.to(torch.float16))
+        self.gemm.bias   = nn.Parameter(self.gemm.bias.to(torch.float16))
 
-        # BN learnable params → fp16; running stats stay fp32
         self.bn_weight = nn.Parameter(torch.ones(self.out_features,  dtype=torch.float16))
         self.bn_bias   = nn.Parameter(torch.zeros(self.out_features, dtype=torch.float16))
         self.register_buffer("bn_running_mean", torch.zeros(self.out_features, dtype=torch.float32))
         self.register_buffer("bn_running_var",  torch.ones(self.out_features,  dtype=torch.float32))
 
-        # scale → fp16
-        self.scale = nn.Parameter(torch.ones(self.scale_shape, dtype=torch.float16))  # ← float16
+        self.scale = nn.Parameter(torch.ones(self.scale_shape, dtype=torch.float16))
+
+    def _restore_bn_buffers_fp32(self):
+        self.bn_running_mean = self.bn_running_mean.float()
+        self.bn_running_var  = self.bn_running_var.float()
+
+    def half(self):
+        super().half()
+        self._restore_bn_buffers_fp32()
+        return self
+
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        self._restore_bn_buffers_fp32()
+        return self
 
     def forward(self, x):
-        if x.dtype != torch.float16:  # ← float16
+        if x.dtype != torch.float16:
             x = x.half()
 
         return kernel_function(

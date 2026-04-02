@@ -309,7 +309,11 @@ class OptimizerAgent(Optimizer):
         executor = self.executor
         last_accepted = {"comparison": None}
 
+        _verify_call_count = [0]  # mutable counter in closure
+
         def compile_and_verify(optimized_code: dspy.Code["python"]) -> str:
+            _verify_call_count[0] += 1
+            logger.debug("compile_and_verify call #%d", _verify_call_count[0])
             code = _extract_code_from_response(
                 optimized_code.code if hasattr(optimized_code, "code") else str(optimized_code)
             )
@@ -394,6 +398,9 @@ class OptimizerAgent(Optimizer):
 
             if executor and input_shapes:
                 try:
+                    logger.info(
+                        "Measuring: original vs optimized (call #%d)", _verify_call_count[0]
+                    )
                     comparison = executor.compare_kernels(
                         original_code=original_code,
                         optimized_code=code,
@@ -403,11 +410,23 @@ class OptimizerAgent(Optimizer):
                         dtype=dtype,
                         init_args=init_args,
                     )
+                    if comparison.original_time_us:
+                        logger.info("  original : %.2f µs", comparison.original_time_us)
+                    if comparison.optimized_time_us:
+                        logger.info("  optimized: %.2f µs", comparison.optimized_time_us)
                     if not comparison.optimized_correct:
                         return comparison.feedback_message or "Optimized kernel failed."
-                    if comparison.is_slower and not skip_speedup_check:
-                        sd = 1.0 / comparison.speedup if comparison.speedup > 0 else float("inf")
-                        return f"PERFORMANCE REGRESSION: {sd:.2f}x SLOWER. Try different approach."
+                    # Use pipeline baseline for regression check (avoids JIT warmup noise)
+                    if not skip_speedup_check:
+                        if baseline_ms and comparison.optimized_time_us:
+                            true_spd = (baseline_ms * 1000) / comparison.optimized_time_us
+                        else:
+                            true_spd = comparison.speedup
+                        if true_spd < 1.0:
+                            sd = 1.0 / true_spd if true_spd > 0 else float("inf")
+                            return (
+                                f"PERFORMANCE REGRESSION: {sd:.2f}x SLOWER. Try different approach."
+                            )
                     # Compute speedup relative to true baseline if available
                     # (avoids JIT warmup / thermal noise in re-measured original)
                     if baseline_ms and comparison.optimized_time_us:
@@ -480,6 +499,7 @@ class OptimizerAgent(Optimizer):
         skip_speedup = stage in CORRECTNESS_ONLY_STAGES
 
         _baseline_ms = perf_context.get("original_ms") if perf_context else None
+
         verify_tool, last_accepted = self._create_verify_tool(
             original_code,
             kernel_name,
@@ -610,10 +630,13 @@ class OptimizerAgent(Optimizer):
                     logger.debug(f"Run failed ({err}), stopping best-of loop")
                     break
 
-                # Require >1.0x on first run, >2% improvement on subsequent runs
+                # Require 2% improvement on ALL runs (first and subsequent)
+                # This eliminates noise-based false improvements from timing variance
                 _MIN_IMPROVEMENT = 1.02
-                _is_improvement = (best_spd is None and spd is not None and spd > 1.0) or (
-                    best_spd is not None and spd is not None and spd > best_spd * _MIN_IMPROVEMENT
+                _is_improvement = (
+                    spd is not None and spd > _MIN_IMPROVEMENT
+                    if best_spd is None
+                    else spd is not None and spd > best_spd * _MIN_IMPROVEMENT
                 )
                 # Also stop if code is identical to previous best (LLM stuck)
                 _code_identical = best_code is not None and candidate == best_code

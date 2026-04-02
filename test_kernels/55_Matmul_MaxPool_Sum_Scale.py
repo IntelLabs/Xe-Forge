@@ -11,12 +11,12 @@ out_features = 4096
 scale_shape = (out_features,)
 
 
-def get_inputs():
-    return [torch.rand(batch_size, in_features, dtype=torch.float16)]  # ← float16
+def get_inputs(self=None):
+    return [torch.rand(batch_size, in_features, dtype=torch.float16)]
 
 
-def get_init_inputs():
-    return [in_features, out_features, scale_shape]
+def get_init_inputs(self=None):                          # ← accept optional self
+    return [in_features, out_features, list(scale_shape)]  # ← list avoids tuple-int ambiguity
 
 
 def _configs():
@@ -61,16 +61,14 @@ def _fused_gemm_scale_bn_kernel(
         w_ptrs = w_ptr + n_offsets[None, :] * stride_wm + k_offsets[:, None] * stride_wk
         w_tile = tl.load(w_ptrs, mask=k_mask[:, None] & n_mask[None, :], other=0.0)
 
-        acc += tl.dot(x_tile.to(tl.float32), w_tile.to(tl.float32))  # ← upcast fp16
+        acc += tl.dot(x_tile.to(tl.float32), w_tile.to(tl.float32))
 
-    # all per-channel params are fp16 → upcast before use
     bias  = tl.load(b_ptr     + n_offsets * stride_b,     mask=n_mask, other=0.0).to(tl.float32)
     scale = tl.load(s_ptr     + n_offsets * stride_s,     mask=n_mask, other=0.0).to(tl.float32)
     gamma = tl.load(gamma_ptr + n_offsets * stride_gamma, mask=n_mask, other=1.0).to(tl.float32)
     beta  = tl.load(beta_ptr  + n_offsets * stride_beta,  mask=n_mask, other=0.0).to(tl.float32)
-    # BN running stats stay fp32 — no cast needed
-    rm = tl.load(rm_ptr + n_offsets * stride_rm, mask=n_mask, other=0.0)
-    rv = tl.load(rv_ptr + n_offsets * stride_rv, mask=n_mask, other=1.0)
+    rm    = tl.load(rm_ptr    + n_offsets * stride_rm,    mask=n_mask, other=0.0)
+    rv    = tl.load(rv_ptr    + n_offsets * stride_rv,    mask=n_mask, other=1.0)
 
     acc = acc + bias[None, :]
     acc = acc * scale[None, :]
@@ -85,18 +83,18 @@ def _fused_gemm_scale_bn_kernel(
 
 def kernel_function(x, weight, bias, scale, bn_weight, bn_bias, running_mean, running_var, eps):
     assert x.device.type == "xpu"
-    assert x.dtype == torch.float16 and weight.dtype == torch.float16  # ← float16
+    assert x.dtype == torch.float16 and weight.dtype == torch.float16
 
-    if not x.is_contiguous():  x = x.contiguous()
+    if not x.is_contiguous():      x = x.contiguous()
     if not weight.is_contiguous(): weight = weight.contiguous()
 
     for t, name in [(bias, "bias"), (scale, "scale"), (bn_weight, "bn_weight"), (bn_bias, "bn_bias")]:
         assert t.device.type == "xpu"
-        assert t.dtype == torch.float16, f"{name} must be float16"  # ← float16
+        assert t.dtype == torch.float16, f"{name} must be float16"
 
     for t, name in [(running_mean, "running_mean"), (running_var, "running_var")]:
         assert t.device.type == "xpu"
-        assert t.dtype == torch.float32, f"{name} must be float32"  # stays fp32
+        assert t.dtype == torch.float32, f"{name} must be float32"
 
     M, K = x.shape
     N, Kw = weight.shape
@@ -121,19 +119,21 @@ def kernel_function(x, weight, bias, scale, bn_weight, bn_bias, running_mean, ru
 class Model(nn.Module):
     def __init__(self, in_features, out_features, scale_shape, eps=1e-5, momentum=0.1):
         super().__init__()
-        self.in_features = int(in_features)
+        self.in_features  = int(in_features)
         self.out_features = int(out_features)
-        self.eps = float(eps)
-        self.momentum = float(momentum)
+        self.eps          = float(eps)
+        self.momentum     = float(momentum)
+        # accept int or sequence for scale_shape
+        self.scale_shape  = (
+            (int(scale_shape),) if isinstance(scale_shape, int) else tuple(scale_shape)
+        )
 
-        # learnable params → fp16
         self.weight    = nn.Parameter(torch.empty(self.out_features, self.in_features, dtype=torch.float16))
         self.bias      = nn.Parameter(torch.empty(self.out_features,  dtype=torch.float16))
-        self.scale     = nn.Parameter(torch.randn(tuple(scale_shape), dtype=torch.float16))
+        self.scale     = nn.Parameter(torch.randn(self.scale_shape,   dtype=torch.float16))
         self.bn_weight = nn.Parameter(torch.ones(self.out_features,   dtype=torch.float16))
         self.bn_bias   = nn.Parameter(torch.zeros(self.out_features,  dtype=torch.float16))
 
-        # BN running stats stay fp32
         self.register_buffer("running_mean", torch.zeros(self.out_features, dtype=torch.float32))
         self.register_buffer("running_var",  torch.ones(self.out_features,  dtype=torch.float32))
 
@@ -142,6 +142,20 @@ class Model(nn.Module):
         nn.init.uniform_(self.bias, -bound, bound)
 
         self._moved_to_xpu = False
+
+    def _restore_bn_buffers_fp32(self):
+        self.running_mean = self.running_mean.float()
+        self.running_var  = self.running_var.float()
+
+    def half(self):
+        super().half()
+        self._restore_bn_buffers_fp32()
+        return self
+
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        self._restore_bn_buffers_fp32()
+        return self
 
     def _move_params_once(self):
         if self._moved_to_xpu:
@@ -152,12 +166,12 @@ class Model(nn.Module):
         with torch.no_grad():
             for p in (self.weight, self.bias, self.scale, self.bn_weight, self.bn_bias):
                 p.data = p.data.to(dev)
-            self.running_mean = self.running_mean.to(dev)
-            self.running_var  = self.running_var.to(dev)
+            self.running_mean = self.running_mean.to(dev, dtype=torch.float32)
+            self.running_var  = self.running_var.to(dev,  dtype=torch.float32)
         self._moved_to_xpu = True
 
     def forward(self, x):
-        if x.dtype != torch.float16:  # ← float16
+        if x.dtype != torch.float16:
             x = x.half()
 
         if not (hasattr(torch, "xpu") and torch.xpu.is_available()):
