@@ -1,0 +1,93 @@
+# Dtype Optimization Patterns for Intel XPU
+
+patterns:
+  - id: dtype_float64_to_float32
+    name: "Float64 to Float32 Accumulator"
+    stage: dtype_fix
+    description: "Replace float64 accumulators with float32"
+    rationale: |
+      float64 throughput is 16-32x slower than float32 on GPUs/XPUs.
+      This is the single biggest performance killer in many kernels.
+      Using float64 alone can cap performance at around 2 TFLOPS on Intel XPU.
+    pattern_before: |
+      acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float64)
+      a = a_fp32.to(tl.float64)
+      b = b_fp32.to(tl.float64)
+    pattern_after: |
+      acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+      # No need to convert inputs - keep as float32
+    expected_speedup: "5-10x"
+    applies_to:
+      - gemm
+      - matmul
+      - reduction
+    examples:
+      - before: |
+          @triton.jit
+          def kernel(a_ptr, b_ptr, c_ptr, ...):
+              acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float64)
+              for k in range(K):
+                  a = tl.load(a_ptr + ...).to(tl.float64)
+                  b = tl.load(b_ptr + ...).to(tl.float64)
+                  acc = tl.dot(a, b, acc)
+        after: |
+          @triton.jit
+          def kernel(a_ptr, b_ptr, c_ptr, ...):
+              acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+              for k in range(K):
+                  a = tl.load(a_ptr + ...)
+                  b = tl.load(b_ptr + ...)
+                  acc = tl.dot(a, b, acc)
+
+  - id: dtype_input_conversion
+    name: "Remove Unnecessary Type Conversions"
+    stage: dtype_fix
+    description: "Avoid converting inputs to higher precision unnecessarily"
+    rationale: |
+      Converting float16 inputs to float64 for computation wastes bandwidth
+      and compute. Use float32 accumulators with float16 inputs for best
+      performance on modern accelerators.
+    pattern_before: |
+      x = tl.load(x_ptr + offsets).to(tl.float64)
+      result = x * x  # float64 computation
+    pattern_after: |
+      x = tl.load(x_ptr + offsets)  # Keep as float16
+      x_fp32 = x.to(tl.float32)  # Upcast to float32 only if needed
+      result = x_fp32 * x_fp32
+    expected_speedup: "2-4x"
+    applies_to:
+      - elementwise
+      - reduction
+
+  - id: accumulator_fp32_with_fp16_inputs_standard
+    name: "Standard: fp16 inputs, fp32 accumulator, fp16 output"
+    stage: dtype_fix
+    description: "Use float16 for all I/O and float32 only for the in-register accumulator and epilogue arithmetic."
+    rationale: |
+      fp16 I/O halves memory bandwidth usage. fp32 accumulation preserves numerical
+      quality across the K-loop. The epilogue (bias, BN, activations) stays in fp32
+      then gets cast to fp16 at the final store. This is the canonical XPU pattern.
+    pattern_before: |
+      # All fp32 — wastes bandwidth
+      acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+      a = tl.load(a_bp).to(tl.float32)
+      b = tl.load(b_bp).to(tl.float32)
+      acc = tl.dot(a, b, acc)
+      tl.store(out_bp, acc)
+    pattern_after: |
+      # fp16 loads, fp32 accumulate, fp16 store
+      acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+      a = tl.load(a_bp)          # fp16 in memory
+      b = tl.load(b_bp)          # fp16 in memory
+      acc = tl.dot(a, b, acc)    # fp16 dot -> fp32 acc
+      # ... epilogue in fp32 ...
+      tl.store(out_bp, acc.to(tl.float16), boundary_check=(0, 1))
+    expected_speedup: "1.5-2x bandwidth, preserved accuracy"
+    applies_to:
+      - gemm
+      - matmul
+      - fused_epilogue
+    examples:
+      - file: 68_Matmul_Min_Subtract.py
+      - file: 45_Gemm_Sigmoid_LogSumExp.py
+      - file: 95_Matmul_Add_Swish_Tanh_GELU_Hardtanh.py

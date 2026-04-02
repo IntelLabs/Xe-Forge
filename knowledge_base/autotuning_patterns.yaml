@@ -1,0 +1,177 @@
+# Autotuning Patterns for Intel XPU Triton Kernels
+# Stage: autotuning
+
+patterns:
+
+  - id: autotune_no_default_values
+    name: "No default values for autotuned constexpr parameters"
+    stage: autotuning
+    description: |
+      Parameters declared in @triton.autotune Config dicts must NOT have default
+      values in the kernel signature. This causes a "Conflicting meta-parameters" error.
+    pattern_before: |
+      @triton.autotune(configs=[triton.Config({'BLOCK_M': 256}, ...)])
+      @triton.jit
+      def kernel(..., BLOCK_M: tl.constexpr = 256):  # ERROR: default conflicts with autotune
+          ...
+    pattern_after: |
+      @triton.autotune(configs=[triton.Config({'BLOCK_M': 256}, ...)])
+      @triton.jit
+      def kernel(..., BLOCK_M: tl.constexpr):  # correct: no default
+          ...
+
+  - id: autotune_grf_as_meta_param_not_kernel_logic
+    name: "grf_mode is an autotune meta-parameter; declare in signature but never use in kernel logic"
+    stage: autotuning
+    description: |
+      grf_mode is consumed by the Triton/XPU backend at compile time.
+      Declare it as tl.constexpr so autotune can pass it, but never reference
+      it inside the kernel body.
+    pattern_before: |
+      @triton.jit
+      def kernel(...):
+          # grf_mode not declared — autotune cannot pass it
+          pass
+    pattern_after: |
+      @triton.jit
+      def kernel(..., grf_mode: tl.constexpr):
+          # grf_mode declared for autotune; never used in kernel body
+          acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+          ...
+
+  - id: autotune_sweep_both_grf_modes
+    name: "Always sweep both grf_mode='128' and grf_mode='256' in autotune configs"
+    stage: autotuning
+    description: |
+      grf_mode='256' (large register file) is often best for large tiles with 32 warps,
+      but grf_mode='128' (higher occupancy) can win when register pressure is high or
+      M is small. Always include both variants so autotune picks the winner.
+    pattern_before: |
+      # Only grf_mode='256' — may miss cases where '128' wins
+      configs = [
+          triton.Config({'BLOCK_M': 256, 'BLOCK_N': 256, 'BLOCK_K': 32,
+                         'GROUP_SIZE_M': 4, 'grf_mode': '256'}, num_warps=32, num_stages=2),
+      ]
+    pattern_after: |
+      configs = []
+      for BM, BN, BK in [(256, 256, 32), (256, 128, 64), (128, 256, 32), (128, 128, 64)]:
+          for nw in (8, 16, 32):
+              for ns in (2, 3):
+                  for grf in ('128', '256'):   # always sweep both
+                      configs.append(triton.Config(
+                          {'BLOCK_M': BM, 'BLOCK_N': BN, 'BLOCK_K': BK,
+                           'GROUP_SIZE_M': 4, 'grf_mode': grf},
+                          num_warps=nw, num_stages=ns))
+    examples:
+      - before: |
+          triton.Config({'BLOCK_M': 256, 'BLOCK_N': 256, 'grf_mode': '256'}, num_warps=32)
+        after: |
+          triton.Config({'BLOCK_M': 256, 'BLOCK_N': 256, 'grf_mode': '256'}, num_warps=32),
+          triton.Config({'BLOCK_M': 256, 'BLOCK_N': 256, 'grf_mode': '128'}, num_warps=32),
+
+  - id: autotune_include_no_swizzle_fallback
+    name: "Include GROUP_SIZE_M=1 (no swizzle) as a fallback autotune config"
+    stage: autotuning
+    description: |
+      GROUP_SIZE_M > 1 improves L2 cache reuse for large matrices but can hurt
+      for small M or unusual shapes. Always include GROUP_SIZE_M=1 so autotune
+      can fall back to simple row-major tile ordering.
+    pattern_before: |
+      for gs in (2, 4):    # missing no-swizzle fallback
+          configs.append(triton.Config({..., 'GROUP_SIZE_M': gs}, ...))
+    pattern_after: |
+      for gs in (1, 2, 4):  # 1 = no swizzle fallback
+          configs.append(triton.Config({..., 'GROUP_SIZE_M': gs}, ...))
+    examples:
+      - before: |
+          for gs in (2, 4):
+              configs.append(triton.Config({'GROUP_SIZE_M': gs, ...}, ...))
+        after: |
+          for gs in (1, 2, 4):
+              configs.append(triton.Config({'GROUP_SIZE_M': gs, ...}, ...))
+
+  - id: autotune_even_flags_for_boundary_elimination
+    name: "Use EVEN_M/N/K constexpr flags to specialize for tile-divisible shapes"
+    stage: autotuning
+    description: |
+      Include EVEN_M, EVEN_N, EVEN_K as autotunable constexpr booleans.
+      The compiler eliminates boundary checks when the flag is True.
+      Always include both True and False variants to handle arbitrary shapes.
+    pattern_before: |
+      # Always pays boundary check overhead regardless of shape
+      a = tl.load(a_bp, boundary_check=(0, 1))
+      b = tl.load(b_bp, boundary_check=(0, 1))
+    pattern_after: |
+      # Config sweep includes both even and non-even variants:
+      triton.Config({'BLOCK_M': 128, ..., 'EVEN_M': True,  'EVEN_K': True},  ...)
+      triton.Config({'BLOCK_M': 128, ..., 'EVEN_M': False, 'EVEN_K': False}, ...)
+
+      # Kernel uses constexpr branch — compiler eliminates dead path:
+      EVEN_M: tl.constexpr
+      EVEN_K: tl.constexpr
+      if EVEN_M and EVEN_K:
+          a = tl.load(a_bp)                       # no boundary check
+      else:
+          a = tl.load(a_bp, boundary_check=(0, 1))
+    examples:
+      - before: |
+          # Always checks boundary — same code for all shapes
+          a = tl.load(a_bp, boundary_check=(0, 1))
+          tl.store(o_bp, out, boundary_check=(0, 1))
+        after: |
+          EVEN_M: tl.constexpr
+          EVEN_N: tl.constexpr
+          if EVEN_M and EVEN_K:
+              a = tl.load(a_bp)
+          else:
+              a = tl.load(a_bp, boundary_check=(0, 1))
+          if EVEN_M and EVEN_N:
+              tl.store(o_bp, out)
+          else:
+              tl.store(o_bp, out, boundary_check=(0, 1))
+
+  - id: autotune_separate_configs_for_reduction_kernels
+    name: "Use separate autotune config generators for GEMM and row-reduction kernels"
+    stage: autotuning
+    description: |
+      Reduction kernels (LogSumExp, Softmax, row-sum) have incompatible tile shape
+      constraints compared to 2D GEMM kernels. Define separate config functions and
+      use different key= sets. Sharing configs wastes autotune budget.
+    pattern_before: |
+      # WRONG: reusing GEMM configs (with BK) for a row-reduction kernel
+      @triton.autotune(configs=_cfgs_gemm(), key=['M', 'N', 'K'])
+      @triton.jit
+      def lse_kernel(..., BK: tl.constexpr):  # BK irrelevant for reduction
+          ...
+    pattern_after: |
+      def _cfgs_gemm():   # 3D tile sweep: BM x BN x BK
+          return [
+              triton.Config({'BM': 128, 'BN': 128, 'BK': 32, 'grf_mode': '256'}, num_warps=16, num_stages=3),
+              triton.Config({'BM': 128, 'BN': 128, 'BK': 32, 'grf_mode': '128'}, num_warps=16, num_stages=3),
+          ]
+
+      def _cfgs_lse():    # 2D sweep: BM (rows/program) x BN (scan width); no BK
+          return [
+              triton.Config({'BM': 128, 'BN': 256, 'grf_mode': '256'}, num_warps=8,  num_stages=3),
+              triton.Config({'BM': 64,  'BN': 256, 'grf_mode': '256'}, num_warps=4,  num_stages=4),
+          ]
+
+      @triton.autotune(configs=_cfgs_gemm(), key=['M', 'N', 'K'])
+      @triton.jit
+      def gemm_kernel(...): ...
+
+      @triton.autotune(configs=_cfgs_lse(), key=['M', 'N'])   # no K in key
+      @triton.jit
+      def lse_kernel(...): ...
+    examples:
+      - before: |
+          @triton.autotune(configs=_cfgs_gemm(), key=['M', 'N', 'K'])
+          @triton.jit
+          def lse_kernel(..., BK: tl.constexpr): ...  # BK unused in LSE
+        after: |
+          def _cfgs_lse():
+              return [triton.Config({'BM': 128, 'BN': 256, 'grf_mode': '256'}, num_warps=8, num_stages=3)]
+
+          @triton.autotune(configs=_cfgs_lse(), key=['M', 'N'])
+          @triton.jit
+          def lse_kernel(...): ...  # no BK parameter
