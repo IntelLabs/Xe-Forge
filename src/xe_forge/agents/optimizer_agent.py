@@ -47,11 +47,9 @@ class OptimizationSignature(dspy.Signature):
       tl.advance() for pointer updates.
     XPU_SPECIFIC: BLOCK_M=256, BLOCK_N=256, BLOCK_K=32, num_warps=32,
       GROUP_SIZE_M swizzling.
-      IMPORTANT: grf_mode is NOT a triton.Config() parameter. Do NOT pass
-      grf_mode to triton.Config() or @triton.autotune configs. It is set
-      via environment variable (IGC_EnableLargeGRF=1) or compiler options,
-      not in kernel code. Only use valid triton.Config kwargs: meta-parameters
-      (like BLOCK_SIZE_M, BLOCK_SIZE_N, etc.), num_warps, and num_stages.
+      grf_mode is a valid Intel XPU triton.Config() parameter for
+      controlling register file size. Use grf_mode="256" for large
+      register file (good for register-heavy kernels like large GEMMs).
     PERSISTENT_KERNEL: persistent kernel pattern, tune NUM_PROGS.
     DISCOVERY: apply the open-ended optimization described in the issues field.
       This is a novel optimization not covered by standard stages. Follow the
@@ -178,11 +176,9 @@ class AutotuneSignature(dspy.Signature):
     - Vary num_stages: try 2, 3, 4
     - Include GROUP_SIZE_M for L2 cache swizzling
     - Use key= with the shape arguments that affect tiling
-    - NEVER put grf_mode in triton.Config(). grf_mode is NOT a valid
-      triton.Config parameter. It is set via environment variable
-      (IGC_EnableLargeGRF=1), not in kernel code. Only valid Config
-      kwargs are: meta-parameters (BLOCK_SIZE_*, GROUP_SIZE_*, etc.),
-      num_warps, and num_stages.
+    - grf_mode is a valid Intel XPU triton.Config parameter. Include
+      grf_mode="256" configs for large-tile kernels where register
+      pressure is high. Also try without grf_mode for smaller tiles.
 
     === CODE REQUIREMENTS ===
     - Include ALL imports (torch, triton, triton.language as tl)
@@ -255,7 +251,10 @@ def _build_performance_context(perf_context: Optional[dict]) -> str:
 
 
 def _has_cpu_return(code: str) -> bool:
-    """Return True if kernel_function/forward returns a CPU tensor — always invalid on XPU."""
+    """Return True if kernel_function/forward returns a CPU tensor.
+    .cpu() in a return is always wrong — output must stay on XPU.
+    Note: .xpu() IS valid (moves to XPU) but should not be needed in a return.
+    """
     if re.search(r"return\s+\S+\.cpu\(\)", code):
         return True
     if re.search(r"return\s+\S+\.to\(.[Cc][Pp][Uu].", code):
@@ -351,14 +350,6 @@ class OptimizerAgent(Optimizer):
                     bs = int(bm.group(1))
                     if bs <= 0 or (bs & (bs - 1)) != 0:
                         return f"INVALID {bn}={bs}: Must be power of 2."
-
-            if re.search(r"triton\.Config\s*\([^)]*grf_mode", code):
-                return (
-                    "INVALID: grf_mode is NOT a triton.Config() parameter. "
-                    "Remove grf_mode from all triton.Config() calls. "
-                    "grf_mode is set via environment variable IGC_EnableLargeGRF=1, "
-                    "not in kernel code."
-                )
 
             if stage is not None and stage.value == "fusion":
                 for _vp in [

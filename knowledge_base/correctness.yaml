@@ -208,22 +208,27 @@ constraints:
       tl.store(out_ptr, acc)  # acc is already float32
       ```
 
-  - id: no_invalid_tensor_device_methods
-    name: "Use .cpu() / .to('cpu') to move tensor to CPU — .xpu() is not a valid method"
+  - id: no_cpu_return_from_xpu_kernel
+    name: "kernel_function must NOT return a CPU tensor — output must stay on XPU"
     severity: critical
     description: |
-      To return a CPU tensor from kernel_function, use .cpu() or .to('cpu').
-      The method .xpu() does not exist on PyTorch tensors and will raise
-      AttributeError at runtime.
+      kernel_function and forward() must return tensors on XPU, not CPU.
+      The executor expects XPU output and will raise a device mismatch error
+      if a CPU tensor is returned.
+
+      NOTE: tensor.xpu() IS a valid PyTorch method (moves tensor to XPU,
+      equivalent to tensor.to('xpu')). It is tensor.cpu() in a return
+      statement that is wrong here.
 
       WRONG:
       ```python
-      return y.xpu()   # AttributeError: 'Tensor' object has no attribute 'xpu'
+      return y.cpu()   # moves output to CPU — executor expects XPU
       ```
 
       CORRECT:
       ```python
-      return y.cpu()
+      return y          # already on XPU, no move needed
+      # or if needed: return y.to('xpu')  # same as y.xpu()
       # or, if dtype conversion also needed:
       return y.to(torch.float32).cpu()
       ```
