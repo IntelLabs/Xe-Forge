@@ -1,0 +1,218 @@
+# Algorithmic Patterns for Intel XPU Triton Kernels
+# Stage: algorithmic
+#
+# These patterns cover non-trivial algorithmic choices that affect correctness
+# and performance independently of low-level XPU tuning.
+
+patterns:
+
+  - id: two_pass_softmax_for_large_n
+    name: "Two-pass tiled softmax for large N (N > single BLOCK fits)"
+    stage: algorithmic
+    description: "When N is larger than a single tile (e.g. N=8192), use a 2D-tiled softmax decomposed into tile-max, row-reduce-max, tile-sumexp, row-reduce-sum, and tile-norm passes."
+    rationale: |
+      A single-tile softmax kernel requires the whole row to fit in one program's
+      BLOCK_N, which is impractical for large N. The 2D tiled decomposition splits
+      the row into tiles processed by separate programs, coordinated by two
+      intermediary reduction kernels. This unlocks parallelism over (rows × tiles).
+
+      Five-kernel decomposition:
+        1. _softmax_tile_max:       per-tile max  → tile_max [M, num_tiles]
+        2. _softmax_row_reduce_max: row-wise max  → row_max  [M]
+        3. _softmax_tile_sumexp:    per-tile sumexp with numerical correction
+        4. _softmax_row_reduce_sum: row-wise sum  → row_sum  [M]
+        5. _softmax_tile_norm:      divide each tile element by row_sum
+
+    pattern_before: |
+      # Single-tile softmax — only works if N <= BLOCK
+      @triton.jit
+      def softmax_kernel(x_ptr, out_ptr, M, N, BLOCK: tl.constexpr):
+          row = tl.program_id(0)
+          offs = tl.arange(0, BLOCK)
+          x = tl.load(x_ptr + row * N + offs, mask=offs < N, other=-1e20)
+          x = x - tl.max(x, axis=0)
+          x = tl.exp(x)
+          x = x / tl.sum(x, axis=0)
+          tl.store(out_ptr + row * N + offs, x, mask=offs < N)
+
+    pattern_after: |
+      # 2D-tiled: each of 5 small kernels processes (row, tile) pairs
+      # Tile 1: per-tile max
+      @triton.jit
+      def _softmax_tile_max_kernel(x_ptr, tile_max_ptr, M, N, num_tiles, BLOCK: tl.constexpr):
+          row  = tl.program_id(0)
+          tile = tl.program_id(1)
+          col_start = tile * BLOCK
+          offs = col_start + tl.arange(0, BLOCK)
+          mask = offs < N
+          x = tl.load(x_ptr + row * N + offs, mask=mask, other=-1e20).to(tl.float32)
+          m = tl.max(x, axis=0)
+          tl.store(tile_max_ptr + row * num_tiles + tile, m)
+      # ... (row reduce max, tile sumexp, row reduce sum, tile norm follow the same pattern)
+
+    examples:
+      - file: 84_Gemm_BatchNorm_Scaling_Softmax.py
+        note: "Full 5-kernel 2D softmax for N=8192 following GEMM+BN+Scale"
+
+  - id: lse_as_separate_row_reduction_kernel
+    name: "LogSumExp as a separate row-reduction kernel after GEMM"
+    stage: algorithmic
+    description: "Compute log(sum(exp(row))) in a dedicated row-reduction kernel, not fused into GEMM."
+    rationale: |
+      LogSumExp requires a full-row scan that conflicts with 2D GEMM tile parallelism.
+      The accepted trade-off is one extra [M, N] memory pass for the LSE input,
+      but the GEMM retains full M×N tile parallelism. Numerically stable via max-subtract.
+
+      ```python
+      @triton.autotune(configs=_cfgs_lse(), key=['M', 'N'])
+      @triton.jit
+      def _lse_kernel(x_ptr, out_ptr, M, N, stride_m, stride_n,
+                      BM: tl.constexpr, BN: tl.constexpr):
+          # rows handled by this program
+          pid_m = tl.program_id(0)
+          rows = pid_m * BM + tl.arange(0, BM)
+          mask_m = rows < M
+
+          # scan across N in BN tiles to find max
+          row_max = tl.full((BM,), -1e30, dtype=tl.float32)
+          for col in tl.range(0, N, BN):
+              cols = col + tl.arange(0, BN)
+              mask = mask_m[:, None] & (cols[None, :] < N)
+              x = tl.load(x_ptr + rows[:, None]*stride_m + cols[None,:]*stride_n,
+                          mask=mask, other=-1e30).to(tl.float32)
+              row_max = tl.maximum(row_max, tl.max(x, axis=1))
+
+          # sum exp(x - max)
+          sum_exp = tl.zeros((BM,), dtype=tl.float32)
+          for col in tl.range(0, N, BN):
+              cols = col + tl.arange(0, BN)
+              mask = mask_m[:, None] & (cols[None, :] < N)
+              x = tl.load(...).to(tl.float32)
+              sum_exp += tl.sum(tl.exp(x - row_max[:, None]), axis=1)
+
+          lse = row_max + tl.log(sum_exp)
+          tl.store(out_ptr + rows, lse, mask=mask_m)
+      ```
+
+    examples:
+      - file: 45_Gemm_Sigmoid_LogSumExp.py
+        note: "Separate LSE kernel after 2-stage GEMM pipeline"
+
+  - id: in_register_maxpool_via_reshape
+    name: "Pairwise max-pool via tl.reshape + tl.max on the accumulator tile"
+    stage: algorithmic
+    description: "Perform kernel=2,stride=2 1D max-pool on the [BLOCK_M, BLOCK_N] accumulator tile in registers using reshape + max, without writing to memory."
+    rationale: |
+      tl.reshape allows re-interpreting the accumulator as [BM, BN/2, 2] so that
+      tl.max over axis=2 computes pairwise max entirely in registers. This is valid
+      as long as BLOCK_N is even and matches the pool stride. Combined with tl.sum
+      over axis=1, the full pool→sum→scale reduction fits in the GEMM epilogue.
+
+      ```python
+      # acc: [BLOCK_M, BLOCK_N] fp32
+      acc_pairs = tl.reshape(acc, (BLOCK_M, BLOCK_N // 2, 2))  # [BM, BN/2, 2]
+      pair_max  = tl.max(acc_pairs, axis=2)                    # [BM, BN/2]
+      row_sum   = tl.sum(pair_max, axis=1)                     # [BM]
+      row_sum   = row_sum * scale
+      ```
+      Requires: BLOCK_N must be even; output tensor shape is [M] not [M, N].
+
+    examples:
+      - file: 55_Matmul_MaxPool_Sum_Scale.py
+        note: "In-register maxpool(k=2) + sum + scale, result atomic-added to [M] output"
+
+  - id: residual_add_as_gemm_epilogue
+    name: "Fuse residual/skip-connection add into GEMM epilogue"
+    stage: algorithmic
+    description: "Load the residual tensor column-slice in the GEMM epilogue and add it to the fp32 accumulator before the final store."
+    rationale: |
+      If the residual is a 1D per-column vector (broadcast over rows), loading it
+      once per tile column costs negligible bandwidth. If the residual is [M, N],
+      use a block pointer to load the matching tile. Either way, this eliminates
+      one full [M, N] read pass compared to a separate add kernel.
+
+      ```python
+      # 1D residual (per-column broadcast)
+      res = tl.load(res_ptr + offs_n, mask=mask_n, other=0.0).to(tl.float32)
+      acc = acc + res[None, :]
+
+      # 2D residual (matching tile)
+      r_bp = tl.make_block_ptr(base=res_ptr, shape=(M, N),
+                                strides=(stride_rm, stride_rn),
+                                offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),
+                                block_shape=(BLOCK_M, BLOCK_N), order=(1, 0))
+      res = tl.load(r_bp, boundary_check=(0, 1)).to(tl.float32)
+      acc = acc + res
+      ```
+
+    examples:
+      - file: 70_Gemm_Sigmoid_Scaling_ResidualAdd.py
+        note: "Residual added after sigmoid; both scaled output and residual are fp32 at add time"
+      - file: 95_Matmul_Add_Swish_Tanh_GELU_Hardtanh.py
+        note: "add_value (per-column) added as fp32 to accumulator before activation chain"
+
+  - id: weight_statistic_precomputation
+    name: "Precompute weight-derived statistics once in __init__, not every forward()"
+    stage: algorithmic
+    description: |
+      When a kernel computes a statistic of a frozen weight tensor on every
+      forward() call (column sums, row norms, packed transposes, etc.) and
+      that statistic depends only on the weight (not the input), it should
+      be computed once in __init__ and cached. Recomputing it every call
+      wastes bandwidth proportional to the weight size.
+
+      This is the model-level analogue of cacheable_intermediate.
+    pattern_before: |
+      def forward(self, x):
+          # Recomputes w_colsum = W.sum(dim=0) every call
+          # W is [N, K] = [8192, 8192] → reads 134MB of W every forward()
+          w_colsum = compute_colsum(self.weight)   # O(N*K) every call
+          return dot_with_colsum(x, w_colsum)
+    pattern_after: |
+      def __init__(self, ...):
+          super().__init__()
+          self.weight = nn.Parameter(...)
+          self._w_colsum: Optional[torch.Tensor] = None
+          self._w_colsum_version = -1
+
+      def _ensure_colsum(self):
+          cur_ver = int(self.weight._version)
+          if self._w_colsum is None or self._w_colsum_version != cur_ver:
+              self._w_colsum = compute_colsum(self.weight.data)
+              self._w_colsum_version = cur_ver
+
+      def forward(self, x):
+          self._ensure_colsum()
+          # W never read in hot path — only x and w_colsum (~16KB)
+          return dot_with_colsum(x, self._w_colsum)
+    expected_speedup: "Up to 83x for W=[8192,8192], batch=100 (eliminates 134MB W read)"
+    applies_to:
+      - gemm_reduction
+      - sum_scaling
+      - any kernel with weight_statistic
+
+  - id: sum_matmul_reorder
+    name: "Reorder sum(A@B, dim) as A @ B.sum(dim) to reduce total FLOPs"
+    stage: algorithmic
+    description: |
+      When computing sum(A @ B, dim=1) where A=[M,K] and B=[K,N]:
+        - Naive: compute full [M,N] product then sum rows → O(M*N*K + M*N)
+        - Optimal: precompute b_colsum = B.sum(dim=0) [K], then A @ b_colsum → O(N*K + M*K)
+
+      This reduces FLOPs from M*N*K to (N+M)*K — for M=N=K=8192 that's 8192x fewer ops.
+      Valid by distributivity of matrix multiplication over addition.
+    pattern_before: |
+      # Naive: full GEMM then reduce
+      out = (x @ W.T)          # [M, N] — O(M*N*K) FLOPs
+      out = out.sum(dim=1)     # [M]   — O(M*N) FLOPs
+      out = out * scale
+    pattern_after: |
+      # Optimal: reduce W first, then single dot per row
+      w_colsum = W.sum(dim=0)  # [K]   — O(N*K) FLOPs, cache in __init__
+      out = x @ w_colsum       # [M]   — O(M*K) FLOPs
+      out = out * scale
+    expected_speedup: "O(M*N*K) → O((N+M)*K): ~N/2 = 4096x fewer FLOPs for square matrices"
+    applies_to:
+      - gemm_row_reduction
+      - linear_sum
+      - matmul_reduce
