@@ -115,7 +115,7 @@ constraints:
 
   - id: forward_must_move_x_to_xpu_before_dtype_cast
     name: "Move tensor to XPU and cast dtype in one call to avoid CPU intermediate"
-    severity: critical
+    severity: warning
     description: |
       In forward(), always move to device AND cast dtype in a single .to() call.
       Splitting into two operations creates a CPU intermediate of the wrong dtype.
@@ -159,8 +159,8 @@ constraints:
           return kernel_function(x, self.weight, self.bias)
       ```
 
-  - id: grf_mode_must_be_declared_in_kernel_signature
-    name: "grf_mode in autotune Config must also be declared as tl.constexpr in kernel signature"
+  - id: grf_mode_is_compiler_option_not_config_kwarg
+    name: "grf_mode must NOT be in triton.Config() — declare as tl.constexpr in kernel signature"
     severity: critical
     description: |
       If grf_mode appears in @triton.autotune Config dicts, it MUST be declared
