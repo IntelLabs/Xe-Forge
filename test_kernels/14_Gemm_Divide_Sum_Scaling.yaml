@@ -13,7 +13,7 @@ inits:
 
 ci:
   - params: [X]
-    dtype: float32
+    dtype: float16
     dims:
       BATCH: 4
       INPUT_SIZE: 1024
@@ -23,9 +23,9 @@ ci:
 
 bench-gpu:
   - params: [X]
-    dtype: float32
+    dtype: float16
     dims:
-      BATCH: 100
+      BATCH: 1024
       INPUT_SIZE: 8192
       HIDDEN_SIZE: 8192
       SCALING_FACTOR: 1.5
