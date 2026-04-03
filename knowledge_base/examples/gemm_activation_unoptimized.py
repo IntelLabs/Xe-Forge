@@ -1,4 +1,3 @@
-# ruff: noqa: E731
 # UNOPTIMIZED KERNEL EXAMPLE
 # This kernel has multiple performance issues that need to be fixed for Intel XPU
 #

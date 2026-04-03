@@ -16,11 +16,10 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import yaml
 
-from xe_forge.models import IssueType, OptimizationStage
+from xe_forge.models import OptimizationStage
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +85,7 @@ class KnowledgeEntry:
     pattern_after: str
     description: str = ""
     rationale: str = ""
-    expected_speedup: Optional[str] = None
+    expected_speedup: str | None = None
     applies_to: list[str] = field(default_factory=list)
     prerequisites: list[str] = field(default_factory=list)
     notes: str = ""
@@ -350,7 +349,7 @@ def _load_yaml_file(kb: KnowledgeBase, path: Path) -> None:
             )
 
 
-def _parse_constraint(data: dict, source: str) -> Optional[KnowledgeConstraint]:
+def _parse_constraint(data: dict, source: str) -> KnowledgeConstraint | None:
     try:
         cid = data.get("id", "")
         stages = _infer_constraint_stages(cid)
@@ -378,7 +377,7 @@ def _infer_constraint_stages(cid: str) -> list[OptimizationStage]:
     return result
 
 
-def _parse_entry(data: dict, source: str) -> Optional[KnowledgeEntry]:
+def _parse_entry(data: dict, source: str) -> KnowledgeEntry | None:
     if "severity" in data and "stage" not in data:
         return None
 
@@ -406,7 +405,7 @@ def _parse_entry(data: dict, source: str) -> Optional[KnowledgeEntry]:
     )
 
 
-def _normalize_stage(stage_str: str) -> Optional[OptimizationStage]:
+def _normalize_stage(stage_str: str) -> OptimizationStage | None:
     if not stage_str:
         return None
     s = stage_str.strip().lower()

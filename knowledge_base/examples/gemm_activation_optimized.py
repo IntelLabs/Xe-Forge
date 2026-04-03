@@ -1,4 +1,3 @@
-# ruff: noqa: E731
 # This kernel demonstrates all key optimizations:
 #
 # 1. FUSED kernel (GEMM + activation in single kernel)

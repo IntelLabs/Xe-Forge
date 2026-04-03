@@ -52,7 +52,8 @@ allow-direct-references = true
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-exclude = ["test_kernels"]
+exclude =     ["test_kernels", "knowledge_base/examples", "outputs/kernels"]
+
 
 [tool.ruff.lint]
 select = [
@@ -79,4 +80,4 @@ known-first-party = ["xe_forge"]
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
-exclude = ["test_kernels"]
+

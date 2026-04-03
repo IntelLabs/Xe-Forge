@@ -9,7 +9,6 @@ list of stages to apply, with reasoning.  Falls back to DEFAULT_STAGE_ORDER
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional
 
 import dspy
 
@@ -22,7 +21,7 @@ logger = logging.getLogger(__name__)
 # shown to the planner so it knows what it is overriding.
 # ---------------------------------------------------------------------------
 
-DEFAULT_STAGE_ORDER: List[OptimizationStage] = [
+DEFAULT_STAGE_ORDER: list[OptimizationStage] = [
     OptimizationStage.ALGORITHMIC,
     OptimizationStage.DISCOVERY,
     OptimizationStage.DTYPE_FIX,
@@ -40,7 +39,7 @@ DEFAULT_STAGE_ORDER: List[OptimizationStage] = [
 # ---------------------------------------------------------------------------
 
 # (before, after): before must appear before after if both are present
-_HARD_DEPENDENCIES: List[tuple[OptimizationStage, OptimizationStage]] = [
+_HARD_DEPENDENCIES: list[tuple[OptimizationStage, OptimizationStage]] = [
     (OptimizationStage.ALGORITHMIC, OptimizationStage.FUSION),
     (OptimizationStage.ALGORITHMIC, OptimizationStage.DTYPE_FIX),
     (OptimizationStage.DISCOVERY, OptimizationStage.DTYPE_FIX),
@@ -138,11 +137,11 @@ class PlannerAgent:
 
     def plan(
         self,
-        stages_needed: Dict[OptimizationStage, List[str]],
+        stages_needed: dict[OptimizationStage, list[str]],
         analysis: KernelAnalysis,
-        input_shapes: Optional[list] = None,
-        flop: Optional[float] = None,
-    ) -> List[OptimizationStage]:
+        input_shapes: list | None = None,
+        flop: float | None = None,
+    ) -> list[OptimizationStage]:
         """
         Return an ordered list of stages to apply.
 
@@ -186,12 +185,12 @@ class PlannerAgent:
 # ---------------------------------------------------------------------------
 
 
-def _default_filtered(stages_needed: Dict[OptimizationStage, List[str]]) -> List[OptimizationStage]:
+def _default_filtered(stages_needed: dict[OptimizationStage, list[str]]) -> list[OptimizationStage]:
     """Default order filtered to only stages that have detected issues."""
     return [s for s in DEFAULT_STAGE_ORDER if s in stages_needed]
 
 
-def _format_available(stages_needed: Dict[OptimizationStage, List[str]]) -> str:
+def _format_available(stages_needed: dict[OptimizationStage, list[str]]) -> str:
     import json
 
     return json.dumps({s.value: issues for s, issues in stages_needed.items()}, indent=2)
@@ -211,8 +210,8 @@ def _format_issue_summary(analysis: KernelAnalysis) -> str:
 
 def _format_kernel_context(
     analysis: KernelAnalysis,
-    input_shapes: Optional[list],
-    flop: Optional[float],
+    input_shapes: list | None,
+    flop: float | None,
 ) -> str:
     parts = [f"kernel: {analysis.kernel_name}"]
     if input_shapes:
@@ -228,9 +227,9 @@ def _format_kernel_context(
 
 def _parse_and_validate(
     raw_ordered: list,
-    stages_needed: Dict[OptimizationStage, List[str]],
-    fallback: List[OptimizationStage],
-) -> List[OptimizationStage]:
+    stages_needed: dict[OptimizationStage, list[str]],
+    fallback: list[OptimizationStage],
+) -> list[OptimizationStage]:
     """
     Parse the LLM output, validate each stage name, enforce hard dependencies,
     and fill in any missing needed stages at the end.
@@ -238,7 +237,7 @@ def _parse_and_validate(
     # Build stage value → enum map for fast lookup
     valid = {s.value: s for s in OptimizationStage}
 
-    parsed: List[OptimizationStage] = []
+    parsed: list[OptimizationStage] = []
     seen: set[OptimizationStage] = set()
 
     for item in raw_ordered or []:
@@ -274,7 +273,7 @@ def _parse_and_validate(
     return parsed
 
 
-def _enforce_dependencies(stages: List[OptimizationStage]) -> List[OptimizationStage]:
+def _enforce_dependencies(stages: list[OptimizationStage]) -> list[OptimizationStage]:
     """
     Enforce _HARD_DEPENDENCIES by moving stages that violate ordering constraints.
     """

@@ -7,7 +7,6 @@ The pipeline still builds the list of detected issues and passes them to each st
 import ast
 import logging
 import re
-from typing import Optional
 
 import dspy
 
@@ -217,7 +216,7 @@ class AutotuneSignature(dspy.Signature):
     )
 
 
-def _build_performance_context(perf_context: Optional[dict]) -> str:
+def _build_performance_context(perf_context: dict | None) -> str:
     """Format perf_context dict into a human-readable string for the LLM prompt."""
     if not perf_context:
         return ""
@@ -394,7 +393,7 @@ class OptimizerAgent(Optimizer):
             original_jit_kernels = {
                 name
                 for name in original_kernels
-                if f"@triton.jit" in original_code
+                if "@triton.jit" in original_code
                 and re.search(
                     rf"@triton\.jit[\s\S]{{0,200}}def\s+{re.escape(name)}\s*\(", original_code
                 )
@@ -477,7 +476,7 @@ class OptimizerAgent(Optimizer):
         pytorch_code="",
         init_args=None,
         vtune_report="",
-        perf_context: Optional[dict] = None,
+        perf_context: dict | None = None,
     ):
         logger.info(f"Applying optimization stage: {stage.value}")
         original_code = code

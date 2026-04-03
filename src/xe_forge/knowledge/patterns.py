@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import logging
 from functools import lru_cache
-from typing import Optional
 
 from xe_forge.models import IssueType, OptimizationStage
 
