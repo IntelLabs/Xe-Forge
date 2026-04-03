@@ -200,3 +200,12 @@ class Model(nn.Module):
         else:
             bias = self.bias
         return _forward_unoptimized(x, self.weight, bias)
+
+
+# ── test helpers ─────────────────────────────────────────────────────────────
+def get_init_inputs():
+    return [4096, 4096]  # in_features, out_features
+
+
+def get_inputs():
+    return [torch.rand(1024, 4096, dtype=torch.float32)]

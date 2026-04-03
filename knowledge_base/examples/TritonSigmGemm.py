@@ -25,30 +25,22 @@ import triton.language as tl
 def _cfgs_gemm():
     # Keep modest search space; you can expand if needed.
     return [
-        triton.Config(
-            {"BM": 128, "BN": 128, "BK": 32, "grf_mode": "256"}, num_warps=16, num_stages=3
-        ),
-        triton.Config(
-            {"BM": 128, "BN": 64, "BK": 32, "grf_mode": "256"}, num_warps=8, num_stages=4
-        ),
-        triton.Config(
-            {"BM": 64, "BN": 128, "BK": 32, "grf_mode": "256"}, num_warps=8, num_stages=4
-        ),
-        triton.Config({"BM": 64, "BN": 64, "BK": 64, "grf_mode": "256"}, num_warps=4, num_stages=4),
+        triton.Config({"BM": 128, "BN": 128, "BK": 32}, num_warps=16, num_stages=3),
+        triton.Config({"BM": 128, "BN": 64, "BK": 32}, num_warps=8, num_stages=4),
+        triton.Config({"BM": 64, "BN": 128, "BK": 32}, num_warps=8, num_stages=4),
+        triton.Config({"BM": 64, "BN": 64, "BK": 64}, num_warps=4, num_stages=4),
         # GRF=128 variants (sometimes win with lower reg pressure)
-        triton.Config(
-            {"BM": 128, "BN": 128, "BK": 32, "grf_mode": "128"}, num_warps=16, num_stages=3
-        ),
-        triton.Config({"BM": 64, "BN": 64, "BK": 64, "grf_mode": "128"}, num_warps=4, num_stages=4),
+        triton.Config({"BM": 128, "BN": 128, "BK": 32}, num_warps=16, num_stages=3),
+        triton.Config({"BM": 64, "BN": 64, "BK": 64}, num_warps=4, num_stages=4),
     ]
 
 
 def _cfgs_lse():
     # One kernel: reduce across N in tiles; BM controls rows-per-program.
     return [
-        triton.Config({"BM": 128, "BN": 256, "grf_mode": "256"}, num_warps=8, num_stages=3),
-        triton.Config({"BM": 128, "BN": 128, "grf_mode": "256"}, num_warps=4, num_stages=4),
-        triton.Config({"BM": 64, "BN": 256, "grf_mode": "256"}, num_warps=4, num_stages=4),
+        triton.Config({"BM": 128, "BN": 256}, num_warps=8, num_stages=3),
+        triton.Config({"BM": 128, "BN": 128}, num_warps=4, num_stages=4),
+        triton.Config({"BM": 64, "BN": 256}, num_warps=4, num_stages=4),
     ]
 
 
@@ -299,7 +291,10 @@ def kernel_function_fast(
     y = torch.empty((M,), device="xpu", dtype=torch.float16)
 
     # GEMM1+sigmoid
-    grid1 = (triton.cdiv(M, 128), triton.cdiv(H, 128))
+    grid1 = lambda META: (
+        triton.cdiv(M, META["BM"]),
+        triton.cdiv(H, META["BN"]),
+    )
     gemm_bias_sigmoid_kernel[grid1](
         x,
         W1_t,
@@ -317,7 +312,10 @@ def kernel_function_fast(
     )
 
     # GEMM2
-    grid2 = (triton.cdiv(M, 128), triton.cdiv(O, 128))
+    grid2 = lambda META: (
+        triton.cdiv(M, META["BM"]),
+        triton.cdiv(O, META["BN"]),
+    )
     gemm_bias_kernel[grid2](
         inter,
         W2_t,
@@ -335,7 +333,7 @@ def kernel_function_fast(
     )
 
     # Row LSE
-    grid3 = (triton.cdiv(M, 128),)
+    grid3 = lambda META: (triton.cdiv(M, META["BM"]),)
     row_lse_kernel[grid3](
         logits,
         y,

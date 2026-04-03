@@ -26,7 +26,6 @@ def get_xpu_configs():
                 "BLOCK_N": 256,
                 "BLOCK_K": 32,
                 "GROUP_SIZE_M": 4,
-                "grf_mode": "256",
             },
             num_warps=32,
             num_stages=2,
@@ -37,7 +36,6 @@ def get_xpu_configs():
                 "BLOCK_N": 128,
                 "BLOCK_K": 32,
                 "GROUP_SIZE_M": 4,
-                "grf_mode": "256",
             },
             num_warps=32,
             num_stages=2,
@@ -48,7 +46,6 @@ def get_xpu_configs():
                 "BLOCK_N": 256,
                 "BLOCK_K": 32,
                 "GROUP_SIZE_M": 4,
-                "grf_mode": "256",
             },
             num_warps=32,
             num_stages=2,
@@ -59,7 +56,6 @@ def get_xpu_configs():
                 "BLOCK_N": 128,
                 "BLOCK_K": 64,
                 "GROUP_SIZE_M": 4,
-                "grf_mode": "256",
             },
             num_warps=32,
             num_stages=2,
@@ -166,7 +162,7 @@ def _matmul_at_kernel_optimized(
         block_shape=(BLOCK_M, BLOCK_N),
         order=(1, 0),
     )
-    tl.store(C_block_ptr, acc.to(tl.float16), boundary_check=(0, 1))
+    tl.store(C_block_ptr, acc, boundary_check=(0, 1))
 
 
 class Model(nn.Module):
@@ -208,3 +204,16 @@ class Model(nn.Module):
         )
 
         return C
+
+
+# ── test helpers ─────────────────────────────────────────────────────────────
+def get_init_inputs():
+    return []
+
+
+def get_inputs():
+    # A: [K, M], B: [K, N]
+    return [
+        torch.rand(4096, 1024, dtype=torch.float32),
+        torch.rand(4096, 4096, dtype=torch.float32),
+    ]

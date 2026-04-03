@@ -15,7 +15,6 @@ def get_autotune_configs():
                     "BLOCK_SIZE_N": 256,
                     "BLOCK_SIZE_K": 32,
                     "GROUP_SIZE_M": 4,
-                    "grf_mode": "256",
                 },
                 num_stages=s,
                 num_warps=32,
@@ -29,7 +28,6 @@ def get_autotune_configs():
                     "BLOCK_SIZE_N": 128,
                     "BLOCK_SIZE_K": 32,
                     "GROUP_SIZE_M": 4,
-                    "grf_mode": m,
                 },
                 num_stages=s,
                 num_warps=w,
@@ -44,7 +42,6 @@ def get_autotune_configs():
                     "BLOCK_SIZE_N": 256,
                     "BLOCK_SIZE_K": 32,
                     "GROUP_SIZE_M": 4,
-                    "grf_mode": "256",
                 },
                 num_stages=s,
                 num_warps=32,
@@ -58,7 +55,6 @@ def get_autotune_configs():
                     "BLOCK_SIZE_N": 128,
                     "BLOCK_SIZE_K": 64,
                     "GROUP_SIZE_M": 4,
-                    "grf_mode": "256",
                 },
                 num_stages=s,
                 num_warps=32,
@@ -72,7 +68,6 @@ def get_autotune_configs():
                     "BLOCK_SIZE_N": 128,
                     "BLOCK_SIZE_K": 32,
                     "GROUP_SIZE_M": 4,
-                    "grf_mode": "256",
                 },
                 num_stages=2,
                 num_warps=32,
@@ -185,7 +180,6 @@ def _fused_gemm_activation_kernel(
     accumulator = tl.minimum(accumulator, 1.0)
 
     # Store with block pointer
-    c = accumulator.to(tl.float16)
     c_block_ptr = tl.make_block_ptr(
         base=c_ptr,
         shape=(M, N),
@@ -194,7 +188,7 @@ def _fused_gemm_activation_kernel(
         block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_N),
         order=(1, 0),
     )
-    tl.store(c_block_ptr, c, boundary_check=(0, 1))
+    tl.store(c_block_ptr, accumulator, boundary_check=(0, 1))
 
 
 class Model(nn.Module):
@@ -261,3 +255,17 @@ class Model(nn.Module):
         )
 
         return out
+
+
+# ── test helpers ─────────────────────────────────────────────────────────────
+_batch_size = 1024
+_in_features = 4096
+_out_features = 4096
+
+
+def get_init_inputs():
+    return [_in_features, _out_features]
+
+
+def get_inputs():
+    return [torch.rand(_batch_size, _in_features, dtype=torch.float32)]

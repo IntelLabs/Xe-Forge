@@ -114,7 +114,6 @@ def _get_xpu_autotune_configs():
                 "BLOCK_N": 256,
                 "BLOCK_K": 32,
                 "GROUP_SIZE_M": 4,
-                "grf_mode": "256",
             },
             num_warps=32,
             num_stages=2,
@@ -125,7 +124,6 @@ def _get_xpu_autotune_configs():
                 "BLOCK_N": 128,
                 "BLOCK_K": 32,
                 "GROUP_SIZE_M": 4,
-                "grf_mode": "256",
             },
             num_warps=32,
             num_stages=2,
@@ -136,7 +134,6 @@ def _get_xpu_autotune_configs():
                 "BLOCK_N": 256,
                 "BLOCK_K": 32,
                 "GROUP_SIZE_M": 4,
-                "grf_mode": "256",
             },
             num_warps=32,
             num_stages=2,
@@ -147,7 +144,6 @@ def _get_xpu_autotune_configs():
                 "BLOCK_N": 128,
                 "BLOCK_K": 32,
                 "GROUP_SIZE_M": 4,
-                "grf_mode": "256",
             },
             num_warps=32,
             num_stages=3,
@@ -299,9 +295,9 @@ def kernel_function(
         return (triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(N, META["BLOCK_N"]),)
 
     _fused_gemm_bias_add_activation_kernel[grid](
-        x,
+        x_xpu,
         wt_xpu,
-        bias,
+        b_xpu,
         out,
         M,
         N,

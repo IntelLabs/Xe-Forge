@@ -38,17 +38,17 @@ def _configs():
     # Large square-ish tiles
     cfgs += [
         triton.Config(
-            {"BLOCK_M": 256, "BLOCK_N": 256, "BLOCK_K": 32, "GROUP_SIZE_M": 4, "grf_mode": "256"},
+            {"BLOCK_M": 256, "BLOCK_N": 256, "BLOCK_K": 32, "GROUP_SIZE_M": 4},
             num_warps=16,
             num_stages=2,
         ),
         triton.Config(
-            {"BLOCK_M": 256, "BLOCK_N": 256, "BLOCK_K": 32, "GROUP_SIZE_M": 4, "grf_mode": "256"},
+            {"BLOCK_M": 256, "BLOCK_N": 256, "BLOCK_K": 32, "GROUP_SIZE_M": 4},
             num_warps=32,
             num_stages=3,
         ),
         triton.Config(
-            {"BLOCK_M": 256, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_SIZE_M": 4, "grf_mode": "128"},
+            {"BLOCK_M": 256, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_SIZE_M": 4},
             num_warps=16,
             num_stages=3,
         ),
@@ -61,17 +61,17 @@ def _configs():
     # Rectangular: 256x128 and 128x256
     cfgs += [
         triton.Config(
-            {"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_SIZE_M": 4, "grf_mode": "256"},
+            {"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_SIZE_M": 4},
             num_warps=16,
             num_stages=3,
         ),
         triton.Config(
-            {"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 32, "GROUP_SIZE_M": 4, "grf_mode": "128"},
+            {"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 32, "GROUP_SIZE_M": 4},
             num_warps=8,
             num_stages=3,
         ),
         triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_SIZE_M": 4, "grf_mode": "256"},
+            {"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_SIZE_M": 4},
             num_warps=16,
             num_stages=3,
         ),
@@ -84,12 +84,12 @@ def _configs():
     # Balanced 128x128 with deeper K
     cfgs += [
         triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_SIZE_M": 4, "grf_mode": "128"},
+            {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_SIZE_M": 4},
             num_warps=8,
             num_stages=3,
         ),
         triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_SIZE_M": 4, "grf_mode": "256"},
+            {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 128, "GROUP_SIZE_M": 4},
             num_warps=8,
             num_stages=4,
         ),
@@ -107,7 +107,7 @@ def _configs():
     # Small-M variants to improve occupancy when M is skinny
     cfgs += [
         triton.Config(
-            {"BLOCK_M": 64, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_SIZE_M": 4, "grf_mode": "128"},
+            {"BLOCK_M": 64, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_SIZE_M": 4},
             num_warps=8,
             num_stages=3,
         ),
@@ -117,12 +117,12 @@ def _configs():
             num_stages=3,
         ),
         triton.Config(
-            {"BLOCK_M": 128, "BLOCK_N": 64, "BLOCK_K": 64, "GROUP_SIZE_M": 4, "grf_mode": "128"},
+            {"BLOCK_M": 128, "BLOCK_N": 64, "BLOCK_K": 64, "GROUP_SIZE_M": 4},
             num_warps=4,
             num_stages=3,
         ),
         triton.Config(
-            {"BLOCK_M": 256, "BLOCK_N": 64, "BLOCK_K": 32, "GROUP_SIZE_M": 4, "grf_mode": "256"},
+            {"BLOCK_M": 256, "BLOCK_N": 64, "BLOCK_K": 32, "GROUP_SIZE_M": 4},
             num_warps=8,
             num_stages=2,
         ),

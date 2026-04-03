@@ -26,14 +26,14 @@ def get_sum_weight_configs():
                 for ns in (1, 2):
                     configs.append(
                         triton.Config(
-                            {"BLOCK_M": bm, "BLOCK_N": bn, "grf_mode": "128"},
+                            {"BLOCK_M": bm, "BLOCK_N": bn},
                             num_warps=nw,
                             num_stages=ns,
                         )
                     )
                     configs.append(
                         triton.Config(
-                            {"BLOCK_M": bm, "BLOCK_N": bn, "grf_mode": "256"},
+                            {"BLOCK_M": bm, "BLOCK_N": bn},
                             num_warps=nw,
                             num_stages=ns,
                         )
@@ -41,7 +41,7 @@ def get_sum_weight_configs():
             # Optional 32 warps (included; autotune will pick only if it wins)
             configs.append(
                 triton.Config(
-                    {"BLOCK_M": bm, "BLOCK_N": bn, "grf_mode": "256"},
+                    {"BLOCK_M": bm, "BLOCK_N": bn},
                     num_warps=32,
                     num_stages=2,
                 )
@@ -58,14 +58,14 @@ def get_dot_row_configs():
             for ns in (1, 2):
                 configs.append(
                     triton.Config(
-                        {"BLOCK_K": bk, "grf_mode": "128"},
+                        {"BLOCK_K": bk},
                         num_warps=nw,
                         num_stages=ns,
                     )
                 )
                 configs.append(
                     triton.Config(
-                        {"BLOCK_K": bk, "grf_mode": "256"},
+                        {"BLOCK_K": bk},
                         num_warps=nw,
                         num_stages=ns,
                     )
@@ -73,7 +73,7 @@ def get_dot_row_configs():
         # Optional 32 warps (included; autotune will pick only if it wins)
         configs.append(
             triton.Config(
-                {"BLOCK_K": bk, "grf_mode": "256"},
+                {"BLOCK_K": bk},
                 num_warps=32,
                 num_stages=2,
             )

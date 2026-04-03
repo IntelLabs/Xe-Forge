@@ -115,3 +115,16 @@ class Model(nn.Module):
             C.stride(1),
         )
         return C
+
+
+# ── test helpers ─────────────────────────────────────────────────────────────
+def get_init_inputs():
+    return []
+
+
+def get_inputs():
+    # A: [K, M], B: [K, N]
+    return [
+        torch.rand(4096, 1024, dtype=torch.float32),
+        torch.rand(4096, 4096, dtype=torch.float32),
+    ]

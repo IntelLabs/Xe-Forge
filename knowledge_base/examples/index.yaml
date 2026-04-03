@@ -1,301 +1,250 @@
-# Knowledge Base Examples Index
 examples:
-  - id: gemm_activation
-    name: "GEMM + Activation Fusion"
-    stages: [algorithmic, fusion, block_pointers, xpu_specific, autotuning]
-    description: |
-      Shows optimization of a linear layer followed by activation.
-      Original has two separate kernels, optimized fuses them.
-    unoptimized: gemm_activation_unoptimized.py
-    optimized: gemm_activation_optimized.py
-    optimizations_applied:
-      - Kernel fusion (2 kernels to 1)
-      - Block pointers (vs manual arithmetic)
-      - Large tiles 256x256 (vs 64x64)
-      - 32 warps (vs default 8)
-      - grf_mode 256
-      - GROUP_SIZE_M swizzling
-      - 1D grid (vs 2D)
-      - Autotune configs
-    expected_speedup: "2-4x"
+- id: gemm_activation
+  name: GEMM + Activation Fusion
+  stages:
+  - algorithmic
+  - fusion
+  - block_pointers
+  - xpu_specific
+  - autotuning
+  description: 'Shows optimization of a linear layer followed by activation.
 
-  - id: gemm_simple
-    name: "Simple GEMM Optimization"
-    stages: [block_pointers, xpu_specific, autotuning]
-    description: |
-      Basic matrix multiplication showing XPU-specific optimizations.
-    unoptimized: gemm_simple_unoptimized.py
-    optimized: gemm_simple_optimized.py
-    optimizations_applied:
-      - Block pointers
-      - Large tiles
-      - XPU warp/grf configuration
-      - Tile swizzling
-    expected_speedup: "1.5-3x"
+    Original has two separate kernels, optimized fuses them.
 
-  - id: matmul_at
-    name: "MatMul A^T @ B Optimization"
-    stages: [block_pointers, xpu_specific, memory_access]
-    description: |
-      Matrix multiplication C = A^T @ B where A is [K, M], B is [K, N].
-      Shows conversion from manual pointer arithmetic to block pointers,
-      2D grid to 1D with swizzling, and XPU-specific optimizations.
-    unoptimized: matmul_at_unoptimized.py
-    optimized: matmul_at_optimized.py
-    optimizations_applied:
-      - Block pointers (tl.make_block_ptr) instead of manual arithmetic
-      - Large tiles 256x256 (vs 64-128)
-      - 32 warps (vs 4-8)
-      - grf_mode 256 for large register file
-      - GROUP_SIZE_M swizzling for L2 cache
-      - 1D grid with swizzling (vs 2D grid)
-      - fp16 dot with fp32 accumulation
-    expected_speedup: "2-4x"
+    '
+  unoptimized: gemm_activation_unoptimized.py
+  optimized: gemm_activation_optimized.py
+  optimizations_applied:
+  - Kernel fusion (2 kernels to 1)
+  - Block pointers (vs manual arithmetic)
+  - Large tiles 256x256 (vs 64x64)
+  - 32 warps (vs default 8)
+  - grf_mode 256
+  - GROUP_SIZE_M swizzling
+  - 1D grid (vs 2D)
+  - Autotune configs
+  expected_speedup: 2-4x
+- id: matmul_at
+  name: MatMul A^T @ B Optimization
+  stages:
+  - block_pointers
+  - xpu_specific
+  - memory_access
+  description: 'Matrix multiplication C = A^T @ B where A is [K, M], B is [K, N].
 
-  - id: stream_k_gemm_descriptors
-    name: "Stream K GEMM with Tensor Descriptors"
-    stages: [persistent_kernel, block_pointers, xpu_specific, memory_access]
-    description: |
-      Advanced Stream K GEMM for Intel XPU using tensor descriptors.
-      Two-wave decomposition (stream-K + data-parallel), atomic
-      accumulation for partial tiles, hardware-aware program count.
-    file: stream_k_gemm_descriptors.py
-    optimizations_applied:
-      - Tensor descriptors (tl.make_tensor_descriptor)
-      - Stream K two-wave decomposition (first_wave + full_tiles)
-      - Atomic partial tile accumulation (tl.atomic_add)
-      - JIT helper functions for tile swizzling
-      - Hardware capability query (gpu_subslice_count)
-      - Pre-zeroed output buffer for atomic safety
-    expected_speedup: "improved utilization for non-divisible tile counts"
+    Shows conversion from manual pointer arithmetic to block pointers,
 
-  - id: gemm_tensor_of_ptr
-    name: "GEMM Tensor of Pointers (manual pointer arithmetic baseline)"
-    stages: [block_pointers, xpu_specific, memory_access]
-    description: |
-      Standard Triton tutorial-style GEMM using manual pointer arithmetic.
-      Demonstrates GROUP_SIZE_M swizzling, K-loop boundary masking, and
-      int64 cast for batch offsets.
-    file: gemm_tensor_of_ptr.py
-    optimizations_applied:
-      - GROUP_SIZE_M tile swizzling (1D grid)
-      - fp32 accumulation
-      - K-loop boundary masking
-      - Batched variant with axis=1 batch grid
-      - int64 cast for batch pointer offsets (overflow safety)
-      - Autotune configs
-    expected_speedup: "baseline"
+    2D grid to 1D with swizzling, and XPU-specific optimizations.
 
-  - id: fused_softmax
-    name: "Fused Softmax (row-wise, multi-row tiling)"
-    stages: [algorithmic, fusion, xpu_specific, memory_access, autotuning]
-    description: |
-      Row-wise fused softmax adapted for Intel XPU benchmarks.
-      Demonstrates multi-row tiling, hardware work group size query,
-      warp_size autotune sweeping, and numerical stability.
-    file: fused_softmax.py
-    optimizations_applied:
-      - Multi-row tiling (BLOCK_SIZE_Y rows per program)
-      - Hardware work group size query
-      - warp_size autotune sweeping
-      - Power-of-2 column block sizing
-      - Numerical stability with -inf mask fill
-      - bfloat16 input with fp32 computation
-    expected_speedup: "significant vs naive (single pass vs 5 passes)"
+    '
+  unoptimized: matmul_at_unoptimized.py
+  optimized: matmul_at_optimized.py
+  optimizations_applied:
+  - Block pointers (tl.make_block_ptr) instead of manual arithmetic
+  - Large tiles 256x256 (vs 64-128)
+  - 32 warps (vs 4-8)
+  - grf_mode 256 for large register file
+  - GROUP_SIZE_M swizzling for L2 cache
+  - 1D grid with swizzling (vs 2D grid)
+  - fp16 dot with fp32 accumulation
+  expected_speedup: 2-4x
+- id: gemm_swish_divide_clamp_tanh_clamp
+  name: GEMM + Swish + Divide + Clamp + Tanh + Clamp (Fused Activation Chain)
+  stages:
+  - fusion
+  - block_pointers
+  - xpu_specific
+  - autotuning
+  description: 'GEMM with a 5-step activation chain fused entirely in the epilogue.
 
-  - id: gemm_postop_addmatrix
-    name: "GEMM + PostOp Add Matrix (tensor descriptors, int8 support)"
-    stages: [algorithmic, fusion, block_pointers, xpu_specific, autotuning]
-    description: |
-      GEMM with fused matrix addition epilogue (C = A @ B + D).
-      Uses tensor descriptors for all loads/stores. Supports bf16 and int8.
-    file: gemm_postop_addmatrix.py
-    optimizations_applied:
-      - Tensor descriptors for A, B, C, D
-      - GEMM + matrix add epilogue fusion
-      - ACCUMULATOR_DTYPE as constexpr (float32 for float, int32 for int8)
-      - Batched variant with int64 batch offset in descriptor base
-      - Autotune configs including skinny-M (BLOCK_SIZE_M=8)
-      - GROUP_SIZE_M tile swizzling
-    expected_speedup: "eliminates separate add kernel launch and memory round-trip"
+    No intermediate HBM writes between activation steps.
 
-  - id: gemm_postop_gelu
-    name: "GEMM + PostOp GeLU (tensor descriptors, JIT activation helpers)"
-    stages: [algorithmic, fusion, block_pointers, xpu_specific, autotuning]
-    description: |
-      GEMM with fused GeLU activation epilogue using tensor descriptors.
-      GeLU implemented via composable @triton.jit helpers.
-    file: gemm_postop_gelu.py
-    optimizations_applied:
-      - Tensor descriptors for A, B, C
-      - GEMM + GeLU epilogue fusion
-      - Reusable triton.jit helpers (tanh, gelu)
-      - Batched variant with int64 batch offset
-      - Autotune configs including skinny-M (BLOCK_SIZE_M=8)
-    expected_speedup: "eliminates separate GeLU kernel launch and memory round-trip"
+    '
+  file: gemmelem.py
+  optimizations_applied:
+  - Fused activation chain (Swish, divide, clamp, tanh, clamp) in GEMM epilogue
+  - Block pointers with tl.advance
+  - GROUP_SIZE_M swizzling (1D grid)
+  - 32 warps, grf_mode 256
+  - Autotune configs
+  expected_speedup: eliminates 4 separate activation kernel launches
+- id: matmul_add_swish_tanh_gelu_hardtanh
+  name: MatMul + Add + Swish + Tanh + GELU + Hardtanh (Fused)
+  stages:
+  - fusion
+  - block_pointers
+  - xpu_specific
+  - memory_access
+  - autotuning
+  description: 'GEMM with bias, residual add, and 4-stage activation chain fused.
 
-  - id: flash_attention_fwd_bwd
-    name: "Flash Attention Forward + Backward (tensor descriptors, exp2, causal)"
-    stages: [xpu_specific, block_pointers, memory_access, persistent_kernel]
-    description: |
-      Full Flash Attention implementation with forward and backward passes for
-      Intel XPU. Forward uses online softmax with exp2/log2 arithmetic and
-      tensor descriptors. Backward computes dQ/dK/dV.
-    file: flash_attention.py
-    optimizations_applied:
-      - exp2/log2 attention with RCP_LN2 scaling
-      - Tensor descriptors (2D for Q/K/V/O, 1D for logsumexp)
-      - Descriptor .load().T for K transpose
-      - tl.trans() for backward transposes
-      - Two-stage causal masking
-      - Autotune configs
+    Shows version-tracked parameter caching and 1D grid with swizzling.
 
-  - id: gemm_swish_divide_clamp_tanh_clamp
-    name: "GEMM + Swish + Divide + Clamp + Tanh + Clamp (Fused Activation Chain)"
-    stages: [fusion, block_pointers, xpu_specific, autotuning]
-    description: |
-      GEMM with a 5-step activation chain fused entirely in the epilogue.
-      No intermediate HBM writes between activation steps.
-    file: gemmelem.py
-    optimizations_applied:
-      - Fused activation chain (Swish, divide, clamp, tanh, clamp) in GEMM epilogue
-      - Block pointers with tl.advance
-      - GROUP_SIZE_M swizzling (1D grid)
-      - 32 warps, grf_mode 256
-      - Autotune configs
-    expected_speedup: "eliminates 4 separate activation kernel launches"
+    '
+  file: MMTanh.py
+  optimizations_applied:
+  - Fused bias add + residual add + Swish + Tanh + GELU + Hardtanh in epilogue
+  - Block pointers for X and W^T
+  - 1D grid with GROUP_SIZE_M swizzle
+  - Pre-packed W^T with version-tracked cache invalidation
+  - fp16 I/O, fp32 accumulator, fp16 store
+  - Autotune configs
+  expected_speedup: eliminates 5 separate kernel launches and intermediate buffers
+- id: matmul_min_subtract
+  name: MatMul + Min + Subtract (Fused Epilogue)
+  stages:
+  - fusion
+  - block_pointers
+  - memory_access
+  - xpu_specific
+  description: 'GEMM with fused min-clamp and scalar subtract epilogue.
 
-  - id: matmul_add_swish_tanh_gelu_hardtanh
-    name: "MatMul + Add + Swish + Tanh + GELU + Hardtanh (Fused)"
-    stages: [fusion, block_pointers, xpu_specific, memory_access, autotuning]
-    description: |
-      GEMM with bias, residual add, and 4-stage activation chain fused.
-      Shows version-tracked parameter caching and 1D grid with swizzling.
-    file: MMTanh.py
-    optimizations_applied:
-      - Fused bias add + residual add + Swish + Tanh + GELU + Hardtanh in epilogue
-      - Block pointers for X and W^T
-      - 1D grid with GROUP_SIZE_M swizzle
-      - Pre-packed W^T with version-tracked cache invalidation
-      - fp16 I/O, fp32 accumulator, fp16 store
-      - Autotune configs
-    expected_speedup: "eliminates 5 separate kernel launches and intermediate buffers"
+    Constant kept as Python float to avoid device-host sync.
 
-  - id: matmul_min_subtract
-    name: "MatMul + Min + Subtract (Fused Epilogue)"
-    stages: [fusion, block_pointers, memory_access, xpu_specific]
-    description: |
-      GEMM with fused min-clamp and scalar subtract epilogue.
-      Constant kept as Python float to avoid device-host sync.
-    file: matt_elem.py
-    optimizations_applied:
-      - Fused min(GEMM+bias, C) - C epilogue
-      - Block pointers for X and W^T
-      - Pre-packed W^T cached in __init__
-      - Constant as Python float (no device to host sync)
-      - fp16 I/O, fp32 accumulator
-    expected_speedup: "1.97x"
+    '
+  file: matt_elem.py
+  optimizations_applied:
+  - Fused min(GEMM+bias, C) - C epilogue
+  - Block pointers for X and W^T
+  - Pre-packed W^T cached in __init__
+  - Constant as Python float (no device to host sync)
+  - fp16 I/O, fp32 accumulator
+  expected_speedup: 1.97x
+- id: matmul_maxpool_sum_scale
+  name: MatMul + MaxPool(k=2) + Sum + Scale (Reduction Fusion)
+  stages:
+  - algorithmic
+  - fusion
+  - block_pointers
+  - xpu_specific
+  description: 'GEMM with pairwise max-pool, row-sum, and scale fused in-kernel using
 
-  - id: matmul_maxpool_sum_scale
-    name: "MatMul + MaxPool(k=2) + Sum + Scale (Reduction Fusion)"
-    stages: [algorithmic, fusion, block_pointers, xpu_specific]
-    description: |
-      GEMM with pairwise max-pool, row-sum, and scale fused in-kernel using
-      tl.reshape and tl.atomic_add. Produces a [M] output directly.
-    file: matmul_max.py
-    optimizations_applied:
-      - In-register maxpool via tl.reshape and tl.max
-      - Row sum + scale in epilogue
-      - Atomic accumulation into pre-zeroed fp32 buffer
-      - Block pointers with 1D grid and GROUP_SIZE_M swizzle
-      - tl.max_contiguous hint on bias offset
-      - fp16 I/O, fp32 accumulation
-    expected_speedup: "eliminates intermediate [M,N] tensor and separate reduction kernels"
+    tl.reshape and tl.atomic_add. Produces a [M] output directly.
 
-  - id: gemm_sigmoid_logsumexp
-    name: "GEMM + Sigmoid + GEMM + LogSumExp (Multi-Kernel Pipeline)"
-    stages: [algorithmic, fusion, block_pointers, xpu_specific, autotuning]
-    description: |
-      Two-stage GEMM pipeline with sigmoid between stages, followed by
-      row-wise LogSumExp as a separate kernel to preserve GEMM parallelism.
-    file: TritonSigmGemm.py
-    optimizations_applied:
-      - exp2-based sigmoid helper (_sigmoid_exp2)
-      - Block pointers in both GEMM kernels
-      - Pre-packed W1^T and W2^T (no per-forward repack)
-      - Separate LogSumExp reduction kernel
-      - Separate autotune configs for GEMM vs LSE kernels
-      - fp16 I/O, fp32 accumulation
+    '
+  file: matmul_max.py
+  optimizations_applied:
+  - In-register maxpool via tl.reshape and tl.max
+  - Row sum + scale in epilogue
+  - Atomic accumulation into pre-zeroed fp32 buffer
+  - Block pointers with 1D grid and GROUP_SIZE_M swizzle
+  - tl.max_contiguous hint on bias offset
+  - fp16 I/O, fp32 accumulation
+  expected_speedup: eliminates intermediate [M,N] tensor and separate reduction kernels
+- id: gemm_sigmoid_logsumexp
+  name: GEMM + Sigmoid + GEMM + LogSumExp (Multi-Kernel Pipeline)
+  stages:
+  - algorithmic
+  - fusion
+  - block_pointers
+  - xpu_specific
+  - autotuning
+  description: 'Two-stage GEMM pipeline with sigmoid between stages, followed by
 
-  - id: gemm_sigmoid_scaling_residual_add
-    name: "GEMM + Sigmoid + Scale + Residual Add (EVEN_M/N/K Specialization)"
-    stages: [xpu_specific, block_pointers, autotuning]
-    description: |
-      GEMM with sigmoid, scale, and residual add. Demonstrates EVEN_M/N/K
-      autotune flags to skip boundary checks for divisible shapes.
-    file: gemm_sigm.py
-    optimizations_applied:
-      - EVEN_M/N/K constexpr flags for boundary-check elimination
-      - GROUP_SIZE_M sweep including no-swizzle fallback (1, 2, 4)
-      - exp2-based sigmoid in epilogue
-      - Block pointers with conditional boundary_check
-      - Fast-path kernel for divisible shapes
-      - Autotune sweep over tiles, warps, stages, grf, groups
+    row-wise LogSumExp as a separate kernel to preserve GEMM parallelism.
 
-  - id: gemm_scale_batchnorm
-    name: "GEMM + Scale + BatchNorm Inference Fusion"
-    stages: [fusion, block_pointers, xpu_specific, autotuning]
-    description: |
-      GEMM with per-channel scale and BatchNorm (inference mode) fused in
-      the epilogue. BN stats loaded as 1D column vectors once per tile.
-    file: gemm_scale.py
-    optimizations_applied:
-      - Inference BatchNorm fused in GEMM epilogue (no separate BN kernel)
-      - Per-channel scale fused in same epilogue
-      - Column stats (rm, rv, gamma, beta) loaded once per tile column
-      - 1D grid with GROUP_SIZE_M swizzle
-      - Autotune over tiles and warps with grf sweep
-      - fp16 I/O, fp32 epilogue arithmetic
-    expected_speedup: "eliminates BN and scale kernel launches and memory round-trips"
+    '
+  file: TritonSigmGemm.py
+  optimizations_applied:
+  - exp2-based sigmoid helper (_sigmoid_exp2)
+  - Block pointers in both GEMM kernels
+  - Pre-packed W1^T and W2^T (no per-forward repack)
+  - Separate LogSumExp reduction kernel
+  - Separate autotune configs for GEMM vs LSE kernels
+  - fp16 I/O, fp32 accumulation
+- id: gemm_sigmoid_scaling_residual_add
+  name: GEMM + Sigmoid + Scale + Residual Add (EVEN_M/N/K Specialization)
+  stages:
+  - xpu_specific
+  - block_pointers
+  - autotuning
+  description: 'GEMM with sigmoid, scale, and residual add. Demonstrates EVEN_M/N/K
 
-  - id: gemm_batchnorm_scaling_softmax
-    name: "GEMM + BatchNorm + Scale + 2D-Tiled Softmax"
-    stages: [algorithmic, fusion, block_pointers, xpu_specific]
-    description: |
-      GEMM with fused BatchNorm and scale, followed by 2D-tiled Softmax
-      for large N (N=8192) decomposed into 5 passes.
-    file: gemmsoft.py
-    optimizations_applied:
-      - GEMM + inference BN + scalar scale fused in epilogue
-      - 5-kernel 2D-tiled softmax decomposition for large N
-      - Numerical stability with max-subtract before exp
-      - fp16 I/O throughout, fp32 reduction intermediates
+    autotune flags to skip boundary checks for divisible shapes.
 
-  - id: matmul_gelu_softmax
-    name: "MatMul + GELU + Softmax (Sequential Kernels)"
-    stages: [algorithmic, fusion, block_pointers, xpu_specific, memory_access]
-    description: |
-      Linear + GELU fused in one kernel, then row-wise Softmax as a
-      separate kernel. Shows GELU tanh formulation and version-tracked cache.
-    file: MMSoftx.py
-    optimizations_applied:
-      - GELU tanh formulation via tl.math.tanh
-      - Block pointers for X and W^T
-      - Separate row-wise softmax kernel
-      - Weight stored as [K, N] pre-transposed and cached fp16 on XPU
-      - Version-tracked cache for training safety
-      - fp16 I/O, fp32 accumulation
+    '
+  file: gemm_sigm.py
+  optimizations_applied:
+  - EVEN_M/N/K constexpr flags for boundary-check elimination
+  - GROUP_SIZE_M sweep including no-swizzle fallback (1, 2, 4)
+  - exp2-based sigmoid in epilogue
+  - Block pointers with conditional boundary_check
+  - Fast-path kernel for divisible shapes
+  - Autotune sweep over tiles, warps, stages, grf, groups
+- id: gemm_scale_batchnorm
+  name: GEMM + Scale + BatchNorm Inference Fusion
+  stages:
+  - fusion
+  - block_pointers
+  - xpu_specific
+  - autotuning
+  description: 'GEMM with per-channel scale and BatchNorm (inference mode) fused in
 
-  - id: gemm_divide_sum_scaling
-    name: "GEMM + Divide + Sum + Scaling (Row Reduction Pipeline)"
-    stages: [dtype_fix, xpu_specific, autotuning]
-    description: |
-      GEMM with per-row divide, sum, and scaling using separate GEMM and
-      row-reduction kernels. Shows broad autotune sweep with grf variants.
-    file: gemm_sum.py
-    optimizations_applied:
-      - Separate autotune config generators for GEMM tiles vs row-reduction
-      - Broad sweep over BLOCK_M/N/K, num_warps, num_stages, grf_mode
-      - dtype_fix and xpu_specific optimizations
-    expected_speedup: "1.97x"
+    the epilogue. BN stats loaded as 1D column vectors once per tile.
 
+    '
+  file: gemm_scale.py
+  optimizations_applied:
+  - Inference BatchNorm fused in GEMM epilogue (no separate BN kernel)
+  - Per-channel scale fused in same epilogue
+  - Column stats (rm, rv, gamma, beta) loaded once per tile column
+  - 1D grid with GROUP_SIZE_M swizzle
+  - Autotune over tiles and warps with grf sweep
+  - fp16 I/O, fp32 epilogue arithmetic
+  expected_speedup: eliminates BN and scale kernel launches and memory round-trips
+- id: gemm_batchnorm_scaling_softmax
+  name: GEMM + BatchNorm + Scale + 2D-Tiled Softmax
+  stages:
+  - algorithmic
+  - fusion
+  - block_pointers
+  - xpu_specific
+  description: 'GEMM with fused BatchNorm and scale, followed by 2D-tiled Softmax
+
+    for large N (N=8192) decomposed into 5 passes.
+
+    '
+  file: gemmsoft.py
+  optimizations_applied:
+  - GEMM + inference BN + scalar scale fused in epilogue
+  - 5-kernel 2D-tiled softmax decomposition for large N
+  - Numerical stability with max-subtract before exp
+  - fp16 I/O throughout, fp32 reduction intermediates
+- id: matmul_gelu_softmax
+  name: MatMul + GELU + Softmax (Sequential Kernels)
+  stages:
+  - algorithmic
+  - fusion
+  - block_pointers
+  - xpu_specific
+  - memory_access
+  description: 'Linear + GELU fused in one kernel, then row-wise Softmax as a
+
+    separate kernel. Shows GELU tanh formulation and version-tracked cache.
+
+    '
+  file: MMSoftx.py
+  optimizations_applied:
+  - GELU tanh formulation via tl.math.tanh
+  - Block pointers for X and W^T
+  - Separate row-wise softmax kernel
+  - Weight stored as [K, N] pre-transposed and cached fp16 on XPU
+  - Version-tracked cache for training safety
+  - fp16 I/O, fp32 accumulation
+- id: gemm_divide_sum_scaling
+  name: GEMM + Divide + Sum + Scaling (Row Reduction Pipeline)
+  stages:
+  - dtype_fix
+  - xpu_specific
+  - autotuning
+  description: 'GEMM with per-row divide, sum, and scaling using separate GEMM and
+
+    row-reduction kernels. Shows broad autotune sweep with grf variants.
+
+    '
+  file: gemm_sum.py
+  optimizations_applied:
+  - Separate autotune config generators for GEMM tiles vs row-reduction
+  - Broad sweep over BLOCK_M/N/K, num_warps, num_stages, grf_mode
+  - dtype_fix and xpu_specific optimizations
+  expected_speedup: 1.97x
