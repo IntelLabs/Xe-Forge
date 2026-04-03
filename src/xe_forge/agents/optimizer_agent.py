@@ -540,44 +540,44 @@ class OptimizerAgent(Optimizer):
 
         if stage == OptimizationStage.ALGORITHMIC:
             sig = AlgorithmicOptimizationSignature
-            kwargs = dict(
-                original_code=original_code,
-                current_code=code,
-                pytorch_code=pytorch_code or "",
-                issues=issues_text,
-                xpu_config=xpu_text,
-                problem_context=problem_ctx,
-                performance_context=perf_ctx,
-                knowledge_base_context=kb_context,
-            )
+            kwargs = {
+                "original_code": original_code,
+                "current_code": code,
+                "pytorch_code": pytorch_code or "",
+                "issues": issues_text,
+                "xpu_config": xpu_text,
+                "problem_context": problem_ctx,
+                "performance_context": perf_ctx,
+                "knowledge_base_context": kb_context,
+            }
         elif stage == OptimizationStage.AUTOTUNING:
             sig = AutotuneSignature
             suggested_configs = self._build_autotune_configs(xpu_config, input_shapes)
             problem_shapes = self._build_problem_shapes(input_shapes)
-            kwargs = dict(
-                original_code=original_code,
-                current_code=code,
-                issues=issues_text,
-                xpu_config=xpu_text,
-                suggested_autotune_configs=suggested_configs,
-                problem_shapes=problem_shapes,
-                problem_context=problem_ctx,
-                performance_context=perf_ctx,
-                knowledge_base_context=kb_context,
-            )
+            kwargs = {
+                "original_code": original_code,
+                "current_code": code,
+                "issues": issues_text,
+                "xpu_config": xpu_text,
+                "suggested_autotune_configs": suggested_configs,
+                "problem_shapes": problem_shapes,
+                "problem_context": problem_ctx,
+                "performance_context": perf_ctx,
+                "knowledge_base_context": kb_context,
+            }
         else:
             sig = OptimizationSignature
-            kwargs = dict(
-                original_code=original_code,
-                current_code=code,
-                stage=stage.value,
-                issues=issues_text,
-                xpu_config=xpu_text,
-                problem_context=problem_ctx,
-                performance_context=perf_ctx,
-                vtune_report=vtune_report or "",
-                knowledge_base_context=kb_context,
-            )
+            kwargs = {
+                "original_code": original_code,
+                "current_code": code,
+                "stage": stage.value,
+                "issues": issues_text,
+                "xpu_config": xpu_text,
+                "problem_context": problem_ctx,
+                "performance_context": perf_ctx,
+                "vtune_report": vtune_report or "",
+                "knowledge_base_context": kb_context,
+            }
 
         cover = CoVeR(
             signature=sig,
@@ -751,10 +751,10 @@ class OptimizerAgent(Optimizer):
         header = re.match(r"((?:#[^\n]*\n)+)", code)
         if header:
             key = [
-                l
-                for l in header.group(1).split("\n")
+                line
+                for line in header.group(1).split("\n")
                 if any(
-                    kw in l.lower()
+                    kw in line.lower()
                     for kw in [
                         "fix",
                         "key",

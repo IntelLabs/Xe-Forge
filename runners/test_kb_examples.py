@@ -150,7 +150,7 @@ def check_tensor(t, name):
     return issues
 
 
-def test_single(path: Path, label: str = None) -> bool:
+def test_single(path: Path, label: str | None = None) -> bool:
     label = label or path.name
     print(f"\n{'─' * 60}")
     print(f"Testing: {label}")
@@ -170,7 +170,7 @@ def test_single(path: Path, label: str = None) -> bool:
         return False
 
 
-def test_pair(pair: dict, examples_dir: Path = None) -> bool:
+def test_pair(pair: dict, examples_dir: Path | None = None) -> bool:
     pid = pair["id"]
     base = examples_dir if examples_dir else _DEFAULT_EXAMPLES_DIR
     unopt_path = base / pair["unoptimized"]

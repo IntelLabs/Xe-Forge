@@ -42,29 +42,26 @@ from xe_forge.core.xpu_query import (
 )
 
 __all__ = [
-    # Executor
     "ComparisonResult",
+    "InputSpec",
     "KernelBenchExecutor",
     "KernelExecutor",
-    "create_executor_tool",
-    # Spec loader
-    "InputSpec",
     "KernelSpec",
     "VariantSpec",
-    "get_test_config_from_spec",
-    "load_spec",
-    "load_spec_from_string",
-    "parse_spec",
-    # XPU query & config
     "XPUDeviceInfo",
     "create_executor_from_config",
+    "create_executor_tool",
     "extract_mnk_from_shapes",
     "format_xpu_config_for_llm",
     "get_autotune_configs",
     "get_optimal_params",
+    "get_test_config_from_spec",
     "get_xpu_config",
     "get_xpu_config_dict",
     "get_xpu_config_for_pipeline",
+    "load_spec",
+    "load_spec_from_string",
+    "parse_spec",
     "print_xpu_info",
 ]
 

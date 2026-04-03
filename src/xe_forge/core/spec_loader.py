@@ -10,6 +10,7 @@ Parses YAML spec files to get:
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import ClassVar
 
 import torch
 import yaml
@@ -83,7 +84,7 @@ class KernelSpec:
     _named_variants: dict[str, list[VariantSpec]] = field(default_factory=dict, repr=False)
 
     # Base-prefix → attribute name for the four standard families.
-    _VARIANT_MAP_KEYS = {
+    _VARIANT_MAP_KEYS: ClassVar[dict[str, str]] = {
         "ci": "ci",
         "bench-cpu": "bench_cpu",
         "bench-gpu": "bench_gpu",
@@ -227,7 +228,7 @@ class KernelSpec:
         variant = vl[variant_index]
         args = []
         for init_entry in self.inits:
-            for param_name, dim_var in init_entry.items():
+            for _param_name, dim_var in init_entry.items():
                 if dim_var in variant.dims:
                     args.append(variant.dims[dim_var])
                 else:

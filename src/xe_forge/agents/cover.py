@@ -82,7 +82,7 @@ class CoVeR(dspy.Module):
 
         # Route each task output to its tools based on the name
         self.tools = tool_dict
-        self.tool_args: dict[str, list[str]] = dict()
+        self.tool_args: dict[str, list[str]] = {}
         for name, tool in self.tools.items():
             assert name, f"Tool name for {tool} is empty!"
             if not name == tool.name:
@@ -200,7 +200,7 @@ class CoVeR(dspy.Module):
                     return None
 
         logger.warning(f"Unable to extract a prediction after {retries} retries!")
-        return dict()
+        return {}
 
     def truncate_trajectory(self, trajectory):
         """Truncates the trajectory so that it fits in the context window.

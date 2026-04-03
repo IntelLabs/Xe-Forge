@@ -3,12 +3,12 @@ Core data models for Triton optimization pipeline
 """
 
 from datetime import datetime
-from enum import Enum, StrEnum
+from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
 
-class OptimizationStage(str, Enum):
+class OptimizationStage(StrEnum):
     ANALYSIS = "analysis"
     ALGORITHMIC = "algorithmic"
     DTYPE_FIX = "dtype_fix"
