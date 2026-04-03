@@ -514,14 +514,6 @@ For each stage, the LLM receives:
 
 Your Model takes init args but either (a) the spec has no `inits` section, or (b) the dimension variable in `inits` doesn't match any dim in the variant. Fix: add `inits: [{param_name: DIM_VAR}]` to your spec.
 
-### "Cannot extract M,N,K: need at least 2 input shapes"
-
-This is a legacy warning that should no longer appear in v0.2. The shape extractor now handles single-input tensors, 3+ inputs (Q,K,V attention), and 4D shapes.
-
-### "Config.__init__() got an unexpected keyword argument 'grf_mode'"
-
-The LLM generated `grf_mode` inside a `triton.Config()` call. This is now caught at verify time with feedback to the LLM. If you still see this, update your `optimizer_agent.py`.
-
 ### Connection errors / retries
 
 The LLM context may be too large. Try reducing kernel size, using `--stages` to run fewer stages, or using a model with a larger context window.
