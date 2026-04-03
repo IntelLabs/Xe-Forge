@@ -15,9 +15,11 @@ from xe_forge.models import (
     IssueType,
     OptimizationResult,
     OptimizationStage,
+    StageResult,
 )
 from xe_forge.planner import DEFAULT_STAGE_ORDER as PLANNER_DEFAULT_STAGE_ORDER
 from xe_forge.planner import PlannerAgent
+from xe_forge.trajectory import TrajectoryRecord
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +146,7 @@ class XeForgePipeline:
         target_dtype=None,
         rtol=None,
         atol=None,
+        trajectory_dir=None,
     ):
         import torch
 
@@ -284,6 +287,7 @@ class XeForgePipeline:
 
             current_code = triton_code
             current_ms: float | None = val_orig_ms
+            trajectory_counts = {"success": 0, "failed": 0}
 
             for stage in stages_to_apply:
                 logger.info("=" * 60 + f"\nSTAGE: {stage.value.upper()}\n" + "=" * 60)
@@ -345,6 +349,35 @@ class XeForgePipeline:
                             oi.open_ended_proposal,
                         )
 
+                # --- Trajectory collection (side effect only) ---
+                # Skip no-op stages (no issues found, nothing was optimized)
+                _is_noop = (
+                    stage_result.success
+                    and stage_result.output_code == stage_result.input_code
+                    and stage_result.speedup is None
+                )
+                if trajectory_dir and not _is_noop:
+                    self._save_trajectory(
+                        trajectory_dir=trajectory_dir,
+                        kernel_name=display_name,
+                        spec_path=spec_path or "",
+                        stage=stage,
+                        stage_result=stage_result,
+                        original_code=triton_code,
+                        current_code_before_stage=stage_result.input_code,
+                        xpu_config=xpu_config,
+                        analysis=analysis,
+                        input_shapes=input_shapes,
+                        dtype=dtype,
+                        init_args=init_args,
+                        flop=flop,
+                        pytorch_code=pytorch_code,
+                        val_orig_ms=val_orig_ms,
+                        val_orig_tflops=val_orig_tflops,
+                        current_ms=current_ms,
+                        trajectory_counts=trajectory_counts,
+                    )
+
                 analysis = self.analyzer.analyze(
                     current_code, pytorch_code, display_name, input_shapes, flop, target_dtype=etd
                 )
@@ -390,6 +423,9 @@ class XeForgePipeline:
         )
         self._save_results(result)
 
+        if trajectory_dir:
+            result.trajectory_counts = trajectory_counts
+
         logger.info("=" * 60 + "\nOPTIMIZATION COMPLETE\n" + "=" * 60)
         ok = [s for s in result.stages_applied if s.success]
         fail = [s for s in result.stages_applied if not s.success]
@@ -423,6 +459,111 @@ class XeForgePipeline:
             with open(output_path, "w") as f:
                 f.write(result.optimized_code)
         return result
+
+    def _save_trajectory(
+        self,
+        trajectory_dir,
+        kernel_name,
+        spec_path,
+        stage,
+        stage_result: StageResult,
+        original_code,
+        current_code_before_stage,
+        xpu_config,
+        analysis,
+        input_shapes,
+        dtype,
+        init_args,
+        flop,
+        pytorch_code,
+        val_orig_ms,
+        val_orig_tflops,
+        current_ms,
+        trajectory_counts=None,
+    ):
+        """Save a TrajectoryRecord for one stage. Called only when trajectory_dir is set."""
+        from xe_forge.agents.optimizer_agent import _build_performance_context
+        from xe_forge.knowledge.patterns import get_stage_for_issue
+
+        try:
+            traj_dir = Path(trajectory_dir)
+            success_dir = traj_dir / "success"
+            failed_dir = traj_dir / "failed"
+            success_dir.mkdir(parents=True, exist_ok=True)
+            failed_dir.mkdir(parents=True, exist_ok=True)
+
+            # Rebuild the inputs that optimize_stage saw
+            stage_issues = [
+                i for i in analysis.detected_issues
+                if get_stage_for_issue(i.issue_type) == stage
+            ]
+            issues_text = "\n".join(
+                f"- {i.issue_type.value}: {i.description}\n  Fix: {i.suggested_fix}"
+                for i in stage_issues
+            )
+
+            xpu_text = "Intel XPU Configuration:\n" + "\n".join(
+                f"  {k}: {v}" for k, v in xpu_config.items()
+            )
+
+            perf_context = {
+                "original_ms": val_orig_ms,
+                "original_tflops": val_orig_tflops,
+                "current_ms": current_ms,
+                "speedup_so_far": (
+                    round(val_orig_ms / current_ms, 3)
+                    if val_orig_ms and current_ms and current_ms > 0
+                    else None
+                ),
+            }
+            perf_ctx = _build_performance_context(perf_context)
+            problem_ctx = self.optimizer._build_problem_context(
+                input_shapes, dtype, init_args, flop
+            )
+
+            rec = TrajectoryRecord(
+                original_code=original_code,
+                current_code=current_code_before_stage,
+                stage=stage.value,
+                issues=issues_text,
+                xpu_config=xpu_text,
+                problem_context=problem_ctx,
+                performance_context=perf_ctx,
+                kernel_name=kernel_name,
+                spec_path=str(spec_path),
+                success=stage_result.success,
+                speedup=stage_result.speedup,
+                iterations_used=len(stage_result.changes_made),
+            )
+
+            if stage == OptimizationStage.ALGORITHMIC:
+                rec.pytorch_code = pytorch_code or ""
+            elif stage == OptimizationStage.AUTOTUNING:
+                rec.suggested_autotune_configs = self.optimizer._build_autotune_configs(
+                    xpu_config, input_shapes
+                )
+                rec.problem_shapes = self.optimizer._build_problem_shapes(input_shapes)
+
+            if stage_result.output_code:
+                rec.optimized_code = stage_result.output_code
+            if stage_result.reasoning:
+                rec.next_thought = stage_result.reasoning
+            if stage_result.metrics_after and "tflops" in stage_result.metrics_after:
+                rec.tflops = stage_result.metrics_after["tflops"]
+
+            save_dir = success_dir if stage_result.success else failed_dir
+            # Prefer spec-derived name over kernel_name (which defaults to "Model")
+            file_label = Path(spec_path).stem if spec_path else kernel_name
+            fname = f"{file_label}_{stage.value}.json"
+            rec.save(save_dir / fname)
+            logger.info(f"Trajectory saved: {save_dir / fname}")
+
+            if trajectory_counts is not None:
+                key = "success" if stage_result.success else "failed"
+                trajectory_counts[key] += 1
+
+        except Exception as e:
+            logger.warning(f"Failed to save trajectory for {kernel_name}/{stage.value}: {e}")
 
     def _save_results(self, result):
         if not self.config.logging.save_intermediate:

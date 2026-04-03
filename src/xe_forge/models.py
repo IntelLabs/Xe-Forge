@@ -142,6 +142,7 @@ class OptimizationResult(BaseModel):
     optimized_tflops: float | None = None
     original_memory_bw: float | None = None
     optimized_memory_bw: float | None = None
+    trajectory_counts: dict[str, int] | None = None
 
 
 class KnowledgeEntry(BaseModel):

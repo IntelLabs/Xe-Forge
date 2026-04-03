@@ -120,6 +120,19 @@ Examples:
         help="Absolute tolerance override for correctness check (overrides spec and config values)",
     )
 
+    # Trajectory collection
+    parser.add_argument(
+        "--collect-trajectories",
+        action="store_true",
+        help="Save trajectory records (LLM inputs/outputs per stage) alongside normal output",
+    )
+    parser.add_argument(
+        "--trajectory-dir",
+        type=str,
+        default="./outputs/trajectories",
+        help="Directory for trajectory output (default: ./outputs/trajectories)",
+    )
+
     # Other options
     parser.add_argument("--debug", action="store_true", help="Enable debug output")
 
@@ -187,6 +200,8 @@ Examples:
         print(f"Target dtype: {args.target_dtype}")
     print(f"Stages: {[s.value for s in stages] if stages else 'all'}")
     print(f"Best@k: {config.optimization.best_k}")
+    if args.collect_trajectories:
+        print(f"Trajectories: {args.trajectory_dir}")
 
     # Print correctness settings
     if config.optimization.require_correctness:
@@ -265,6 +280,7 @@ Examples:
         target_dtype=args.target_dtype,
         rtol=args.rtol,
         atol=args.atol,
+        trajectory_dir=args.trajectory_dir if args.collect_trajectories else None,
     )
 
     # Save output if requested
@@ -302,6 +318,12 @@ Examples:
 
     if args.output:
         print(f"\nOptimized kernel saved to: {args.output}")
+
+    if args.collect_trajectories:
+        counts = getattr(result, "trajectory_counts", None) or {}
+        n_success = counts.get("success", 0)
+        n_failed = counts.get("failed", 0)
+        print(f"\nTrajectories: {n_success} successful, {n_failed} failed -> {args.trajectory_dir}")
 
     print("=" * 60)
 
