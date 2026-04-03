@@ -78,9 +78,17 @@ class XPUConfig:
 
 @dataclass
 class KnowledgeConfig:
-    """Knowledge base configuration"""
+    """Knowledge base configuration.
 
+    Set enabled=True and point knowledge_dir at a directory containing
+    the YAML pattern files to load the knowledge base at startup.
+    When enabled=False (default) the pipeline relies entirely on the
+    LLM's built-in knowledge — no YAML files are required.
+    """
+
+    enabled: bool = False
     knowledge_dir: str = "./knowledge_base"
+    # auto_load kept for backward compatibility; ignored when enabled=False
     auto_load: bool = True
 
 
@@ -172,6 +180,7 @@ class ConfigManager:
 
         # Knowledge Configuration
         knowledge = KnowledgeConfig(
+            enabled=self._get_env("KNOWLEDGE_BASE_ENABLED", False, bool),
             knowledge_dir=self._get_env("KNOWLEDGE_DIR", "./knowledge_base"),
             auto_load=self._get_env("AUTO_LOAD_KNOWLEDGE", True, bool),
         )

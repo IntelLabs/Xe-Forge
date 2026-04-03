@@ -1,23 +1,3 @@
-"""
-Triton Optimizer Pipeline - Multi-stage optimization for Intel XPU
-
-Stage ordering:
-1. Analysis           - Identify all issues (LLM-based, no local KB)
-2. Algorithmic        - Mathematical / algorithmic rewrites (NEW)
-3. Dtype Fix          - Fix float64 to float32
-4. Fusion             - Fuse multiple kernels
-5. Memory Access      - Coalescing, TMA, register pressure
-6. Block Pointers     - Convert to block pointer API
-7. Persistent Kernel  - Persistent kernel transforms
-8. XPU Specific       - Intel XPU optimizations
-
-Rationale: algorithmic first (may eliminate work), then dtype, then fusion
-(on cleaned ops), then low-level tuning on final fused kernel.
-
-Each stage uses CoVeR. The pipeline builds the issue list and passes it
-to each stage; the LLM uses its own knowledge to optimize.
-"""
-
 import logging
 import os
 from datetime import datetime
@@ -29,9 +9,12 @@ import httpx
 import litellm
 
 from xe_forge.agents import AnalyzerAgent, Optimizer, OptimizerAgent, OptimizerReActAgent
+from xe_forge.planner import PlannerAgent, DEFAULT_STAGE_ORDER as PLANNER_DEFAULT_STAGE_ORDER
+from xe_forge.knowledge.loader import KnowledgeBase, load_knowledge_base
 from xe_forge.config import Config, get_config
 from xe_forge.core import get_xpu_config_for_pipeline
 from xe_forge.models import (
+    IssueType,
     KernelAnalysis,
     OptimizationResult,
     OptimizationStage,
@@ -43,6 +26,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_STAGE_ORDER: List[OptimizationStage] = [
     OptimizationStage.ANALYSIS,
     OptimizationStage.ALGORITHMIC,
+    OptimizationStage.DISCOVERY,
     OptimizationStage.DTYPE_FIX,
     OptimizationStage.FUSION,
     OptimizationStage.MEMORY_ACCESS,
@@ -54,9 +38,6 @@ DEFAULT_STAGE_ORDER: List[OptimizationStage] = [
 
 
 class XeForgePipeline:
-    """Multi-stage optimization pipeline for Triton kernels targeting Intel XPU.
-    Uses LLM knowledge (no local knowledge base required)."""
-
     config: Config
     analyzer: AnalyzerAgent
     optimizer: Optimizer
@@ -76,8 +57,15 @@ class XeForgePipeline:
                 atol=self.config.optimization.correctness_atol,
             )
 
-        # No knowledge base needed
-        self.analyzer = AnalyzerAgent()
+        self.knowledge_base: Optional[KnowledgeBase] = None
+        if self.config.knowledge.enabled:
+            self.knowledge_base = load_knowledge_base(self.config.knowledge.knowledge_dir)
+            logger.info("  Knowledge base: %s", self.knowledge_base.summary())
+        else:
+            logger.info("  Knowledge base: disabled (set KNOWLEDGE_BASE_ENABLED=true to enable)")
+
+        self.analyzer = AnalyzerAgent(knowledge_base=self.knowledge_base)
+        self.planner = PlannerAgent()
 
         match self.config.agent.strategy:
             case "cover":
@@ -91,6 +79,7 @@ class XeForgePipeline:
             executor=executor,
             validator=validator,
             max_iterations=self.config.agent.max_iterations,
+            knowledge_base=self.knowledge_base,
         )
         self.executor = executor
         self.validator = validator
@@ -127,7 +116,7 @@ class XeForgePipeline:
             )
             dspy.configure(lm=lm)
         except Exception as e:
-            raise RuntimeError(f"Failed to initialize LLM: {e}")
+            raise RuntimeError(f"Failed to initialize LLM: {e}") from e
 
     def _resolve_tolerances(self, spec=None, variant_type="bench-gpu", rtol=None, atol=None):
         ertol = self.config.optimization.correctness_rtol
@@ -158,12 +147,6 @@ class XeForgePipeline:
         rtol=None,
         atol=None,
     ):
-        """Optimize Triton kernel through multi-stage pipeline.
-
-        The pipeline: analyze -> plan -> execute stages in order:
-        ALGORITHMIC -> DTYPE -> FUSION -> MEMORY -> BLOCK_PTRS -> PERSISTENT -> XPU.
-        Each stage receives its relevant issue list. After each stage, re-analyze.
-        """
         import torch
 
         spec, flop, dtype, init_args = None, None, None, None
@@ -192,18 +175,17 @@ class XeForgePipeline:
         display_name = kernel_name or "Model"
         logger.info(f"Starting optimization for kernel: {display_name}")
 
-        # Measure original performance
         val_orig_tflops, val_orig_ms = None, None
+        from xe_forge.core.executor import KernelBenchExecutor
+
+        _bench_ex = (
+            self.executor
+            if isinstance(self.executor, KernelBenchExecutor)
+            else KernelBenchExecutor(device=self.config.xpu.device)
+        )
         if self.executor and input_shapes:
             try:
-                from xe_forge.core.executor import KernelBenchExecutor
-
-                ex = (
-                    self.executor
-                    if isinstance(self.executor, KernelBenchExecutor)
-                    else KernelBenchExecutor(device=self.config.xpu.device)
-                )
-                orig_r = ex.execute(
+                orig_r = _bench_ex.execute(
                     triton_code,
                     None,
                     input_shapes,
@@ -216,7 +198,7 @@ class XeForgePipeline:
                     logger.info(
                         f"Original: {orig_r.tflops:.2f} TFLOPS, {orig_r.execution_time_ms:.2f} ms"
                     )
-                if not orig_r.success:
+                else:
                     logger.error(f"Baseline FAILED: {orig_r.error_message}")
                     logger.debug(orig_r.error_traceback)
             except Exception as e:
@@ -246,7 +228,6 @@ class XeForgePipeline:
                 input_shapes=input_shapes, config=self.config, dtype=etd or "float16"
             )
 
-            # === ANALYSIS ===
             logger.info("=" * 60 + "\nSTAGE: ANALYSIS\n" + "=" * 60)
             analysis = self.analyzer.analyze(
                 triton_code, pytorch_code, display_name, input_shapes, flop, target_dtype=etd
@@ -262,7 +243,6 @@ class XeForgePipeline:
                 candidates.append(result)
                 continue
 
-            # === PLANNING ===
             logger.info("=" * 60 + "\nSTAGE: PLANNING\n" + "=" * 60)
             from xe_forge.knowledge.patterns import get_stage_for_issue
 
@@ -271,17 +251,31 @@ class XeForgePipeline:
                 st = get_stage_for_issue(iss.issue_type)
                 stages_needed.setdefault(st, []).append(iss.issue_type.value)
 
-            all_stages = stages or DEFAULT_STAGE_ORDER
-            stages_to_apply = [
-                s for s in all_stages if s in stages_needed and s != OptimizationStage.ANALYSIS
-            ]
+            if stages:
+                stages_to_apply = [
+                    s for s in stages if s in stages_needed and s != OptimizationStage.ANALYSIS
+                ]
+                logger.info("Stage order: manual override")
+            else:
+                stages_to_apply = self.planner.plan(
+                    stages_needed=stages_needed,
+                    analysis=analysis,
+                    input_shapes=input_shapes,
+                    flop=flop,
+                )
 
             logger.info("Optimization plan:")
-            for s in all_stages:
+            for s in PLANNER_DEFAULT_STAGE_ORDER:
                 if s == OptimizationStage.ANALYSIS:
                     continue
                 if s in stages_needed:
-                    logger.info(f"  + {s.value}: {', '.join(stages_needed[s])}")
+                    if s in stages_to_apply:
+                        pos = stages_to_apply.index(s) + 1
+                        issues_str = ", ".join(stages_needed[s])
+                        logger.info(f"  + {s.value} [#{pos}]: {issues_str}")
+                    else:
+                        issues_str = ", ".join(stages_needed[s])
+                        logger.info(f"  ~ {s.value} (deferred): {issues_str}")
                 else:
                     logger.info(f"  - {s.value}: skipped")
 
@@ -290,8 +284,8 @@ class XeForgePipeline:
                 candidates.append(result)
                 continue
 
-            # === EXECUTE STAGES ===
             current_code = triton_code
+            current_ms: float | None = val_orig_ms
 
             for stage in stages_to_apply:
                 logger.info("=" * 60 + f"\nSTAGE: {stage.value.upper()}\n" + "=" * 60)
@@ -308,6 +302,16 @@ class XeForgePipeline:
                     dtype=dtype,
                     pytorch_code=pytorch_code,
                     init_args=init_args,
+                    perf_context={
+                        "original_ms": val_orig_ms,
+                        "original_tflops": val_orig_tflops,
+                        "current_ms": current_ms,
+                        "speedup_so_far": (
+                            round(val_orig_ms / current_ms, 3)
+                            if val_orig_ms and current_ms and current_ms > 0
+                            else None
+                        ),
+                    },
                 )
                 result.stages_applied.append(stage_result)
 
@@ -317,6 +321,13 @@ class XeForgePipeline:
                     and stage_result.output_code != current_code
                 ):
                     current_code = stage_result.output_code
+                    if stage_result.speedup and val_orig_ms:
+                        current_ms = val_orig_ms / stage_result.speedup
+                    elif (
+                        stage_result.metrics_after
+                        and "execution_time_ms" in stage_result.metrics_after
+                    ):
+                        current_ms = stage_result.metrics_after["execution_time_ms"]
                     logger.info(
                         f"Stage {stage.value} OK"
                         + (f" ({stage_result.speedup:.2f}x)" if stage_result.speedup else "")
@@ -324,22 +335,25 @@ class XeForgePipeline:
                 elif not stage_result.success:
                     logger.warning(f"Stage {stage.value} failed: {stage_result.error_message}")
 
-                # Re-analyze after each stage
+                if stage == OptimizationStage.DISCOVERY and stage_result.success:
+                    open_ended_issues = [
+                        i
+                        for i in analysis.detected_issues
+                        if i.issue_type == IssueType.OPEN_ENDED and i.open_ended_proposal
+                    ]
+                    for oi in open_ended_issues:
+                        logger.info(
+                            "DISCOVERY succeeded — promote to named IssueType:\n%s",
+                            oi.open_ended_proposal,
+                        )
+
                 analysis = self.analyzer.analyze(
                     current_code, pytorch_code, display_name, input_shapes, flop, target_dtype=etd
                 )
 
-            # Measure optimized performance
             if self.executor and input_shapes and current_code != triton_code:
                 try:
-                    from xe_forge.core.executor import KernelBenchExecutor
-
-                    ex = (
-                        self.executor
-                        if isinstance(self.executor, KernelBenchExecutor)
-                        else KernelBenchExecutor(device=self.config.xpu.device)
-                    )
-                    opt_r = ex.execute(
+                    opt_r = _bench_ex.execute(
                         current_code,
                         kernel_name,
                         input_shapes,
@@ -357,6 +371,13 @@ class XeForgePipeline:
                             logger.info(f"Total speedup: {result.total_speedup:.2f}x")
                 except Exception as e:
                     logger.warning(f"Failed to measure optimized: {e}")
+                    if current_ms and current_ms != val_orig_ms:
+                        result.optimized_ms = current_ms
+                        if result.original_ms and result.optimized_ms:
+                            result.total_speedup = result.original_ms / result.optimized_ms
+                            logger.info(
+                                f"Total speedup (from stage measurements): {result.total_speedup:.2f}x"
+                            )
 
             result.optimized_code, result.success = current_code, True
             candidates.append(result)

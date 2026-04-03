@@ -4,7 +4,7 @@
 inputs:
   X:
     shape: [BATCH, IN_FEAT]
-    dtype: float32
+    dtype: float16
 
 inits:
   - dim: IN_FEAT
@@ -14,7 +14,7 @@ inits:
 
 ci:
   - params: [X]
-    dtype: float32
+    dtype: float16
     dims:
       BATCH: 4
       IN_FEAT: 1024
@@ -25,7 +25,7 @@ ci:
 
 bench-gpu:
   - params: [X]
-    dtype: float32
+    dtype: float16
     dims:
       BATCH: 128
       IN_FEAT: 32768

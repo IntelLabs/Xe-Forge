@@ -18,6 +18,8 @@ class OptimizationStage(str, Enum):
     PERSISTENT_KERNEL = "persistent_kernel"
     XPU_SPECIFIC = "xpu_specific"
     AUTOTUNING = "autotuning"
+    DISCOVERY = "discovery"  # handles open_ended issues — novel optimizations
+    # not covered by any existing stage
 
 
 class IssueType(StrEnum):
@@ -75,6 +77,11 @@ class IssueType(StrEnum):
     MISSING_AUTOTUNE = "missing_autotune"
     SUBOPTIMAL_AUTOTUNE_CONFIGS = "suboptimal_autotune_configs"
     AUTOTUNE_KEY_MISSING = "autotune_key_missing"
+    # DISCOVERY — for novel optimizations not covered by any existing type.
+    # The LLM should use this when it identifies a concrete, high-value
+    # optimization that has no matching type above.  It must populate
+    # open_ended_proposal in the DetectedIssue with a precise description.
+    OPEN_ENDED = "open_ended"
 
 
 class DetectedIssue(BaseModel):
@@ -84,6 +91,10 @@ class DetectedIssue(BaseModel):
     description: str
     suggested_fix: str
     estimated_speedup: Optional[str] = None
+    # Populated only when issue_type == OPEN_ENDED.
+    # Must contain: (a) what the optimization is, (b) why it is mathematically
+    # valid, (c) a concrete before/after sketch, (d) estimated speedup reasoning.
+    open_ended_proposal: Optional[str] = None
 
 
 class KernelAnalysis(BaseModel):

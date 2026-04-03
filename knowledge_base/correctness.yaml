@@ -1,0 +1,234 @@
+constraints:
+  - id: outputs_must_match
+    name: "Outputs must match original"
+    severity: info
+    description: |
+      The verification tool will check that outputs match the original.
+      If it fails, try a different optimization approach.
+      
+  - id: streamk_output_must_be_prezeroed
+    name: "Pre-zero output buffer when using atomic accumulation (Stream K)"
+    severity: critical
+    description: |
+      When partial tiles use tl.atomic_add to accumulate results, the output
+      tensor MUST be initialized to zero (torch.zeros, NOT torch.empty).
+      Otherwise partial sums will include garbage values.
+
+      WRONG:
+      ```python
+      c = torch.empty((M, N), device=a.device, dtype=torch.float32)
+      first_wave[grid](a, b, c, ...)  # atomic_add onto garbage
+      ```
+
+      CORRECT:
+      ```python
+      c = torch.zeros((M, N), device=a.device, dtype=torch.float32)
+      first_wave[grid](a, b, c, ...)  # atomic_add safely onto zeros
+      ```
+
+  - id: streamk_atomic_add_needs_mask
+    name: "Atomic adds on partial tiles must be masked for boundary safety"
+    severity: critical
+    description: |
+      When falling back to tl.atomic_add for partial tiles, you MUST apply
+      boundary masks (rm < M, rn < N) to avoid writing out-of-bounds.
+
+      ```python
+      rm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+      rn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+      mask = (rm < M)[:, None] & (rn < N)[None, :]
+      tl.atomic_add(c_ptr_, acc, mask=mask, sem='relaxed')
+      ```
+
+  - id: int64_cast_for_large_batch_offsets
+    name: "Cast batch/stride products to int64 to prevent pointer overflow"
+    severity: critical
+    description: |
+      When computing pointer offsets for batched operations, the product of
+      a batch index and a stride can exceed int32 range for large tensors.
+      Triton program_id returns int32 by default. You MUST cast to int64
+      before multiplying by strides.
+
+      WRONG (silent int32 overflow → wrong memory addresses):
+      ```python
+      bid = tl.program_id(axis=1)
+      offset_a = bid * stride_az        # int32 * int32 → overflow for large tensors
+      a_ptrs = a_ptr + offset_a + ...
+      ```
+
+      CORRECT:
+      ```python
+      bid = tl.program_id(axis=1)
+      offset_a = bid.to(tl.int64) * stride_az   # safe for large tensors
+      a_ptrs = a_ptr + offset_a + ...
+      ```
+
+      This applies whenever a program_id or loop index is multiplied by a
+      stride that could produce values > 2^31 (≈2 billion elements). Common
+      in batched GEMM, multi-head attention, and any kernel with a batch
+      dimension over large tensors.
+
+  - id: descriptor_no_boundary_check_arg
+    name: "Tensor descriptor .load() does NOT accept boundary_check"
+    severity: critical
+    description: |
+      Unlike block pointers which use tl.load(ptr, boundary_check=(0, 1)),
+      tensor descriptors handle boundaries internally. The .load() method
+      takes only a coordinate list.
+
+      WRONG:
+      ```python
+      desc = tl.make_tensor_descriptor(base=ptr, shape=(M, K), ...)
+      data = desc.load([row, col], boundary_check=(0, 1))
+      ```
+
+      CORRECT:
+      ```python
+      desc = tl.make_tensor_descriptor(base=ptr, shape=(M, K), ...)
+      data = desc.load([row, col])
+      ```
+  - id: kernel_launch_must_use_device_moved_tensors
+    name: "Always pass device-moved tensor variables to kernel launch, not original args"
+    severity: critical
+    description: |
+      When kernel_function() creates local copies (x_xpu, b_xpu, wt_xpu) to move
+      tensors to XPU, the kernel launch MUST use those copies — not the original
+      argument names (x, bias, weight_t). Passing originals silently feeds CPU
+      tensors to the XPU kernel, causing "Expected all tensors to be on the same
+      device" errors at runtime.
+
+      WRONG:
+      ```python
+      x_xpu  = x.to("xpu", dtype=torch.float16).contiguous()
+      b_xpu  = bias.to("xpu", dtype=torch.float32).contiguous()
+      _kernel[grid](x, b_xpu, ...)          # x is still CPU!
+      ```
+
+      CORRECT:
+      ```python
+      x_xpu  = x.to("xpu", dtype=torch.float16).contiguous()
+      b_xpu  = bias.to("xpu", dtype=torch.float32).contiguous()
+      _kernel[grid](x_xpu, b_xpu, ...)      # all tensors on XPU
+      ```
+
+      Also applies to strides: use x_xpu.stride(0) not x.stride(0) after the copy.
+
+  - id: forward_must_move_x_to_xpu_before_dtype_cast
+    name: "Move tensor to XPU and cast dtype in one call to avoid CPU intermediate"
+    severity: warning
+    description: |
+      In forward(), always move to device AND cast dtype in a single .to() call.
+      Splitting into two operations creates a CPU intermediate of the wrong dtype.
+
+      WRONG:
+      ```python
+      if x.dtype != torch.float16:
+          x = x.to(dtype=torch.float16)       # stays on CPU as fp16!
+      if x.device.type != "xpu":
+          x = x.to("xpu")                     # now moves, but wasteful
+      ```
+
+      CORRECT:
+      ```python
+      if x.device.type != "xpu" or x.dtype != torch.float16:
+          x = x.to("xpu", dtype=torch.float16)
+      ```
+
+  - id: model_forward_must_not_rely_on_model_to_for_device
+    name: "forward() must not assume model.to(device) was called; move tensors explicitly"
+    severity: critical
+    description: |
+      KernelBench and similar frameworks may not call model.to("xpu") before
+      forward(). Always move self.weight, self.bias, and input x to XPU
+      explicitly in forward() or in a lazy init method called from forward().
+
+      WRONG:
+      ```python
+      def forward(self, x):
+          # assumes model.to("xpu") was called — not safe in KernelBench
+          return kernel_function(x, self.weight, self.bias)
+      ```
+
+      CORRECT:
+      ```python
+      def forward(self, x):
+          if x.device.type != "xpu" or x.dtype != torch.float16:
+              x = x.to("xpu", dtype=torch.float16)
+          if self.weight.device.type != "xpu":
+              self.weight.data = self.weight.data.to("xpu", dtype=torch.float16).contiguous()
+          return kernel_function(x, self.weight, self.bias)
+      ```
+
+  - id: grf_mode_is_compiler_option_not_config_kwarg
+    name: "grf_mode must NOT be in triton.Config() — declare as tl.constexpr in kernel signature"
+    severity: critical
+    description: |
+      If grf_mode appears in @triton.autotune Config dicts, it MUST be declared
+      as a tl.constexpr parameter in the kernel signature. Triton will raise
+      "Unexpected keyword argument 'grf_mode'" at compile time otherwise.
+      The parameter value is consumed by the XPU backend — never reference it
+      in the kernel body.
+
+      WRONG (compilation error):
+      ```python
+      @triton.autotune(configs=[triton.Config({'BLOCK_M': 256, 'grf_mode': '256'}, ...)])
+      @triton.jit
+      def kernel(..., BLOCK_M: tl.constexpr):   # grf_mode missing!
+          ...
+      ```
+
+      CORRECT:
+      ```python
+      @triton.autotune(configs=[triton.Config({'BLOCK_M': 256, 'grf_mode': '256'}, ...)])
+      @triton.jit
+      def kernel(..., BLOCK_M: tl.constexpr, grf_mode: tl.constexpr):  # declared
+          ...  # grf_mode never used in body
+      ```
+
+  - id: output_dtype_must_match_original
+    name: "Output tensor dtype must match the original kernel's output dtype"
+    severity: critical
+    description: |
+      When optimizing a kernel, the output tensor allocation and any final
+      tl.store cast must preserve the original output dtype. Changing from
+      float32 to float16 (or vice versa) will fail the correctness check.
+
+      WRONG (dtype mismatch — correctness failure):
+      ```python
+      # Original outputs float32
+      y = torch.empty((M, 1), device="xpu", dtype=torch.float16)  # changed!
+      # ...
+      tl.store(out_ptr, acc.to(tl.float16))  # downcasting float32 result
+      ```
+
+      CORRECT:
+      ```python
+      y = torch.empty((M, 1), device="xpu", dtype=torch.float32)  # preserved
+      # ...
+      tl.store(out_ptr, acc)  # acc is already float32
+      ```
+
+  - id: no_cpu_return_from_xpu_kernel
+    name: "kernel_function must NOT return a CPU tensor — output must stay on XPU"
+    severity: critical
+    description: |
+      kernel_function and forward() must return tensors on XPU, not CPU.
+      The executor expects XPU output and will raise a device mismatch error
+      if a CPU tensor is returned.
+
+      NOTE: tensor.xpu() IS a valid PyTorch method (moves tensor to XPU,
+      equivalent to tensor.to('xpu')). It is tensor.cpu() in a return
+      statement that is wrong here.
+
+      WRONG:
+      ```python
+      return y.cpu()   # moves output to CPU — executor expects XPU
+      ```
+
+      CORRECT:
+      ```python
+      return y          # already on XPU, no move needed
+      # or if needed: return y.to('xpu')  # same as y.xpu()
+      # or, if dtype conversion also needed:
+      return y.to(torch.float32).cpu()
+      ```
