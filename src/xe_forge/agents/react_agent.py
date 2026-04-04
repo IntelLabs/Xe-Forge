@@ -602,7 +602,7 @@ class OptimizerReActAgent(Optimizer):
     def _get_stage_patterns(self, stage: OptimizationStage) -> str:
         """Get knowledge patterns for a stage."""
         if self.knowledge_base:
-            return self.knowledge_base.format_for_llm(stage)
+            return self.knowledge_base.format_for_stage(stage)
         else:
             return (
                 f"No specific patterns available for {stage.value}. Apply general best practices."
