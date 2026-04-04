@@ -50,7 +50,6 @@ _MAPPING: dict[IssueType, OptimizationStage] = {
     IssueType.UNFUSED_ELEMENTWISE: OptimizationStage.FUSION,
     IssueType.UNFUSED_REDUCTION: OptimizationStage.FUSION,
     IssueType.FUSION_REGISTER_PRESSURE: OptimizationStage.FUSION,
-    IssueType.FUSION_REPLACES_VENDOR: OptimizationStage.FUSION,
     IssueType.FUSION_NOOP: OptimizationStage.FUSION,
     # MEMORY ACCESS
     IssueType.MISSING_BOUNDARY_CHECK: OptimizationStage.MEMORY_ACCESS,

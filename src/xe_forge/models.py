@@ -43,7 +43,6 @@ class IssueType(StrEnum):
     UNFUSED_ELEMENTWISE = "unfused_elementwise"
     UNFUSED_REDUCTION = "unfused_reduction"
     FUSION_REGISTER_PRESSURE = "fusion_register_pressure"
-    FUSION_REPLACES_VENDOR = "fusion_replaces_vendor"
     FUSION_NOOP = "fusion_noop"
     # MEMORY ACCESS
     MANUAL_POINTER_ARITHMETIC = "manual_pointer_arithmetic"
