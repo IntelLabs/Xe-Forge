@@ -2,28 +2,26 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
 
 import dspy
 import httpx
 import litellm
 
 from xe_forge.agents import AnalyzerAgent, Optimizer, OptimizerAgent, OptimizerReActAgent
-from xe_forge.planner import PlannerAgent, DEFAULT_STAGE_ORDER as PLANNER_DEFAULT_STAGE_ORDER
-from xe_forge.knowledge.loader import KnowledgeBase, load_knowledge_base
 from xe_forge.config import Config, get_config
 from xe_forge.core import get_xpu_config_for_pipeline
+from xe_forge.knowledge.loader import KnowledgeBase, load_knowledge_base
 from xe_forge.models import (
     IssueType,
-    KernelAnalysis,
     OptimizationResult,
     OptimizationStage,
-    StageResult,
 )
+from xe_forge.planner import DEFAULT_STAGE_ORDER as PLANNER_DEFAULT_STAGE_ORDER
+from xe_forge.planner import PlannerAgent
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_STAGE_ORDER: List[OptimizationStage] = [
+DEFAULT_STAGE_ORDER: list[OptimizationStage] = [
     OptimizationStage.ANALYSIS,
     OptimizationStage.ALGORITHMIC,
     OptimizationStage.DISCOVERY,
@@ -57,7 +55,7 @@ class XeForgePipeline:
                 atol=self.config.optimization.correctness_atol,
             )
 
-        self.knowledge_base: Optional[KnowledgeBase] = None
+        self.knowledge_base: KnowledgeBase | None = None
         if self.config.knowledge.enabled:
             self.knowledge_base = load_knowledge_base(self.config.knowledge.knowledge_dir)
             logger.info("  Knowledge base: %s", self.knowledge_base.summary())
@@ -246,7 +244,7 @@ class XeForgePipeline:
             logger.info("=" * 60 + "\nSTAGE: PLANNING\n" + "=" * 60)
             from xe_forge.knowledge.patterns import get_stage_for_issue
 
-            stages_needed: Dict[OptimizationStage, List[str]] = {}
+            stages_needed: dict[OptimizationStage, list[str]] = {}
             for iss in analysis.detected_issues:
                 st = get_stage_for_issue(iss.issue_type)
                 stages_needed.setdefault(st, []).append(iss.issue_type.value)

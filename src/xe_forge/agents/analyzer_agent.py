@@ -3,12 +3,11 @@ Analyzer Agent - LLM-based analysis of Triton kernels for optimization opportuni
 """
 
 import logging
-from typing import List, Optional
 
 import dspy
 
-from xe_forge.models import DetectedIssue, IssueType, KernelAnalysis, OptimizationStage
 from xe_forge.knowledge.patterns import get_stage_for_issue, get_stage_for_issue_str
+from xe_forge.models import DetectedIssue, IssueType, KernelAnalysis, OptimizationStage
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +23,6 @@ def _build_issue_categories() -> str:
     Generate the === ISSUE CATEGORIES === block from the IssueType enum + stage mapping.
     Groups by stage in pipeline order so the LLM sees a clean, current list.
     """
-    from collections import defaultdict
 
     stage_order = [
         OptimizationStage.ALGORITHMIC,
@@ -236,9 +234,9 @@ class AnalyzerAgent:
         triton_code: str,
         pytorch_code: str = "",
         kernel_name: str = "kernel",
-        input_shapes: Optional[List[tuple]] = None,
-        flop: Optional[float] = None,
-        target_dtype: Optional[str] = None,
+        input_shapes: list[tuple] | None = None,
+        flop: float | None = None,
+        target_dtype: str | None = None,
     ) -> KernelAnalysis:
         problem_context = self._build_problem_context(input_shapes, flop, target_dtype)
 
@@ -293,7 +291,7 @@ class AnalyzerAgent:
 
     # ------------------------------------------------------------------
 
-    def _coerce_issue(self, raw) -> Optional[DetectedIssue]:
+    def _coerce_issue(self, raw) -> DetectedIssue | None:
         """
         Convert a raw LLM output item to a DetectedIssue.
 
@@ -403,9 +401,9 @@ class AnalyzerAgent:
 
     def _build_problem_context(
         self,
-        input_shapes: Optional[List[tuple]],
-        flop: Optional[float],
-        target_dtype: Optional[str] = None,
+        input_shapes: list[tuple] | None,
+        flop: float | None,
+        target_dtype: str | None = None,
     ) -> str:
         lines = ["TARGET DEVICE: Intel XPU (Data Center GPU Max / Ponte Vecchio)", ""]
 

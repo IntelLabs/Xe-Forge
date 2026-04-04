@@ -7,9 +7,10 @@ and set_all_seeds utilities (shared with the benchmark harness).
 
 import logging
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any
 
 import torch
 from ai_bench import time as bench_time
@@ -32,8 +33,8 @@ class ComparisonResult:
     original_time_us: float
     optimized_time_us: float
     speedup: float
-    original_tflops: Optional[float] = None
-    optimized_tflops: Optional[float] = None
+    original_tflops: float | None = None
+    optimized_tflops: float | None = None
     original_correct: bool = True
     optimized_correct: bool = True
     is_slower: bool = False
@@ -79,8 +80,8 @@ class KernelBenchExecutor:
         self,
         fn: Callable,
         args: tuple,
-        warmup: Optional[int] = None,
-        rep: Optional[int] = None,
+        warmup: int | None = None,
+        rep: int | None = None,
     ) -> float:
         """
         Measure execution time of the provided function.
@@ -106,13 +107,13 @@ class KernelBenchExecutor:
     def execute(
         self,
         kernel_code: str,
-        kernel_name: Optional[str] = None,
-        input_shapes: Optional[List[Tuple[int, ...]]] = None,
-        inputs: Optional[List] = None,
-        flop: Optional[float] = None,
-        reference_fn: Optional[Callable] = None,
+        kernel_name: str | None = None,
+        input_shapes: list[tuple[int, ...]] | None = None,
+        inputs: list | None = None,
+        flop: float | None = None,
+        reference_fn: Callable | None = None,
         dtype=None,
-        init_args: Optional[list] = None,
+        init_args: list | None = None,
     ) -> ExecutionResult:
         """
         Execute kernel and measure performance.
@@ -223,10 +224,10 @@ class KernelBenchExecutor:
         self,
         original_code: str,
         optimized_code: str,
-        kernel_name: Optional[str],
-        input_shapes: List[Tuple[int, ...]],
+        kernel_name: str | None,
+        input_shapes: list[tuple[int, ...]],
         dtype=None,
-        init_args: Optional[list] = None,
+        init_args: list | None = None,
     ) -> bool:
         """
         Check if optimized kernel produces same outputs as original.
@@ -330,13 +331,13 @@ class KernelBenchExecutor:
         self,
         original_code: str,
         optimized_code: str,
-        kernel_name: Optional[str] = None,
-        input_shapes: Optional[List[Tuple[int, ...]]] = None,
-        inputs: Optional[List] = None,
-        flop: Optional[float] = None,
-        reference_fn: Optional[Callable] = None,
+        kernel_name: str | None = None,
+        input_shapes: list[tuple[int, ...]] | None = None,
+        inputs: list | None = None,
+        flop: float | None = None,
+        reference_fn: Callable | None = None,
         dtype=None,
-        init_args: Optional[list] = None,
+        init_args: list | None = None,
     ) -> ComparisonResult:
         """
         Compare performance AND correctness of original vs optimized kernel.
@@ -523,8 +524,8 @@ class KernelBenchExecutor:
             return None
 
     def _get_callable(
-        self, module, kernel_name: Optional[str] = None, init_args: Optional[list] = None
-    ) -> Tuple[Optional[Callable], Optional[Any]]:
+        self, module, kernel_name: str | None = None, init_args: list | None = None
+    ) -> tuple[Callable | None, Any | None]:
         """
         Get callable from module.
 
@@ -582,7 +583,7 @@ class KernelBenchExecutor:
 
     def _create_inputs(
         self,
-        shapes: List[Tuple[int, ...]],
+        shapes: list[tuple[int, ...]],
         dtype=None,
     ) -> list:
         """Create input tensors."""
@@ -608,9 +609,9 @@ KernelExecutor = KernelBenchExecutor
 def create_executor_tool(
     executor: KernelBenchExecutor,
     original_code: str,
-    kernel_name: Optional[str] = None,
-    input_shapes: Optional[List[Tuple[int, ...]]] = None,
-    flop: Optional[float] = None,
+    kernel_name: str | None = None,
+    input_shapes: list[tuple[int, ...]] | None = None,
+    flop: float | None = None,
     dtype=None,
 ) -> Callable[[str], str]:
     """

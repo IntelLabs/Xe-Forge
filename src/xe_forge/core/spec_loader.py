@@ -10,7 +10,7 @@ Parses YAML spec files to get:
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import ClassVar
 
 import torch
 import yaml
@@ -28,22 +28,22 @@ from ai_bench.utils import eval_eq
 V_BENCH_XPU = "bench-xpu"
 
 __all__ = [
-    "SpecKey",
-    "InKey",
-    "VKey",
-    "InitKey",
     "V_BENCH_XPU",
+    "InKey",
+    "InitKey",
+    "InputSpec",
+    "KernelSpec",
+    "SpecKey",
+    "VKey",
+    "VariantSpec",
     "eval_eq",
     "get_atol",
     "get_rtol",
+    "get_test_config_from_spec",
     "get_torch_dtype",
-    "InputSpec",
-    "VariantSpec",
-    "KernelSpec",
     "load_spec",
     "load_spec_from_string",
     "parse_spec",
-    "get_test_config_from_spec",
 ]
 
 
@@ -52,7 +52,7 @@ class InputSpec:
     """Specification for a single input tensor."""
 
     name: str
-    shape_vars: List[str]  # e.g., ["K", "M"]
+    shape_vars: list[str]  # e.g., ["K", "M"]
     dtype: str  # e.g., "float16"
 
 
@@ -60,31 +60,31 @@ class InputSpec:
 class VariantSpec:
     """Specification for a test variant."""
 
-    params: List[str]  # Input parameter names
-    dims: Dict[str, int]  # Dimension values
-    flop_formula: Optional[str] = None  # e.g., "2*M*N*K"
-    dtype: Optional[str] = None  # Override dtype
-    rtol: Optional[float] = None  # Relative tolerance for correctness
-    atol: Optional[float] = None  # Absolute tolerance for correctness
+    params: list[str]  # Input parameter names
+    dims: dict[str, int]  # Dimension values
+    flop_formula: str | None = None  # e.g., "2*M*N*K"
+    dtype: str | None = None  # Override dtype
+    rtol: float | None = None  # Relative tolerance for correctness
+    atol: float | None = None  # Absolute tolerance for correctness
 
 
 @dataclass
 class KernelSpec:
     """Complete kernel specification."""
 
-    inputs: Dict[str, InputSpec]
-    inits: List[dict] = field(default_factory=list)
-    ci: List[VariantSpec] = field(default_factory=list)
-    bench_cpu: List[VariantSpec] = field(default_factory=list)
-    bench_gpu: List[VariantSpec] = field(default_factory=list)
-    bench_xpu: List[VariantSpec] = field(default_factory=list)
+    inputs: dict[str, InputSpec]
+    inits: list[dict] = field(default_factory=list)
+    ci: list[VariantSpec] = field(default_factory=list)
+    bench_cpu: list[VariantSpec] = field(default_factory=list)
+    bench_gpu: list[VariantSpec] = field(default_factory=list)
+    bench_xpu: list[VariantSpec] = field(default_factory=list)
 
     # Stores numbered variants like bench-gpu-0, bench-gpu-1, ...
     # keyed by their exact YAML key so callers can request them by name.
-    _named_variants: Dict[str, List[VariantSpec]] = field(default_factory=dict, repr=False)
+    _named_variants: dict[str, list[VariantSpec]] = field(default_factory=dict, repr=False)
 
     # Base-prefix → attribute name for the four standard families.
-    _VARIANT_MAP_KEYS = {
+    _VARIANT_MAP_KEYS: ClassVar[dict[str, str]] = {
         "ci": "ci",
         "bench-cpu": "bench_cpu",
         "bench-gpu": "bench_gpu",
@@ -111,7 +111,7 @@ class KernelSpec:
 
         return []
 
-    def get_variant(self, variant_type: str = "bench-gpu") -> Optional[VariantSpec]:
+    def get_variant(self, variant_type: str = "bench-gpu") -> VariantSpec | None:
         """Get first variant of specified type."""
         vl = self._variants(variant_type)
         return vl[0] if vl else None
@@ -120,7 +120,7 @@ class KernelSpec:
         self,
         variant_type: str = "bench-gpu",
         variant_index: int = 0,
-    ) -> List[Tuple[int, ...]]:
+    ) -> list[tuple[int, ...]]:
         """Get input shapes for a variant."""
         vl = self._variants(variant_type)
         if not vl or variant_index >= len(vl):
@@ -160,7 +160,7 @@ class KernelSpec:
         self,
         variant_type: str = "bench-gpu",
         variant_index: int = 0,
-    ) -> Optional[float]:
+    ) -> float | None:
         """Calculate FLOP count for variant."""
         vl = self._variants(variant_type)
         if not vl or variant_index >= len(vl):
@@ -183,7 +183,7 @@ class KernelSpec:
         self,
         variant_type: str = "bench-gpu",
         variant_index: int = 0,
-    ) -> Optional[float]:
+    ) -> float | None:
         """Get relative tolerance from variant spec."""
         vl = self._variants(variant_type)
         if not vl or variant_index >= len(vl):
@@ -194,7 +194,7 @@ class KernelSpec:
         self,
         variant_type: str = "bench-gpu",
         variant_index: int = 0,
-    ) -> Optional[float]:
+    ) -> float | None:
         """Get absolute tolerance from variant spec."""
         vl = self._variants(variant_type)
         if not vl or variant_index >= len(vl):
@@ -228,7 +228,7 @@ class KernelSpec:
         variant = vl[variant_index]
         args = []
         for init_entry in self.inits:
-            for param_name, dim_var in init_entry.items():
+            for _param_name, dim_var in init_entry.items():
                 if dim_var in variant.dims:
                     args.append(variant.dims[dim_var])
                 else:
@@ -241,7 +241,7 @@ class KernelSpec:
                             args.append(dim_var)
         return args
 
-    def list_variant_keys(self) -> List[str]:
+    def list_variant_keys(self) -> list[str]:
         """Return all available variant keys (named + standard families)."""
         keys = list(self._named_variants.keys())
         for base_key, attr in self._VARIANT_MAP_KEYS.items():
@@ -283,7 +283,7 @@ def parse_spec(data: dict) -> KernelSpec:
     All keys are stored in _named_variants so _variants() can look them up by
     their exact name.
     """
-    inputs: Dict[str, InputSpec] = {}
+    inputs: dict[str, InputSpec] = {}
     if SpecKey.INS in data:
         for name, input_data in data[SpecKey.INS].items():
             inputs[name] = InputSpec(
@@ -305,11 +305,11 @@ def parse_spec(data: dict) -> KernelSpec:
     # Prefixes that identify numbered variant families (bench-gpu-N, etc.)
     NUMBERED_PREFIXES = ("bench-gpu-", "bench-cpu-", "bench-xpu-", "ci-")
 
-    ci: List[VariantSpec] = []
-    bench_cpu: List[VariantSpec] = []
-    bench_gpu: List[VariantSpec] = []
-    bench_xpu: List[VariantSpec] = []
-    named_variants: Dict[str, List[VariantSpec]] = {}
+    ci: list[VariantSpec] = []
+    bench_cpu: list[VariantSpec] = []
+    bench_gpu: list[VariantSpec] = []
+    bench_xpu: list[VariantSpec] = []
+    named_variants: dict[str, list[VariantSpec]] = {}
 
     for key, value in data.items():
         if not isinstance(value, list):
