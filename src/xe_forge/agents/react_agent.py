@@ -66,7 +66,9 @@ class OptimizationReActSignature(dspy.Signature):
     original_code: dspy.Code["python"] = dspy.InputField(  # noqa: UP037
         desc="Original Triton kernel code for reference"
     )
-    current_code: dspy.Code["python"] = dspy.InputField(desc="Current Triton kernel code to optimize")  # noqa: UP037
+    current_code: dspy.Code["python"] = dspy.InputField(
+        desc="Current Triton kernel code to optimize"
+    )  # noqa: UP037
     stage: str = dspy.InputField(
         desc="Optimization stage to apply (e.g., dtype_fix, block_pointers, xpu_specific)"
     )
