@@ -63,10 +63,10 @@ class OptimizationReActSignature(dspy.Signature):
     Be aggressive with optimizations - the verification tool will check correctness.
     """
 
-    original_code: dspy.Code[python] = dspy.InputField(
+    original_code: dspy.Code["python"] = dspy.InputField(  # noqa: UP037
         desc="Original Triton kernel code for reference"
     )
-    current_code: dspy.Code[python] = dspy.InputField(desc="Current Triton kernel code to optimize")
+    current_code: dspy.Code["python"] = dspy.InputField(desc="Current Triton kernel code to optimize")  # noqa: UP037
     stage: str = dspy.InputField(
         desc="Optimization stage to apply (e.g., dtype_fix, block_pointers, xpu_specific)"
     )
@@ -76,7 +76,7 @@ class OptimizationReActSignature(dspy.Signature):
     )
     xpu_config: str = dspy.InputField(desc="Intel XPU configuration parameters")
 
-    optimized_code: dspy.Code[python] = dspy.OutputField(
+    optimized_code: dspy.Code["python"] = dspy.OutputField(  # noqa: UP037
         desc="Complete optimized Triton kernel code. Must include all imports, decorators, kernel function, and Model class."
     )
 
@@ -129,7 +129,7 @@ class OptimizerReActAgent(Optimizer):
         """
         executor = self.executor
 
-        def compile_and_verify(optimized_code: dspy.Code[python]) -> str:
+        def compile_and_verify(optimized_code: dspy.Code["python"]) -> str:  # noqa: UP037
             """Compile and verify the optimized Triton kernel.
 
             Checks:
@@ -304,6 +304,9 @@ class OptimizerReActAgent(Optimizer):
         input_shapes: list[tuple[int, ...]] | None = None,
         flop: float | None = None,
         dtype=None,
+        pytorch_code: str = "",
+        init_args: list | None = None,
+        perf_context: dict | None = None,
     ) -> StageResult:
         """
         Apply a single optimization stage using ReAct.
