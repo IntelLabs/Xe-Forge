@@ -1,11 +1,11 @@
 # Xe Forge
-[![CodeQL](https://github.com/IntelLabs/XPU-Forge/actions/workflows/codeql-analysis.yml/badge.svg)](https://github.com/IntelLabs/XPU-Forge/actions/workflows/codeql-analysis.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/IntelLabs/XPU-Forge/badge)](https://scorecard.dev/viewer/?uri=github.com/IntelLabs/XPU-Forge)
 
 Multi-stage LLM-driven optimization pipeline for Triton kernels targeting Intel XPU.
 
 The optimizer analyzes Triton kernels, identifies performance issues, and applies optimizations through a series of stages — each powered by an LLM that understands GPU programming, numerical linear algebra, and Intel XPU hardware.
 
+⚠️ **Disclaimer**: This project is currently in active development. The code is **not stable** and **not intended for use in production environments**. Interfaces, features, and behaviors are subject to change without notice.
 ---
 
 ## Installation
