@@ -1,5 +1,5 @@
 # Xe Forge
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/IntelLabs/XPU-Forge/badge)](https://scorecard.dev/viewer/?uri=github.com/IntelLabs/XPU-Forge)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/IntelLabs/Xe-Forge/badge)](https://scorecard.dev/viewer/?uri=github.com/IntelLabs/Xe-Forge)
 
 Multi-stage LLM-driven optimization pipeline for Triton kernels targeting Intel XPU.
 
