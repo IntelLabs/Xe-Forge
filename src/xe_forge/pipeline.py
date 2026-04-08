@@ -157,7 +157,9 @@ class XeForgePipeline:
             flop = spec.get_flop(variant_type)
             dtype = spec.get_dtype(variant_type)
             init_args = spec.get_init_args(variant_type)
-            logger.info(f"Loaded spec: variant={variant_type}, shapes={input_shapes}, flop={flop}, dtype={dtype}")
+            logger.info(
+                f"Loaded spec: variant={variant_type}, shapes={input_shapes}, flop={flop}, dtype={dtype}"
+            )
             if init_args:
                 logger.info(f"  Model init args: {init_args}")
 
