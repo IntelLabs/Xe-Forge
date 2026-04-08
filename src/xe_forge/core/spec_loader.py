@@ -79,9 +79,12 @@ class KernelSpec:
     bench_gpu: list[VariantSpec] = field(default_factory=list)
     bench_xpu: list[VariantSpec] = field(default_factory=list)
 
-    # Stores numbered variants like bench-gpu-0, bench-gpu-1, ...
+    # Stores all variant keys (base families, numbered, and arbitrary names)
     # keyed by their exact YAML key so callers can request them by name.
     _named_variants: dict[str, list[VariantSpec]] = field(default_factory=dict, repr=False)
+
+    # Optional default variant declared in the YAML spec.
+    default_variant: str | None = None
 
     # Base-prefix → attribute name for the four standard families.
     _VARIANT_MAP_KEYS: ClassVar[dict[str, str]] = {
@@ -110,6 +113,20 @@ class KernelSpec:
             return getattr(self, attr)
 
         return []
+
+    def resolve_variant(self, cli_variant: str | None = None) -> str:
+        """Resolve which variant to use.
+
+        Priority order:
+          1. Explicit CLI ``--variant`` value (when not None).
+          2. ``default_variant`` declared in the YAML spec.
+          3. Falls back to ``bench-gpu``.
+        """
+        if cli_variant is not None:
+            return cli_variant
+        if self.default_variant is not None:
+            return self.default_variant
+        return "bench-gpu"
 
     def get_variant(self, variant_type: str = "bench-gpu") -> VariantSpec | None:
         """Get first variant of specified type."""
@@ -302,8 +319,8 @@ def parse_spec(data: dict) -> KernelSpec:
         V_BENCH_XPU: "bench_xpu",
     }
 
-    # Prefixes that identify numbered variant families (bench-gpu-N, etc.)
-    NUMBERED_PREFIXES = ("bench-gpu-", "bench-cpu-", "bench-xpu-", "ci-")
+    # Non-variant scalar/dict keys that should never be treated as variants.
+    NON_VARIANT_KEYS = {SpecKey.INS, SpecKey.INITS, "default_variant"}
 
     ci: list[VariantSpec] = []
     bench_cpu: list[VariantSpec] = []
@@ -312,8 +329,10 @@ def parse_spec(data: dict) -> KernelSpec:
     named_variants: dict[str, list[VariantSpec]] = {}
 
     for key, value in data.items():
+        if key in NON_VARIANT_KEYS:
+            continue
         if not isinstance(value, list):
-            continue  # skip inputs, inits, and scalar keys
+            continue  # skip scalar keys
 
         parsed = [_parse_variant_entry(vd) for vd in value]
 
@@ -329,10 +348,11 @@ def parse_spec(data: dict) -> KernelSpec:
             elif attr_name == "bench_xpu":
                 bench_xpu = parsed
             named_variants[key] = parsed
-
-        elif any(key.startswith(prefix) for prefix in NUMBERED_PREFIXES):
-            # Numbered variant like bench-gpu-0, bench-gpu-17, etc.
+        else:
+            # Any other list key is treated as a variant (numbered or custom).
             named_variants[key] = parsed
+
+    default_variant = data.get("default_variant")
 
     return KernelSpec(
         inputs=inputs,
@@ -342,16 +362,18 @@ def parse_spec(data: dict) -> KernelSpec:
         bench_gpu=bench_gpu,
         bench_xpu=bench_xpu,
         _named_variants=named_variants,
+        default_variant=default_variant,
     )
 
 
 def get_test_config_from_spec(
     spec_path: str | Path,
-    variant_type: str = "bench-gpu",
+    variant_type: str | None = None,
     variant_index: int = 0,
 ) -> dict:
     """Load spec and return test configuration dict for optimizer."""
     spec = load_spec(spec_path)
+    variant_type = spec.resolve_variant(variant_type)
     return {
         "input_shapes": spec.get_input_shapes(variant_type, variant_index),
         "flop": spec.get_flop(variant_type, variant_index),
