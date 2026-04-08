@@ -2,7 +2,6 @@
 
 from xe_forge.core.spec_loader import load_spec_from_string
 
-
 BASIC_SPEC = """\
 inputs:
   X:
