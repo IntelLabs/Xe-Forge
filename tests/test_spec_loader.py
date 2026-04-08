@@ -1,8 +1,6 @@
 """Tests for spec_loader variant resolution and parsing."""
 
-import pytest
-
-from xe_forge.core.spec_loader import KernelSpec, VariantSpec, load_spec_from_string
+from xe_forge.core.spec_loader import load_spec_from_string
 
 
 BASIC_SPEC = """\
