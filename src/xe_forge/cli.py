@@ -65,9 +65,8 @@ Examples:
     parser.add_argument(
         "--variant",
         type=str,
-        default="bench-gpu",
-        choices=["ci", "bench-cpu", "bench-gpu", "bench-xpu"],
-        help="Variant type from spec (default: bench-gpu)",
+        default=None,
+        help="Variant name from spec (default: bench-gpu, overridden by default_variant in spec)",
     )
 
     # Stage selection
@@ -182,7 +181,8 @@ Examples:
     print(f"Kernel: {args.name}")
     print(f"Model: {config.llm.model}")
     if args.spec:
-        print(f"Spec: {args.spec} (variant: {args.variant})")
+        variant_display = args.variant or "(auto-resolved from spec)"
+        print(f"Spec: {args.spec} (variant: {variant_display})")
     if args.target_dtype:
         print(f"Target dtype: {args.target_dtype}")
     print(f"Stages: {[s.value for s in stages] if stages else 'all'}")
@@ -215,11 +215,13 @@ Examples:
         from xe_forge.core import load_spec
 
         spec = load_spec(args.spec)
+        args.variant = spec.resolve_variant(args.variant)
         input_shapes = spec.get_input_shapes(args.variant)
         flop = spec.get_flop(args.variant)
         spec_rtol = spec.get_rtol(args.variant)
         spec_atol = spec.get_atol(args.variant)
         print("\nTest configuration from spec:")
+        print(f"  Variant: {args.variant}")
         print(f"  Input shapes: {input_shapes}")
         print(f"  FLOP: {flop:,.0f}" if flop else "  FLOP: N/A")
         if spec_rtol is not None or spec_atol is not None:
