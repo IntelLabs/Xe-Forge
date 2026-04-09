@@ -6,6 +6,35 @@ Multi-stage LLM-driven optimization pipeline for Triton kernels targeting Intel 
 The optimizer analyzes Triton kernels, identifies performance issues, and applies optimizations through a series of stages — each powered by an LLM that understands GPU programming, numerical linear algebra, and Intel XPU hardware.
 
 ⚠️ **Disclaimer**: This project is currently in active development. The code is **not stable** and **not intended for use in production environments**. Interfaces, features, and behaviors are subject to change without notice.
+
+---
+
+## Performance Results on Intel BMG (FP16)
+
+### FlashAttention Forward
+
+FlashAttention benchmark optimized across diverse shapes including skinny, non-square, and irregular configurations (varying head counts, sequence lengths, and head dimensions). Up to **10.6x** speedup over unoptimized Triton kernels, with optimized kernels reaching over **80 TFLOPS** on Intel BMG.
+
+<p align="center">
+  <img src="plots/attention_panel.png" alt="FlashAttention TFLOPS comparison and roofline analysis" width="800"/>
+</p>
+
+### GEMM Kernels (L2 KernelBench)
+
+[KernelBench](https://github.com/ScalingIntelligence/KernelBench) L2 GEMM problems. Optimized Triton kernels surpass both PyTorch eager and `torch.compile` baselines, exceeding the **150 TFLOPS** L2 roofline ceiling for compute-bound configurations.
+
+<p align="center">
+  <img src="plots/l2_roofline_gemm.png" alt="Roofline analysis for GEMM kernels" width="500"/>
+</p>
+
+### Matmul Kernels (L2 KernelBench)
+
+[KernelBench](https://github.com/ScalingIntelligence/KernelBench) L2 Matmul problems. Optimized Triton implementations deliver up to **68x** speedup over PyTorch eager and consistently operate near or above the hardware roofline.
+
+<p align="center">
+  <img src="plots/l2_roofline_matmul.png" alt="Roofline analysis for Matmul kernels" width="500"/>
+</p>
+
 ---
 
 ## Installation
