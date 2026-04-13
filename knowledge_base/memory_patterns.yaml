@@ -40,6 +40,49 @@ constraints:
       kernel[grid](x, ...)
       ```
 
+  - id: use_channels_last_for_conv
+    name: "Use channels_last (NHWC) for convolution + spatial tiling + block_ptr"
+    severity: critical
+    description: |
+      For convolution workloads, ALWAYS use channels_last (NHWC) layout combined
+      with spatial tiling and block_ptr for all operands. This is required because:
+
+      1. NHWC makes C contiguous (stride=1) — each (kh,kw) position's input slice
+         is a contiguous [BLOCK_OW, C_in] matrix, enabling block_ptr and DPAS.
+
+      2. Spatial tiling (grid = n, oh, ow_tile) keeps consecutive output pixels
+         along ow in consecutive memory rows in the flat (N*H*W, C) NHWC view.
+         This makes x a regular 2D block for tl.make_block_ptr.
+         Flat M tiling (M=N*OH*OW) BREAKS this — adjacent M indices cross
+         oh/batch boundaries, forcing scatter loads.
+
+      3. block_ptr on ALL operands (x, w, y) generates Intel 2D block IO
+         (SubgroupBlockReadINTEL) — structured coalesced transfers.
+
+      Conversion (do ONCE, not per forward):
+      ```python
+      # 2D conv:
+      x = x.to(memory_format=torch.channels_last)
+      x_nhwc = x.permute(0, 2, 3, 1)  # contiguous view, no copy
+      w_hwio = weight.permute(2, 3, 1, 0).contiguous()  # [KH,KW,C_in,C_out]
+
+      # 3D conv:
+      x = x.to(memory_format=torch.channels_last_3d)
+      x_ndhwc = x.permute(0, 2, 3, 4, 1)
+      w_dhwio = weight.permute(2, 3, 4, 1, 0).contiguous()
+      ```
+
+      WRONG — do NOT use im2col. Flattening C_in*K_h*K_w into one GEMM K dimension
+      creates scatter-gather loads that the Triton compiler cannot lower to DPAS.
+      The compiler falls back to scalar FMA (verified in SPIR-V: 897 FMA vs 0 DPAS).
+
+      Pre-allocate output as channels_last to avoid format conversion:
+      ```python
+      y = torch.empty((N, C_out, OH, OW), device=..., dtype=torch.float16,
+                       memory_format=torch.channels_last)
+      y_nhwc = y.permute(0, 2, 3, 1)  # write target for kernel
+      ```
+
   - id: block_ptr_boundary_check_tuple
     name: "Block pointer boundary_check must be tuple of ints"
     severity: critical

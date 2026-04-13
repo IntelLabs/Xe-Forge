@@ -6,7 +6,7 @@
 # - there are many tiles (launch/tail overhead),
 # - the workload is bandwidth/reduction bound,
 # - cache reuse across tiles is valuable,
-# and they do NOT replace a faster vendor primitive (e.g., vendor GEMM).
+# and the workload benefits from persistent scheduling.
 #
 # Stream K is a related advanced scheduling strategy that splits tiles'
 # K-loop iterations evenly across programs to fix quantization inefficiency.
@@ -221,7 +221,7 @@ constraints:
         - The kernel is a 1D reduction (output shape [M] or [M,1]) — these
           already have M programs, not M*N tile programs
         - M < 512 (small batch — the grid is inherently tiny)
-        - The kernel already uses a vendor GEMM path
+        - The kernel is not a custom GEMM (e.g., uses F.linear for the matmul)
 
       For this to apply, the kernel must be a large 2D GEMM-like workload
       (M >= 1024 AND N >= 1024 AND BLOCK_M=256 AND BLOCK_N=256 → ~16 tiles per dim → 256 tiles minimum).

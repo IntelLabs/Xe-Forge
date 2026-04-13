@@ -1,13 +1,11 @@
 # Kernel Fusion Patterns for Intel XPU
 # Fusion can reduce memory traffic by eliminating intermediate writes/reads,
-# but it can also hurt due to GRF/register pressure, reduced occupancy, and
-# losing access to vendor-tuned primitives (e.g., GEMM).
+# but it can also hurt due to GRF/register pressure, reduced occupancy.
 #
 # Guidance:
 # - Fuse bandwidth-bound elementwise chains aggressively (usually a win).
 # - Be cautious fusing into GEMM unless you already need a custom GEMM.
-# - Do NOT fuse if the intermediate is not materialized, is dead/redundant,
-#   or if fusion would replace a faster vendor primitive for a tiny epilogue.
+# - Do NOT fuse if the intermediate is not materialized or dead/redundant.
 
 constraints:
   - id: fuse_only_if_intermediate_is_materialized
@@ -23,17 +21,148 @@ constraints:
       - dead / provably redundant for the workload,
       then fusion provides little/no benefit and may harm performance.
 
-  - id: do_not_replace_vendor_gemm_for_tiny_epilogue
-    name: "Do not replace vendor GEMM solely to fuse a tiny epilogue"
+  - id: prefer_fused_gemm_with_epilogue
+    name: "Prefer fused GEMM with epilogue over separate kernels"
     severity: critical
     description: |
-      If a vendor GEMM path exists and is faster, do not implement a custom Triton GEMM
-      only to fuse a small epilogue (e.g., ReLU / min-sub / clamp).
+      When a GEMM is followed by a small epilogue (e.g., ReLU, bias add, clamp),
+      fuse the epilogue into the GEMM kernel by applying it on the accumulator
+      in registers before the final tl.store. This eliminates an extra read+write
+      of the full output tensor.
 
-      Prefer:
-      - vendor GEMM + separate epilogue kernel, OR
-      - vendor GEMM with native epilogue (if supported),
-      unless the epilogue is substantial OR you must use a custom GEMM due to layout/math.
+      However, if the epilogue is very complex (e.g., GroupNorm, BatchNorm with
+      running stats, reductions across spatial dims), keep it as a separate kernel
+      to avoid register pressure collapse.
+
+  - id: nhwc_spatially_tiled_conv_with_block_ptr
+    name: "Spatially-tiled NHWC convolution using block_ptr and fused epilogue"
+    severity: critical
+    description: |
+      For convolution kernels, use NHWC (channels_last) layout with SPATIAL TILING
+      and ALL operands via tl.make_block_ptr. This is the only Triton conv pattern
+      that reliably maps to DPAS on Intel XPU.
+
+      There are THREE things that must ALL be correct:
+
+      1. NHWC LAYOUT — C must be the contiguous (stride=1) dimension.
+         Convert once: x.to(memory_format=torch.channels_last)
+         Weight packed as HWIO: weight.permute(2, 3, 1, 0).contiguous()
+
+      2. SPATIAL TILING — grid is (n, oh, ow_tile * cout_tile), NOT flat M.
+         Preserving (n, oh) in the grid ensures that within each tile,
+         output pixels along ow are consecutive in NHWC flat (N*H*W, C) view.
+         This makes x loads a regular 2D block — enabling block_ptr.
+         Flattening M = N*OH*OW DESTROYS this — adjacent M indices cross
+         oh/batch boundaries, forcing scatter loads that break DPAS.
+
+      3. ALL OPERANDS USE block_ptr (x, w, y) — tl.make_block_ptr generates
+         Intel 2D block load/store instructions (SubgroupBlockReadINTEL).
+         This replaces ALL scatter/gather with structured block transfers.
+
+      WRONG patterns (all break DPAS):
+      - NCHW direct conv: C not contiguous, no GEMM possible
+      - im2col: flattens K_h*K_w*C_in, scatter-gather indices → scalar FMA fallback
+      - Flat M tiling: M=N*OH*OW with pointer arithmetic → scatter x loads
+
+      CORRECT pattern — spatially-tiled NHWC conv:
+      ```python
+      @triton.jit
+      def _conv2d_spatial_tiled(
+          x_ptr, w_ptr, bias_ptr, y_ptr,
+          N_batch, H, W, C_out, OH, OW,
+          stride_wkh, stride_wkw, stride_wci, stride_wco,
+          BLOCK_OW: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+          KH: tl.constexpr, KW: tl.constexpr, C_IN: tl.constexpr,
+      ):
+          n = tl.program_id(0)
+          oh = tl.program_id(1)
+          pid_ow_n = tl.program_id(2)  # combined ow_tile and cout_tile
+
+          num_ow_tiles = tl.cdiv(OW, BLOCK_OW)
+          pid_ow = pid_ow_n % num_ow_tiles
+          pid_n = pid_ow_n // num_ow_tiles
+          ow0 = pid_ow * BLOCK_OW
+          HW = H * W
+
+          acc = tl.zeros((BLOCK_OW, BLOCK_N), dtype=tl.float32)
+
+          # K_h × K_w small GEMMs — each on contiguous NHWC data
+          for kh in range(KH):
+              for kw in range(KW):
+                  # x rows: consecutive in flat (N*H*W, C_IN) view
+                  x_row_start = n * HW + (oh + kh) * W + (ow0 + kw)
+                  x_valid_rows = W - (ow0 + kw)  # boundary limit
+
+                  x_bp = tl.make_block_ptr(
+                      base=x_ptr,
+                      shape=(x_row_start + x_valid_rows, C_IN),
+                      strides=(C_IN, 1),  # C is contiguous!
+                      offsets=(x_row_start, 0),
+                      block_shape=(BLOCK_OW, BLOCK_K),
+                      order=(1, 0),
+                  )
+                  w_bp = tl.make_block_ptr(
+                      base=w_ptr + kh * stride_wkh + kw * stride_wkw,
+                      shape=(C_IN, C_out),
+                      strides=(stride_wci, stride_wco),
+                      offsets=(0, pid_n * BLOCK_N),
+                      block_shape=(BLOCK_K, BLOCK_N),
+                      order=(1, 0),
+                  )
+                  for c0 in range(0, C_IN, BLOCK_K):
+                      x_tile = tl.load(x_bp, boundary_check=(0,1), padding_option="zero")
+                      w_tile = tl.load(w_bp, boundary_check=(0,1), padding_option="zero")
+                      acc = tl.dot(x_tile, w_tile, acc)  # → DPAS
+                      x_bp = tl.advance(x_bp, (0, BLOCK_K))
+                      w_bp = tl.advance(w_bp, (BLOCK_K, 0))
+
+          # Fused epilogue — all in registers, zero extra memory traffic
+          offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+          acc += tl.load(bias_ptr + offs_n, mask=offs_n < C_out, other=0.0)[None, :]
+          acc = tl.maximum(acc, 0.0)  # relu or other activations
+
+          # Store with boundary-limited shape to prevent oh-row wrapping
+          y_row_start = n * (OH * OW) + oh * OW + ow0
+          y_valid_rows = OW - ow0
+          y_bp = tl.make_block_ptr(
+              base=y_ptr,
+              shape=(y_row_start + y_valid_rows, C_out),
+              strides=(C_out, 1),
+              offsets=(y_row_start, pid_n * BLOCK_N),
+              block_shape=(BLOCK_OW, BLOCK_N),
+              order=(1, 0),
+          )
+          tl.store(y_bp, acc.to(tl.float16), boundary_check=(0, 1))
+      ```
+
+      Grid function:
+      ```python
+      def grid(meta):
+          num_ow = triton.cdiv(OW, meta['BLOCK_OW'])
+          num_n = triton.cdiv(C_out, meta['BLOCK_N'])
+          return (N, OH, num_ow * num_n)
+      ```
+
+      Wrapper preparation (do ONCE in __init__, not per forward):
+      ```python
+      x_cl = x.to(memory_format=torch.channels_last)
+      x_nhwc = x_cl.permute(0, 2, 3, 1)  # contiguous NHWC view, no copy
+      w_hwio = weight.permute(2, 3, 1, 0).contiguous()  # [KH, KW, C_in, C_out]
+      y_cl = torch.empty(..., memory_format=torch.channels_last)
+      y_nhwc = y_cl.permute(0, 2, 3, 1)
+      ```
+
+      Key requirements:
+      - BLOCK_K must be multiple of 16 (DPAS alignment)
+      - C_IN as tl.constexpr when possible (unrolls channel reduction loop)
+      - Boundary-limited shape on block_ptr prevents oh-row wrapping
+      - Weight as HWIO (not OIHW) for direct per-(kh,kw) access
+      - For Conv3d: add outer loop over K_d, use channels_last_3d,
+        handle padding with conditional skip (d_ok, h_ok checks)
+      - For padded convolutions: padding in d/h → conditional skip,
+        padding in w → block_ptr boundary_check handles naturally
+      - Pre-allocate output as channels_last, reuse across calls
+      - Autotune BLOCK_OW, BLOCK_N, BLOCK_K, num_warps, num_stages
 
   - id: fusion_register_pressure_guard
     name: "Avoid fusion that causes GRF/register pressure collapse"
@@ -111,15 +240,13 @@ patterns:
     stage: fusion
     description: "Fuse activation into GEMM ONLY when you already need a custom GEMM"
     rationale: |
-      Fusion removes an intermediate write+read of the GEMM output. This can be beneficial
-      when you already use a custom GEMM kernel (special layout, custom math, no vendor path).
-      However, replacing a vendor GEMM with a custom fused GEMM for a tiny activation can be slower.
+      Fusion removes an intermediate write+read of the GEMM output. This is beneficial
+      when you use a custom GEMM kernel. Fuse the activation into the GEMM epilogue
+      by applying it on the accumulator in registers before tl.store.
     applies_when:
       - uses_custom_gemm: true
       - intermediate_materialized: true
-      - replaces_vendor_gemm: false
     rejects_when:
-      - replaces_vendor_gemm: true
       - epilogue_is_tiny: true
       - num_pid_m_le_1: true
     pattern_before: |
@@ -142,7 +269,7 @@ patterns:
           acc = tl.dot(a, b)
           acc = tl.maximum(acc, 0.0)  # ReLU
           tl.store(out_ptr + offsets, acc, mask=mask)
-    expected_speedup: "workload-dependent (positive if avoiding a large materialized intermediate; negative if replacing vendor GEMM)"
+    expected_speedup: "workload-dependent (positive if avoiding a large materialized intermediate)"
     applies_to:
       - custom_gemm_only
       - mlp
@@ -161,9 +288,7 @@ patterns:
     applies_when:
       - uses_custom_gemm: true
       - intermediate_materialized: true
-      - replaces_vendor_gemm: false
     rejects_when:
-      - replaces_vendor_gemm: true
       - activation_chain_is_heavy: true
     pattern_before: |
       c = gemm(a, b)
