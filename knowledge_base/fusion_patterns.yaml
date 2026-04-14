@@ -164,6 +164,52 @@ constraints:
       - Pre-allocate output as channels_last, reuse across calls
       - Autotune BLOCK_OW, BLOCK_N, BLOCK_K, num_warps, num_stages
 
+  - id: fuse_batchnorm_into_conv_epilogue
+    name: "Fuse BatchNorm (eval mode) into conv epilogue as affine transform"
+    severity: critical
+    description: |
+      For inference/eval mode, BatchNorm reduces to an affine transform:
+        y = gamma * (x - mean) / sqrt(var + eps) + beta
+          = x * (gamma / sqrt(var + eps)) + (beta - mean * gamma / sqrt(var + eps))
+          = x * bn_scale + bn_bias
+
+      Pre-compute bn_scale and bn_bias ONCE in __init__ or a lazy cache:
+      ```python
+      inv_std = torch.rsqrt(self.bn.running_var + self.bn.eps)
+      bn_scale = (self.bn.weight * inv_std * self.scaling_factor).contiguous()
+      bn_bias = (self.bn.bias - self.bn.running_mean * self.bn.weight * inv_std).contiguous()
+      ```
+
+      Then fuse into the conv epilogue as a single multiply-add on the accumulator:
+      ```python
+      # After conv accumulation, before tl.store:
+      acc += conv_bias[None, :]          # conv bias
+      acc = acc * bn_scale[None, :] + bn_bias[None, :]  # fused BN + scaling
+      tl.store(y_bp, acc.to(tl.float16), ...)
+      ```
+
+      This eliminates a full read+write of the intermediate tensor between conv and BN.
+      The bn_scale and bn_bias vectors are [C_out] — tiny, stay in registers.
+
+  - id: use_conv_transpose_with_triton_epilogue
+    name: "Use F.conv_transpose2d/3d with Triton epilogue for transposed convolutions"
+    severity: critical
+    description: |
+      For ConvTranspose2d and ConvTranspose3d, the im2col GEMM relationship is inverted
+      (scatter instead of gather), making a custom Triton spatial-tiled kernel much harder.
+      The best approach is:
+      1. Use F.conv_transpose2d / F.conv_transpose3d for the transposed conv
+      2. Write a separate Triton elementwise kernel for the epilogue
+
+      ```python
+      def forward(self, x):
+          y = F.conv_transpose2d(x, self.weight, self.bias, stride=2, padding=1, output_padding=1)
+          return _triton_epilogue_kernel(y, ...)  # subtract, tanh, gelu, etc.
+      ```
+
+      Cache weight on XPU in __init__ to avoid per-call conversion.
+      The epilogue kernel is a simple 1D elementwise kernel — use autotune for BLOCK_SIZE.
+
   - id: fusion_register_pressure_guard
     name: "Avoid fusion that causes GRF/register pressure collapse"
     severity: critical
