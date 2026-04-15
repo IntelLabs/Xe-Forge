@@ -9,30 +9,22 @@ The optimizer analyzes Triton kernels, identifies performance issues, and applie
 
 ---
 
-## Performance Results on Intel BMG (FP16)
+## Results on Intel Arc Pro B70
 
 ### FlashAttention Forward
 
-FlashAttention benchmark optimized across diverse shapes including skinny, non-square, and irregular configurations (varying head counts, sequence lengths, and head dimensions). Up to **10.6x** speedup over unoptimized Triton kernels, with optimized kernels reaching over **80 TFLOPS** on Intel BMG.
+FlashAttention benchmark optimized across diverse shapes including skinny, non-square, and irregular configurations (varying head counts, sequence lengths, and head dimensions). Up to **10.6x** speedup over unoptimized Triton kernels, with optimized kernels reaching over **80 TFLOPS** on Intel Arc Pro B70.
 
 <p align="center">
-  <img src="plots/attention_panel.png" alt="FlashAttention TFLOPS comparison and roofline analysis" width="800"/>
+  <img src="plots/attention_roofline.png" alt="Roofline analysis for FlashAttention Forward" width="500"/>
 </p>
 
-### GEMM Kernels (L2 KernelBench)
+### GEMM / Matmul Kernels (L2 KernelBench)
 
-[KernelBench](https://github.com/ScalingIntelligence/KernelBench) L2 GEMM problems. Optimized Triton kernels surpass both PyTorch eager and `torch.compile` baselines, exceeding the **150 TFLOPS** L2 roofline ceiling for compute-bound configurations.
-
-<p align="center">
-  <img src="plots/l2_roofline_gemm.png" alt="Roofline analysis for GEMM kernels" width="500"/>
-</p>
-
-### Matmul Kernels (L2 KernelBench)
-
-[KernelBench](https://github.com/ScalingIntelligence/KernelBench) L2 Matmul problems. Optimized Triton implementations deliver up to **68x** speedup over PyTorch eager and consistently operate near or above the hardware roofline.
+[KernelBench](https://github.com/ScalingIntelligence/KernelBench) L2 GEMM and Matmul problems. Optimized Triton kernels surpass both PyTorch eager and `torch.compile` baselines, exceeding the **160 TFLOPS** peak roofline ceiling for compute-bound configurations.
 
 <p align="center">
-  <img src="plots/l2_roofline_matmul.png" alt="Roofline analysis for Matmul kernels" width="500"/>
+  <img src="plots/l2_roofline_gemm_matmul.png" alt="Roofline analysis for GEMM and Matmul kernels" width="500"/>
 </p>
 
 ---
