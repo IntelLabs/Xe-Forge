@@ -248,3 +248,63 @@ examples:
   - Broad sweep over BLOCK_M/N/K, num_warps, num_stages, grf_mode
   - dtype_fix and xpu_specific optimizations
   expected_speedup: 1.97x
+- id: conv2d_relu_bias_nhwc
+  name: Conv2d + ReLU + Bias (NHWC Spatially-Tiled with block_ptr)
+  stages:
+  - fusion
+  - memory_access
+  - block_pointers
+  - xpu_specific
+  - autotuning
+  description: |
+    Conv2d(64->128, 3x3) + ReLU + bias.
+    Shows the spatially-tiled NHWC convolution pattern with ALL block_ptr.
+    Grid is (n, oh, ow_tile * cout_tile) preserving spatial structure.
+    Weight packed as HWIO. C_IN as constexpr. Fused epilogue.
+  file: conv2d_relu_bias_nhwc.py
+  optimizations_applied:
+  - NHWC (channels_last) layout for all tensors
+  - Spatial tiling grid (n, oh, ow_tile) not flat M
+  - ALL operands via block_ptr (x, w, y) for 2D block IO
+  - Boundary-limited block_ptr shape prevents oh-row wrapping
+  - C_IN as tl.constexpr for channel loop unrolling
+  - Fused epilogue (conv_bias + ReLU + model_bias) in registers
+  - Pre-prepared inputs with zero per-call overhead
+  - Autotune (BLOCK_OW, BLOCK_N, BLOCK_K, num_warps, num_stages)
+  expected_speedup: 2-4x vs NCHW direct conv
+- id: conv2d_multiply_leakyrelu_gelu_nhwc
+  name: Conv2d + Multiply + LeakyReLU + GELU (NHWC Spatially-Tiled)
+  stages:
+  - fusion
+  - memory_access
+  - block_pointers
+  - xpu_specific
+  - autotuning
+  description: |
+    Conv2d(64->64, 3x3) + per-channel multiply + LeakyReLU + GELU.
+    Heavy 5-op fused epilogue eliminates ~1 GB intermediate traffic.
+  file: conv2d_mul_leakyrelu_gelu_nhwc.py
+  optimizations_applied:
+  - NHWC + spatial tiling + ALL block_ptr
+  - Heavy fused epilogue bias + multiply + LeakyReLU + GELU(erf)
+  - Pre-loaded bias/multiplier stay in registers during GEMM loops
+  expected_speedup: significant due to eliminated 1GB intermediate
+- id: conv3d_pool_lse_relu_nhwc
+  name: Conv3d + MaxPool3d + LogSumExp + ReLU (NHWC Spatially-Tiled)
+  stages:
+  - fusion
+  - memory_access
+  - block_pointers
+  - xpu_specific
+  - autotuning
+  description: |
+    Conv3d(32->64, 3x3x3, pad=1) + MaxPool3d(2) + LogSumExp(dim=1) + ReLU.
+    Shows Conv3d spatial tiling with channels_last_3d and padding handling.
+  file: conv3d_pool_lse_relu_nhwc.py
+  optimizations_applied:
+  - channels_last_3d (NDHWC) layout, weight as DHWIO
+  - Spatial tiling grid (n, od*OH+oh, ow_tile*cout_tiles)
+  - Padding via conditional skip + block_ptr boundary_check
+  - Fused MaxPool3d + LogSumExp(dim=1) + ReLU in second kernel
+  - Numerically stable LogSumExp with online max tracking
+  expected_speedup: conv portion 2-4x
