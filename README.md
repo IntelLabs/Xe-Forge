@@ -6,6 +6,27 @@ Multi-stage LLM-driven optimization pipeline for Triton kernels targeting Intel 
 The optimizer analyzes Triton kernels, identifies performance issues, and applies optimizations through a series of stages — each powered by an LLM that understands GPU programming, numerical linear algebra, and Intel XPU hardware.
 
 ⚠️ **Disclaimer**: This project is currently in active development. The code is **not stable** and **not intended for use in production environments**. Interfaces, features, and behaviors are subject to change without notice.
+
+---
+
+## Results on Intel Arc Pro B70
+
+### FlashAttention Forward
+
+FlashAttention benchmark optimized across diverse shapes including skinny, non-square, and irregular configurations (varying head counts, sequence lengths, and head dimensions). Up to **10.6x** speedup over unoptimized Triton kernels, with optimized kernels reaching over **80 TFLOPS** on Intel Arc Pro B70.
+
+<p align="center">
+  <img src="plots/attention_roofline.png" alt="Roofline analysis for FlashAttention Forward" width="500"/>
+</p>
+
+### GEMM / Matmul Kernels (L2 KernelBench)
+
+[KernelBench](https://github.com/ScalingIntelligence/KernelBench) L2 GEMM and Matmul problems. Optimized Triton kernels surpass both PyTorch eager and `torch.compile` baselines, exceeding the **160 TFLOPS** peak roofline ceiling for compute-bound configurations.
+
+<p align="center">
+  <img src="plots/l2_roofline_gemm_matmul.png" alt="Roofline analysis for GEMM and Matmul kernels" width="500"/>
+</p>
+
 ---
 
 ## Installation
