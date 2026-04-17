@@ -45,12 +45,12 @@ def _gemm_sigmoid_kernel(
         A_ptrs = A_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
         B_ptrs = B_ptr + offs_n[:, None] * stride_bk + offs_k[None, :] * stride_bn
 
-        A_block = tl.load(
-            A_ptrs, mask=(mask_m[:, None] & mask_k[None, :]), other=0.0
-        ).to(tl.float16)
-        B_block = tl.load(
-            B_ptrs, mask=(mask_n[:, None] & mask_k[None, :]), other=0.0
-        ).to(tl.float16)
+        A_block = tl.load(A_ptrs, mask=(mask_m[:, None] & mask_k[None, :]), other=0.0).to(
+            tl.float16
+        )
+        B_block = tl.load(B_ptrs, mask=(mask_n[:, None] & mask_k[None, :]), other=0.0).to(
+            tl.float16
+        )
 
         acc = tl.dot(A_block, B_block.T, acc)
 
@@ -98,12 +98,8 @@ def _gemm_bias_kernel(
         a_ptrs = A_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
         b_ptrs = B_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
 
-        a = tl.load(a_ptrs, mask=(mask_m[:, None] & mask_k[None, :]), other=0.0).to(
-            tl.float16
-        )
-        b = tl.load(b_ptrs, mask=(mask_k[:, None] & mask_n[None, :]), other=0.0).to(
-            tl.float16
-        )
+        a = tl.load(a_ptrs, mask=(mask_m[:, None] & mask_k[None, :]), other=0.0).to(tl.float16)
+        b = tl.load(b_ptrs, mask=(mask_k[:, None] & mask_n[None, :]), other=0.0).to(tl.float16)
 
         acc = tl.dot(a, b, acc)
 
