@@ -75,6 +75,12 @@ Examples:
         type=str,
         help="Comma-separated stages to apply (e.g., dtype_fix,fusion,xpu_specific)",
     )
+    parser.add_argument(
+        "--correctness-only-stages",
+        type=str,
+        help="Comma-separated stages that skip the speedup regression check "
+        "(only require correctness). e.g., dtype_fix,algorithmic",
+    )
 
     # LLM configuration
     parser.add_argument("--model", type=str, help="LLM model to use")
@@ -173,6 +179,17 @@ Examples:
             except ValueError:
                 print(f"Warning: Unknown stage '{name}', skipping")
 
+    # Parse correctness-only stages
+    correctness_only_stages = None
+    if args.correctness_only_stages:
+        cos_names = [s.strip() for s in args.correctness_only_stages.split(",")]
+        correctness_only_stages = set()
+        for name in cos_names:
+            try:
+                correctness_only_stages.add(OptimizationStage(name))
+            except ValueError:
+                print(f"Warning: Unknown stage '{name}' in --correctness-only-stages, skipping")
+
     # Print header
     print("=" * 60)
     print("TRITON OPTIMIZER")
@@ -186,6 +203,8 @@ Examples:
     if args.target_dtype:
         print(f"Target dtype: {args.target_dtype}")
     print(f"Stages: {[s.value for s in stages] if stages else 'all'}")
+    if correctness_only_stages:
+        print(f"Correctness-only stages: {[s.value for s in correctness_only_stages]}")
     print(f"Best@k: {config.optimization.best_k}")
 
     # Print correctness settings
@@ -267,6 +286,7 @@ Examples:
         target_dtype=args.target_dtype,
         rtol=args.rtol,
         atol=args.atol,
+        correctness_only_stages=correctness_only_stages,
     )
 
     # Save output if requested

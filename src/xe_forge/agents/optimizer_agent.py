@@ -477,6 +477,7 @@ class OptimizerAgent(Optimizer):
         init_args=None,
         vtune_report="",
         perf_context: dict | None = None,
+        correctness_only_stages: set | None = None,
     ):
         logger.info(f"Applying optimization stage: {stage.value}")
         original_code = code
@@ -507,8 +508,7 @@ class OptimizerAgent(Optimizer):
             f"  {k}: {v}" for k, v in xpu_config.items()
         )
 
-        CORRECTNESS_ONLY_STAGES = {}
-        skip_speedup = stage in CORRECTNESS_ONLY_STAGES
+        skip_speedup = stage in (correctness_only_stages or set())
 
         _baseline_ms = perf_context.get("original_ms") if perf_context else None
 

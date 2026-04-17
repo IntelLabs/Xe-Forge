@@ -18,6 +18,7 @@ class Optimizer(ABC):
         dtype=None,
         pytorch_code: str = "",
         init_args: list | None = None,
+        correctness_only_stages: set | None = None,
     ) -> StageResult:
         """Apply optimization stage to kernel code."""
         ...
