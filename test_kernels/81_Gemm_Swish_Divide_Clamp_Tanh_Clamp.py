@@ -19,12 +19,22 @@ def get_init_inputs():
 
 @triton.jit
 def _linear_bias_kernel(
-    a_ptr, b_ptr, bias_ptr, c_ptr,
-    M, N, K,
-    stride_am, stride_ak,
-    stride_bk, stride_bn,
-    stride_cm, stride_cn,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    a_ptr,
+    b_ptr,
+    bias_ptr,
+    c_ptr,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
 ):
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
@@ -64,7 +74,7 @@ def _swish_div_clamp_tanh_clamp_kernel(
     col_blk = tl.program_id(1)
     offs_c = col_blk * BLOCK_COL + tl.arange(0, BLOCK_COL)
     offs_r = row_idx * stride_row
-    ptrs_in  = x_ptr + offs_r + offs_c * stride_col
+    ptrs_in = x_ptr + offs_r + offs_c * stride_col
     ptrs_out = y_ptr + offs_r + offs_c * stride_col
     mask = offs_c < N
 
@@ -89,7 +99,9 @@ def kernel_function(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor) -
     N, K_w = weight.shape
     assert K == K_w
     assert bias.shape[0] == N
-    assert x.dtype == torch.float16 and weight.dtype == torch.float16 and bias.dtype == torch.float16  # ← float16
+    assert (
+        x.dtype == torch.float16 and weight.dtype == torch.float16 and bias.dtype == torch.float16
+    )  # ← float16
 
     # CPU fallback — upcast to fp32 for all math, return fp32
     if not (hasattr(torch, "xpu") and torch.xpu.is_available()):
@@ -110,20 +122,30 @@ def kernel_function(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor) -
     stride_bk, stride_bn = weight.stride(1), weight.stride(0)
     BLOCK_M, BLOCK_N, BLOCK_K = 128, 128, 64
     _linear_bias_kernel[(triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))](
-        x, weight, bias, out1,
-        M, N, K,
-        x.stride(0), x.stride(1),
-        stride_bk, stride_bn,
-        out1.stride(0), out1.stride(1),
-        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
+        x,
+        weight,
+        bias,
+        out1,
+        M,
+        N,
+        K,
+        x.stride(0),
+        x.stride(1),
+        stride_bk,
+        stride_bn,
+        out1.stride(0),
+        out1.stride(1),
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
     )
 
     # out2 is fp32 — swish kernel only touches fp32 out1
     out2 = torch.empty((M, N), dtype=torch.float32, device=device)
     BLOCK_COL = 256
-    _swish_div_clamp_tanh_clamp_kernel[
-        (M, triton.cdiv(N, BLOCK_COL))
-    ](out1, out2, M, N, out1.stride(0), out1.stride(1), BLOCK_COL=BLOCK_COL)
+    _swish_div_clamp_tanh_clamp_kernel[(M, triton.cdiv(N, BLOCK_COL))](
+        out1, out2, M, N, out1.stride(0), out1.stride(1), BLOCK_COL=BLOCK_COL
+    )
 
     torch.xpu.synchronize()
     return out2

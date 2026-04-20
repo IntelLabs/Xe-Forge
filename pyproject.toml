@@ -52,7 +52,7 @@ allow-direct-references = true
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-exclude =     ["test_kernels", "knowledge_base/examples", "outputs/kernels"]
+exclude =     ["test_kernels", "knowledge_base/examples", "outputs/kernels", "examples",]
 
 
 [tool.ruff.lint]
