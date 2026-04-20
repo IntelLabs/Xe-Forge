@@ -30,7 +30,7 @@ def _build_issue_categories() -> str:
         OptimizationStage.FUSION,
         OptimizationStage.MEMORY_ACCESS,
         OptimizationStage.BLOCK_POINTERS,
-        OptimizationStage.XPU_SPECIFIC,
+        OptimizationStage.DEVICE_SPECIFIC,
         OptimizationStage.PERSISTENT_KERNEL,
         OptimizationStage.AUTOTUNING,
     ]
@@ -42,7 +42,7 @@ def _build_issue_categories() -> str:
         OptimizationStage.FUSION: "FUSION",
         OptimizationStage.MEMORY_ACCESS: "MEMORY ACCESS",
         OptimizationStage.BLOCK_POINTERS: "BLOCK POINTERS",
-        OptimizationStage.XPU_SPECIFIC: "XPU SPECIFIC (Intel)",
+        OptimizationStage.DEVICE_SPECIFIC: "DEVICE SPECIFIC",
         OptimizationStage.PERSISTENT_KERNEL: "PERSISTENT KERNEL",
         OptimizationStage.AUTOTUNING: "AUTOTUNING",
     }
@@ -405,7 +405,12 @@ class AnalyzerAgent:
         flop: float | None,
         target_dtype: str | None = None,
     ) -> str:
-        lines = ["TARGET DEVICE: Intel XPU (Data Center GPU Max / Ponte Vecchio)", ""]
+        from xe_forge.config import get_config
+        from xe_forge.prompts import PromptLibrary
+
+        cfg = get_config()
+        prompts = PromptLibrary(dsl=cfg.device_config.dsl, device_type=cfg.device_config.device)
+        lines = [prompts.target_device_line(), ""]
 
         if target_dtype:
             lines.append(f"TARGET DTYPE: {target_dtype}")

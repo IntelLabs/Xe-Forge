@@ -1,0 +1,101 @@
+constraints:
+- id: gluon_tile_size_alignment
+  name: Tile sizes must be aligned to hardware subgroup size
+  severity: critical
+  description: |
+    Gluon kernels on Intel XPU require tile dimensions aligned to the
+    subgroup (SIMD) width. For Xe-cores this is typically 16 or 32.
+    Misaligned tiles cause silent performance degradation.
+
+- id: gluon_dtype_accumulator
+  name: Use float32 accumulator for bf16/fp16 matmuls
+  severity: critical
+  description: |
+    When performing matrix multiplications with bfloat16 or float16 inputs
+    on Intel XPU, always accumulate in float32 to avoid numerical overflow.
+    The DPAS units natively support mixed-precision accumulation.
+
+- id: gluon_avoid_host_sync
+  name: Avoid unnecessary host-device synchronization
+  severity: warning
+  description: |
+    Calling .cpu() or .item() inside kernel loops forces synchronization
+    between host and device, destroying pipeline parallelism. Keep all
+    intermediate results on XPU.
+
+patterns:
+- id: gluon_block_tiling
+  name: Apply block tiling for GEMM
+  stage: device_specific
+  description: Use hardware-aligned block tiling for matrix operations
+  rationale: |
+    Intel XPU Xe-cores achieve peak throughput with 256x256 workgroup tiles
+    and 32-deep K dimension to match DPAS systolic array depth.
+  pattern_before: |
+    # Naive matmul without tiling
+    C = torch.matmul(A, B)
+  pattern_after: |
+    # Gluon tiled matmul with XPU-optimal tile shape
+    # TileShape: M=256, N=256, K=32 for Xe-core DPAS
+    C = gluon.matmul(A, B, tile_m=256, tile_n=256, tile_k=32)
+  expected_speedup: "2-5x over naive torch.matmul for large matrices"
+
+- id: gluon_prefetch_pipeline
+  name: Enable prefetching for memory-bound kernels
+  stage: memory_access
+  description: Use software prefetching to hide memory latency
+  rationale: |
+    Intel XPU benefits heavily from prefetching future K-blocks of A and B
+    matrices. This overlaps compute with memory transfers across pipeline
+    stages.
+  pattern_before: |
+    # Single-stage load without prefetch
+    for k in range(K // BLOCK_K):
+        a_tile = load(A, k)
+        b_tile = load(B, k)
+        acc += dpas(a_tile, b_tile)
+  pattern_after: |
+    # Two-stage pipelined load with prefetch
+    prefetch(A, k=0)
+    prefetch(B, k=0)
+    for k in range(K // BLOCK_K):
+        a_tile = load(A, k)
+        b_tile = load(B, k)
+        prefetch(A, k+1)
+        prefetch(B, k+1)
+        acc += dpas(a_tile, b_tile)
+  expected_speedup: "1.3-2x for memory-bound kernels"
+
+- id: gluon_fusion_elementwise
+  name: Fuse elementwise operations into GEMM epilogue
+  stage: fusion
+  description: Fold activation functions and scaling into the GEMM epilogue
+  rationale: |
+    Separate elementwise kernels after GEMM force an extra global memory
+    round-trip. Fusing them into the epilogue eliminates this overhead.
+  pattern_before: |
+    C = gluon.matmul(A, B)
+    D = torch.relu(C)
+    E = D * scale
+  pattern_after: |
+    # Fused GEMM + ReLU + scale in single kernel
+    E = gluon.matmul(A, B, epilogue=lambda c: torch.relu(c) * scale)
+  expected_speedup: "1.2-1.5x for fusion-eligible patterns"
+
+- id: gluon_dtype_optimization
+  name: Use bfloat16 inputs with float32 accumulation
+  stage: dtype_fix
+  description: Leverage mixed-precision DPAS for higher throughput
+  rationale: |
+    Intel XPU DPAS units deliver 2x throughput with bf16 inputs vs float32.
+    Using bf16 inputs with fp32 accumulation maximizes compute throughput
+    while maintaining numerical stability.
+  pattern_before: |
+    A = A.float()
+    B = B.float()
+    C = gluon.matmul(A, B)
+  pattern_after: |
+    A = A.bfloat16()
+    B = B.bfloat16()
+    C = gluon.matmul(A, B, acc_dtype=torch.float32)
+  expected_speedup: "~2x throughput improvement"

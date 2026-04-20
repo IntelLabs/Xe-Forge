@@ -1,11 +1,24 @@
 """
-Core data models for Triton optimization pipeline
+Core data models for kernel optimization pipeline
 """
 
 from datetime import datetime
 from enum import StrEnum
 
 from pydantic import BaseModel, Field
+
+
+class DSL(StrEnum):
+    TRITON = "triton"
+    GLUON = "gluon"
+    SYCL = "sycl"
+    CUDA = "cuda"
+
+
+class DeviceType(StrEnum):
+    XPU = "xpu"
+    CUDA = "cuda"
+    CPU = "cpu"
 
 
 class OptimizationStage(StrEnum):
@@ -16,7 +29,8 @@ class OptimizationStage(StrEnum):
     MEMORY_ACCESS = "memory_access"
     BLOCK_POINTERS = "block_pointers"
     PERSISTENT_KERNEL = "persistent_kernel"
-    XPU_SPECIFIC = "xpu_specific"
+    DEVICE_SPECIFIC = "device_specific"
+    XPU_SPECIFIC = "device_specific"  # backward-compatible alias
     AUTOTUNING = "autotuning"
     DISCOVERY = "discovery"  # handles open_ended issues — novel optimizations
     # not covered by any existing stage

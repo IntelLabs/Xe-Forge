@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CLI for Triton Optimizer
+CLI for Xe-Forge kernel optimization pipeline
 
 Usage:
     python -m xe_forge.cli --input kernel.py --name my_kernel
@@ -20,16 +20,20 @@ def main():
     sys.stdout.reconfigure(line_buffering=True)
 
     parser = argparse.ArgumentParser(
-        description="Triton Optimizer - Multi-stage optimization for Intel XPU",
+        description="Xe-Forge - Multi-stage kernel optimization pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Optimize a Triton kernel
+  # Optimize a Triton kernel for Intel XPU (default)
   python -m xe_forge.cli --input kernel.py --name gemm_kernel
+
+  # Optimize for CUDA
+  python -m xe_forge.cli --input kernel.py --name kernel \\
+      --device cuda --dsl triton
 
   # Optimize with specific stages
   python -m xe_forge.cli --input kernel.py --name kernel \\
-      --stages dtype_fix,fusion,xpu_specific
+      --stages dtype_fix,fusion,device_specific
 
   # Override model
   python -m xe_forge.cli --input kernel.py --name kernel \\
@@ -81,7 +85,23 @@ Examples:
     parser.add_argument("--api-base", type=str, help="API base URL")
     parser.add_argument("--api-key", type=str, help="API key")
 
-    # XPU configuration
+    # Device and DSL configuration
+    parser.add_argument(
+        "--device",
+        type=str,
+        choices=["xpu", "cuda", "cpu"],
+        default=None,
+        help="Target device (default: xpu)",
+    )
+    parser.add_argument(
+        "--dsl",
+        type=str,
+        choices=["triton", "gluon", "sycl", "cuda"],
+        default=None,
+        help="Kernel DSL (default: triton)",
+    )
+
+    # GPU tuning configuration
     parser.add_argument("--num-warps", type=int, help="Default number of warps")
     parser.add_argument("--tile-size", type=int, help="Preferred tile size (M=N)")
 
@@ -139,10 +159,10 @@ Examples:
     if args.api_key:
         overrides["llm_api_key"] = args.api_key
     if args.num_warps:
-        overrides["xpu_default_num_warps"] = args.num_warps
+        overrides["device_config_default_num_warps"] = args.num_warps
     if args.tile_size:
-        overrides["xpu_preferred_tile_m"] = args.tile_size
-        overrides["xpu_preferred_tile_n"] = args.tile_size
+        overrides["device_config_preferred_tile_m"] = args.tile_size
+        overrides["device_config_preferred_tile_n"] = args.tile_size
     if args.target_dtype:
         overrides["optimization_target_dtype"] = args.target_dtype
     if args.best_k:
@@ -156,6 +176,12 @@ Examples:
     # Note: rtol/atol are passed directly to pipeline.optimize() for
     # proper priority resolution (CLI > spec > config default), not
     # via config overrides.
+
+    # Set device/dsl env vars before config loading
+    if args.device:
+        os.environ["DEVICE_TYPE"] = args.device
+    if args.dsl:
+        os.environ["DSL"] = args.dsl
 
     # Load and override config
     config = get_config()
@@ -175,10 +201,12 @@ Examples:
 
     # Print header
     print("=" * 60)
-    print("TRITON OPTIMIZER")
+    print("XE-FORGE")
     print("=" * 60)
     print(f"Input: {args.input}")
     print(f"Kernel: {args.name}")
+    print(f"Device: {config.device_config.device}")
+    print(f"DSL: {config.device_config.dsl}")
     print(f"Model: {config.llm.model}")
     if args.spec:
         variant_display = args.variant or "(auto-resolved from spec)"
@@ -234,12 +262,12 @@ Examples:
         from xe_forge.core import KernelBenchExecutor
 
         executor = KernelBenchExecutor(
-            device=config.xpu.device,
+            device=config.device_config.device,
             require_correctness=config.optimization.require_correctness,
             rtol=config.optimization.correctness_rtol,
             atol=config.optimization.correctness_atol,
         )
-        print(f"Executor: KernelBenchExecutor (device={config.xpu.device})")
+        print(f"Executor: KernelBenchExecutor (device={config.device_config.device})")
 
     # Create pipeline and optimize
     pipeline = XeForgePipeline(config=config, executor=executor)  # type: ignore

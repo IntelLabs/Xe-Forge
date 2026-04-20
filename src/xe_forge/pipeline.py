@@ -9,7 +9,7 @@ import litellm
 
 from xe_forge.agents import AnalyzerAgent, Optimizer, OptimizerAgent, OptimizerReActAgent
 from xe_forge.config import Config, get_config
-from xe_forge.core import get_xpu_config_for_pipeline
+from xe_forge.core.device_query import get_device_config_for_pipeline
 from xe_forge.knowledge.loader import KnowledgeBase, load_knowledge_base
 from xe_forge.models import (
     IssueType,
@@ -30,7 +30,7 @@ DEFAULT_STAGE_ORDER: list[OptimizationStage] = [
     OptimizationStage.MEMORY_ACCESS,
     OptimizationStage.BLOCK_POINTERS,
     OptimizationStage.PERSISTENT_KERNEL,
-    OptimizationStage.XPU_SPECIFIC,
+    OptimizationStage.DEVICE_SPECIFIC,
     OptimizationStage.AUTOTUNING,
 ]
 
@@ -49,7 +49,7 @@ class XeForgePipeline:
             from xe_forge.core import KernelBenchExecutor
 
             executor = KernelBenchExecutor(
-                device=self.config.xpu.device,
+                device=self.config.device_config.device,
                 require_correctness=self.config.optimization.require_correctness,
                 rtol=self.config.optimization.correctness_rtol,
                 atol=self.config.optimization.correctness_atol,
@@ -57,7 +57,11 @@ class XeForgePipeline:
 
         self.knowledge_base: KnowledgeBase | None = None
         if self.config.knowledge.enabled:
-            self.knowledge_base = load_knowledge_base(self.config.knowledge.knowledge_dir)
+            self.knowledge_base = load_knowledge_base(
+                self.config.knowledge.knowledge_dir,
+                dsl=self.config.device_config.dsl,
+                device_type=self.config.device_config.device,
+            )
             logger.info("  Knowledge base: %s", self.knowledge_base.summary())
         else:
             logger.info("  Knowledge base: disabled (set KNOWLEDGE_BASE_ENABLED=true to enable)")
@@ -182,7 +186,7 @@ class XeForgePipeline:
         _bench_ex = (
             self.executor
             if isinstance(self.executor, KernelBenchExecutor)
-            else KernelBenchExecutor(device=self.config.xpu.device)
+            else KernelBenchExecutor(device=self.config.device_config.device)
         )
         if self.executor and input_shapes:
             try:
@@ -225,8 +229,12 @@ class XeForgePipeline:
                     torch.float32: "float32",
                 }.get(dtype)
 
-            xpu_config = get_xpu_config_for_pipeline(
-                input_shapes=input_shapes, config=self.config, dtype=etd or "float16"
+            device_type = self.config.device_config.device
+            xpu_config = get_device_config_for_pipeline(
+                device_type=device_type,
+                input_shapes=input_shapes,
+                config=self.config,
+                dtype=etd or "float16",
             )
 
             logger.info("=" * 60 + "\nSTAGE: ANALYSIS\n" + "=" * 60)

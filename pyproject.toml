@@ -1,9 +1,9 @@
 [project]
 name = "xe-forge"
 version = "0.1.0"
-description = "Multi-stage Triton kernel optimization for Intel XPU"
+description = "Multi-stage kernel optimization for GPU computing"
 authors = [{ name = "Intel Labs" }]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
   "numpy>=1.24.0",
   "pydantic>=2.0.0",
@@ -12,11 +12,12 @@ dependencies = [
   "python-dotenv>=1.0.0",
   "PyYAML>=6.0.0",
   "httpx>=0.24.0",
-  "torch==2.10+xpu",
   "ai-bench @ git+https://github.com/libxsmm/AI-bench@9afa0d8356e42fee09d69d9e5731a5dcb5edd5d2",
 ]
 
 [project.optional-dependencies]
+xpu = ["torch==2.10+xpu"]
+cuda = ["torch>=2.0.0"]
 wandb = ["weave>=0.52.24"]
 
 [project.scripts]

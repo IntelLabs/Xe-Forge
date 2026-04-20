@@ -503,9 +503,11 @@ class OptimizerAgent(Optimizer):
             ]
         )
 
-        xpu_text = "Intel XPU Configuration:\n" + "\n".join(
-            f"  {k}: {v}" for k, v in xpu_config.items()
-        )
+        from xe_forge.config import get_config
+        from xe_forge.core.device_query import format_device_config_for_llm
+
+        _cfg = get_config()
+        xpu_text = format_device_config_for_llm(xpu_config, _cfg.device_config.device)
 
         CORRECTNESS_ONLY_STAGES = {}
         skip_speedup = stage in CORRECTNESS_ONLY_STAGES

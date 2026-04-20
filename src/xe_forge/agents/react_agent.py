@@ -70,7 +70,7 @@ class OptimizationReActSignature(dspy.Signature):
         desc="Current Triton kernel code to optimize"
     )
     stage: str = dspy.InputField(
-        desc="Optimization stage to apply (e.g., dtype_fix, block_pointers, xpu_specific)"
+        desc="Optimization stage to apply (e.g., dtype_fix, block_pointers, device_specific)"
     )
     issues: list[DetectedIssue] = dspy.InputField(desc="Specific issues to fix in this stage")
     knowledge_patterns: str = dspy.InputField(
@@ -319,7 +319,7 @@ class OptimizerReActAgent(Optimizer):
 
         Args:
             code: Current Triton code
-            stage: Stage to apply (e.g., DTYPE_FIX, BLOCK_POINTERS, XPU_SPECIFIC)
+            stage: Stage to apply (e.g., DTYPE_FIX, BLOCK_POINTERS, DEVICE_SPECIFIC)
             analysis: Kernel analysis results with detected issues
             xpu_config: XPU configuration (num_warps, tile sizes, etc.)
             kernel_name: Kernel function name (optional for Model-based kernels)
@@ -353,9 +353,11 @@ class OptimizerReActAgent(Optimizer):
         # Get knowledge patterns for this stage
         knowledge_patterns = self._get_stage_patterns(stage)
 
-        xpu_config_text = "Intel XPU Configuration:\n" + "\n".join(
-            [f"  {k}: {v}" for k, v in xpu_config.items()]
-        )
+        from xe_forge.config import get_config
+        from xe_forge.core.device_query import format_device_config_for_llm
+
+        _cfg = get_config()
+        xpu_config_text = format_device_config_for_llm(xpu_config, _cfg.device_config.device)
 
         # Create verification tool
         verify_tool = self._create_verify_tool(

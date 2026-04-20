@@ -1,16 +1,24 @@
 """
 Core components for kernel execution and validation
 
-Provides KernelBench-style testing with accurate XPU timing including:
+Provides KernelBench-style testing with accurate GPU timing including:
 - L2 cache flushing between runs
 - Hardware event-based timing
 - Proper warmup and synchronization
 - Comparison tools for CoVeR agent feedback
 - YAML spec loading for test configurations
-- XPU hardware query for optimal kernel parameters
+- Device hardware query for optimal kernel parameters (XPU, CUDA)
 - Configurable correctness validation (via REQUIRE_CORRECTNESS, CORRECTNESS_RTOL, CORRECTNESS_ATOL)
 """
 
+from xe_forge.core.device_query import (
+    CUDADeviceInfo,
+    DeviceInfo,
+    format_device_config_for_llm,
+    get_device_config_for_pipeline,
+    query_cuda_via_torch,
+    query_device,
+)
 from xe_forge.core.executor import (
     ComparisonResult,
     KernelBenchExecutor,
@@ -27,8 +35,7 @@ from xe_forge.core.spec_loader import (
     parse_spec,
 )
 
-# validator module not included — correctness checking is handled by executor
-# from xe_forge.core.validator import KernelValidator
+# Backward-compatible XPU-specific exports
 from xe_forge.core.xpu_query import (
     XPUDeviceInfo,
     extract_mnk_from_shapes,
@@ -42,7 +49,9 @@ from xe_forge.core.xpu_query import (
 )
 
 __all__ = [
+    "CUDADeviceInfo",
     "ComparisonResult",
+    "DeviceInfo",
     "InputSpec",
     "KernelBenchExecutor",
     "KernelExecutor",
@@ -52,8 +61,10 @@ __all__ = [
     "create_executor_from_config",
     "create_executor_tool",
     "extract_mnk_from_shapes",
+    "format_device_config_for_llm",
     "format_xpu_config_for_llm",
     "get_autotune_configs",
+    "get_device_config_for_pipeline",
     "get_optimal_params",
     "get_test_config_from_spec",
     "get_xpu_config",
@@ -63,6 +74,8 @@ __all__ = [
     "load_spec_from_string",
     "parse_spec",
     "print_xpu_info",
+    "query_cuda_via_torch",
+    "query_device",
 ]
 
 
@@ -84,7 +97,7 @@ def create_executor_from_config(config) -> KernelBenchExecutor:
         executor = create_executor_from_config(config)
     """
     return KernelBenchExecutor(
-        device=config.xpu.device,
+        device=config.device_config.device,
         require_correctness=config.optimization.require_correctness,
         rtol=config.optimization.correctness_rtol,
         atol=config.optimization.correctness_atol,
