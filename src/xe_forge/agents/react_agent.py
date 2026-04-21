@@ -121,6 +121,7 @@ class OptimizerReActAgent(Optimizer):
         input_shapes: list[tuple[int, ...]] | None,
         flop: float | None,
         dtype=None,
+        skip_speedup_check: bool = False,
     ) -> Callable:
         """
         Create a verification tool for ReAct.
@@ -251,7 +252,7 @@ class OptimizerReActAgent(Optimizer):
                         )
 
                     # Check performance regression
-                    if comparison.is_slower:
+                    if not skip_speedup_check and comparison.is_slower:
                         slowdown = (
                             1.0 / comparison.speedup if comparison.speedup > 0 else float("inf")
                         )
@@ -309,6 +310,7 @@ class OptimizerReActAgent(Optimizer):
         pytorch_code: str = "",
         init_args: list | None = None,
         perf_context: dict | None = None,
+        correctness_only_stages: set | None = None,
     ) -> StageResult:
         """
         Apply a single optimization stage using ReAct.
@@ -357,6 +359,8 @@ class OptimizerReActAgent(Optimizer):
             [f"  {k}: {v}" for k, v in xpu_config.items()]
         )
 
+        skip_speedup = stage in (correctness_only_stages or set())
+
         # Create verification tool
         verify_tool = self._create_verify_tool(
             original_code=original_code,
@@ -364,6 +368,7 @@ class OptimizerReActAgent(Optimizer):
             input_shapes=input_shapes,
             flop=flop,
             dtype=dtype,
+            skip_speedup_check=skip_speedup,
         )
 
         # Create ReAct agent for this optimization
@@ -427,7 +432,7 @@ class OptimizerReActAgent(Optimizer):
 
                     if not comparison.optimized_correct:
                         last_error = "Optimized kernel produces incorrect results"
-                    elif comparison.is_slower:
+                    elif not skip_speedup and comparison.is_slower:
                         slowdown = (
                             1.0 / comparison.speedup if comparison.speedup > 0 else float("inf")
                         )

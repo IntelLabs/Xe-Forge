@@ -144,6 +144,7 @@ class XeForgePipeline:
         target_dtype=None,
         rtol=None,
         atol=None,
+        correctness_only_stages=None,
     ):
         import torch
 
@@ -313,6 +314,7 @@ class XeForgePipeline:
                             else None
                         ),
                     },
+                    correctness_only_stages=correctness_only_stages,
                 )
                 result.stages_applied.append(stage_result)
 

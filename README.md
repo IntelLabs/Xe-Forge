@@ -94,6 +94,9 @@ xe-forge -i kernel.py -s spec.yaml --target-dtype float16
 # Use a different LLM model
 xe-forge -i kernel.py -s spec.yaml --model openai/gpt-4-turbo
 
+# Allow dtype_fix to produce slower-but-correct kernels
+xe-forge -i kernel.py -s spec.yaml --correctness-only-stages dtype_fix
+
 # Multiple candidates (pick best)
 xe-forge -i kernel.py -s spec.yaml --best-k 3
 
@@ -359,6 +362,14 @@ xe-forge -i kernel.py -s spec.yaml \
     --stages algorithmic,dtype_fix,fusion,memory_access,persistent_kernel,xpu_specific,autotuning
 ```
 
+### Correctness-Only Stages
+
+Some stages (e.g. `dtype_fix`, `algorithmic`) may produce kernels that are temporarily slower — a cast from fp16 to fp32 is required for correctness but adds overhead. Use `--correctness-only-stages` to let these stages skip the speedup regression check; later stages (e.g. `fusion`, `xpu_specific`) are expected to recover the performance.
+
+```bash
+xe-forge -i kernel.py -s spec.yaml --correctness-only-stages dtype_fix,algorithmic
+```
+
 ---
 
 ## CLI Reference
@@ -386,6 +397,7 @@ xe-forge --input KERNEL --spec SPEC [OPTIONS]
 | Flag | Description |
 |------|-------------|
 | `--stages` | Comma-separated stages (e.g. `dtype_fix,xpu_specific`) |
+| `--correctness-only-stages` | Comma-separated stages that skip the speedup regression check (e.g. `dtype_fix,algorithmic`) |
 | `--target-dtype` | Target dtype: `float16`, `bfloat16`, `float32` |
 
 ### LLM Configuration
