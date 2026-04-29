@@ -7,7 +7,7 @@ import logging
 import dspy
 
 from xe_forge.knowledge.patterns import get_stage_for_issue, get_stage_for_issue_str
-from xe_forge.models import DetectedIssue, IssueType, KernelAnalysis, OptimizationStage
+from xe_forge.models import DSL, DetectedIssue, IssueType, KernelAnalysis, OptimizationStage
 
 logger = logging.getLogger(__name__)
 
@@ -225,8 +225,9 @@ Examples that do NOT qualify (use the named type instead):
 class AnalyzerAgent:
     """LLM-based analyzer for Triton kernels."""
 
-    def __init__(self, knowledge_base=None):
+    def __init__(self, knowledge_base=None, dsl: DSL | str = DSL.TRITON):
         self.knowledge_base = knowledge_base
+        self.dsl = DSL(dsl) if isinstance(dsl, str) else dsl
         self.predictor = dspy.Predict(AnalysisSignature)
 
     def analyze(

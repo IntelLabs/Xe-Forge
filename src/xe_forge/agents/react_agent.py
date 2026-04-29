@@ -11,7 +11,7 @@ from collections.abc import Callable
 
 import dspy
 
-from xe_forge.agents import Optimizer
+from xe_forge.agents.base import Optimizer
 from xe_forge.core import KernelBenchExecutor
 from xe_forge.knowledge.patterns import get_stage_for_issue
 
@@ -20,6 +20,7 @@ try:
 except ImportError:
     KnowledgeBase = None
 from xe_forge.models import (
+    DSL,
     DetectedIssue,
     KernelAnalysis,
     OptimizationStage,
@@ -96,6 +97,7 @@ class OptimizerReActAgent(Optimizer):
         executor: KernelBenchExecutor | None = None,
         validator: Callable | None = None,
         max_iterations: int = 5,
+        dsl: DSL | str = DSL.TRITON,
     ):
         """
         Initialize optimizer agent.
@@ -105,11 +107,13 @@ class OptimizerReActAgent(Optimizer):
             executor: KernelBenchExecutor instance for runtime verification
             validator: Additional validator function (optional)
             max_iterations: Max iterations per stage
+            dsl: DSL type for code generation
         """
         self.knowledge_base = knowledge_base
         self.executor = executor
         self.validator = validator
         self.max_iterations = max_iterations
+        self.dsl = DSL(dsl) if isinstance(dsl, str) else dsl
 
         if not executor:
             logger.warning("No executor provided - kernels will NOT be verified at runtime!")

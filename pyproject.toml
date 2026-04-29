@@ -18,9 +18,11 @@ dependencies = [
 [project.optional-dependencies]
 intel = [
   "torch==2.11+xpu",
+  "pytorch-triton-xpu",
 ]
 nvidia = [
   "torch>=2.0.0",
+  "pytorch-triton",
 ]
 wandb = ["weave>=0.52.24"]
 
@@ -48,12 +50,21 @@ conflicts = [
 ]
 
 [tool.uv.sources]
-torch = { index = "pytorch" }
-triton-xpu = { index = "pytorch" }
+torch = [
+  { index = "pytorch-xpu", extra = "intel" },
+  { index = "pytorch-cuda", extra = "nvidia" },
+]
+triton-xpu = { index = "pytorch-xpu" }
+pytorch-triton-xpu = { index = "pytorch-xpu" }
+pytorch-triton = { index = "pytorch-cuda" }
 
 [[tool.uv.index]]
-name = "pytorch"
-url = "https://download.pytorch.org/whl"
+name = "pytorch-xpu"
+url = "https://download.pytorch.org/whl/xpu"
+
+[[tool.uv.index]]
+name = "pytorch-cuda"
+url = "https://download.pytorch.org/whl/cu128"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/xe_forge"]

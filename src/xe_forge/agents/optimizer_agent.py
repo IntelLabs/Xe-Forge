@@ -14,6 +14,7 @@ from xe_forge.agents.base import Optimizer
 from xe_forge.agents.cover import CoVeR
 from xe_forge.knowledge.loader import KnowledgeBase
 from xe_forge.models import (
+    DSL,
     OptimizationStage,
     StageResult,
 )
@@ -288,11 +289,13 @@ class OptimizerAgent(Optimizer):
         executor=None,
         validator=None,
         max_iterations=5,
+        dsl: DSL | str = DSL.TRITON,
     ):
         self.executor = executor
         self.validator = validator
         self.max_iterations = max_iterations
         self.knowledge_base: KnowledgeBase | None = knowledge_base
+        self.dsl = DSL(dsl) if isinstance(dsl, str) else dsl
         if not executor:
             logger.warning("No executor provided - kernels will NOT be verified at runtime!")
 

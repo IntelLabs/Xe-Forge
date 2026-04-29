@@ -66,7 +66,9 @@ class XeForgePipeline:
         else:
             logger.info("  Knowledge base: disabled (set KNOWLEDGE_BASE_ENABLED=true to enable)")
 
-        self.analyzer = AnalyzerAgent(knowledge_base=self.knowledge_base)
+        self.analyzer = AnalyzerAgent(
+            knowledge_base=self.knowledge_base, dsl=self.config.device_config.dsl,
+        )
         self.planner = PlannerAgent()
 
         match self.config.agent.strategy:
@@ -82,6 +84,7 @@ class XeForgePipeline:
             validator=validator,
             max_iterations=self.config.agent.max_iterations,
             knowledge_base=self.knowledge_base,
+            dsl=self.config.device_config.dsl,
         )
         self.executor = executor
         self.validator = validator
@@ -116,7 +119,7 @@ class XeForgePipeline:
                 max_tokens=self.config.llm.max_tokens,
                 cache=False,
             )
-            dspy.configure(lm=lm)
+            dspy.configure(lm=lm, warn_on_type_mismatch=False)
         except Exception as e:
             raise RuntimeError(f"Failed to initialize LLM: {e}") from e
 
@@ -239,7 +242,7 @@ class XeForgePipeline:
 
             logger.info("=" * 60 + "\nSTAGE: ANALYSIS\n" + "=" * 60)
             analysis = self.analyzer.analyze(
-                triton_code, pytorch_code, display_name, input_shapes, flop, target_dtype=etd
+                triton_code, pytorch_code, display_name, input_shapes, flop, target_dtype=etd,
             )
             result.analysis = analysis
 
@@ -357,7 +360,7 @@ class XeForgePipeline:
                         )
 
                 analysis = self.analyzer.analyze(
-                    current_code, pytorch_code, display_name, input_shapes, flop, target_dtype=etd
+                    current_code, pytorch_code, display_name, input_shapes, flop, target_dtype=etd,
                 )
 
             if self.executor and input_shapes and current_code != triton_code:

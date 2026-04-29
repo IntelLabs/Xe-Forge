@@ -14,6 +14,12 @@ class DSL(StrEnum):
     SYCL = "sycl"
     CUDA = "cuda"
 
+    @property
+    def code_language(self) -> str:
+        if self in (DSL.SYCL, DSL.CUDA):
+            return "cpp"
+        return "python"
+
 
 class DeviceType(StrEnum):
     XPU = "xpu"

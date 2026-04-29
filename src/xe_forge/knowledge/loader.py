@@ -36,7 +36,7 @@ _STAGE_ALIASES: dict[str, str] = {
     "fuse": "fusion",
     "persist": "persistent_kernel",
     "persistent": "persistent_kernel",
-    "xpu": "device_specific",
+    "xpu_specific": "device_specific",
     "cuda": "device_specific",
     "nvidia": "device_specific",
     "sycl": "device_specific",
