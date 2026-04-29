@@ -18,11 +18,11 @@ dependencies = [
 [project.optional-dependencies]
 intel = [
   "torch==2.11+xpu",
-  "triton>=3.0.0",
+  "pytorch-triton-xpu",
 ]
 nvidia = [
   "torch>=2.0.0",
-  "triton>=3.0.0",
+  "pytorch-triton",
 ]
 wandb = ["weave>=0.52.24"]
 
@@ -40,18 +40,23 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.uv.sources]
-torch = [
-  { index = "pytorch-xpu", extra = "intel" },
-  { index = "PyPI", extra = "nvidia" },
+[tool.uv]
+conflicts = [
+  [
+    { extra = "intel" },
+    { extra = "nvidia" },
+  ],
 ]
 
-[tool.uv]
-index-strategy = "unsafe-best-match"
+[tool.uv.sources]
+torch = { index = "pytorch" }
+pytorch-triton-xpu = { index = "pytorch" }
+pytorch-triton = { index = "pytorch" }
 
 [[tool.uv.index]]
-name = "pytorch-xpu"
-url = "https://download.pytorch.org/whl/xpu"
+name = "pytorch"
+url = "https://download.pytorch.org/whl"
+explicit = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/xe_forge"]
@@ -62,7 +67,7 @@ allow-direct-references = true
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-exclude =     ["test_kernels", "knowledge_base/examples", "outputs/kernels"]
+exclude = ["test_kernels", "knowledge_base/**/examples", "outputs/kernels"]
 
 
 [tool.ruff.lint]
