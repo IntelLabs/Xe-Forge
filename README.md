@@ -34,10 +34,10 @@ FlashAttention benchmark optimized across diverse shapes including skinny, non-s
 ### Prerequisites
 
 - Python 3.11+
-- Intel XPU with drivers and runtime installed
-- PyTorch 2.9.1+ with XPU support
-- Triton 3.0+ with Intel XPU backend
 - Access to an OpenAI-compatible LLM API
+- One of the following backends:
+  - **Intel XPU**: Intel GPU with drivers and runtime installed
+  - **NVIDIA CUDA**: NVIDIA GPU with CUDA toolkit installed
 
 ### Install with uv (recommended)
 
@@ -46,8 +46,11 @@ FlashAttention benchmark optimized across diverse shapes including skinny, non-s
 git clone https://github.com/IntelLabs/Xe-Forge
 cd Xe-Forge
 
-# Install with uv
-uv sync
+# Install for Intel XPU
+uv sync --extra intel
+
+# Install for NVIDIA CUDA
+uv sync --extra nvidia
 ```
 
 ### Environment Setup

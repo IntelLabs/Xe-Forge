@@ -16,8 +16,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-xpu = ["torch==2.10+xpu"]
-cuda = ["torch>=2.0.0"]
+intel = [
+  "torch==2.11+xpu",
+  "triton>=3.0.0",
+]
+nvidia = [
+  "torch>=2.0.0",
+  "triton>=3.0.0",
+]
 wandb = ["weave>=0.52.24"]
 
 [project.scripts]
@@ -35,7 +41,10 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.uv.sources]
-torch = { index = "pytorch-xpu" }
+torch = [
+  { index = "pytorch-xpu", extra = "intel" },
+  { index = "PyPI", extra = "nvidia" },
+]
 
 [tool.uv]
 index-strategy = "unsafe-best-match"
