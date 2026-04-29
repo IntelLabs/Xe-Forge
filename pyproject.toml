@@ -1,6 +1,6 @@
 [project]
 name = "xe-forge"
-version = "0.1.0"
+version = "0.1.1"
 description = "Multi-stage kernel optimization for GPU computing"
 authors = [{ name = "Intel Labs" }]
 requires-python = ">=3.11"
@@ -41,6 +41,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.uv]
+index-strategy = "unsafe-best-match"
 conflicts = [
   [
     { extra = "intel" },
@@ -50,13 +51,13 @@ conflicts = [
 
 [tool.uv.sources]
 torch = { index = "pytorch" }
+triton-xpu = { index = "pytorch" }
 pytorch-triton-xpu = { index = "pytorch" }
 pytorch-triton = { index = "pytorch" }
 
 [[tool.uv.index]]
 name = "pytorch"
 url = "https://download.pytorch.org/whl"
-explicit = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/xe_forge"]
