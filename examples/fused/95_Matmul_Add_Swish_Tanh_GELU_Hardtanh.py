@@ -1,0 +1,1 @@
+../../test_kernels/95_Matmul_Add_Swish_Tanh_GELU_Hardtanh.py

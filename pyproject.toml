@@ -77,7 +77,6 @@ line-length = 100
 target-version = "py311"
 exclude = ["test_kernels", "knowledge_base/**/examples", "outputs/kernels"]
 
-
 [tool.ruff.lint]
 select = [
   "E",   # pycodestyle errors

@@ -81,7 +81,7 @@ def kernel_function(input_tensor: torch.Tensor, weight: torch.Tensor) -> torch.T
     device = "xpu"
 
     x = input_tensor.to(device=device)  # stays fp16
-    w = weight.to(device=device)        # stays fp16
+    w = weight.to(device=device)  # stays fp16
     M, K = x.shape
     N, K2 = w.shape
     assert K2 == K
@@ -92,8 +92,14 @@ def kernel_function(input_tensor: torch.Tensor, weight: torch.Tensor) -> torch.T
     BLOCK_N = 128
     grid0 = (triton.cdiv(K, BLOCK_N),)
     sum_weight_kernel[grid0](
-        w, w_colsum, N, K, w.stride(0), w.stride(1),
-        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
+        w,
+        w_colsum,
+        N,
+        K,
+        w.stride(0),
+        w.stride(1),
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
     )
 
     # output stays fp32 (accumulated in fp32 inside kernel)
@@ -101,9 +107,15 @@ def kernel_function(input_tensor: torch.Tensor, weight: torch.Tensor) -> torch.T
     BLOCK_K = 256
     grid1 = (M,)
     dot_row_kernel[grid1](
-        x, w_colsum, y, M, K,
-        x.stride(0), x.stride(1),
-        w_colsum.stride(0), y.stride(0),
+        x,
+        w_colsum,
+        y,
+        M,
+        K,
+        x.stride(0),
+        x.stride(1),
+        w_colsum.stride(0),
+        y.stride(0),
         BLOCK_K=BLOCK_K,
     )
 

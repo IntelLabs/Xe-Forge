@@ -60,14 +60,24 @@ def get_inputs():
 
 @triton.jit
 def _linear_min_sub_kernel(
-    x_ptr, w_ptr, b_ptr, o_ptr,
-    M, N, K,
-    stride_xm, stride_xk,
-    stride_wn, stride_wk,
+    x_ptr,
+    w_ptr,
+    b_ptr,
+    o_ptr,
+    M,
+    N,
+    K,
+    stride_xm,
+    stride_xk,
+    stride_wn,
+    stride_wk,
     stride_b,
-    stride_om, stride_ok,
+    stride_om,
+    stride_ok,
     constant,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
 ):
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
@@ -107,9 +117,9 @@ def kernel_function(input_tensor, linear_weight, linear_bias, constant):
     assert input_tensor.device.type == "xpu"
     assert linear_weight.device.type == "xpu"
     assert linear_bias.device.type == "xpu"
-    assert input_tensor.dtype == torch.float16, "input must be float16"   # ← float16
-    assert linear_weight.dtype == torch.float16, "weight must be float16" # ← float16
-    assert linear_bias.dtype == torch.float16, "bias must be float16"     # ← float16
+    assert input_tensor.dtype == torch.float16, "input must be float16"  # ← float16
+    assert linear_weight.dtype == torch.float16, "weight must be float16"  # ← float16
+    assert linear_bias.dtype == torch.float16, "bias must be float16"  # ← float16
 
     if isinstance(constant, torch.Tensor):
         assert constant.numel() == 1
@@ -128,14 +138,24 @@ def kernel_function(input_tensor, linear_weight, linear_bias, constant):
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
 
     _linear_min_sub_kernel[grid](
-        input_tensor, linear_weight, linear_bias, output,
-        M, N, K,
-        input_tensor.stride(0), input_tensor.stride(1),
-        linear_weight.stride(0), linear_weight.stride(1),
+        input_tensor,
+        linear_weight,
+        linear_bias,
+        output,
+        M,
+        N,
+        K,
+        input_tensor.stride(0),
+        input_tensor.stride(1),
+        linear_weight.stride(0),
+        linear_weight.stride(1),
         linear_bias.stride(0),
-        output.stride(0), output.stride(1),
+        output.stride(0),
+        output.stride(1),
         c_val,
-        BLOCK_M, BLOCK_N, BLOCK_K,
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
     )
     torch.xpu.synchronize()
     return output

@@ -500,7 +500,12 @@ Both variables have these defaults, so if you place the `knowledge_base/` direct
  
 - **Analyzer** receives the critical constraints so it can detect violations (wrong device placement, missing grf_mode declaration, etc.) before flagging issues.
 - **Optimizer** receives the patterns and examples relevant to the current stage — before/after code pairs and real optimized kernels it can learn from.
- 
+
+---
+
+## Examples
+
+Curated kernels from [KernelBench](https://github.com/ScalingIntelligence/KernelBench) Level 2 and the [Intel XPU Triton benchmarks](https://github.com/intel/intel-xpu-backend-for-triton/tree/main/benchmarks/triton_kernels_benchmark), organized by category (GEMM, fused ops, reductions, attention, mixed ops). See [`EXAMPLES.md`](EXAMPLES.md) for the full list and usage instructions.
 
 ---
 

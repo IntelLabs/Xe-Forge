@@ -8,12 +8,23 @@ import triton.language as tl
 
 @triton.jit
 def _linear_gelu_kernel(
-    x_ptr, w_ptr, b_ptr, tmp_ptr,
-    M, N, K,
-    stride_xm, stride_xk,
-    stride_wk, stride_wn,
-    stride_b, stride_tm, stride_tn,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    x_ptr,
+    w_ptr,
+    b_ptr,
+    tmp_ptr,
+    M,
+    N,
+    K,
+    stride_xm,
+    stride_xk,
+    stride_wk,
+    stride_wn,
+    stride_b,
+    stride_tm,
+    stride_tn,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
 ):
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
@@ -59,8 +70,14 @@ def _linear_gelu_kernel(
 # softmax kernel is UNCHANGED — it only ever touches fp32 tmp/out
 @triton.jit
 def _softmax_kernel(
-    tmp_ptr, out_ptr, M, N,
-    stride_tm, stride_tn, stride_om, stride_on,
+    tmp_ptr,
+    out_ptr,
+    M,
+    N,
+    stride_tm,
+    stride_tn,
+    stride_om,
+    stride_on,
     BLOCK_N: tl.constexpr,
 ):
     pid_m = tl.program_id(0)
@@ -99,7 +116,7 @@ def kernel_function(input_tensor: torch.Tensor, weight: torch.Tensor, bias: torc
     assert hasattr(torch, "xpu") and torch.xpu.is_available(), "XPU device is required"
     assert input_tensor.device.type == "xpu", "input_tensor must be on xpu"
     assert input_tensor.dtype == torch.float16, "input_tensor must be float16"  # ← float16
-    assert weight.dtype == torch.float16, "weight must be float16"               # ← float16
+    assert weight.dtype == torch.float16, "weight must be float16"  # ← float16
     # bias is kept fp32 — avoids precision loss on the additive term
     assert bias.dtype == torch.float16, "bias must be float16"
 
@@ -121,15 +138,36 @@ def kernel_function(input_tensor: torch.Tensor, weight: torch.Tensor, bias: torc
     BLOCK_M, BLOCK_N, BLOCK_K = 64, 128, 64
     grid1 = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
     _linear_gelu_kernel[grid1](
-        input_tensor, weight, bias, tmp,
-        M, N, K,
-        sxm, sxk, swk, swn, sb, stm, stn,
-        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
+        input_tensor,
+        weight,
+        bias,
+        tmp,
+        M,
+        N,
+        K,
+        sxm,
+        sxk,
+        swk,
+        swn,
+        sb,
+        stm,
+        stn,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
     )
 
     SM_BLOCK = 128
     _softmax_kernel[(M,)](
-        tmp, out, M, N, stm, stn, som, son, BLOCK_N=SM_BLOCK,
+        tmp,
+        out,
+        M,
+        N,
+        stm,
+        stn,
+        som,
+        son,
+        BLOCK_N=SM_BLOCK,
     )
 
     torch.xpu.synchronize()
@@ -154,7 +192,7 @@ class Model(nn.Module):
         nn.init.uniform_(self.bias, -bound, bound)
 
     def forward(self, x):
-        if x.dtype != torch.float16:    # ← float16
+        if x.dtype != torch.float16:  # ← float16
             x = x.half()
 
         if not (hasattr(torch, "xpu") and torch.xpu.is_available()):

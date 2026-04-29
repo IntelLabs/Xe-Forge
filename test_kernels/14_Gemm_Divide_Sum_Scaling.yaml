@@ -1,6 +1,3 @@
-# kernelbench_gemm_div_sum_scale.yaml
-# KernelBench problem spec (same format you posted earlier)
-
 inputs:
   X:
     shape: [BATCH, INPUT_SIZE]
