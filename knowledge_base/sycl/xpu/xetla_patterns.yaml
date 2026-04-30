@@ -1,6 +1,7 @@
 # Intel XPU SYCL / XeTLA Optimization Patterns
 # Focused on tiling, DPAS tile shapes, epilogues, and GEMM optimization
-# for SYCL C++ kernels targeting Intel Xe GPUs.
+# for SYCL C++ kernels targeting Intel Xe2 GPUs (Battlemage: B580, B570, Pro B).
+# Also covers Xe-HPG (Alchemist) and Xe-HPC (PVC) for reference.
 
 constraints:
   - id: sycl_dpas_requires_simd16
@@ -90,10 +91,10 @@ constraints:
     name: SLM allocation must fit within per-Xe-Core budget
     severity: critical
     description: |
-      Shared Local Memory (SLM) is limited per Xe Core:
-        - Xe-HPG (Arc):    64 KB
-        - Xe-HPC (PVC):   128 KB
-        - Xe2 (BMG/LNL):  128 KB
+      Shared Local Memory (SLM) is limited per work-group:
+        - Xe-HPG (Arc A-series):  64 KB  (192 KB L1$/SLM partition per core)
+        - Xe-HPC (PVC):          128 KB
+        - Xe2 (BMG B580/B570):   128 KB  (256 KB L1$/SLM partition per core)
 
       Exceeding the budget silently degrades performance or causes failures.
 
@@ -181,13 +182,20 @@ constraints:
     name: Monitor GRF usage — high register count kills occupancy
     severity: high
     description: |
-      Default GRFs per thread: 128 (128 x 32 bytes = 4 KB).
-      Large-GRF mode (grf_mode=256) extends to 256 per thread but halves
-      max thread count. Higher register usage reduces thread occupancy:
-        128 GRF/thread → 8 threads/VE (100% occupancy, default mode)
-        160 GRF/thread → 6 threads/VE (75%, requires large-GRF mode)
-        192 GRF/thread → 5 threads/VE (63%, requires large-GRF mode)
-        256 GRF/thread → 4 threads/VE (50%, max in large-GRF mode)
+      GRF per thread depends on GPU generation and mode:
+
+      Xe-HPG (Arc A-series): 32-byte registers
+        128 GRF/thread → 4 KB, 8 threads/VE (100% occupancy)
+        256 GRF/thread → 8 KB, 4 threads/VE (50%, large-GRF mode)
+
+      Xe2 (BMG B580/B570): 64-byte registers (2x wider, SIMD16)
+        128 GRF/thread → 8 KB, 8 threads/VE (100% occupancy)
+        256 GRF/thread → 16 KB, 4 threads/VE (50%, large-GRF mode)
+
+      On Xe2, prefer large-GRF mode for GEMM — the doubled register file
+      means deep K-loop unrolling (4-8x) fits without spilling, and the
+      reduced thread count (32/core) is acceptable because Xe2 has fewer
+      threads anyway (64 max/core vs 128 on Xe-HPG).
 
       Spills are catastrophic (~200+ cycle penalty per spill/fill).
 
@@ -860,19 +868,178 @@ patterns:
     rationale: |
       Knowing expected performance helps identify under-optimized kernels.
       Small shapes are launch-overhead limited; large shapes should approach
-      hardware peak.
+      hardware peak. Targets are per-device — use the correct GPU family.
     pattern_after: |
-      // BF16 GEMM performance targets (Arc A770):
-      //   M=N=K=8192:  25-30 TFLOPS (65-75% peak)
-      //   M=N=K=4096:  22-28 TFLOPS (60-70% peak)
-      //   M=N=K=1024:  12-18 TFLOPS (30-45% peak)
-      //   M=N=K=512:    3-6  TFLOPS (10-15% peak) — launch-overhead limited
+      // ========== Intel Arc B580 (Xe2-HPG / BMG-G21) ==========
+      // Peak BF16 XMX: ~117 TFLOPS | Memory BW: 456 GB/s
+      // 20 Xe-cores, 160 XMX engines (8/core x 2048-bit)
       //
-      // Tile hierarchy for peak performance:
-      //   Work-group: 128x128, Subgroup: 32x32, DPAS: 8x8
-      //   With double-buffered SLM and 3-4 way K-loop unrolling
+      // BF16 GEMM measured performance (Arc B580, CUTLASS/XeTLA):
+      //
+      //   Baseline (naive CUTLASS):
+      //     M=N=K=4096:  3.7  TFLOPS  (36.96 ms)
+      //     M=N=K=2048:  3.7  TFLOPS  (4.59 ms)
+      //     M=N=K=1024:  5.7  TFLOPS  (0.38 ms)
+      //     M=N=K=512:   1.2  TFLOPS  (0.23 ms) — launch-overhead limited
+      //     M=N=K=256:   0.2  TFLOPS  (0.14 ms) — launch-overhead limited
+      //
+      //   Optimized (XeTLA-tuned):
+      //     M=N=K=4096:  37.9 TFLOPS  (3.62 ms)  — 32% of peak, 10.2x speedup
+      //     M=N=K=2048:  37.6 TFLOPS  (0.46 ms)  — 32% of peak, 10.1x speedup
+      //     M=N=K=1024:  14.7 TFLOPS  (0.15 ms)  — 12.6% of peak, 2.6x speedup
+      //     M=N=K=512:   13.1 TFLOPS  (0.02 ms)  — 11.2% of peak, 11.2x speedup
+      //     M=N=K=256:    2.5 TFLOPS  (0.01 ms)  — 2.1% of peak, 10.2x speedup
+      //
+      //   Performance targets (what an optimized kernel should achieve):
+      //     M=N=K>=4096:  35-50  TFLOPS (30-43% peak) — room for improvement
+      //     M=N=K=2048:   30-45  TFLOPS (26-38% peak)
+      //     M=N=K=1024:   12-25  TFLOPS (10-21% peak)
+      //     M=N=K=512:     5-15  TFLOPS (4-13% peak) — launch overhead significant
+      //
+      // ========== Intel Arc B570 (Xe2-HPG / BMG-G21 cut) ==========
+      // Peak BF16 XMX: ~105 TFLOPS | Memory BW: 380 GB/s
+      // 18 Xe-cores, 144 XMX engines
+      // Scale B580 targets by ~0.9x
+      //
+      // ========== Intel Arc Pro B-series (workstation) ==========
+      // Same Xe2 architecture, similar or higher clocks
+      // Use B580 targets as baseline, adjust for core count
+      //
+      // Tile hierarchy for peak performance on Xe2:
+      //   Work-group: 256x256, Subgroup: 32x64, DPAS: 8x8
+      //   With double-buffered SLM (128 KB budget) and 4-8 way K-loop unrolling
+      //   SIMD16 required for all XMX operations on Xe2
     expected_speedup: "reference targets, not a pattern"
     applies_to: [gemm]
     notes: |
+      Measured data from B580 benchmarks (2026-04-29) using CUTLASS/XeTLA BF16 GEMM.
+      Optimized kernel reaches ~38 TFLOPS at N>=2048 (32% peak), suggesting further
+      optimization headroom — likely from larger tile sizes and deeper prefetching.
       Small GEMM (< 512x512) should be batched or fused into larger kernels.
-      512x512 standalone GEMM achieves only 10-15% peak due to launch overhead.
+      Arithmetic intensity threshold: ~257 FLOPs/byte (B580) — problems below
+      this are memory-bandwidth-bound, not compute-bound.
+
+  - id: sycl_xe2_architecture_differences
+    name: Xe2 (Battlemage/BMG) architecture changes from Xe-HPG (Alchemist)
+    stage: device_specific
+    description: Key architecture changes that affect kernel optimization on Xe2
+    rationale: |
+      Xe2 (BMG) restructures the compute units compared to Xe-HPG (ACM).
+      Code that was optimal on Arc A-series may need adjustment for B-series.
+    pattern_after: |
+      // ===== Xe2-HPG (B580/B570/Pro B) vs Xe-HPG (A770/A750) =====
+      //
+      // CHANGE 1: XVEs halved but 2x wider
+      //   Xe-HPG: 16 XVE/core x 256-bit (SIMD8 native)
+      //   Xe2:     8 XVE/core x 512-bit (SIMD16 native)
+      //   Impact: SIMD8 no longer efficient. Always use SIMD16 or SIMD32.
+      //
+      // CHANGE 2: XMX engines halved but 2x wider
+      //   Xe-HPG: 16 XMX/core x 1024-bit
+      //   Xe2:     8 XMX/core x 2048-bit
+      //   Impact: Same per-core throughput, fewer scheduling units.
+      //
+      // CHANGE 3: GRF doubled
+      //   Xe-HPG: 32 KB GRF/XVE (4 KB/thread small, 8 KB/thread large)
+      //   Xe2:    64 KB GRF/XVE (8 KB/thread small, 16 KB/thread large)
+      //   Impact: 2x more registers — can unroll deeper, fewer spills.
+      //
+      // CHANGE 4: SLM doubled
+      //   Xe-HPG: 64 KB max per work-group (192 KB L1$/SLM per core)
+      //   Xe2:   128 KB max per work-group (256 KB L1$/SLM per core)
+      //   Impact: Larger double-buffer tiles, bigger SLM-cached blocks.
+      //
+      // CHANGE 5: Max threads per core halved
+      //   Xe-HPG: 128 threads/core (small GRF) / 64 (large GRF)
+      //   Xe2:     64 threads/core (small GRF) / 32 (large GRF)
+      //   Impact: Less latency hiding via thread switching.
+      //           Must rely more on ILP, prefetch, and K-loop unrolling.
+      //
+      // CHANGE 6: Higher clocks
+      //   Xe-HPG: ~2100-2400 MHz
+      //   Xe2:    ~2670-2850 MHz
+      //   Impact: Partially compensates for fewer cores.
+      //
+      // CHANGE 7: DPAS tile shape unchanged
+      //   Both: 8x8x16 (BF16/FP16), 8x8x32 (INT8)
+      //   Impact: joint_matrix code ports directly.
+      //
+      // CHANGE 8: New data types on Xe2
+      //   TF32 and BF8 DPAS support (not on Xe-HPG)
+    expected_speedup: "architecture guide, not a pattern"
+    applies_to: [all]
+
+  - id: sycl_xe2_optimization_strategy
+    name: Optimization strategy for Xe2 (BMG) — fewer threads, more registers
+    stage: device_specific
+    description: Adapt kernel design for Xe2 reduced thread count and increased resources
+    rationale: |
+      Xe2 has half the threads per core but double the GRF and SLM per thread.
+      The optimal strategy shifts from "many small threads hiding latency" to
+      "fewer threads doing more work with deeper pipelines".
+    pattern_after: |
+      // Strategy for Xe2 (B580/B570):
+      //
+      // 1. USE LARGE GRF MODE (256 registers)
+      //    - 16 KB/thread on Xe2 vs 8 KB/thread on Xe-HPG
+      //    - Thread count drops to 32/core but each thread has massive register space
+      //    - Enables 4-8 way K-loop unrolling without spills
+      //    - Use: -cl-intel-256-GRF-per-thread or [[intel::reqd_work_group_size(...)]]
+      //
+      // 2. DEEPER K-LOOP UNROLLING (4-8x instead of 3-4x)
+      //    - More GRF means more accumulators fit without spilling
+      //    - Critical on Xe2 because fewer threads = less latency hiding
+      //    - Each extra unroll adds ~16 GRF (was a bottleneck on Xe-HPG, not on Xe2)
+      //
+      // 3. LARGER SLM TILES
+      //    - 128 KB SLM budget (vs 64 KB on Xe-HPG)
+      //    - Double-buffered BF16 tiles up to: 2*(256*32 + 32*256)*2 = 64 KB
+      //    - Or single-buffered: 2*(256*64 + 64*256)*2 = 128 KB
+      //    - Reduces global memory traffic per K-iteration
+      //
+      // 4. AGGRESSIVE PREFETCHING
+      //    - Fewer threads = less natural latency hiding
+      //    - Must explicitly prefetch next K-block while computing current
+      //    - sub_group_block_prefetch ~400 cycles before use
+      //
+      // 5. INSTRUCTION-LEVEL PARALLELISM
+      //    - Xe2 has improved ALU0+ALU1 and ALU0+XMX co-issue
+      //    - Interleave address calculations with DPAS instructions
+      //    - Use independent accumulators for parallel reduction chains
+    expected_speedup: "10-30% over naively ported Xe-HPG kernels"
+    applies_to: [gemm, attention, compute_bound]
+
+  - id: sycl_bmg_hardware_specs
+    name: Intel Xe2-HPG (Battlemage) hardware specifications
+    stage: device_specific
+    description: Quick reference for BMG-family GPU specifications
+    rationale: |
+      Knowing exact hardware specs prevents over/under-subscribing resources
+      and guides tile size, unroll depth, and SLM budget decisions.
+    pattern_after: |
+      // ===== Arc B580 (BMG-G21, 20 Xe-cores) =====
+      //   BF16 XMX peak:   ~117 TFLOPS
+      //   FP32 vector peak: ~14.6 TFLOPS
+      //   INT8 XMX peak:   ~233 TOPS
+      //   Memory:           12 GB GDDR6, 192-bit, 456 GB/s
+      //   L2 cache:         18 MB
+      //   SLM/core:         128 KB max per work-group (256 KB L1$/SLM partition)
+      //   GRF/XVE:          64 KB (128 regs x 64B or 256 regs x 64B)
+      //   Threads/core:     64 (small GRF) / 32 (large GRF)
+      //   Clock:            2670 MHz base / ~2850 MHz boost
+      //   TDP:              150 W
+      //
+      // ===== Arc B570 (BMG-G21 cut, 18 Xe-cores) =====
+      //   BF16 XMX peak:   ~105 TFLOPS
+      //   Memory:           10 GB GDDR6, 160-bit, 380 GB/s
+      //   L2 cache:         15 MB
+      //   Same per-core specs as B580
+      //
+      // ===== Roofline thresholds (BF16) =====
+      //   B580: 117 TFLOPS / 456 GB/s = 257 FLOPs/byte
+      //   B570: 105 TFLOPS / 380 GB/s = 276 FLOPs/byte
+      //   GEMM arithmetic intensity: 2*M*N*K / (2*(M*K + K*N + M*N))
+      //   At M=N=K=1024: ~341 FLOPs/byte → compute-bound
+      //   At M=N=K=256:  ~85 FLOPs/byte → memory-bound on both GPUs
+    expected_speedup: "hardware reference, not a pattern"
+    applies_to: [all]

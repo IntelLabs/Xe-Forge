@@ -54,7 +54,7 @@ Examples:
     )
 
     # Required arguments
-    parser.add_argument("--input", "-i", type=str, required=True, help="Input Triton kernel file")
+    parser.add_argument("--input", "-i", type=str, required=True, help="Input kernel file")
     parser.add_argument(
         "--name", "-n", type=str, default="kernel", help="Kernel function name (default: kernel)"
     )
@@ -188,6 +188,12 @@ Examples:
     if overrides:
         config = override_config(**overrides)
 
+    dsl = config.device_config.dsl
+
+    # Default to bench-xpu variant for SYCL
+    if args.variant is None and dsl in ("sycl",):
+        args.variant = "bench-xpu"
+
     # Parse stages
     stages = None
     if args.stages:
@@ -256,9 +262,9 @@ Examples:
             print(f"  Spec tolerances: rtol={spec_rtol}, atol={spec_atol}")
         print()
 
-    # Create executor if spec provided
+    # Create executor if spec provided (let pipeline auto-create for SYCL/CUDA)
     executor = None
-    if args.spec:
+    if args.spec and dsl not in ("sycl", "cuda"):
         from xe_forge.core import KernelBenchExecutor
 
         executor = KernelBenchExecutor(
@@ -274,19 +280,22 @@ Examples:
 
     # Read input file
     with open(args.input) as f:
-        triton_code = f.read()
+        kernel_code = f.read()
 
-    # Read the pytorch file
-    try:
-        with open(f"{os.path.splitext(args.input)[0]}_pytorch.py") as f:
-            pytorch_code = f.read()
-    except FileNotFoundError:
-        pytorch_code = ""
-        print(f"No PyTorch reference file found at {os.path.splitext(args.input)[0]}_pytorch.py")
+    # Read reference implementation (Python DSLs only)
+    reference_code = ""
+    if dsl not in ("sycl", "cuda"):
+        try:
+            with open(f"{os.path.splitext(args.input)[0]}_pytorch.py") as f:
+                reference_code = f.read()
+        except FileNotFoundError:
+            print(
+                f"No PyTorch reference file found at {os.path.splitext(args.input)[0]}_pytorch.py"
+            )
 
     result = pipeline.optimize(
-        triton_code=triton_code,
-        pytorch_code=pytorch_code,
+        kernel_code=kernel_code,
+        reference_code=reference_code,
         kernel_name=args.name if args.name != "kernel" else None,
         input_shapes=input_shapes,
         stages=stages,

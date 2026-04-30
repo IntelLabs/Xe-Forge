@@ -25,6 +25,10 @@ from xe_forge.core.executor import (
     KernelExecutor,
     create_executor_tool,
 )
+from xe_forge.core.sycl_executor import (
+    SyclComparisonResult,
+    SyclExecutor,
+)
 from xe_forge.core.spec_loader import (
     InputSpec,
     KernelSpec,
@@ -56,6 +60,8 @@ __all__ = [
     "KernelBenchExecutor",
     "KernelExecutor",
     "KernelSpec",
+    "SyclComparisonResult",
+    "SyclExecutor",
     "VariantSpec",
     "XPUDeviceInfo",
     "create_executor_from_config",
@@ -79,23 +85,18 @@ __all__ = [
 ]
 
 
-def create_executor_from_config(config) -> KernelBenchExecutor:
+def create_executor_from_config(config) -> KernelBenchExecutor | SyclExecutor:
     """
-    Create a KernelBenchExecutor with settings from Config.
+    Create an executor with settings from Config.
 
-    Args:
-        config: Config object (from xe_forge.config)
-
-    Returns:
-        KernelBenchExecutor configured with correctness settings
-
-    Example:
-        from xe_forge.config import get_config
-        from xe_forge.core import create_executor_from_config
-
-        config = get_config()
-        executor = create_executor_from_config(config)
+    Returns SyclExecutor when dsl=sycl, KernelBenchExecutor otherwise.
     """
+    from xe_forge.models import DSL
+
+    if config.device_config.dsl == DSL.SYCL:
+        return SyclExecutor(
+            verify=config.optimization.require_correctness,
+        )
     return KernelBenchExecutor(
         device=config.device_config.device,
         require_correctness=config.optimization.require_correctness,

@@ -12,7 +12,6 @@ from collections.abc import Callable
 import dspy
 
 from xe_forge.agents.base import Optimizer
-from xe_forge.core import KernelBenchExecutor
 from xe_forge.knowledge.patterns import get_stage_for_issue
 
 try:
@@ -31,6 +30,53 @@ logger = logging.getLogger(__name__)
 
 
 SUCCESS_MESSAGE = "Success! Optimization verified and kernel is faster."
+
+
+def _extract_gemm_dims(
+    input_shapes: list[tuple[int, ...]] | None,
+) -> tuple[int, int, int]:
+    """Extract M, N, K from GEMM input shapes [(M, K), (K, N)]."""
+    if input_shapes and len(input_shapes) >= 2:
+        a, b = input_shapes[0], input_shapes[1]
+        if len(a) >= 2 and len(b) >= 2:
+            return a[-2], b[-1], a[-1]
+    return 1024, 1024, 1024
+
+
+def _verify_sycl(code, original_code, executor, input_shapes, spec_dims=None):
+    """Verify a SYCL C++ kernel: basic structure check + runtime comparison."""
+    if "#include" not in code:
+        return "MISSING: C++ code must contain #include directives."
+    if "sycl" not in code.lower() and "cutlass" not in code.lower():
+        return "MISSING: Code does not appear to be a SYCL/CUTLASS kernel."
+
+    if executor:
+        try:
+            _dims = spec_dims or dict(zip(("M", "N", "K"), _extract_gemm_dims(input_shapes)))
+            comparison = executor.compare_kernels(
+                original_code=original_code,
+                optimized_code=code,
+                dims=_dims,
+            )
+            if not comparison.optimized_correct:
+                return comparison.feedback_message or "Optimized kernel failed."
+            if comparison.is_slower:
+                sd = 1.0 / comparison.speedup if comparison.speedup > 0 else float("inf")
+                return (
+                    f"PERFORMANCE REGRESSION: {sd:.2f}x SLOWER.\n"
+                    f"Original: {comparison.original_time_ms:.4f}ms ({comparison.original_tflops or 0:.3f} TFlop/s)\n"
+                    f"Optimized: {comparison.optimized_time_ms:.4f}ms ({comparison.optimized_tflops or 0:.3f} TFlop/s)"
+                )
+            logger.info(
+                f"SYCL optimization verified: {comparison.speedup:.2f}x speedup "
+                f"({comparison.original_tflops or 0:.3f} -> {comparison.optimized_tflops or 0:.3f} TFlop/s)"
+            )
+            return SUCCESS_MESSAGE
+        except Exception as e:
+            return f"RUNTIME ERROR: {e!s}"
+
+    logger.warning("No executor - accepting SYCL code based on static checks only")
+    return SUCCESS_MESSAGE
 
 
 class OptimizationReActSignature(dspy.Signature):
@@ -84,6 +130,46 @@ class OptimizationReActSignature(dspy.Signature):
     )
 
 
+class SyclOptimizationReActSignature(dspy.Signature):
+    """Optimize a SYCL/CUTLASS C++ kernel for Intel XPU.
+
+    You are an expert SYCL/CUTLASS kernel optimizer for Intel XPU.
+
+    Your task: Optimize the C++ kernel for maximum performance.
+    You may change template parameters, dispatch policies, and data types
+    if the outputs remain numerically equivalent.
+
+    === OPTIMIZATION PRIORITIES ===
+    1. TileShape: try Shape<_256,_256,_32> or Shape<_128,_128,_64> for BMG
+    2. PipelineStages: 2-4 (balance prefetching vs register pressure)
+    3. MMA Atom: XE_DPAS_TT<8, float, bfloat16_t> for BMG
+    4. Dispatch Policy: MainloopXeL1Staged for L1 caching
+    5. Data types: bfloat16_t inputs, float accumulators
+    6. Memory layout: match RowMajor/ColumnMajor to access patterns
+
+    === CODE REQUIREMENTS ===
+    - Complete, valid SYCL C++ with all #include directives
+    - CUTLASS template types, ExampleRunner, and main()
+    - Must compile with icpx -fsycl
+    - Keep the Cutlass GEMM Performance output format
+    """
+
+    original_code: dspy.Code["cpp"] = dspy.InputField(
+        desc="Original SYCL C++ kernel code for reference"
+    )
+    current_code: dspy.Code["cpp"] = dspy.InputField(
+        desc="Current SYCL C++ kernel code to optimize"
+    )
+    stage: str = dspy.InputField(desc="Optimization stage to apply")
+    issues: list[DetectedIssue] = dspy.InputField(desc="Specific issues to fix in this stage")
+    knowledge_patterns: str = dspy.InputField(desc="Optimization patterns and examples to follow")
+    xpu_config: str = dspy.InputField(desc="Intel XPU configuration parameters")
+
+    optimized_code: dspy.Code["cpp"] = dspy.OutputField(
+        desc="Complete optimized SYCL C++ kernel with all #includes, templates, ExampleRunner, and main()."
+    )
+
+
 class OptimizerReActAgent(Optimizer):
     """
     Agent that applies optimization transformations to Triton kernels using ReAct.
@@ -94,21 +180,11 @@ class OptimizerReActAgent(Optimizer):
     def __init__(
         self,
         knowledge_base: KnowledgeBase | None = None,
-        executor: KernelBenchExecutor | None = None,
+        executor=None,
         validator: Callable | None = None,
         max_iterations: int = 5,
         dsl: DSL | str = DSL.TRITON,
     ):
-        """
-        Initialize optimizer agent.
-
-        Args:
-            knowledge_base: KnowledgeBase instance for optimization patterns
-            executor: KernelBenchExecutor instance for runtime verification
-            validator: Additional validator function (optional)
-            max_iterations: Max iterations per stage
-            dsl: DSL type for code generation
-        """
         self.knowledge_base = knowledge_base
         self.executor = executor
         self.validator = validator
@@ -125,84 +201,57 @@ class OptimizerReActAgent(Optimizer):
         input_shapes: list[tuple[int, ...]] | None,
         flop: float | None,
         dtype=None,
+        spec_dims: dict[str, int] | None = None,
     ) -> Callable:
-        """
-        Create a verification tool for ReAct.
+        """Create a verification tool for ReAct.
 
-        The tool validates the optimized code and returns:
-        - SUCCESS_MESSAGE if valid and faster
-        - Detailed error/feedback message otherwise
+        Returns SUCCESS_MESSAGE if valid and faster, detailed error otherwise.
         """
         executor = self.executor
+        dsl = self.dsl
 
         def compile_and_verify(optimized_code: dspy.Code["python"]) -> str:  # noqa: UP037
-            """Compile and verify the optimized Triton kernel.
-
-            Checks:
-            1. Python syntax validity
-            2. Triton kernel structure (imports, decorators, Model class)
-            3. Runtime execution (if executor available)
-            4. Performance (must be faster than original)
-
-            Note: Correctness checking (output comparison) will be added later.
-
+            """Compile and verify the optimized kernel.
             Returns SUCCESS_MESSAGE on success, or detailed error message.
             """
             code: str = optimized_code.code
 
-            # Step 1: Validate Python syntax
+            if dsl == DSL.SYCL:
+                return _verify_sycl(
+                    code,
+                    original_code,
+                    executor,
+                    input_shapes,
+                    spec_dims,
+                )
+
+            # --- Triton path (unchanged) ---
             try:
                 ast.parse(code)
             except SyntaxError as e:
                 return (
                     f"SYNTAX ERROR at line {e.lineno}: {e.msg}\n"
-                    f"Please fix the Python syntax error and try again.\n"
                     f"Problematic line: {e.text.strip() if e.text else 'unknown'}"
                 )
 
-            # Step 2: Validate Triton structure
-            has_triton_import = "import triton" in code or "from triton" in code
-            has_tl_import = "triton.language" in code or "import triton.language" in code
-            has_kernel = "@triton.jit" in code
-            has_model = "class Model" in code
+            for check, msg in [
+                ("import triton" in code or "from triton" in code, "MISSING: import triton"),
+                (
+                    "triton.language" in code or "import triton.language" in code,
+                    "MISSING: import triton.language",
+                ),
+                ("@triton.jit" in code, "MISSING: @triton.jit decorator"),
+                ("class Model" in code, "MISSING: class Model"),
+            ]:
+                if not check:
+                    return msg
 
-            if not has_triton_import:
-                return (
-                    "MISSING IMPORT: Code must include 'import triton'.\n"
-                    "Please add: import triton\n"
-                    "            import triton.language as tl"
-                )
-
-            if not has_tl_import:
-                return (
-                    "MISSING IMPORT: Code must include 'import triton.language as tl'.\n"
-                    "Please add this import for Triton language primitives."
-                )
-
-            if not has_kernel:
-                return (
-                    "MISSING KERNEL: Code must include a @triton.jit decorated kernel function.\n"
-                    "Please ensure the kernel function has the @triton.jit decorator."
-                )
-
-            if not has_model:
-                return (
-                    "MISSING MODEL: Code must include a 'class Model(nn.Module)' wrapper.\n"
-                    "Please ensure the Model class with forward() method is present."
-                )
-
-            # Step 2b: Validate Triton constraints
             warps_match = re.search(r"num_warps\s*=\s*(\d+)", code)
             if warps_match:
                 num_warps = int(warps_match.group(1))
                 if num_warps <= 0 or (num_warps & (num_warps - 1)) != 0:
-                    return (
-                        f"INVALID num_warps={num_warps}: Must be a power of 2.\n"
-                        f"Valid values: 1, 2, 4, 8, 16, 32\n"
-                        f"Please fix num_warps to be a power of 2."
-                    )
+                    return f"INVALID num_warps={num_warps}: Must be a power of 2."
 
-            # Check block sizes are powers of 2
             for block_name in [
                 "BLOCK_M",
                 "BLOCK_N",
@@ -215,13 +264,8 @@ class OptimizerReActAgent(Optimizer):
                 if block_match:
                     block_size = int(block_match.group(1))
                     if block_size <= 0 or (block_size & (block_size - 1)) != 0:
-                        return (
-                            f"INVALID {block_name}={block_size}: Must be a power of 2.\n"
-                            f"Valid values: 16, 32, 64, 128, 256\n"
-                            f"Please fix {block_name} to be a power of 2."
-                        )
+                        return f"INVALID {block_name}={block_size}: Must be a power of 2."
 
-            # Step 3: Runtime verification (if executor available)
             if executor and input_shapes:
                 try:
                     comparison = executor.compare_kernels(
@@ -233,68 +277,36 @@ class OptimizerReActAgent(Optimizer):
                         dtype=dtype,
                     )
 
-                    # Debug: log what executor returned
                     logger.debug(
                         f"compare_kernels result: speedup={comparison.speedup}, "
                         f"orig_time={getattr(comparison, 'original_time_us', 'N/A')}, "
                         f"opt_time={getattr(comparison, 'optimized_time_us', 'N/A')}, "
-                        f"orig_tflops={comparison.original_tflops}, "
-                        f"opt_tflops={comparison.optimized_tflops}, "
                         f"correct={comparison.optimized_correct}, "
                         f"is_slower={comparison.is_slower}"
                     )
 
-                    # Check if optimized kernel failed to compile/run
                     if not comparison.optimized_correct:
-                        # Use executor's feedback message if available
-                        if comparison.feedback_message:
-                            return comparison.feedback_message
-                        return (
-                            "COMPILATION/RUNTIME ERROR: Optimized kernel failed.\n"
-                            "Please check for syntax errors, missing imports, or invalid Triton operations."
-                        )
+                        return comparison.feedback_message or "Optimized kernel failed."
 
-                    # Check performance regression
                     if comparison.is_slower:
                         slowdown = (
                             1.0 / comparison.speedup if comparison.speedup > 0 else float("inf")
                         )
-                        orig_tflops = comparison.original_tflops or 0
-                        opt_tflops = comparison.optimized_tflops or 0
                         return (
-                            f"PERFORMANCE REGRESSION: Optimized kernel is {slowdown:.2f}x SLOWER.\n"
-                            f"Original: {comparison.original_time_us:.2f}μs ({orig_tflops:.2f} TFLOPS)\n"
-                            f"Optimized: {comparison.optimized_time_us:.2f}μs ({opt_tflops:.2f} TFLOPS)\n"
-                            f"The optimization made performance worse. Please try a different approach:\n"
-                            f"- Check tile sizes (prefer 256x256 for XPU)\n"
-                            f"- Ensure num_warps=32 for XPU\n"
-                            f"- Use block pointers with boundary_check\n"
-                            f"- Add GROUP_SIZE_M swizzling"
+                            f"PERFORMANCE REGRESSION: {slowdown:.2f}x SLOWER.\n"
+                            f"Original: {comparison.original_time_us:.2f}μs\n"
+                            f"Optimized: {comparison.optimized_time_us:.2f}μs"
                         )
 
-                    # Success!
-                    speedup = comparison.speedup
-                    orig_tflops = comparison.original_tflops or 0
-                    opt_tflops = comparison.optimized_tflops or 0
-
                     logger.info(
-                        f"✓ Optimization verified: {speedup:.2f}x speedup "
-                        f"({orig_tflops:.2f} → {opt_tflops:.2f} TFLOPS)"
+                        f"Optimization verified: {comparison.speedup:.2f}x speedup "
+                        f"({comparison.original_tflops or 0:.2f} -> {comparison.optimized_tflops or 0:.2f} TFLOPS)"
                     )
                     return SUCCESS_MESSAGE
 
                 except Exception as e:
-                    return (
-                        f"RUNTIME ERROR: Kernel execution failed.\n"
-                        f"Error: {e!s}\n"
-                        f"Please fix the runtime error. Common issues:\n"
-                        f"- Missing imports (torch, nn)\n"
-                        f"- Incorrect tensor shapes or strides\n"
-                        f"- Invalid Triton operations\n"
-                        f"- Device mismatch (ensure XPU compatibility)"
-                    )
+                    return f"RUNTIME ERROR: {e!s}"
 
-            # No executor - accept if syntax and structure are valid
             logger.warning("No executor available - accepting based on static checks only")
             return SUCCESS_MESSAGE
 
@@ -308,6 +320,7 @@ class OptimizerReActAgent(Optimizer):
         xpu_config: dict,
         kernel_name: str | None = None,
         input_shapes: list[tuple[int, ...]] | None = None,
+        spec_dims: dict[str, int] | None = None,
         flop: float | None = None,
         dtype=None,
         pytorch_code: str = "",
@@ -370,11 +383,13 @@ class OptimizerReActAgent(Optimizer):
             input_shapes=input_shapes,
             flop=flop,
             dtype=dtype,
+            spec_dims=spec_dims,
         )
 
         # Create ReAct agent for this optimization
+        sig = SyclOptimizationReActSignature if self.dsl == DSL.SYCL else OptimizationReActSignature
         react_agent = dspy.ReAct(
-            signature=OptimizationReActSignature,
+            signature=sig,
             tools=[verify_tool],
             max_iters=self.max_iterations,
         )
@@ -415,21 +430,31 @@ class OptimizerReActAgent(Optimizer):
             last_error = None
 
             # Check syntax first
-            if not self._is_valid_python(optimized_code):
+            if self.dsl != DSL.SYCL and not self._is_valid_python(optimized_code):
                 last_error = "Final code has invalid Python syntax"
-            elif not self._is_valid_triton(optimized_code):
-                last_error = "Final code is not valid Triton kernel"
-            elif self.executor and input_shapes:
+            elif not self._is_valid_kernel(optimized_code):
+                last_error = "Final code is not a valid kernel"
+            elif self.executor and (self.dsl == DSL.SYCL or input_shapes):
                 # Runtime verification
                 try:
-                    comparison = self.executor.compare_kernels(
-                        original_code=original_code,
-                        optimized_code=optimized_code,
-                        kernel_name=kernel_name,
-                        input_shapes=input_shapes,
-                        flop=flop,
-                        dtype=dtype,
-                    )
+                    if self.dsl == DSL.SYCL:
+                        _dims = spec_dims or dict(
+                            zip(("M", "N", "K"), _extract_gemm_dims(input_shapes))
+                        )
+                        comparison = self.executor.compare_kernels(
+                            original_code=original_code,
+                            optimized_code=optimized_code,
+                            dims=_dims,
+                        )
+                    else:
+                        comparison = self.executor.compare_kernels(
+                            original_code=original_code,
+                            optimized_code=optimized_code,
+                            kernel_name=kernel_name,
+                            input_shapes=input_shapes,
+                            flop=flop,
+                            dtype=dtype,
+                        )
 
                     if not comparison.optimized_correct:
                         last_error = "Optimized kernel produces incorrect results"
@@ -548,8 +573,10 @@ class OptimizerReActAgent(Optimizer):
             logger.debug(f"Syntax error at line {e.lineno}: {e.msg}")
             return False
 
-    def _is_valid_triton(self, code: str) -> bool:
-        """Check if code looks like a valid Triton kernel."""
+    def _is_valid_kernel(self, code: str) -> bool:
+        """Check if code looks like a valid kernel for the current DSL."""
+        if self.dsl == DSL.SYCL:
+            return "#include" in code and ("sycl" in code.lower() or "cutlass" in code.lower())
         has_triton_import = "import triton" in code or "from triton" in code
         has_kernel = "@triton.jit" in code or "class Model" in code
         return has_triton_import and has_kernel

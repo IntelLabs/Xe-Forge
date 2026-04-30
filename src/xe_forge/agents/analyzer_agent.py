@@ -18,7 +18,56 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _build_issue_categories() -> str:
+_SYCL_DESCRIPTIONS: dict[IssueType, str] = {
+    IssueType.SUBOPTIMAL_TILE_SIZE: "TileShape dimensions suboptimal for Intel BMG — try Shape<_256,_256,_32> or Shape<_128,_128,_64>",
+    IssueType.SUBOPTIMAL_WARPS: "SubgroupSize in MMA Atom suboptimal — try XE_DPAS_TT<8, float, bfloat16_t>",
+    IssueType.HIGH_REGISTER_PRESSURE: "Too many PipelineStages or large TileShape causing register spill",
+    IssueType.CACHE_EVICTION_RISK: "PipelineStages too high or TileShape too large for L1/L2",
+    IssueType.UNCOALESCED_ACCESS: "Memory layout mismatch (RowMajor vs ColumnMajor) causing non-coalesced access",
+    IssueType.DTYPE_PRECISION: "Using float accumulators where bfloat16 suffices, or float64 anywhere",
+    IssueType.DTYPE_FLOAT64: "float64 in computation — extremely slow on Intel XPU",
+    IssueType.UNFUSED_ELEMENTWISE: "Elementwise op not fused into CUTLASS epilogue callbacks",
+    IssueType.UNFUSED_KERNELS: "Multiple kernel launches that could be fused",
+    IssueType.SUBOPTIMAL_ALGORITHM: "Naive algorithm when a more efficient form exists",
+    IssueType.REDUNDANT_COMPUTATION: "Repeated work that can be factored out",
+    IssueType.OPEN_ENDED: (
+        "A novel optimization not covered by any existing issue_type. "
+        "Use ONLY when you have found a concrete, high-value, implementable "
+        "optimization with no matching type above. "
+        "You MUST populate open_ended_proposal with: "
+        "(a) exactly what changes, "
+        "(b) why it is valid, "
+        "(c) a before/after C++ code sketch, "
+        "(d) estimated speedup with reasoning."
+    ),
+}
+
+_SYCL_SKIP_ISSUES: set[IssueType] = {
+    IssueType.MANUAL_POINTER_ARITHMETIC,
+    IssueType.BLOCK_PTR_BOUNDARY_WRONG,
+    IssueType.BLOCK_PTR_MULTIPLE_OF_MISUSE,
+    IssueType.MISSING_BLOCK_POINTERS,
+    IssueType.MISSING_AUTOTUNE,
+    IssueType.SUBOPTIMAL_AUTOTUNE_CONFIGS,
+    IssueType.AUTOTUNE_KEY_MISSING,
+    IssueType.AUTOTUNE_DUPLICATE_PARAMS,
+    IssueType.MISSING_GRF_MODE,
+    IssueType.NO_SWIZZLING,
+    IssueType.SIGMOID_SLOW_EXP,
+    IssueType.REPACK_IN_FORWARD,
+    IssueType.MISSING_PACKED_TRANSPOSE,
+    IssueType.MISSING_PERSISTENT,
+    IssueType.PERSISTENT_NUM_PROGS_HARDCODED,
+    IssueType.SERIALIZED_N_TILES,
+    IssueType.MISSING_TMA,
+    IssueType.MISSING_BOUNDARY_CHECK,
+    IssueType.DEVICE_HOST_SYNC,
+    IssueType.NON_CONTIGUOUS_INPUT,
+    IssueType.TRANSPOSE_IN_LOOP,
+}
+
+
+def _build_issue_categories(dsl: DSL = DSL.TRITON) -> str:
     """
     Generate the === ISSUE CATEGORIES === block from the IssueType enum + stage mapping.
     Groups by stage in pipeline order so the LLM sees a clean, current list.
@@ -122,9 +171,19 @@ def _build_issue_categories() -> str:
         ),
     }
 
+    # When building for SYCL, apply overrides and skip Triton-only issues
+    if dsl == DSL.SYCL:
+        skip = _SYCL_SKIP_ISSUES
+        desc_overrides = _SYCL_DESCRIPTIONS
+    else:
+        skip = set()
+        desc_overrides = {}
+
     # Group by stage
     by_stage: dict[OptimizationStage, list[IssueType]] = {s: [] for s in stage_order}
     for issue in IssueType:
+        if issue in skip:
+            continue
         stage = get_stage_for_issue(issue)
         if stage in by_stage:
             by_stage[stage].append(issue)
@@ -136,7 +195,7 @@ def _build_issue_categories() -> str:
             continue
         lines.append(f"{stage_labels[stage]}:")
         for issue in issues:
-            desc = _descriptions.get(issue, "")
+            desc = desc_overrides.get(issue, _descriptions.get(issue, ""))
             if desc:
                 lines.append(f"  - {issue.value}: {desc}")
             else:
@@ -147,7 +206,8 @@ def _build_issue_categories() -> str:
 
 
 # Build once at import time — cheap, just string formatting
-_ISSUE_CATEGORIES_BLOCK = _build_issue_categories()
+_ISSUE_CATEGORIES_BLOCK = _build_issue_categories(DSL.TRITON)
+_SYCL_ISSUE_CATEGORIES_BLOCK = _build_issue_categories(DSL.SYCL)
 
 
 # ---------------------------------------------------------------------------
@@ -198,10 +258,10 @@ Examples that do NOT qualify (use the named type instead):
   * "fuse these kernels" → use unfused_kernels
 """
 
-    pytorch_code: dspy.Code["python"] = dspy.InputField(
+    kernel_code: dspy.Code["python"] = dspy.InputField(desc="Triton kernel source code to analyze.")
+    reference_code: str = dspy.InputField(
         desc="Original PyTorch implementation. May be empty if not available."
     )
-    triton_code: dspy.Code["python"] = dspy.InputField(desc="Triton kernel source code to analyze.")
     problem_context: str = dspy.InputField(
         desc="Problem size, FLOP count, target device, and other context."
     )
@@ -210,6 +270,50 @@ Examples that do NOT qualify (use the named type instead):
         desc="Critical constraints from the knowledge base that commonly manifest "
         "as bugs in Triton/XPU kernels. Use these to guide detection: if a "
         "constraint is violated in the code, flag the corresponding issue. "
+        "Empty string if KB is disabled."
+    )
+    issues_found: list[DetectedIssue] = dspy.OutputField(
+        desc="List of detected issues. Return empty array [] only if kernel is already optimal."
+    )
+
+
+class SyclAnalysisSignature(dspy.Signature):
+    __doc__ = f"""Analyze SYCL/CUTLASS C++ kernel for optimization opportunities on Intel XPU.
+
+You are a world-class expert in SYCL, CUTLASS/XeTLA, and Intel XPU GPU kernel optimization.
+
+Analyze the given SYCL C++ kernel code and identify ALL applicable optimizations.
+
+=== SYCL/CUTLASS OPTIMIZATION KNOBS ===
+- TileShape: Shape<_M, _N, _K> (e.g. 256x256x32, 128x128x64, 128x256x32)
+- PipelineStages: 2, 3, or 4 (more = more prefetching, but more register pressure)
+- MMA Atom: XE_DPAS_TT<SubgroupSize, AccumType, InputType> — SubgroupSize 4 or 8
+- Dispatch Policy: MainloopXeL1Staged (L1 cached), MainloopXeL0Staged
+- Data types: bfloat16_t/half_t inputs, float/bfloat16_t accumulators
+- Memory layout: RowMajor vs ColumnMajor for A, B, C, D matrices
+- Epilogue fusion: LinearCombination, bias addition, activation functions via FusionCallbacks
+- GmemTiledCopy: void (auto) or explicit copy atoms for fine-grained control
+
+{_SYCL_ISSUE_CATEGORIES_BLOCK}
+IMPORTANT:
+- Return issues as a JSON array of DetectedIssue objects.
+- Each issue MUST have: issue_type (exact string from the list above),
+  severity (1-5), description, suggested_fix, estimated_speedup.
+- issue_type MUST be one of the exact strings listed above.
+- Return empty array [] ONLY if the kernel is already optimal.
+"""
+
+    kernel_code: dspy.Code["cpp"] = dspy.InputField(
+        desc="SYCL/CUTLASS C++ kernel source code to analyze."
+    )
+    reference_code: str = dspy.InputField(
+        desc="Reference implementation or description. May be empty."
+    )
+    problem_context: str = dspy.InputField(
+        desc="Problem size, FLOP count, target device, and other context."
+    )
+    knowledge_base_context: str = dspy.InputField(
+        desc="Constraints from the knowledge base for SYCL/XPU kernels. "
         "Empty string if KB is disabled."
     )
     issues_found: list[DetectedIssue] = dspy.OutputField(
@@ -228,7 +332,8 @@ class AnalyzerAgent:
     def __init__(self, knowledge_base=None, dsl: DSL | str = DSL.TRITON):
         self.knowledge_base = knowledge_base
         self.dsl = DSL(dsl) if isinstance(dsl, str) else dsl
-        self.predictor = dspy.Predict(AnalysisSignature)
+        sig = SyclAnalysisSignature if self.dsl == DSL.SYCL else AnalysisSignature
+        self.predictor = dspy.Predict(sig)
 
     def analyze(
         self,
@@ -253,8 +358,8 @@ class AnalyzerAgent:
             )
         try:
             result = self.predictor(
-                triton_code=triton_code,
-                pytorch_code=pytorch_code or "",
+                kernel_code=triton_code,
+                reference_code=pytorch_code or "",
                 problem_context=problem_context,
                 knowledge_base_context=kb_context,
             )
