@@ -12,7 +12,7 @@ dependencies = [
   "python-dotenv>=1.0.0",
   "PyYAML>=6.0.0",
   "httpx>=0.24.0",
-  "ai-bench @ git+https://github.com/libxsmm/AI-bench@e44bf55031beb4bc6268f7fa3f38505bd69a2d34",
+  "ai-bench @ git+https://github.com/libxsmm/AI-bench@c11b0ed4801e9dd4eeaa48c5aed8136dd439dfea",
 ]
 
 [project.optional-dependencies]
