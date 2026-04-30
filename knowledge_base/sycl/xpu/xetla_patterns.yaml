@@ -487,14 +487,20 @@ patterns:
           matC = joint_matrix_mad(sg, matA, matB, matC);
       }
 
-      // Epilogue in registers — no extra global memory round-trip
-      float acc = joint_matrix_get(matC);
-      acc = fmax(0.0f, acc);           // ReLU
-      acc = acc + bias[col];           // Bias add
-      acc = acc * alpha;               // Scale
+      // Epilogue via joint_matrix_apply — operates on elements in-place
+      // No extra global memory round-trip
+      joint_matrix_apply(sg, matC,
+          [&](auto& val, size_t row, size_t col) {
+              val = sycl::fmax(0.0f, val);           // ReLU
+              val = val + bias[base_col + col];       // Bias add
+              val = val * alpha;                      // Scale
+          });
       joint_matrix_store(sg, matC, out_ptr, ldc, layout::row_major);
     expected_speedup: "1.2-1.5x for fusion-eligible patterns"
     applies_to: [gemm, fused_gemm_epilogue, mlp, conv]
+    notes: |
+      joint_matrix_apply is an Intel SYCL extension. If unavailable, store matC
+      to SLM, apply elementwise in work-items, then store to global.
 
   - id: sycl_epilogue_relu_bias_scale
     name: "Standard epilogue: ReLU + bias + scale"
@@ -531,16 +537,20 @@ patterns:
       add, cube). Computing them in a separate kernel wastes memory bandwidth.
       Fusing into the GEMM epilogue keeps data in registers.
     pattern_after: |
-      // After GEMM K-loop accumulation (matC holds result in fp32):
+      // After GEMM K-loop, apply activation in-place via joint_matrix_apply:
 
-      // Sigmoid epilogue:
-      float sig = 1.0f / (1.0f + sycl::exp(-acc));
-      out = acc * sig;  // SiLU = x * sigmoid(x)
+      // SiLU epilogue: SiLU(x) = x * sigmoid(x)
+      joint_matrix_apply(sg, matC, [](auto& val, size_t, size_t) {
+          float sig = 1.0f / (1.0f + sycl::exp(-val));
+          val = val * sig;
+      });
 
       // GELU (tanh approximation) epilogue:
       constexpr float S2PI = 0.7978845608028654f;  // sqrt(2/pi)
-      float z = S2PI * (acc + 0.044715f * acc * acc * acc);
-      float gelu = 0.5f * acc * (1.0f + sycl::tanh(z));
+      joint_matrix_apply(sg, matC, [](auto& val, size_t, size_t) {
+          float z = S2PI * (val + 0.044715f * val * val * val);
+          val = 0.5f * val * (1.0f + sycl::tanh(z));
+      });
 
       // Store fused result to global memory — single write
       joint_matrix_store(sg, matC, out_ptr, ldc, layout::row_major);
@@ -583,10 +593,12 @@ patterns:
       throughput while maintaining numerical stability. The epilogue
       converts back to FP16 for storage efficiency.
     pattern_before: |
-      // Full FP32 GEMM — 1x throughput
-      joint_matrix<sub_group, float, use::a, TM, TK> matA;
-      joint_matrix<sub_group, float, use::b, TK, TN> matB;
-      joint_matrix<sub_group, float, use::accumulator, TM, TN> matC;
+      // Full FP32 scalar VE computation — no XMX acceleration
+      // (XMX/DPAS does NOT support FP32 inputs — only FP16/BF16/INT8/FP8)
+      float acc = 0.0f;
+      for (int k = 0; k < K; ++k) {
+          acc += A[row * K + k] * B[k * N + col];  // Scalar FMA on VE
+      }
     pattern_after: |
       // Mixed precision — 2x throughput
       joint_matrix<sub_group, bfloat16, use::a, TM, TK, layout::row_major> matA;
@@ -629,11 +641,11 @@ patterns:
           joint_matrix_mad(sg, q_tile, k_tile_T, s_tile);
 
           // Update running max and sum (online softmax via subgroup reduction)
-          float m_new = sycl::reduce_over_group(sg,
-              sycl::maximum<float>(), s_max);
+          float m_new = sycl::reduce_over_group(sg, s_max,
+              sycl::maximum<float>());
           float rescale = sycl::exp(m_old - m_new);
           l = l * rescale + sycl::reduce_over_group(sg,
-              sycl::exp(s - m_new), sycl::plus<>());
+              sycl::exp(s - m_new), sycl::plus<float>());
 
           // P_j = softmax(S_j)
           // O_acc = rescale * O_acc + P_j @ V_j  (via DPAS)
