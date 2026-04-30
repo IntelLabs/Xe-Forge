@@ -258,6 +258,38 @@ class KernelSpec:
                             args.append(dim_var)
         return args
 
+    def get_dims(
+        self,
+        variant_type: str = "bench-gpu",
+        variant_index: int = 0,
+    ) -> dict[str, int]:
+        """Get raw dimension values for a variant."""
+        vl = self._variants(variant_type)
+        if not vl or variant_index >= len(vl):
+            return {}
+        return dict(vl[variant_index].dims)
+
+    def get_raw_variant(
+        self,
+        variant_type: str = "bench-gpu",
+        variant_index: int = 0,
+    ) -> dict | None:
+        """Get variant as a raw dict compatible with ai_bench.harness.core functions."""
+        vl = self._variants(variant_type)
+        if not vl or variant_index >= len(vl):
+            return None
+        v = vl[variant_index]
+        raw: dict = {VKey.PARAMS: v.params, VKey.DIMS: v.dims}
+        if v.flop_formula is not None:
+            raw[VKey.FLOP] = v.flop_formula
+        if v.dtype is not None:
+            raw[VKey.TYPE] = v.dtype
+        if v.rtol is not None:
+            raw[VKey.RTOL] = v.rtol
+        if v.atol is not None:
+            raw[VKey.ATOL] = v.atol
+        return raw
+
     def list_variant_keys(self) -> list[str]:
         """Return all available variant keys (named + standard families)."""
         keys = list(self._named_variants.keys())

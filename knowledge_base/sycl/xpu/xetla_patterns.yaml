@@ -1,0 +1,1045 @@
+# Intel XPU SYCL / XeTLA Optimization Patterns
+# Focused on tiling, DPAS tile shapes, epilogues, and GEMM optimization
+# for SYCL C++ kernels targeting Intel Xe2 GPUs (Battlemage: B580, B570, Pro B).
+# Also covers Xe-HPG (Alchemist) and Xe-HPC (PVC) for reference.
+
+constraints:
+  - id: sycl_dpas_requires_simd16
+    name: DPAS operations require SIMD16 subgroup size on Arc/Xe2
+    severity: critical
+    description: |
+      The XMX (DPAS) hardware on Intel Arc (Xe-HPG) and Xe2 expects SIMD16
+      subgroup width. Using SIMD8 will fail or produce incorrect results.
+
+      WRONG:
+      ```cpp
+      h.parallel_for(range, [=](nd_item<2> item)
+          [[intel::reqd_sub_group_size(8)]]  // SIMD8 doesn't match DPAS!
+      {
+          joint_matrix_mad(...);  // May fail or be inefficient
+      });
+      ```
+
+      CORRECT:
+      ```cpp
+      h.parallel_for(range, [=](nd_item<2> item)
+          [[intel::reqd_sub_group_size(16)]]  // SIMD16 for XMX on Arc/Xe2
+      {
+          joint_matrix_mad(...);
+      });
+      ```
+
+      For PVC (Xe-HPC) verify documentation — wider XMX may support different
+      subgroup sizes.
+
+  - id: sycl_fp32_accumulator_required
+    name: Use float32 accumulator for FP16/BF16 matrix multiplies
+    severity: critical
+    description: |
+      When performing matrix multiplications with bfloat16 or float16 inputs,
+      ALWAYS accumulate in float32. FP16 accumulators lose precision in deep
+      K-loops and can produce incorrect results.
+
+      WRONG:
+      ```cpp
+      joint_matrix<sub_group, half, use::accumulator, TM, TN> matC;
+      // Precision loss over many K iterations!
+      ```
+
+      CORRECT:
+      ```cpp
+      joint_matrix<sub_group, float, use::accumulator, TM, TN> matC;
+      // Inputs FP16/BF16, accumulation in FP32
+      ```
+
+  - id: sycl_dpas_tile_shapes_per_generation
+    name: DPAS tile shapes differ between Arc (8x8) and PVC (8x16)
+    severity: critical
+    description: |
+      The hardware DPAS tile shape depends on the GPU generation:
+
+      | Platform  | M | N  | K (FP16) | K (INT8) | K (FP8) |
+      |-----------|---|----|----------|----------|---------|
+      | Xe-HPG    | 8 | 8  | 16       | 32       | —       |
+      | Xe-HPC    | 8 | 16 | 16       | 32       | 32      |
+      | Xe2-LPG   | 8 | 8  | 16       | 32       | 32      |
+      | Xe2-HPG   | 8 | 8  | 16       | 32       | 32      |
+
+      Xe-HPC (PVC) uses 8x16 tiles — do NOT assume 8x8 on PVC.
+
+      WRONG (hardcoded 8x8 for all platforms):
+      ```cpp
+      for (int n = 0; n < N; n += 8) {
+          joint_matrix_mad(sg, A, B, C);  // Fails on PVC (needs n += 16)
+      }
+      ```
+
+      CORRECT (generalized):
+      ```cpp
+      #ifdef __PVC__
+        constexpr int TN = 16;  // PVC tile width
+      #else
+        constexpr int TN = 8;   // Arc/Xe2 tile width
+      #endif
+
+      for (int n = 0; n < N; n += TN) {
+          joint_matrix_mad(...);
+      }
+      ```
+
+  - id: sycl_slm_size_limits
+    name: SLM allocation must fit within per-Xe-Core budget
+    severity: critical
+    description: |
+      Shared Local Memory (SLM) is limited per work-group:
+        - Xe-HPG (Arc A-series):  64 KB  (192 KB L1$/SLM partition per core)
+        - Xe-HPC (PVC):          128 KB
+        - Xe2 (BMG B580/B570):   128 KB  (256 KB L1$/SLM partition per core)
+
+      Exceeding the budget silently degrades performance or causes failures.
+
+      WRONG:
+      ```cpp
+      __local float big_tile[256][256];  // 256 KB >> 64 KB limit (Xe-HPG)
+      ```
+
+      CORRECT:
+      ```cpp
+      __local float tile[64][64];  // 16 KB, fits in 64 KB SLM
+      ```
+
+      For double-buffered GEMM patterns, total SLM = 2 * (TILE_M * TILE_K + TILE_K * TILE_N)
+      must fit within budget.
+
+  - id: sycl_no_xmx_on_xe_lp
+    name: XMX (DPAS) is NOT available on Xe-LP (Tiger Lake, DG1)
+    severity: critical
+    description: |
+      Xe-LP integrated GPUs do NOT have XMX hardware. joint_matrix_mad will
+      fail at runtime.
+
+      CORRECT — check capability before using XMX:
+      ```cpp
+      if (dev.has(sycl::aspect::ext_intel_matrix)) {
+          // XMX path
+      } else {
+          // Scalar VE fallback
+      }
+      ```
+
+  - id: sycl_slm_bank_conflict_padding
+    name: Pad SLM arrays to avoid bank conflicts on transpose access
+    severity: high
+    description: |
+      SLM has 32 banks x 4 bytes. When threads access the same bank in the
+      same cycle, accesses serialize. Transpose-like column access on
+      power-of-2 arrays causes worst-case 32-way conflicts.
+
+      WRONG:
+      ```cpp
+      __local float tile[16][16];
+      tile[col][row] = ...;  // Column access — all threads hit bank 0
+      ```
+
+      CORRECT:
+      ```cpp
+      __local float tile[16][17];  // +1 padding breaks conflict pattern
+      tile[col][row] = ...;  // Diagonals shift across banks
+      ```
+
+  - id: sycl_k_loop_unroll_for_dpas_latency
+    name: Unroll K-loop to hide DPAS 8-cycle latency
+    severity: high
+    description: |
+      Each DPAS instruction has ~8 cycles of systolic array latency. A single
+      DPAS per K-iteration stalls the pipeline waiting for the result.
+
+      WRONG (stalls each iteration):
+      ```cpp
+      for (k = 0; k < K; k += 8) {
+          joint_matrix_load(...);
+          joint_matrix_mad(...);  // 8-cycle latency, thread idle
+          barrier();
+      }
+      ```
+
+      CORRECT (4-way unroll hides latency):
+      ```cpp
+      for (k = 0; k < K; k += 32) {
+          joint_matrix_load(A[0:8]);
+          joint_matrix_mad(..., A[0:8]);   // Issue, latency begins
+          joint_matrix_mad(..., A[8:16]);  // Execute while first stalls
+          joint_matrix_mad(..., A[16:24]); // Continue pipeline
+          joint_matrix_mad(..., A[24:32]); // All complete by barrier
+          barrier();
+      }
+      ```
+
+      Diminishing returns after 3-4 unroll depth. Each unroll adds ~16 GRF of
+      register pressure for DPAS accumulators.
+
+  - id: sycl_register_pressure_occupancy
+    name: Monitor GRF usage — high register count kills occupancy
+    severity: high
+    description: |
+      GRF per thread depends on GPU generation and mode:
+
+      Xe-HPG (Arc A-series): 32-byte registers
+        128 GRF/thread → 4 KB, 8 threads/VE (100% occupancy)
+        256 GRF/thread → 8 KB, 4 threads/VE (50%, large-GRF mode)
+
+      Xe2 (BMG B580/B570): 64-byte registers (2x wider, SIMD16)
+        128 GRF/thread → 8 KB, 8 threads/VE (100% occupancy)
+        256 GRF/thread → 16 KB, 4 threads/VE (50%, large-GRF mode)
+
+      On Xe2, prefer large-GRF mode for GEMM — the doubled register file
+      means deep K-loop unrolling (4-8x) fits without spilling, and the
+      reduced thread count (32/core) is acceptable because Xe2 has fewer
+      threads anyway (64 max/core vs 128 on Xe-HPG).
+
+      Spills are catastrophic (~200+ cycle penalty per spill/fill).
+
+      Diagnosis:
+      ```bash
+      icpx -fsycl main.cpp -Xs "-cl-intel-print-grf-usage"
+      ```
+
+      Fixes:
+      1. Hoist common subexpressions out of loops
+      2. Kill temporaries early (short liveness)
+      3. Recompute cheap values instead of caching
+      4. Split kernel into multiple launches
+      5. Reduce K-loop unroll depth
+
+  - id: sycl_use_subgroup_reduction_not_slm
+    name: Use subgroup reductions instead of manual SLM tree reduction
+    severity: high
+    description: |
+      SYCL subgroup collectives are hardware-accelerated (~10 cycles) and
+      use no SLM. Manual SLM tree reductions waste memory and barriers.
+
+      WRONG:
+      ```cpp
+      __local float smem[256];
+      smem[lid] = val;
+      barrier();
+      for (int s = 128; s > 0; s >>= 1) { ... }
+      ```
+
+      CORRECT:
+      ```cpp
+      float sg_sum = sycl::reduce_over_group(sg, val, sycl::plus<>());
+      ```
+
+  - id: sycl_coalesced_access_required
+    name: Ensure coalesced (stride-1) global memory access
+    severity: high
+    description: |
+      Uncoalesced memory access causes each thread to hit a different cache
+      line, multiplying memory traffic by the subgroup size.
+
+      WRONG (column access in row-major):
+      ```cpp
+      float val = matrix[row + tid * num_rows];  // Stride = num_rows
+      ```
+
+      CORRECT (row access, stride-1):
+      ```cpp
+      float val = matrix[tid + row * num_cols];  // Stride = 1
+      ```
+
+  - id: sycl_avoid_fp64_on_consumer
+    name: Avoid FP64 on consumer GPUs — 16x slower than FP32
+    severity: high
+    description: |
+      FP64 throughput on Arc (Xe-HPG) is 1/16 of FP32, and 1/8 on Xe-LP.
+      Only PVC (Xe-HPC) has full-speed FP64 support.
+
+      Always use float or bfloat16 on consumer GPUs unless PVC is the target.
+
+patterns:
+  # === TILING PATTERNS ===
+
+  - id: sycl_gemm_tile_hierarchy
+    name: GEMM tile hierarchy — work-group / subgroup / DPAS
+    stage: device_specific
+    description: Map GEMM to standard 3-level tile hierarchy for Intel Xe
+    rationale: |
+      Intel Xe GPUs achieve peak GEMM throughput with a hierarchical tiling:
+      work-group tiles (128x128) → subgroup tiles (32x32) → DPAS tiles (8x8).
+      Each level maps to a hardware abstraction for efficient scheduling.
+    pattern_after: |
+      // Work-group tile: 128x128 output
+      // Subgroup tile:   32x32 (4x4 grid of 8x8 DPAS blocks)
+      // DPAS tile:       8x8 per instruction (Arc/Xe2) or 8x16 (PVC)
+
+      constexpr int WG_M = 128, WG_N = 128;
+      constexpr int SG_M = 32,  SG_N = 32;
+      constexpr int TM = 8, TN = 8, TK = 16;  // BF16 DPAS shape
+
+      // Per subgroup: 16 accumulators (one per 8x8 block in 32x32 tile)
+      // K-loop loads A[32x16], B[16x32] to SLM (double-buffered)
+      for (int k = 0; k < K; k += TK) {
+          // Cooperative load to SLM
+          barrier();
+          // 4x4 DPAS grid within subgroup tile
+          for each 8x8 accumulator:
+              joint_matrix_mad(sg, matA, matB, matC);
+          barrier();
+      }
+      // Post-loop: store 16 accumulators to global C
+    expected_speedup: "baseline high-performance pattern"
+    applies_to: [gemm, conv, all_compute_bound]
+
+  - id: sycl_tile_size_selection_by_shape
+    name: Select tile sizes based on problem shape and hardware
+    stage: device_specific
+    description: Choose tiling parameters based on matrix dimensions and target GPU
+    rationale: |
+      Tile sizes must balance compute throughput, SLM capacity, register
+      pressure, and parallelism. Oversized tiles on small problems reduce
+      parallelism; undersized tiles on large problems leave performance on
+      the table.
+    pattern_after: |
+      // Large square GEMM (M,N >= 2048): maximize compute density
+      constexpr int WG_M = 256, WG_N = 256, WG_K = 32;
+
+      // Medium GEMM (512 < M,N < 2048): balanced tiles
+      constexpr int WG_M = 128, WG_N = 128, WG_K = 32;
+
+      // Skinny GEMM (M or N < 256): reduce the small dimension
+      // e.g., M=64: WG_M=64, WG_N=256 to maximize N-parallelism
+      constexpr int WG_M = 64, WG_N = 256, WG_K = 32;
+
+      // SLM budget check (double-buffered BF16):
+      // 2 * (WG_M * WG_K + WG_K * WG_N) * sizeof(bf16) <= SLM_SIZE
+      // 2 * (128 * 32 + 32 * 128) * 2 = 32 KB (fits 64 KB SLM)
+    expected_speedup: "prevents regressions; enables optimal occupancy"
+    applies_to: [gemm, conv, attention]
+
+  - id: sycl_slm_double_buffering
+    name: Double-buffer SLM tiles to overlap load and compute
+    stage: memory_access
+    description: Use two SLM buffers to pipeline data loading with DPAS compute
+    rationale: |
+      Single-buffered SLM forces serialization: load tile → barrier → compute →
+      barrier → load next. Double buffering overlaps the next tile's load with
+      the current tile's compute, hiding memory latency.
+    pattern_before: |
+      __local float As[TILE][TILE];
+      __local float Bs[TILE][TILE];
+
+      for (int t = 0; t < K / TILE; ++t) {
+          As[lrow][lcol] = A[...];
+          Bs[lrow][lcol] = B[...];
+          barrier();
+          for (int k = 0; k < TILE; ++k)
+              acc += As[lrow][k] * Bs[k][lcol];
+          barrier();
+      }
+    pattern_after: |
+      __local float As[2][TILE][TILE];
+      __local float Bs[2][TILE][TILE];
+      int cur = 0, nxt = 1;
+
+      // Preload tile 0
+      load_tile(As[cur], Bs[cur], 0);
+      barrier();
+
+      for (int t = 0; t < T; ++t) {
+          if (t + 1 < T)
+              load_tile_async(As[nxt], Bs[nxt], t + 1);
+
+          compute(As[cur], Bs[cur], acc);  // Overlaps with next load
+
+          barrier();
+          std::swap(cur, nxt);
+      }
+    expected_speedup: "1.1-1.3x on memory-bound tiled kernels"
+    applies_to: [gemm, conv, attention, memory_bound]
+
+  - id: sycl_block_load_intrinsics
+    name: Use subgroup block loads instead of scalar loads
+    stage: memory_access
+    description: Replace per-thread scalar loads with subgroup block reads
+    rationale: |
+      A scalar load issues 16 separate transactions (one per thread).
+      A subgroup block read issues 1 transaction for the entire subgroup,
+      dramatically reducing memory controller pressure.
+    pattern_before: |
+      float v = data[gid];  // 16 separate loads per subgroup
+    pattern_after: |
+      using namespace sycl::ext::intel::experimental;
+      sycl::vec<uint, 4> v4 = sub_group_block_read<uint, 4>(sg, ptr);
+      // 16 threads x 4 uints = 256 bytes in 1 transaction
+
+      // Requirements:
+      //   - ptr must be 16-byte aligned
+      //   - subgroup size 16 or 32
+    expected_speedup: "1.5-3x for memory-bandwidth-bound kernels"
+    applies_to: [all_memory_bound, reduction, elementwise]
+
+  - id: sycl_prefetch_hints
+    name: Use subgroup block prefetch to hide global memory latency
+    stage: memory_access
+    description: Issue non-blocking prefetch ~400 cycles before actual use
+    rationale: |
+      Global memory latency is 300-600 cycles. Prefetching future tiles
+      brings data into cache ahead of time. Place prefetch instructions
+      approximately one memory latency before the actual load.
+    pattern_after: |
+      using namespace sycl::ext::intel::experimental;
+
+      // Prefetch next K-block while computing current
+      sub_group_block_prefetch<uint, 4>(sg, future_ptr);
+      // ~400 cycles later: data is in L1/L2 cache
+      sycl::vec<uint, 4> v = sub_group_block_read<uint, 4>(sg, future_ptr);
+    expected_speedup: "1.1-1.2x when combined with double buffering"
+    applies_to: [gemm, attention, memory_bound]
+
+  # === DPAS / JOINT_MATRIX PATTERNS ===
+
+  - id: sycl_joint_matrix_gemm
+    name: joint_matrix API for DPAS-accelerated GEMM
+    stage: device_specific
+    description: Use joint_matrix API for hardware-accelerated matrix multiply
+    rationale: |
+      The joint_matrix API maps directly to DPAS hardware instructions,
+      providing maximum throughput for matrix multiplication. It handles
+      the register layout and systolic array scheduling.
+    pattern_after: |
+      #include <sycl/ext/oneapi/matrix/matrix.hpp>
+      using namespace sycl::ext::oneapi::experimental::matrix;
+
+      constexpr int TM = 8, TN = 8, TK = 16;  // BF16 on Arc/Xe2
+
+      h.parallel_for(nd_range, [=](sycl::nd_item<2> item)
+          [[intel::reqd_sub_group_size(16)]]
+      {
+          auto sg = item.get_sub_group();
+
+          // Declare matrices
+          joint_matrix<sub_group, bfloat16, use::a, TM, TK, layout::row_major> matA;
+          joint_matrix<sub_group, bfloat16, use::b, TK, TN, layout::row_major> matB;
+          joint_matrix<sub_group, float, use::accumulator, TM, TN> matC;
+
+          joint_matrix_fill(sg, matC, 0.0f);
+
+          for (int k = 0; k < K; k += TK) {
+              joint_matrix_load(sg, matA, A_ptr + k, lda);
+              joint_matrix_load(sg, matB, B_ptr + k * ldb, ldb);
+              matC = joint_matrix_mad(sg, matA, matB, matC);
+          }
+
+          joint_matrix_store(sg, matC, C_ptr, ldc, layout::row_major);
+      });
+    expected_speedup: "10-50x over scalar VE computation for large GEMM"
+    applies_to: [gemm, conv, attention]
+
+  - id: sycl_dpas_k_loop_unrolling
+    name: Unroll K-loop for DPAS latency hiding
+    stage: device_specific
+    description: Issue multiple DPAS instructions per K-iteration to fill pipeline
+    rationale: |
+      DPAS has ~8-cycle latency through the systolic array. A single DPAS
+      per iteration leaves the pipeline idle. Unrolling 3-4x covers the full
+      latency. Each unroll adds ~16 GRF per thread for accumulators.
+    pattern_before: |
+      // Single DPAS per iteration — pipeline stalls
+      for (int k = 0; k < K; k += TK) {
+          joint_matrix_load(sg, matA, A_ptr + k, lda);
+          joint_matrix_mad(sg, matA, matB, matC);
+          barrier();
+      }
+    pattern_after: |
+      // 4-way unroll hides latency
+      for (int k = 0; k < K; k += 4 * TK) {
+          // Load 4 strips
+          joint_matrix_load(sg, matA0, A_ptr + k,          lda);
+          joint_matrix_load(sg, matA1, A_ptr + k + TK,     lda);
+          joint_matrix_load(sg, matA2, A_ptr + k + 2*TK,   lda);
+          joint_matrix_load(sg, matA3, A_ptr + k + 3*TK,   lda);
+
+          // Issue 4 DPAS — pipeline fills while first stalls
+          matC = joint_matrix_mad(sg, matA0, matB0, matC);
+          matC = joint_matrix_mad(sg, matA1, matB1, matC);
+          matC = joint_matrix_mad(sg, matA2, matB2, matC);
+          matC = joint_matrix_mad(sg, matA3, matB3, matC);
+          barrier();
+      }
+    expected_speedup: "1.2-1.5x for compute-bound GEMM"
+    applies_to: [gemm, compute_bound]
+    notes: |
+      Diminishing returns after 3-4 unroll depth. Monitor register pressure
+      — each DPAS invocation uses ~16 GRF. At 4-way unroll, ~48-64 GRF total
+      per thread limits occupancy to ~2 threads.
+
+  # === EPILOGUE PATTERNS ===
+
+  - id: sycl_fused_gemm_epilogue
+    name: Fuse elementwise epilogue into GEMM kernel
+    stage: fusion
+    description: Apply bias, activation, scaling directly after GEMM accumulation
+    rationale: |
+      A separate elementwise kernel after GEMM forces an extra global memory
+      round-trip (write C, read C, write D). Fusing the epilogue into the GEMM
+      kernel's post-accumulation phase eliminates this traffic.
+    pattern_before: |
+      // Separate kernels — 3x memory traffic
+      gemm_kernel(A, B, C);           // Write C to global
+      relu_kernel(C, D);              // Read C, write D
+      scale_kernel(D, E, alpha);      // Read D, write E
+    pattern_after: |
+      // Fused: epilogue applied in registers after K-loop
+      for (int k = 0; k < K; k += TK) {
+          matC = joint_matrix_mad(sg, matA, matB, matC);
+      }
+
+      // Epilogue via joint_matrix_apply — operates on elements in-place
+      // No extra global memory round-trip
+      joint_matrix_apply(sg, matC,
+          [&](auto& val, size_t row, size_t col) {
+              val = sycl::fmax(0.0f, val);           // ReLU
+              val = val + bias[base_col + col];       // Bias add
+              val = val * alpha;                      // Scale
+          });
+      joint_matrix_store(sg, matC, out_ptr, ldc, layout::row_major);
+    expected_speedup: "1.2-1.5x for fusion-eligible patterns"
+    applies_to: [gemm, fused_gemm_epilogue, mlp, conv]
+    notes: |
+      joint_matrix_apply is an Intel SYCL extension. If unavailable, store matC
+      to SLM, apply elementwise in work-items, then store to global.
+
+  - id: sycl_epilogue_relu_bias_scale
+    name: "Standard epilogue: ReLU + bias + scale"
+    stage: fusion
+    description: Fuse common post-GEMM operations in a single pass
+    rationale: |
+      The ReLU + bias + scale chain is the most common MLP epilogue.
+      All three operations are elementwise and can be applied in-register
+      after the GEMM accumulation, before the single store to global memory.
+    pattern_before: |
+      // Three separate kernels
+      q.parallel_for(..., relu);
+      q.parallel_for(..., add_bias);
+      q.parallel_for(..., scale);
+      // 3x memory traffic
+    pattern_after: |
+      // Fused kernel: single read/write
+      q.parallel_for(..., [=](id<1> i) {
+          float v = x[i];
+          v = fmax(0.0f, v);      // ReLU
+          v = v + bias[i % C];    // Add bias
+          v = v * scale;          // Scale
+          y[i] = v;
+      });
+    expected_speedup: "~3x for 3-operation chains (bandwidth bound)"
+    applies_to: [mlp, conv, elementwise, fused_gemm_epilogue]
+
+  - id: sycl_epilogue_sigmoid_gelu_silu
+    name: Fuse complex activations (sigmoid, GELU, SiLU) into GEMM epilogue
+    stage: fusion
+    description: Apply non-linear activations directly in GEMM epilogue registers
+    rationale: |
+      Complex activations like GELU involve multiple operations (tanh, multiply,
+      add, cube). Computing them in a separate kernel wastes memory bandwidth.
+      Fusing into the GEMM epilogue keeps data in registers.
+    pattern_after: |
+      // After GEMM K-loop, apply activation in-place via joint_matrix_apply:
+
+      // SiLU epilogue: SiLU(x) = x * sigmoid(x)
+      joint_matrix_apply(sg, matC, [](auto& val, size_t, size_t) {
+          float sig = 1.0f / (1.0f + sycl::exp(-val));
+          val = val * sig;
+      });
+
+      // GELU (tanh approximation) epilogue:
+      constexpr float S2PI = 0.7978845608028654f;  // sqrt(2/pi)
+      joint_matrix_apply(sg, matC, [](auto& val, size_t, size_t) {
+          float z = S2PI * (val + 0.044715f * val * val * val);
+          val = 0.5f * val * (1.0f + sycl::tanh(z));
+      });
+
+      // Store fused result to global memory — single write
+      joint_matrix_store(sg, matC, out_ptr, ldc, layout::row_major);
+    expected_speedup: "1.3-2x vs separate activation kernel"
+    applies_to: [mlp, transformer_ffn, fused_gemm_epilogue]
+
+  - id: sycl_quantized_gemm_epilogue
+    name: Fuse dequant/requant into INT8 GEMM epilogue
+    stage: fusion
+    description: Apply scale conversion after INT8 GEMM without materializing INT32 output
+    rationale: |
+      INT8 GEMM produces INT32 accumulators. Converting to FP32, applying
+      scale, and requantizing to INT8 for the next layer should all happen
+      in the epilogue — never write the full INT32 intermediate to memory.
+    pattern_after: |
+      // INT8 GEMM via DPAS
+      joint_matrix<sub_group, int8_t, use::a, 8, 32> matA;
+      joint_matrix<sub_group, int8_t, use::b, 32, 8> matB;
+      joint_matrix<sub_group, int32_t, use::accumulator, 8, 8> matC;
+
+      matC = joint_matrix_mad(sg, matA, matB, matC);
+
+      // Fused dequant/requant epilogue (in-register):
+      // C_fp32 = C_int32 * scale_a * scale_b
+      float c_fp = static_cast<float>(matC_val) * scale_a * scale_b;
+      // Apply bias + activation in fp32
+      c_fp = fmax(0.0f, c_fp + bias[col]);  // ReLU + bias
+      // Requantize: C_int8 = round(C_fp32 / scale_out)
+      int8_t c_out = static_cast<int8_t>(roundf(c_fp / scale_out));
+    expected_speedup: "avoids INT32 intermediate write; ~2x for quantized pipelines"
+    applies_to: [gemm, quantized, int8, inference]
+
+  - id: sycl_mixed_precision_gemm
+    name: FP16/BF16 inputs with FP32 accumulation and FP16 output
+    stage: dtype_fix
+    description: Standard mixed-precision GEMM pattern for maximum throughput
+    rationale: |
+      XMX DPAS delivers 2x throughput with FP16/BF16 inputs vs FP32.
+      Using low-precision inputs with FP32 accumulation maximizes compute
+      throughput while maintaining numerical stability. The epilogue
+      converts back to FP16 for storage efficiency.
+    pattern_before: |
+      // Full FP32 scalar VE computation — no XMX acceleration
+      // (XMX/DPAS does NOT support FP32 inputs — only FP16/BF16/INT8/FP8)
+      float acc = 0.0f;
+      for (int k = 0; k < K; ++k) {
+          acc += A[row * K + k] * B[k * N + col];  // Scalar FMA on VE
+      }
+    pattern_after: |
+      // Mixed precision — 2x throughput
+      joint_matrix<sub_group, bfloat16, use::a, TM, TK, layout::row_major> matA;
+      joint_matrix<sub_group, bfloat16, use::b, TK, TN, layout::row_major> matB;
+      joint_matrix<sub_group, float, use::accumulator, TM, TN> matC;  // FP32 acc
+
+      joint_matrix_fill(sg, matC, 0.0f);
+
+      for (int k = 0; k < K; k += TK) {
+          joint_matrix_load(sg, matA, A_bf16_ptr + k, lda);
+          joint_matrix_load(sg, matB, B_bf16_ptr + k * ldb, ldb);
+          matC = joint_matrix_mad(sg, matA, matB, matC);
+      }
+
+      // Epilogue: apply bias in FP32, then convert to output precision
+      // acc_fp32 = acc_fp32 + bias_fp32
+      // out_bf16 = static_cast<bfloat16>(acc_fp32)
+      joint_matrix_store(sg, matC, out_ptr, ldc, layout::row_major);
+    expected_speedup: "~2x throughput improvement over FP32"
+    applies_to: [gemm, attention, mlp, conv]
+
+  # === ATTENTION PATTERNS ===
+
+  - id: sycl_flash_attention_tiling
+    name: Flash Attention tiled implementation on Intel Xe
+    stage: device_specific
+    description: Tile over K/V sequence to avoid materializing full NxN attention matrix
+    rationale: |
+      Standard attention computes S = Q @ K^T (NxN matrix), applies softmax,
+      then O = S @ V. For long sequences, the NxN matrix doesn't fit in memory.
+      Flash Attention tiles over the K/V sequence dimension, using online softmax
+      to incrementally update the output without materializing S.
+    pattern_after: |
+      // Flash Attention on Xe — tile over K/V blocks
+      // Never materializes full N_CTX x N_CTX attention matrix
+
+      for (int kv_block = 0; kv_block < N_KV; kv_block += BLOCK_N) {
+          // S_j = Q @ K_j^T  (via DPAS)
+          // Uses work-group tile of Q [BLOCK_M x D] and K [BLOCK_N x D]
+          joint_matrix_mad(sg, q_tile, k_tile_T, s_tile);
+
+          // Update running max and sum (online softmax via subgroup reduction)
+          float m_new = sycl::reduce_over_group(sg, s_max,
+              sycl::maximum<float>());
+          float rescale = sycl::exp(m_old - m_new);
+          l = l * rescale + sycl::reduce_over_group(sg,
+              sycl::exp(s - m_new), sycl::plus<float>());
+
+          // P_j = softmax(S_j)
+          // O_acc = rescale * O_acc + P_j @ V_j  (via DPAS)
+          joint_matrix_mad(sg, p_tile, v_tile, o_tile);
+      }
+    expected_speedup: "enables long-context attention; avoids O(N^2) memory"
+    applies_to: [attention, flash_attention]
+    notes: |
+      Memory layout: Q, K, V as [B, H, S, D] (batch, heads, seq, head_dim).
+      For GQA: K, V have fewer heads (H_kv < H_q), broadcast K/V across groups.
+
+  - id: sycl_online_softmax
+    name: Online softmax with subgroup reductions
+    stage: device_specific
+    description: Compute softmax in a single pass using running max and sum
+    rationale: |
+      Naive softmax requires 3 passes (max, sum_exp, normalize). Online softmax
+      computes max and sum_exp in a single pass with rescaling, halving memory
+      traffic. Subgroup reductions make the per-block computation hardware-efficient.
+    pattern_after: |
+      // Per-row online softmax
+      float m = -INFINITY;  // running max
+      float l = 0.0f;       // running sum of exp
+
+      for (int j = 0; j < seq_len; j += BLOCK) {
+          float x = row[j + lane];
+
+          // Update max via subgroup reduction
+          float m_new = fmax(m, sycl::reduce_over_group(sg, x,
+                             sycl::maximum<float>()));
+
+          // Rescale running sum + add new contribution
+          l = l * sycl::exp(m - m_new) +
+              sycl::reduce_over_group(sg, sycl::exp(x - m_new),
+                                      sycl::plus<float>());
+          m = m_new;
+      }
+
+      // Final normalization
+      output[col] = sycl::exp(row[col] - m) / l;
+    expected_speedup: "1.5-2x over 3-pass softmax"
+    applies_to: [softmax, attention, normalization]
+
+  - id: sycl_adaptive_grid_for_attention
+    name: Adapt grid layout for small vs large attention sequences
+    stage: device_specific
+    description: Map batch/head/tile dimensions to grid axes based on sequence length
+    rationale: |
+      Attention kernels have 3 logical dimensions (batch, head, tiles).
+      For long sequences, many tiles provide enough parallelism on axis=2.
+      For short sequences, flattening batch*head onto one axis ensures enough
+      total programs to saturate the GPU.
+    pattern_after: |
+      // Short sequences (N_CTX <= 512): flatten batch*head for parallelism
+      if (n_ctx <= 512) {
+          nd_range = {n_blocks_m, 1, Z * H};
+          // Kernel: start_m = program_id(0), off_hz = program_id(2)
+      }
+      // Long sequences: separate batch, head, tile dimensions
+      else {
+          nd_range = {Z, H, n_blocks_m};
+          // Kernel: off_z = program_id(0), off_h = program_id(1)
+      }
+    expected_speedup: "significant for short sequences (avoids underutilization)"
+    applies_to: [attention, flash_attention, variable_sequence_length]
+
+  # === MEMORY AND VECTORIZATION ===
+
+  - id: sycl_vectorized_loads
+    name: Use vector types for natural GRF-width loads
+    stage: memory_access
+    description: Load data in vector widths that match GRF register size
+    rationale: |
+      Vector loads fill GRF registers efficiently. float4 loads 16 bytes per
+      thread (matches GRF element size). This reduces instruction count and
+      improves throughput for bandwidth-bound kernels.
+    pattern_before: |
+      float v = data[gid];  // Scalar load
+    pattern_after: |
+      // Vector load — 4 FMAs in parallel per thread
+      sycl::vec<float, 4> v = *reinterpret_cast<const sycl::vec<float,4>*>(
+          &data[gid * 4]);
+      v = v * 2.0f + b_vec;
+
+      // Sweet-spot widths by type:
+      //   FP32:  float4  (16 bytes)
+      //   FP16:  half8   (16 bytes)
+      //   INT8:  char16  (16 bytes)
+    expected_speedup: "1.2-2x for bandwidth-bound elementwise kernels"
+    applies_to: [elementwise, bandwidth_bound, reduction]
+
+  - id: sycl_nhwc_layout_for_conv
+    name: Use NHWC (channels-last) layout for convolutions
+    stage: memory_access
+    description: NHWC layout enables coalesced access and DPAS-friendly memory patterns
+    rationale: |
+      NHWC makes the channel dimension contiguous, enabling coalesced width
+      access. Each (kh, kw) position's input slice is a contiguous [HW, C] matrix
+      suitable for DPAS. NCHW forces strided access across spatial dimensions.
+    pattern_before: |
+      // NCHW (PyTorch CPU default) — channel innermost, bad for GPU
+      // Spatial access requires striding over channels
+    pattern_after: |
+      // NHWC (recommended for Xe) — spatial innermost, good coalescing
+      // 1x1 pointwise conv becomes a simple GEMM
+
+      // Conversion (do ONCE, not per forward):
+      // x.to(memory_format=torch.channels_last)
+      // For im2col-free convolution, each (kh,kw) slice is already
+      // a contiguous matrix — block loads work directly.
+    expected_speedup: "1.3-3x for convolution workloads"
+    applies_to: [conv, spatial, depthwise]
+
+  # === SIMD WIDTH AND OCCUPANCY ===
+
+  - id: sycl_simd_width_selection
+    name: Choose SIMD width based on workload characteristics
+    stage: device_specific
+    description: Select SIMD8/16/32 based on divergence, memory, and compute needs
+    rationale: |
+      Intel Xe supports SIMD8, SIMD16, and SIMD32 subgroup widths. Each has
+      tradeoffs: wider SIMD = better coalescing but higher divergence cost.
+
+      | SIMD Width | Threads/WG | Coalescing | Divergence Cost |
+      |------------|-----------|------------|-----------------|
+      | SIMD8      | More      | Less       | Lower           |
+      | SIMD16     | Medium    | Good       | Medium          |
+      | SIMD32     | Fewer     | Best       | Higher          |
+    pattern_after: |
+      // SIMD8: divergent code, low arithmetic intensity
+      [[intel::reqd_sub_group_size(8)]]
+
+      // SIMD16: general purpose, XMX/DPAS operations (required for DPAS)
+      [[intel::reqd_sub_group_size(16)]]
+
+      // SIMD32: memory-bound, simple straight-line code
+      [[intel::reqd_sub_group_size(32)]]
+    expected_speedup: "workload-dependent; wrong choice can cost 2x"
+    applies_to: [all]
+    notes: |
+      DPAS/XMX requires SIMD16 on Arc/Xe2.
+      SIMD32 is best for pure bandwidth-bound elementwise.
+      SIMD8 only when heavy branch divergence.
+
+  - id: sycl_ilp_parallel_accumulation
+    name: Use parallel accumulators for instruction-level parallelism
+    stage: algorithmic
+    description: Break serial dependency chains with multiple independent accumulators
+    rationale: |
+      A serial accumulation chain (acc += a*b each iteration) has a dependency
+      on the previous result — each iteration waits for the last. Multiple
+      independent accumulators let the hardware pipeline fill.
+    pattern_before: |
+      // Serial dependency chain
+      float acc = 0;
+      for (int i = 0; i < 16; i++) {
+          acc = acc + A[i] * B[i];  // Each depends on previous!
+      }
+    pattern_after: |
+      // Parallel accumulation — 4 independent chains
+      float acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
+      for (int i = 0; i < 16; i += 4) {
+          acc0 += A[i+0] * B[i+0];  // Independent
+          acc1 += A[i+1] * B[i+1];  // Can execute in parallel
+          acc2 += A[i+2] * B[i+2];
+          acc3 += A[i+3] * B[i+3];
+      }
+      float acc = (acc0 + acc1) + (acc2 + acc3);
+    expected_speedup: "1.5-3x for reduction-heavy kernels"
+    applies_to: [reduction, dot_product, accumulation]
+
+  - id: sycl_loop_unrolling_strategies
+    name: Apply compile-time and manual loop unrolling
+    stage: device_specific
+    description: Use pragma unroll for known iteration counts, manual unroll for latency hiding
+    rationale: |
+      Compile-time unrolling (#pragma unroll) lets the compiler optimize known-
+      count loops. Manual unrolling (4-way) is needed for latency hiding when
+      loads have 20+ cycle latency and the compiler cannot reason about it.
+    pattern_after: |
+      // Full unroll (known iteration count):
+      #pragma unroll
+      for (int k = 0; k < 16; k++) {
+          acc += A[k] * B[k];
+      }
+
+      // Partial unroll (hint to compiler):
+      #pragma unroll 4
+      for (int k = 0; k < K; k++) {
+          acc += A[k] * B[k];
+      }
+      // Generates: K/4 iterations x 4 ops each
+
+      // Manual 4-way for latency hiding:
+      for (int k = 0; k < K; k += 4) {
+          float a0 = A[k+0], a1 = A[k+1], a2 = A[k+2], a3 = A[k+3];
+          float b0 = B[k+0], b1 = B[k+1], b2 = B[k+2], b3 = B[k+3];
+          acc0 += a0 * b0;
+          acc1 += a1 * b1;
+          acc2 += a2 * b2;
+          acc3 += a3 * b3;
+      }
+    expected_speedup: "1.1-1.5x depending on loop body and iteration count"
+    applies_to: [gemm, reduction, all_compute_bound]
+
+  # === PERFORMANCE EXPECTATIONS ===
+
+  - id: sycl_gemm_performance_targets
+    name: Expected GEMM performance by shape and device
+    stage: device_specific
+    description: Reference performance targets for evaluating GEMM kernel quality
+    rationale: |
+      Knowing expected performance helps identify under-optimized kernels.
+      Small shapes are launch-overhead limited; large shapes should approach
+      hardware peak. Targets are per-device — use the correct GPU family.
+    pattern_after: |
+      // ========== Intel Arc B580 (Xe2-HPG / BMG-G21) ==========
+      // Peak BF16 XMX: ~117 TFLOPS | Memory BW: 456 GB/s
+      // 20 Xe-cores, 160 XMX engines (8/core x 2048-bit)
+      //
+      // BF16 GEMM measured performance (Arc B580, CUTLASS/XeTLA):
+      //
+      //   Baseline (naive CUTLASS):
+      //     M=N=K=4096:  3.7  TFLOPS  (36.96 ms)
+      //     M=N=K=2048:  3.7  TFLOPS  (4.59 ms)
+      //     M=N=K=1024:  5.7  TFLOPS  (0.38 ms)
+      //     M=N=K=512:   1.2  TFLOPS  (0.23 ms) — launch-overhead limited
+      //     M=N=K=256:   0.2  TFLOPS  (0.14 ms) — launch-overhead limited
+      //
+      //   Optimized (XeTLA-tuned):
+      //     M=N=K=4096:  37.9 TFLOPS  (3.62 ms)  — 32% of peak, 10.2x speedup
+      //     M=N=K=2048:  37.6 TFLOPS  (0.46 ms)  — 32% of peak, 10.1x speedup
+      //     M=N=K=1024:  14.7 TFLOPS  (0.15 ms)  — 12.6% of peak, 2.6x speedup
+      //     M=N=K=512:   13.1 TFLOPS  (0.02 ms)  — 11.2% of peak, 11.2x speedup
+      //     M=N=K=256:    2.5 TFLOPS  (0.01 ms)  — 2.1% of peak, 10.2x speedup
+      //
+      //   Performance targets (what an optimized kernel should achieve):
+      //     M=N=K>=4096:  35-50  TFLOPS (30-43% peak) — room for improvement
+      //     M=N=K=2048:   30-45  TFLOPS (26-38% peak)
+      //     M=N=K=1024:   12-25  TFLOPS (10-21% peak)
+      //     M=N=K=512:     5-15  TFLOPS (4-13% peak) — launch overhead significant
+      //
+      // ========== Intel Arc B570 (Xe2-HPG / BMG-G21 cut) ==========
+      // Peak BF16 XMX: ~105 TFLOPS | Memory BW: 380 GB/s
+      // 18 Xe-cores, 144 XMX engines
+      // Scale B580 targets by ~0.9x
+      //
+      // ========== Intel Arc Pro B-series (workstation) ==========
+      // Same Xe2 architecture, similar or higher clocks
+      // Use B580 targets as baseline, adjust for core count
+      //
+      // Tile hierarchy for peak performance on Xe2:
+      //   Work-group: 256x256, Subgroup: 32x64, DPAS: 8x8
+      //   With double-buffered SLM (128 KB budget) and 4-8 way K-loop unrolling
+      //   SIMD16 required for all XMX operations on Xe2
+    expected_speedup: "reference targets, not a pattern"
+    applies_to: [gemm]
+    notes: |
+      Measured data from B580 benchmarks (2026-04-29) using CUTLASS/XeTLA BF16 GEMM.
+      Optimized kernel reaches ~38 TFLOPS at N>=2048 (32% peak), suggesting further
+      optimization headroom — likely from larger tile sizes and deeper prefetching.
+      Small GEMM (< 512x512) should be batched or fused into larger kernels.
+      Arithmetic intensity threshold: ~257 FLOPs/byte (B580) — problems below
+      this are memory-bandwidth-bound, not compute-bound.
+
+  - id: sycl_xe2_architecture_differences
+    name: Xe2 (Battlemage/BMG) architecture changes from Xe-HPG (Alchemist)
+    stage: device_specific
+    description: Key architecture changes that affect kernel optimization on Xe2
+    rationale: |
+      Xe2 (BMG) restructures the compute units compared to Xe-HPG (ACM).
+      Code that was optimal on Arc A-series may need adjustment for B-series.
+    pattern_after: |
+      // ===== Xe2-HPG (B580/B570/Pro B) vs Xe-HPG (A770/A750) =====
+      //
+      // CHANGE 1: XVEs halved but 2x wider
+      //   Xe-HPG: 16 XVE/core x 256-bit (SIMD8 native)
+      //   Xe2:     8 XVE/core x 512-bit (SIMD16 native)
+      //   Impact: SIMD8 no longer efficient. Always use SIMD16 or SIMD32.
+      //
+      // CHANGE 2: XMX engines halved but 2x wider
+      //   Xe-HPG: 16 XMX/core x 1024-bit
+      //   Xe2:     8 XMX/core x 2048-bit
+      //   Impact: Same per-core throughput, fewer scheduling units.
+      //
+      // CHANGE 3: GRF doubled
+      //   Xe-HPG: 32 KB GRF/XVE (4 KB/thread small, 8 KB/thread large)
+      //   Xe2:    64 KB GRF/XVE (8 KB/thread small, 16 KB/thread large)
+      //   Impact: 2x more registers — can unroll deeper, fewer spills.
+      //
+      // CHANGE 4: SLM doubled
+      //   Xe-HPG: 64 KB max per work-group (192 KB L1$/SLM per core)
+      //   Xe2:   128 KB max per work-group (256 KB L1$/SLM per core)
+      //   Impact: Larger double-buffer tiles, bigger SLM-cached blocks.
+      //
+      // CHANGE 5: Max threads per core halved
+      //   Xe-HPG: 128 threads/core (small GRF) / 64 (large GRF)
+      //   Xe2:     64 threads/core (small GRF) / 32 (large GRF)
+      //   Impact: Less latency hiding via thread switching.
+      //           Must rely more on ILP, prefetch, and K-loop unrolling.
+      //
+      // CHANGE 6: Higher clocks
+      //   Xe-HPG: ~2100-2400 MHz
+      //   Xe2:    ~2670-2850 MHz
+      //   Impact: Partially compensates for fewer cores.
+      //
+      // CHANGE 7: DPAS tile shape unchanged
+      //   Both: 8x8x16 (BF16/FP16), 8x8x32 (INT8)
+      //   Impact: joint_matrix code ports directly.
+      //
+      // CHANGE 8: New data types on Xe2
+      //   TF32 and BF8 DPAS support (not on Xe-HPG)
+    expected_speedup: "architecture guide, not a pattern"
+    applies_to: [all]
+
+  - id: sycl_xe2_optimization_strategy
+    name: Optimization strategy for Xe2 (BMG) — fewer threads, more registers
+    stage: device_specific
+    description: Adapt kernel design for Xe2 reduced thread count and increased resources
+    rationale: |
+      Xe2 has half the threads per core but double the GRF and SLM per thread.
+      The optimal strategy shifts from "many small threads hiding latency" to
+      "fewer threads doing more work with deeper pipelines".
+    pattern_after: |
+      // Strategy for Xe2 (B580/B570):
+      //
+      // 1. USE LARGE GRF MODE (256 registers)
+      //    - 16 KB/thread on Xe2 vs 8 KB/thread on Xe-HPG
+      //    - Thread count drops to 32/core but each thread has massive register space
+      //    - Enables 4-8 way K-loop unrolling without spills
+      //    - Use: -cl-intel-256-GRF-per-thread or [[intel::reqd_work_group_size(...)]]
+      //
+      // 2. DEEPER K-LOOP UNROLLING (4-8x instead of 3-4x)
+      //    - More GRF means more accumulators fit without spilling
+      //    - Critical on Xe2 because fewer threads = less latency hiding
+      //    - Each extra unroll adds ~16 GRF (was a bottleneck on Xe-HPG, not on Xe2)
+      //
+      // 3. LARGER SLM TILES
+      //    - 128 KB SLM budget (vs 64 KB on Xe-HPG)
+      //    - Double-buffered BF16 tiles up to: 2*(256*32 + 32*256)*2 = 64 KB
+      //    - Or single-buffered: 2*(256*64 + 64*256)*2 = 128 KB
+      //    - Reduces global memory traffic per K-iteration
+      //
+      // 4. AGGRESSIVE PREFETCHING
+      //    - Fewer threads = less natural latency hiding
+      //    - Must explicitly prefetch next K-block while computing current
+      //    - sub_group_block_prefetch ~400 cycles before use
+      //
+      // 5. INSTRUCTION-LEVEL PARALLELISM
+      //    - Xe2 has improved ALU0+ALU1 and ALU0+XMX co-issue
+      //    - Interleave address calculations with DPAS instructions
+      //    - Use independent accumulators for parallel reduction chains
+    expected_speedup: "10-30% over naively ported Xe-HPG kernels"
+    applies_to: [gemm, attention, compute_bound]
+
+  - id: sycl_bmg_hardware_specs
+    name: Intel Xe2-HPG (Battlemage) hardware specifications
+    stage: device_specific
+    description: Quick reference for BMG-family GPU specifications
+    rationale: |
+      Knowing exact hardware specs prevents over/under-subscribing resources
+      and guides tile size, unroll depth, and SLM budget decisions.
+    pattern_after: |
+      // ===== Arc B580 (BMG-G21, 20 Xe-cores) =====
+      //   BF16 XMX peak:   ~117 TFLOPS
+      //   FP32 vector peak: ~14.6 TFLOPS
+      //   INT8 XMX peak:   ~233 TOPS
+      //   Memory:           12 GB GDDR6, 192-bit, 456 GB/s
+      //   L2 cache:         18 MB
+      //   SLM/core:         128 KB max per work-group (256 KB L1$/SLM partition)
+      //   GRF/XVE:          64 KB (128 regs x 64B or 256 regs x 64B)
+      //   Threads/core:     64 (small GRF) / 32 (large GRF)
+      //   Clock:            2670 MHz base / ~2850 MHz boost
+      //   TDP:              150 W
+      //
+      // ===== Arc B570 (BMG-G21 cut, 18 Xe-cores) =====
+      //   BF16 XMX peak:   ~105 TFLOPS
+      //   Memory:           10 GB GDDR6, 160-bit, 380 GB/s
+      //   L2 cache:         15 MB
+      //   Same per-core specs as B580
+      //
+      // ===== Roofline thresholds (BF16) =====
+      //   B580: 117 TFLOPS / 456 GB/s = 257 FLOPs/byte
+      //   B570: 105 TFLOPS / 380 GB/s = 276 FLOPs/byte
+      //   GEMM arithmetic intensity: 2*M*N*K / (2*(M*K + K*N + M*N))
+      //   At M=N=K=1024: ~341 FLOPs/byte → compute-bound
+      //   At M=N=K=256:  ~85 FLOPs/byte → memory-bound on both GPUs
+    expected_speedup: "hardware reference, not a pattern"
+    applies_to: [all]

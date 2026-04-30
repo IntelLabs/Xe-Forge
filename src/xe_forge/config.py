@@ -1,5 +1,5 @@
 """
-Configuration Manager for Triton Optimizer
+Configuration Manager for Xe-Forge kernel optimization pipeline
 """
 
 import os
@@ -45,7 +45,7 @@ class OptimizationConfig:
             OptimizationStage.MEMORY_ACCESS,
             OptimizationStage.BLOCK_POINTERS,
             OptimizationStage.PERSISTENT_KERNEL,
-            OptimizationStage.XPU_SPECIFIC,
+            OptimizationStage.DEVICE_SPECIFIC,
             OptimizationStage.AUTOTUNING,
         ]
     )
@@ -63,17 +63,42 @@ class OptimizationConfig:
 
 
 @dataclass
-class XPUConfig:
-    """Intel XPU specific configuration"""
+class DeviceConfig:
+    """Base device configuration."""
 
     device: str = "xpu"
-    grf_mode: str = "256"  # XPU register file mode
-    default_num_warps: int = 32  # XPU prefers 32 warps
+    dsl: str = "triton"
+    default_num_warps: int = 32
+    default_num_stages: int = 2
+    preferred_tile_m: int = 256
+    preferred_tile_n: int = 256
+    preferred_tile_k: int = 32
+
+
+@dataclass
+class XPUConfig(DeviceConfig):
+    """Intel XPU specific configuration."""
+
+    device: str = "xpu"
+    grf_mode: str = "256"
+    default_num_warps: int = 32
     default_num_stages: int = 2
     preferred_tile_m: int = 256
     preferred_tile_n: int = 256
     preferred_tile_k: int = 32
     group_size_m: int = 4
+
+
+@dataclass
+class CUDAConfig(DeviceConfig):
+    """NVIDIA CUDA specific configuration."""
+
+    device: str = "cuda"
+    default_num_warps: int = 4
+    default_num_stages: int = 3
+    preferred_tile_m: int = 128
+    preferred_tile_n: int = 128
+    preferred_tile_k: int = 32
 
 
 @dataclass
@@ -109,9 +134,16 @@ class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     optimization: OptimizationConfig = field(default_factory=OptimizationConfig)
-    xpu: XPUConfig = field(default_factory=XPUConfig)
+    device_config: DeviceConfig = field(default_factory=XPUConfig)
     knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+
+    @property
+    def xpu(self) -> XPUConfig:
+        """Backward compatibility accessor."""
+        if isinstance(self.device_config, XPUConfig):
+            return self.device_config
+        raise AttributeError("Current device config is not XPUConfig")
 
 
 class ConfigManager:
@@ -166,17 +198,10 @@ class ConfigManager:
             target_dtype=self._get_env("TARGET_DTYPE", None),
         )
 
-        # XPU Configuration
-        xpu = XPUConfig(
-            device=self._get_env("XPU_DEVICE", "xpu"),
-            grf_mode=self._get_env("GRF_MODE", "256"),
-            default_num_warps=self._get_env("DEFAULT_NUM_WARPS", 32, int),
-            default_num_stages=self._get_env("DEFAULT_NUM_STAGES", 2, int),
-            preferred_tile_m=self._get_env("PREFERRED_TILE_M", 256, int),
-            preferred_tile_n=self._get_env("PREFERRED_TILE_N", 256, int),
-            preferred_tile_k=self._get_env("PREFERRED_TILE_K", 32, int),
-            group_size_m=self._get_env("GROUP_SIZE_M", 4, int),
-        )
+        # Device Configuration
+        device_type = self._get_env("DEVICE_TYPE", "xpu")
+        dsl = self._get_env("DSL", "triton")
+        device_cfg = self._build_device_config(device_type, dsl)
 
         # Knowledge Configuration
         knowledge = KnowledgeConfig(
@@ -197,17 +222,44 @@ class ConfigManager:
             llm=llm,
             agent=agent,
             optimization=optimization,
-            xpu=xpu,
+            device_config=device_cfg,
             knowledge=knowledge,
             logging=logging_cfg,
         )
 
+    def _build_device_config(self, device_type: str, dsl: str) -> DeviceConfig:
+        """Build device-specific configuration based on device type."""
+        if device_type == "cuda":
+            return CUDAConfig(
+                device=device_type,
+                dsl=dsl,
+                default_num_warps=self._get_env("DEFAULT_NUM_WARPS", 4, int),
+                default_num_stages=self._get_env("DEFAULT_NUM_STAGES", 3, int),
+                preferred_tile_m=self._get_env("PREFERRED_TILE_M", 128, int),
+                preferred_tile_n=self._get_env("PREFERRED_TILE_N", 128, int),
+                preferred_tile_k=self._get_env("PREFERRED_TILE_K", 32, int),
+            )
+        return XPUConfig(
+            device=self._get_env("XPU_DEVICE", device_type),
+            dsl=dsl,
+            grf_mode=self._get_env("GRF_MODE", "256"),
+            default_num_warps=self._get_env("DEFAULT_NUM_WARPS", 32, int),
+            default_num_stages=self._get_env("DEFAULT_NUM_STAGES", 2, int),
+            preferred_tile_m=self._get_env("PREFERRED_TILE_M", 256, int),
+            preferred_tile_n=self._get_env("PREFERRED_TILE_N", 256, int),
+            preferred_tile_k=self._get_env("PREFERRED_TILE_K", 32, int),
+            group_size_m=self._get_env("GROUP_SIZE_M", 4, int),
+        )
+
     def override(self, **kwargs) -> "ConfigManager":
         """Override configuration values programmatically"""
+        # Map legacy "xpu_*" keys to device_config
+        _section_aliases = {"xpu": "device_config"}
         for key, value in kwargs.items():
             parts = key.split("_", 1)
             if len(parts) == 2:
                 section, attr = parts
+                section = _section_aliases.get(section, section)
                 if hasattr(self.config, section):
                     section_obj = getattr(self.config, section)
                     if hasattr(section_obj, attr):

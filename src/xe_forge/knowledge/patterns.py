@@ -68,14 +68,14 @@ _MAPPING: dict[IssueType, OptimizationStage] = {
     IssueType.BLOCK_PTR_MULTIPLE_OF_MISUSE: OptimizationStage.BLOCK_POINTERS,
     IssueType.MISSING_BLOCK_POINTERS: OptimizationStage.BLOCK_POINTERS,
     # XPU SPECIFIC
-    IssueType.SUBOPTIMAL_TILE_SIZE: OptimizationStage.XPU_SPECIFIC,
-    IssueType.SUBOPTIMAL_WARPS: OptimizationStage.XPU_SPECIFIC,
-    IssueType.MISSING_GRF_MODE: OptimizationStage.XPU_SPECIFIC,
-    IssueType.NO_SWIZZLING: OptimizationStage.XPU_SPECIFIC,
-    IssueType.REPACK_IN_FORWARD: OptimizationStage.XPU_SPECIFIC,
-    IssueType.MISSING_PACKED_TRANSPOSE: OptimizationStage.XPU_SPECIFIC,
-    IssueType.SERIALIZED_N_TILES: OptimizationStage.XPU_SPECIFIC,
-    IssueType.SIGMOID_SLOW_EXP: OptimizationStage.XPU_SPECIFIC,
+    IssueType.SUBOPTIMAL_TILE_SIZE: OptimizationStage.DEVICE_SPECIFIC,
+    IssueType.SUBOPTIMAL_WARPS: OptimizationStage.DEVICE_SPECIFIC,
+    IssueType.MISSING_GRF_MODE: OptimizationStage.DEVICE_SPECIFIC,
+    IssueType.NO_SWIZZLING: OptimizationStage.DEVICE_SPECIFIC,
+    IssueType.REPACK_IN_FORWARD: OptimizationStage.DEVICE_SPECIFIC,
+    IssueType.MISSING_PACKED_TRANSPOSE: OptimizationStage.DEVICE_SPECIFIC,
+    IssueType.SERIALIZED_N_TILES: OptimizationStage.DEVICE_SPECIFIC,
+    IssueType.SIGMOID_SLOW_EXP: OptimizationStage.DEVICE_SPECIFIC,
     IssueType.AUTOTUNE_DUPLICATE_PARAMS: OptimizationStage.AUTOTUNING,
     # PERSISTENT KERNEL
     IssueType.MISSING_PERSISTENT: OptimizationStage.PERSISTENT_KERNEL,
@@ -151,23 +151,26 @@ _KEYWORD_RULES: list[tuple[str, OptimizationStage]] = [
     ("stream_k", OptimizationStage.PERSISTENT_KERNEL),
     ("num_progs", OptimizationStage.PERSISTENT_KERNEL),
     # XPU SPECIFIC  (after more specific rules above)
-    ("tile_size", OptimizationStage.XPU_SPECIFIC),
-    ("suboptimal_tile", OptimizationStage.XPU_SPECIFIC),
-    ("suboptimal_warp", OptimizationStage.XPU_SPECIFIC),
-    ("num_warps", OptimizationStage.XPU_SPECIFIC),
-    ("grf_mode", OptimizationStage.XPU_SPECIFIC),
-    ("grf", OptimizationStage.XPU_SPECIFIC),
-    ("swizzl", OptimizationStage.XPU_SPECIFIC),
-    ("repack", OptimizationStage.XPU_SPECIFIC),
-    ("packed_transpose", OptimizationStage.XPU_SPECIFIC),
-    ("serialized_n", OptimizationStage.XPU_SPECIFIC),
-    ("sigmoid", OptimizationStage.XPU_SPECIFIC),
-    ("exp2", OptimizationStage.XPU_SPECIFIC),
+    ("tile_size", OptimizationStage.DEVICE_SPECIFIC),
+    ("suboptimal_tile", OptimizationStage.DEVICE_SPECIFIC),
+    ("suboptimal_warp", OptimizationStage.DEVICE_SPECIFIC),
+    ("num_warps", OptimizationStage.DEVICE_SPECIFIC),
+    ("grf_mode", OptimizationStage.DEVICE_SPECIFIC),
+    ("grf", OptimizationStage.DEVICE_SPECIFIC),
+    ("swizzl", OptimizationStage.DEVICE_SPECIFIC),
+    ("repack", OptimizationStage.DEVICE_SPECIFIC),
+    ("packed_transpose", OptimizationStage.DEVICE_SPECIFIC),
+    ("serialized_n", OptimizationStage.DEVICE_SPECIFIC),
+    ("sigmoid", OptimizationStage.DEVICE_SPECIFIC),
+    ("exp2", OptimizationStage.DEVICE_SPECIFIC),
     ("autotune_duplicate", OptimizationStage.AUTOTUNING),
     ("autotune", OptimizationStage.AUTOTUNING),
-    ("warp", OptimizationStage.XPU_SPECIFIC),
-    ("xpu", OptimizationStage.XPU_SPECIFIC),
-    ("intel", OptimizationStage.XPU_SPECIFIC),
+    ("warp", OptimizationStage.DEVICE_SPECIFIC),
+    ("xpu", OptimizationStage.DEVICE_SPECIFIC),
+    ("intel", OptimizationStage.DEVICE_SPECIFIC),
+    ("cuda", OptimizationStage.DEVICE_SPECIFIC),
+    ("nvidia", OptimizationStage.DEVICE_SPECIFIC),
+    ("sycl", OptimizationStage.DEVICE_SPECIFIC),
 ]
 
 # ---------------------------------------------------------------------------
@@ -178,8 +181,8 @@ _PREFIX_RULES: list[tuple[str, OptimizationStage]] = [
     ("dtype_", OptimizationStage.DTYPE_FIX),
     ("missing_block", OptimizationStage.BLOCK_POINTERS),
     ("block_ptr_", OptimizationStage.BLOCK_POINTERS),
-    ("missing_", OptimizationStage.XPU_SPECIFIC),  # missing_grf, missing_warp, etc.
-    ("suboptimal_", OptimizationStage.XPU_SPECIFIC),
+    ("missing_", OptimizationStage.DEVICE_SPECIFIC),  # missing_grf, missing_warp, etc.
+    ("suboptimal_", OptimizationStage.DEVICE_SPECIFIC),
     ("unfused_", OptimizationStage.FUSION),
     ("fusion_", OptimizationStage.FUSION),
     ("persistent_", OptimizationStage.PERSISTENT_KERNEL),
@@ -202,7 +205,7 @@ def register_stage(issue_type_value: str, stage: OptimizationStage) -> None:
     keyword and prefix inference, but yield to the explicit _MAPPING dict.
 
     Example:
-        register_stage("my_custom_issue", OptimizationStage.XPU_SPECIFIC)
+        register_stage("my_custom_issue", OptimizationStage.DEVICE_SPECIFIC)
     """
     _dynamic_registry[issue_type_value.lower()] = stage
     # Clear lru_cache so the new mapping is picked up immediately
