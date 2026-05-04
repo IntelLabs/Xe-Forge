@@ -1,0 +1,365 @@
+# CUTLASS SYCL Framework Patterns for Intel Xe2 (Battlemage B580)
+#
+# Covers: tile configurations, dispatch policies, epilogue fusion operations,
+# tile schedulers, and kernel type templates from the sycl-tla library.
+# Use this to guide SYCL kernel optimizations using the CUTLASS API.
+
+tile_configurations:
+  - id: cutlass_bmg_gemm_256x256x32
+    name: "Standard BF16 GEMM tile: 256x256x32 (optimal for large shapes)"
+    description: |
+      The default high-performance tile for BF16 GEMM on Battlemage.
+      Used by examples 00-05, 08, 11, 13 in sycl-tla.
+
+      ```cpp
+      using TileShape = Shape<_256, _256, _32>;
+      // SubgroupLayout: 8 rows x 4 cols = 32 subgroups per work-group
+      using TiledMMA = TiledMMA<
+          MMA_Atom<XE_8x16x16_F32BF16BF16F32_TT>,
+          Layout<TileShape>,
+          Layout<Shape<_8, _4, _1>, Stride<_4, _1, _0>>>;
+      constexpr int PipelineStages = 2;
+      using DispatchPolicy = MainloopXeL1Staged<PipelineStages>;
+      ```
+
+      Performance: ~37.9 TFLOPS on B580 at M=N=K=4096 (32% peak).
+      Each subgroup handles 32x64 output (256/8 x 256/4).
+      SLM double-buffer: 2*(256*32 + 32*256)*2 = 64 KB (fits 128 KB budget).
+    applies_to: [gemm, large_shapes, M_ge_256, N_ge_256]
+
+  - id: cutlass_bmg_dual_gemm_128x128x64
+    name: "Dual GEMM tile: 128x128x64 (for SwiGLU/GeGLU FFN)"
+    description: |
+      Tile for fused dual-GEMM kernels (two GEMMs sharing matrix A).
+      Used by example 07 (SwiGLU) in sycl-tla.
+
+      ```cpp
+      using TileShape = Shape<_128, _128, _64>;
+      // SubgroupLayout: 8 rows x 4 cols = 32 subgroups
+      using TiledMMA = TiledMMA<
+          MMA_Atom<XE_8x16x16_F32BF16BF16F32_TT>,
+          Layout<TileShape>,
+          Layout<Shape<_8, _4, _1>, Stride<_4, _1, _0>>>;
+      constexpr int PipelineStages = 2;
+      using DispatchPolicy = MainloopIntelXeXMX16<PipelineStages>;
+      ```
+
+      Performance: ~3.8 TFLOPS on B580 (8% peak) — significantly lower than
+      standard GEMM due to smaller tiles and double memory reads (B0+B1).
+      This is the baseline to optimize against for SwiGLU kernels.
+
+      OPTIMIZATION OPPORTUNITIES:
+      - Try larger tiles if register pressure allows (e.g., 256x128x32)
+      - Consider MainloopXeL1Staged instead of MainloopIntelXeXMX16
+      - For skinny M (decode), consider M=64 or M=32 tiles
+      - Stream-K scheduling may help with load balancing
+    applies_to: [dual_gemm, swiglu, geglu, ffn, fused_gemm]
+
+  - id: cutlass_bmg_mixed_dtype_tiles
+    name: "Mixed-precision tile shapes (INT4/INT8 dequant GEMM)"
+    description: |
+      Sub-byte quantized inputs require different tile shapes due to
+      narrower data types and upcast overhead.
+
+      INT8 (W8A16): standard large tiles work
+      ```cpp
+      // BF16 x INT8 -> BF16
+      using TileShape = Shape<_256, _256, _32>;
+      using DispatchPolicy = MainloopIntelXeXMX16MixedPrecision<3>;
+      // 3 pipeline stages (extra stage for upcast)
+      ```
+
+      INT4 (W4A16): much smaller tiles needed
+      ```cpp
+      // FP16 x UINT4 -> FP16
+      using TileShape = Shape<_16, _64, _64>;
+      // SubgroupLayout: 1x2 = 2 subgroups only
+      using MMA = XE_8x16x16_F32F16F16F32_TT;
+      using CopyA = XE_2D_U4x32x16_LD_T;  // 4-bit transposed load
+      using CopyB = XE_2D_U16x16x32_LD_N;
+      ```
+
+      The INT4 tile is 16x smaller than the standard BF16 tile.
+      Dequantization modes: ConvertOnly, ConvertAndScale, ConvertAndScaleWithZeroPoint.
+    applies_to: [quantized_gemm, w4a16, w8a16, int4, int8, mixed_precision]
+
+  - id: cutlass_bmg_flash_attention_tiles
+    name: "Flash Attention V2 tile configurations by head dimension"
+    description: |
+      Flash Attention tiles are selected at compile time based on HEAD_DIM.
+      These configs are from sycl-tla example 06.
+
+      HEAD_DIM=64 (Llama3-8B decode, GPT_OSS):
+      ```cpp
+      ShapeQK  = Shape<_128, _64, _32>;   // Q-tiles x K-tiles x K-block
+      ShapePV  = Shape<_128, _32, _64>;   // Q-tiles x V-head x K-tiles
+      ShapeOut = Shape<_128, _64>;         // Q-tiles x head_dim
+      SubgroupLayout = Shape<_8, _1, _1>; // 8 subgroups
+      PipelineStages = 2;
+      ```
+
+      HEAD_DIM=128 (Llama3/4, Qwen3):
+      ```cpp
+      ShapeQK  = Shape<_256, _32, _32>;
+      ShapePV  = Shape<_256, _32, _32>;
+      ShapeOut = Shape<_256, _128>;
+      SubgroupLayout = Shape<_16, _1, _1>; // 16 subgroups
+      PipelineStages = 2;
+      ```
+
+      HEAD_DIM=192 (Llama3-70B attention):
+      ```cpp
+      ShapeQK  = Shape<_256, _64, _32>;
+      ShapePV  = Shape<_256, _32, _64>;
+      ShapeOut = Shape<_256, _192>;
+      SubgroupLayout = Shape<_32, _1, _1>; // 32 subgroups
+      PipelineStages = 2;
+      ```
+
+      Decode mode uses single-query tiles (Q-tile = 1):
+      ```cpp
+      ShapeQK  = Shape<_1, KV_TILE_SIZE, _64>;
+      ShapePV  = Shape<_1, _32, KV_TILE_SIZE>;
+      ```
+      KV_TILE_SIZE: 256 or 512 (configurable).
+
+      Features: causal masking, variable-length, paged KV cache,
+      GQA/MQA (different num_heads_q vs num_heads_kv),
+      persistent scheduler option.
+    applies_to: [flash_attention, attention, fmha]
+
+dispatch_policies:
+  - id: cutlass_mainloop_xe_l1_staged
+    name: "MainloopXeL1Staged — best for standard GEMM on BMG"
+    description: |
+      L1-staged data movement using DPAS atoms (XE_DPAS_TT) and 2D block
+      copy atoms. This is the highest-performance dispatch policy for
+      standard BF16 GEMM on Battlemage.
+
+      ```cpp
+      using DispatchPolicy = MainloopXeL1Staged<2>;  // 2 pipeline stages
+      ```
+
+      Used by: benchmarks, example 00 (basic GEMM), example 03 (Stream-K).
+      Achieves ~37.9 TFLOPS at 4096^3 on B580.
+
+  - id: cutlass_mainloop_intel_xe_xmx16
+    name: "MainloopIntelXeXMX16 — general-purpose Xe mainloop"
+    description: |
+      Base Xe mainloop for XMX (DPAS) with SIMD16 subgroups.
+      Works on both Battlemage (Xe2) and PVC (Xe-HPC).
+
+      ```cpp
+      using DispatchPolicy = MainloopIntelXeXMX16<2>;
+      ```
+
+      Variants:
+      - MainloopIntelXeXMX16Group<Stages>      — grouped/ptr-array GEMM
+      - MainloopIntelXeXMX16MixedPrecision<3>  — mixed A/B types (INT8, INT4)
+      - MainloopIntelXeXMX16GroupFP8<Stages>   — grouped FP8 GEMM
+      - MainloopIntelXeXMX16FP8Scaling<Stages> — FP8 with per-tensor scales
+      - MainloopIntelW8A8<Stages>              — INT8 weight+activation GEMM
+
+  - id: cutlass_mainloop_xe_l1_staged_group
+    name: "MainloopXeL1StagedGroup — grouped GEMM with L1 staging"
+    description: |
+      L1-staged variant for grouped/batched GEMM with distinct problem sizes.
+
+      ```cpp
+      using DispatchPolicy = MainloopXeL1StagedGroup<2>;
+      ```
+
+      Used with GroupScheduler for MoE expert execution.
+
+tile_schedulers:
+  - id: cutlass_persistent_scheduler
+    name: "PersistentScheduler — default tile scheduling"
+    description: |
+      Work-groups loop over output tiles in a persistent grid. Good default
+      for large, regular GEMM problems.
+
+      ```cpp
+      using TileScheduler = PersistentScheduler;
+      ```
+
+  - id: cutlass_streamk_scheduler
+    name: "StreamKScheduler — load-balanced scheduling for irregular shapes"
+    description: |
+      Distributes K-dimension work across work-groups to improve load balance.
+      Avoids "tail effects" where the last wave of tiles underutilizes the GPU.
+      Supports three modes: DataParallel, Split-K, Hybrid Stream-K.
+
+      ```cpp
+      using TileScheduler = StreamKScheduler;
+      // CLI: --dp (data parallel), --splitk (split-K), default: hybrid
+      ```
+
+      Best for: problems where M*N/tile_area doesn't evenly divide the GPU's
+      work-group capacity, or very large K with small M*N.
+
+  - id: cutlass_group_scheduler
+    name: "GroupScheduler — for grouped/batched GEMM"
+    description: |
+      Schedules tiles across multiple GEMM problems in a ptr-array interface.
+      Each group can have distinct M, N, K and separate alpha/beta.
+
+      ```cpp
+      using TileScheduler = GroupScheduler;
+      ```
+
+      Required for: MoE expert execution, batched distinct-size GEMMs.
+      Combine with MainloopXeL1StagedGroup or MainloopIntelXeXMX16Group.
+
+epilogue_fusion_catalog:
+  - id: cutlass_epilogue_overview
+    name: "Available CUTLASS SYCL epilogue fusion operations"
+    description: |
+      All operations in cutlass::epilogue::fusion:: namespace. These are
+      composable epilogue types that fuse post-GEMM operations into the
+      kernel, eliminating extra memory round-trips.
+
+      BASIC:
+        ScaledAcc              — D = alpha * acc
+        LinearCombination      — D = alpha * acc + beta * C
+
+      ACTIVATION FUSIONS:
+        LinCombEltAct<Act>     — D = Act(alpha * acc + beta * C)
+        Available activations: Identity, ReLu, SiLu, GELU, GELU_taylor,
+          Sigmoid, Tanh, HardSwish, LeakyReLU, Clamp, Scale
+
+      BIAS + ACTIVATION:
+        LinCombPerRowBias          — D = alpha*acc + beta*C + bias_row
+        LinCombPerColBias          — D = alpha*acc + beta*C + bias_col
+        LinCombPerRowBiasEltAct    — D = Act(alpha*acc + beta*C + bias_row)
+        LinCombPerColBiasEltAct    — D = Act(alpha*acc + beta*C + bias_col)
+        XeLinCombPerRowBiasEltAct  — Xe-optimized (uses native broadcast)
+        XeLinCombPerColBiasEltAct  — Xe-optimized (uses native broadcast)
+
+      AUXILIARY OUTPUT (for backward pass / residual):
+        LinCombPerRowBiasEltActAux — D = Act(lincomb + bias); Aux = pre-act
+        LinCombPerColBiasEltActAux — same, per-col bias variant
+
+      BACKWARD PASS:
+        LinCombDeEltAct            — D = d_Act(dY, Z) for activation gradient
+        XeLinCombDeEltAct          — Xe-optimized variant
+        LinCombDeEltActDePerRowBias — gradient + bias gradient
+
+      SOFTMAX / TOPK:
+        LinCombSoftmaxRow      — D = softmax(alpha*acc + beta*C) row-wise
+        LinCombTopKSoftmaxCol  — D = softmax(topk(alpha*acc + beta*C))
+
+      SPLIT-K:
+        LinCombSplitK          — D = splitk_reduce(alpha*acc + beta*C)
+
+      FP8 QUANTIZATION:
+        ScaledLinCombPerRowBiasEltAct     — with per-tensor FP8 scales
+        ScaledLinCombPerRowBiasEltActAmaxAux — + amax tracking for FP8
+
+      PER-ELEMENT SCALING:
+        PerRowLinCombPerRowBiasEltAct — per-row alpha/beta + bias + act
+        PerColLinCombPerColBiasEltAct — per-col alpha/beta + bias + act
+        PerColResAddPerColBiasEltAct  — residual add after activation
+
+      BLOCK SCALING (MX format):
+        LinCombBlockScaleFactor         — + block scale factor output
+        LinCombEltActBlockScaleFactor   — + activation + block scale
+        LinCombPerRowBiasBlockScaleFactor — + bias + block scale
+
+fused_kernel_patterns:
+  - id: cutlass_swiglu_dual_gemm
+    name: "SwiGLU FFN via Dual GEMM (gate+up fused)"
+    description: |
+      The core FFN block in LLaMA, Mistral, Qwen models:
+        D = SiLU(A * B0) * (A * B1)
+
+      Two GEMMs share matrix A (the hidden state), with B0 (gate weights)
+      and B1 (up weights). SiLU activation on gate, elementwise multiply.
+
+      In CUTLASS SYCL:
+      ```cpp
+      // applications/dual_gemm/ provides the collective:
+      using CollectiveMainloop = DualGemmMma<DispatchPolicy, TileShape, ...>;
+      // Epilogue0: LinCombPerRowBiasEltAct<SiLu> (gate path)
+      // Epilogue1: LinCombPerRowBiasEltAct<Identity> (up path)
+      // EpilogueOutput2: FusedElementWiseOpDualGemm<multiplies> (D=D0*D1)
+      ```
+
+      LLM shapes (decode M=1-128, prefill M=512-4096):
+        Qwen3-8B:   N=12288, K=4096  (hidden=4096, intermediate=12288)
+        Qwen3-14B:  N=17408, K=5120  (hidden=5120, intermediate=17408)
+        LLaMA4 MoE: N=8192,  K=5120  (hidden=5120, intermediate=8192)
+        LLaMA4 dense: N=16384, K=5120
+
+  - id: cutlass_flash_attention_v2
+    name: "Flash Attention V2 (fused QK+softmax+PV)"
+    description: |
+      Full Flash Attention V2 implementation:
+        O = softmax(Q @ K^T / sqrt(d)) @ V
+
+      Fuses three operations in one kernel:
+      1. QK GEMM (score computation)
+      2. Online softmax (running max + sum)
+      3. PV GEMM (weighted value aggregation)
+
+      Features:
+      - Causal masking (decoder self-attention)
+      - Variable-length sequences (padded batches)
+      - Paged KV cache (for serving)
+      - GQA / MQA (grouped/multi-query attention)
+      - Persistent scheduler option (for decode)
+
+      applications/flash_attention_v2/ provides:
+      - xe_fmha_fwd_kernel.hpp — forward kernel
+      - fmha_fusion.hpp — fused QK+softmax+PV mainloop
+      - xe_fmha_fwd_epilogue.hpp — writes O + optional LSE
+      - xe_tile_scheduler.hpp — attention-specific scheduler
+
+  - id: cutlass_moe_grouped_gemm
+    name: "MoE Grouped GEMM with persistent scheduling"
+    description: |
+      Mixture-of-Experts GEMM: batch of GEMMs with variable sizes per expert.
+      Each expert has its own weight matrices but different numbers of tokens.
+
+      ```cpp
+      using TileScheduler = GroupScheduler;
+      using DispatchPolicy = MainloopXeL1StagedGroup<2>;
+      ```
+
+      The MoE tile scheduler maps tiles across variable-sized expert groups
+      efficiently, avoiding load imbalance from experts with few tokens.
+
+      Model shapes:
+        DeepSeekV2: 160 experts, dim 3072/1536, router gate 160
+        Qwen3-235B: 128 experts, dim 3072/1536, router gate 128
+        LLaMA4 Scout: 16 experts, dim 16384/8192, router gate 16
+        GPT_OSS_120B: 128 experts, dim 5760/2880, router gate 128
+
+  - id: cutlass_topk_softmax_moe_router
+    name: "GEMM + TopK + Softmax (MoE router gating)"
+    description: |
+      Single kernel computes router logits, selects top-K experts, and
+      normalizes via softmax — all fused.
+
+      ```cpp
+      using EpilogueOp = LinCombTopKSoftmaxCol<TopK>;
+      using TileShape = Shape<_256, _256, _32>;
+      ```
+
+      Router gate shapes (M=tokens, N=num_experts, K=hidden):
+        DeepSeekV2: M=128/131072, N=160, K=5120
+        Qwen3-235B: M=128/131072, N=128, K=4096
+        LLaMA4 Scout: M=128/131072, N=16, K=5120
+        GPT_OSS_120B: M=128/131072, N=128, K=2880
+
+  - id: cutlass_two_gemm_fusion_slm
+    name: "Two-stage fused GEMM via SLM (D = (A*B)*C)"
+    description: |
+      Fuses two sequential GEMMs where the output of the first feeds the
+      second, keeping the intermediate in SLM (no global memory traffic).
+
+      From cute/tutorial/xe_two_gemm_fusion.cpp:
+      - Stage 1: temp = A * B (stored to SLM)
+      - Stage 2: D = temp * C (read from SLM)
+
+      Relevant for MLP blocks where output of one linear feeds another.
+      Requires intermediate fitting in SLM (128 KB on BMG).

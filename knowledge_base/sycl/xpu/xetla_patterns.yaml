@@ -876,25 +876,33 @@ patterns:
       //
       // BF16 GEMM measured performance (Arc B580, CUTLASS/XeTLA):
       //
-      //   Baseline (naive CUTLASS):
-      //     M=N=K=4096:  3.7  TFLOPS  (36.96 ms)
-      //     M=N=K=2048:  3.7  TFLOPS  (4.59 ms)
-      //     M=N=K=1024:  5.7  TFLOPS  (0.38 ms)
-      //     M=N=K=512:   1.2  TFLOPS  (0.23 ms) — launch-overhead limited
-      //     M=N=K=256:   0.2  TFLOPS  (0.14 ms) — launch-overhead limited
+      //   IMPORTANT: All runs require IGC 256-GRF mode:
+      //     export IGC_ExtraOCLOptions="-cl-intel-256-GRF-per-thread"
+      //     export SYCL_PROGRAM_COMPILE_OPTIONS="-ze-opt-large-register-file"
+      //   Without these, register spills cause 8-22x slowdown.
       //
-      //   Optimized (XeTLA-tuned):
-      //     M=N=K=4096:  37.9 TFLOPS  (3.62 ms)  — 32% of peak, 10.2x speedup
-      //     M=N=K=2048:  37.6 TFLOPS  (0.46 ms)  — 32% of peak, 10.1x speedup
-      //     M=N=K=1024:  14.7 TFLOPS  (0.15 ms)  — 12.6% of peak, 2.6x speedup
-      //     M=N=K=512:   13.1 TFLOPS  (0.02 ms)  — 11.2% of peak, 11.2x speedup
-      //     M=N=K=256:    2.5 TFLOPS  (0.01 ms)  — 2.1% of peak, 10.2x speedup
+      //   Simple GEMM (256x256x32 tiles, with 256-GRF):
+      //     M=N=K=4096:  80.96 TFLOPS  (1.70 ms) — 69% of peak
+      //     M=N=K=2048:  39.90 TFLOPS  (0.43 ms) — 34% of peak
+      //     M=N=K=1024:  31.82 TFLOPS  (0.07 ms) — 27% of peak
       //
-      //   Performance targets (what an optimized kernel should achieve):
-      //     M=N=K>=4096:  35-50  TFLOPS (30-43% peak) — room for improvement
-      //     M=N=K=2048:   30-45  TFLOPS (26-38% peak)
-      //     M=N=K=1024:   12-25  TFLOPS (10-21% peak)
-      //     M=N=K=512:     5-15  TFLOPS (4-13% peak) — launch overhead significant
+      //   Dual GEMM SwiGLU (128x128x64 tiles, with 256-GRF):
+      //     M=128,  N=12288, K=4096:  31.41 TF  (0.82 ms)  — Qwen3-8B decode
+      //     M=512,  N=12288, K=4096:  75.98 TF  (1.36 ms)  — Qwen3-8B batch
+      //     M=1024, N=12288, K=4096:  68.98 TF  (2.99 ms)  — Qwen3-8B prefill
+      //     M=4096, N=4096,  K=4096:  46.00 TF  (5.98 ms)  — square
+      //     M=128,  N=8192,  K=5120:  42.56 TF  (0.50 ms)  — LLaMA4 MoE expert
+      //     M=8,    N=4096,  K=4096:   1.67 TF  (0.32 ms)  — decode (tiny M)
+      //
+      //   WITHOUT 256-GRF (same kernel, 128 regs + 145 spills):
+      //     M=128,  N=12288, K=4096:   3.86 TF  (6.68 ms)  — 8.1x slower!
+      //     M=512,  N=12288, K=4096:   3.55 TF  (29.03 ms) — 21.4x slower!
+      //
+      //   Performance targets (with 256-GRF mode):
+      //     M=N=K>=4096:  60-80  TFLOPS (51-68% peak)
+      //     M=N=K=2048:   35-50  TFLOPS (30-43% peak)
+      //     M=N=K=1024:   25-35  TFLOPS (21-30% peak)
+      //     Dual GEMM FFN shapes: 30-75 TFLOPS depending on M
       //
       // ========== Intel Arc B570 (Xe2-HPG / BMG-G21 cut) ==========
       // Peak BF16 XMX: ~105 TFLOPS | Memory BW: 380 GB/s
@@ -912,9 +920,16 @@ patterns:
     expected_speedup: "reference targets, not a pattern"
     applies_to: [gemm]
     notes: |
-      Measured data from B580 benchmarks (2026-04-29) using CUTLASS/XeTLA BF16 GEMM.
-      Optimized kernel reaches ~38 TFLOPS at N>=2048 (32% peak), suggesting further
-      optimization headroom — likely from larger tile sizes and deeper prefetching.
+      Measured data from B580 benchmarks (2026-04-29/30) using CUTLASS/XeTLA BF16.
+
+      Standard GEMM (256x256x32 tiles, MainloopXeL1Staged):
+        Optimized reaches ~38 TFLOPS at N>=2048 (32% peak).
+
+      Dual GEMM SwiGLU (128x128x64 tiles, MainloopIntelXeXMX16):
+        Without 256-GRF: ~3.8 TFLOPS (8% peak) due to 145 register spills.
+        With 256-GRF: 31-76 TFLOPS (27-65% peak) — spills eliminated.
+        The IGC 256-GRF env var is the single most important setting.
+
       Small GEMM (< 512x512) should be batched or fused into larger kernels.
       Arithmetic intensity threshold: ~257 FLOPs/byte (B580) — problems below
       this are memory-bandwidth-bound, not compute-bound.
@@ -1043,3 +1058,270 @@ patterns:
       //   At M=N=K=256:  ~85 FLOPs/byte → memory-bound on both GPUs
     expected_speedup: "hardware reference, not a pattern"
     applies_to: [all]
+
+  - id: sycl_register_spill_diagnosis
+    name: "Register spills are the #1 killer for CUTLASS SYCL kernel performance"
+    stage: device_specific
+    description: Detect and fix register spills that cause 10x+ performance loss
+    rationale: |
+      The icpx compiler reports register spills at compile time. Each spill/fill
+      is ~200+ cycles (global memory round-trip). A kernel spilling 145 registers
+      can lose 10x performance vs an unspilled version.
+
+      DIAGNOSIS — check compile output:
+      ```
+      warning: kernel ... compiled SIMD16 allocated 128 regs and spilled around 145
+      ```
+      This means: 128 GRF used + 145 values spilled to memory = catastrophic.
+
+      REAL EXAMPLE: Dual GEMM SwiGLU kernel on B580:
+        With 145 spills:    3.8 TFLOPS (8% peak)
+        Standard GEMM (no spills): 37.9 TFLOPS (32% peak)
+        → 10x performance gap from register spills alone
+
+      COMPILE FLAG TO CHECK:
+      ```bash
+      icpx -fsycl main.cpp -Xs "-cl-intel-print-grf-usage"
+      ```
+
+      FIXES (in order of impact):
+      1. Request large GRF mode (256 regs instead of 128):
+         ```cpp
+         // Sub-group size controls GRF allocation
+         [[intel::reqd_sub_group_size(16)]]
+         // Or via compiler flag: -cl-intel-256-GRF-per-thread
+         ```
+         Note: halves occupancy (32 threads/core → 16) but eliminates spills.
+
+      2. Reduce K-loop unroll depth (less accumulators live at once):
+         ```cpp
+         // Before: 4-way unroll = 4*16 = 64 accumulator GRF
+         // After:  2-way unroll = 2*16 = 32 accumulator GRF
+         ```
+
+      3. Reduce tile size to reduce live data:
+         - Smaller tile → fewer accumulator registers
+         - 128x128 needs less GRF than 256x256
+         - But also reduces compute-to-memory ratio
+
+      4. Split compound operations (e.g., separate dual GEMM into two passes):
+         - Dual GEMM keeps A, B0, B1, C0, C1, D0, D1, D2 all live
+         - Two separate GEMMs halve the live register count
+         - Trade-off: extra memory traffic for A (read twice)
+
+      5. Use SLM to stage intermediate results:
+         - Store D0 to SLM, compute D1, then fuse D2 = SiLU(D0) * D1
+         - Reduces peak register pressure at cost of SLM bandwidth
+
+      IMPORTANT: A kernel with 0 spills and smaller tiles will almost always
+      outperform a kernel with spills and larger tiles. Eliminate spills first,
+      then tune tile sizes.
+    expected_speedup: "5-10x when eliminating heavy spills"
+    applies_to: [gemm, dual_gemm, attention, all_compute_bound]
+
+  # === CUTLASS SYCL EPILOGUE FUSION CATALOG ===
+  # These are the composable epilogue operations available in CUTLASS SYCL (sycl-tla).
+  # Each can be fused into a GEMM kernel's epilogue phase, eliminating separate kernels.
+
+  - id: cutlass_epilogue_lincomb_eltact
+    name: "CUTLASS epilogue: LinCombEltAct — GEMM + activation fusion"
+    stage: fusion
+    description: Fuse activation function into GEMM epilogue via CUTLASS EVT
+    rationale: |
+      CUTLASS provides composable epilogue visitor tree (EVT) nodes for fusing
+      operations into the GEMM output path. LinCombEltAct applies:
+        D = Activation(alpha * Acc + beta * C)
+
+      Available activations (from cutlass::epilogue::thread):
+        - ReLu, GELU, SiLu (Swish), Sigmoid, HardSwish, LeakyReLU, Identity
+
+      Template usage:
+      ```cpp
+      using EpilogueOp = cutlass::epilogue::fusion::LinCombEltAct<
+          cutlass::epilogue::thread::SiLu,   // Activation function
+          ElementOutput,                       // Output element type
+          ElementCompute,                      // Compute type (float)
+          ElementAccumulator                   // Accumulator type
+      >;
+      ```
+
+      LLM workload mapping:
+        - SiLU: LLaMA/Mistral/Qwen MLP gate projection
+        - GELU: GPT/BERT MLP
+        - ReLU: older models, ReLU-based MLPs
+    expected_speedup: "1.3-2x vs separate activation kernel"
+    applies_to: [gemm, mlp, transformer_ffn, fused_gemm_epilogue]
+
+  - id: cutlass_epilogue_per_row_bias
+    name: "CUTLASS epilogue: per-row/per-col bias addition"
+    stage: fusion
+    description: Fuse bias vector addition into GEMM epilogue
+    rationale: |
+      Adds a bias vector to each row (or column) of the GEMM output without
+      a separate kernel launch.
+
+      Per-row bias (most common — bias per output feature):
+      ```cpp
+      using EpilogueOp = cutlass::epilogue::fusion::XeLinCombPerRowBiasEltAct<
+          cutlass::epilogue::thread::Identity, // No activation (or SiLu, GELU, etc.)
+          ElementOutput, ElementCompute, ElementBias, ElementAccumulator
+      >;
+      ```
+
+      Per-column bias:
+      ```cpp
+      using EpilogueOp = cutlass::epilogue::fusion::XeLinCombPerColBiasEltAct<...>;
+      ```
+
+      The Xe-optimized variants (XeLinComb...) use native broadcast operations
+      for better performance on Intel GPUs.
+    expected_speedup: "1.2-1.5x vs separate bias kernel"
+    applies_to: [gemm, linear_layer, fused_gemm_epilogue]
+
+  - id: cutlass_epilogue_bias_act_aux
+    name: "CUTLASS epilogue: bias + activation + auxiliary output store"
+    stage: fusion
+    description: Fuse bias, activation, AND store pre-activation values for backward pass
+    rationale: |
+      LinCombPerRowBiasEltActAux performs:
+        Pre = alpha * Acc + bias
+        D = Activation(Pre)
+        Aux = Pre  (stored separately for backward pass gradient computation)
+
+      This is critical for training — the backward pass needs the pre-activation
+      values to compute gradients (e.g., dReLU, dGELU, dSiLU).
+
+      ```cpp
+      using EpilogueOp = cutlass::epilogue::fusion::LinCombPerRowBiasEltActAux<
+          LayoutC,
+          cutlass::epilogue::thread::ReLu,
+          ElementOutput, ElementCompute, ElementBias, ElementAccumulator
+      >;
+      ```
+    expected_speedup: "2-3x vs separate bias+activation+store kernels"
+    applies_to: [gemm, training, backward_pass, fused_gemm_epilogue]
+
+  - id: cutlass_epilogue_deeltact
+    name: "CUTLASS epilogue: LinCombDeEltAct — backward pass activation gradient"
+    stage: fusion
+    description: Fuse activation gradient computation into backward GEMM epilogue
+    rationale: |
+      For training backward pass: computes dActivation using the stored
+      pre-activation auxiliary values.
+        D = dActivation(alpha * Acc + beta * C, Aux)
+      where Aux is the pre-activation value stored during forward pass.
+
+      ```cpp
+      using EpilogueOp = cutlass::epilogue::fusion::LinCombDeEltAct<
+          cutlass::epilogue::thread::dReLu,  // Activation gradient
+          ElementOutput, ElementCompute, ElementAccumulator
+      >;
+      ```
+    expected_speedup: "1.5-2x vs separate gradient kernel"
+    applies_to: [gemm, training, backward_pass]
+
+  - id: cutlass_epilogue_softmax
+    name: "CUTLASS epilogue: row-wise softmax fusion"
+    stage: fusion
+    description: Fuse row-wise softmax normalization into GEMM epilogue
+    rationale: |
+      Computes row-wise softmax directly on GEMM output tiles without
+      materializing the full output matrix. Uses online softmax algorithm
+      with running max and sum.
+
+      Uses IntelXeXMX16 dispatch policy and custom EpilogueTile:
+      ```cpp
+      using EpilogueTile = Shape<_16, _32>;
+      using EpilogueDispatchPolicy = cutlass::epilogue::IntelXeXMX16;
+      // LinCombSoftmaxRow epilogue operation
+      ```
+
+      Used in: attention score normalization (QK^T → softmax → PV)
+    expected_speedup: "1.5-2x vs separate softmax kernel"
+    applies_to: [attention, softmax, normalization]
+
+  - id: cutlass_epilogue_topk_softmax
+    name: "CUTLASS epilogue: Top-K + Softmax fusion for MoE routing"
+    stage: fusion
+    description: Fuse Top-K selection and softmax into GEMM epilogue for MoE gating
+    rationale: |
+      MoE (Mixture of Experts) models route tokens via: scores = softmax(topk(X @ W_gate))
+      This fuses GEMM + TopK + Softmax into a single kernel.
+
+      ```cpp
+      static constexpr int TopK = 2;  // or 4, 8 — model-dependent
+      using EpilogueOp = cutlass::epilogue::fusion::LinCombTopKSoftmaxCol<
+          TopK, ElementD, ElementCompute
+      >;
+      ```
+
+      Uses IntelXeXMX16 dispatch policy. TopK is a compile-time constant.
+
+      Models using this: Mixtral (TopK=2), DeepSeek-V2 (TopK=6), Qwen3-MoE
+    expected_speedup: "2-3x vs separate GEMM + TopK + Softmax kernels"
+    applies_to: [gemm, moe, routing, gating]
+
+  - id: cutlass_epilogue_splitk
+    name: "CUTLASS epilogue: Split-K reduction for tall-K problems"
+    stage: fusion
+    description: Split K dimension across work-groups with epilogue reduction
+    rationale: |
+      For problems with large K and small M*N (e.g., DeepSeek MLA attention),
+      Split-K distributes the K-loop across multiple work-groups, each computing
+      a partial result. The epilogue fuses the reduction.
+
+      ```cpp
+      using EpilogueOp = cutlass::epilogue::fusion::LinCombSplitK<
+          ElementOutput, ElementCompute, ElementAccumulator
+      >;
+      ```
+
+      Supports custom nope_dim/rope_dim parameters for DeepSeek MLA
+      (multi-latent attention) with head-specific dimension handling.
+    expected_speedup: "2-5x for tall-K problems (K >> M*N)"
+    applies_to: [gemm, attention, mla, split_k]
+
+  - id: cutlass_epilogue_auxstore
+    name: "CUTLASS epilogue: auxiliary output store + elementwise add"
+    stage: fusion
+    description: Store GEMM result AND add to residual in one epilogue pass
+    rationale: |
+      XeAuxStore + EVT compute enables:
+        Aux = alpha * Acc         (store raw GEMM output)
+        D = Aux + C               (add residual connection)
+
+      Uses the Epilogue Visitor Tree (EVT) pattern with XeAuxStore node.
+      ```cpp
+      using F = cutlass::epilogue::fusion::XeAuxStore<...>;
+      ```
+
+      Critical for transformer residual connections: output = FFN(x) + x
+    expected_speedup: "1.5-2x vs separate store + add kernels"
+    applies_to: [gemm, residual_connection, transformer]
+
+  - id: cutlass_igc_256grf_mode
+    name: "IGC 256-GRF mode for compute-heavy SYCL kernels"
+    stage: device_specific
+    description: Enable 256 registers per thread via IGC environment variables
+    rationale: |
+      The Intel Graphics Compiler (IGC) defaults to 128 GRF per thread. For
+      compute-heavy kernels (GEMM, attention) that spill registers, enabling
+      256-GRF mode eliminates spills at the cost of halved occupancy.
+
+      sycl-tla's CI benchmarks always set these:
+      ```bash
+      export IGC_ExtraOCLOptions="-cl-intel-256-GRF-per-thread"
+      export SYCL_PROGRAM_COMPILE_OPTIONS="-ze-opt-large-register-file -gline-tables-only"
+      export ONEAPI_DEVICE_SELECTOR="level_zero:gpu"
+      export IGC_VectorAliasBBThreshold=100000000000
+      ```
+
+      These are runtime JIT flags — they affect how the SYCL runtime compiles
+      SPIR-V to native GPU code. The AOT-compiled binary (.spv) is the same;
+      the JIT backend respects these env vars at execution time.
+
+      On Xe2 (B580): 256 GRF = 16 KB/thread, 32 threads/core (vs 64 at 128 GRF).
+      For GEMM, the reduced occupancy is acceptable because the kernel is
+      compute-bound and the extra registers eliminate spills.
+    expected_speedup: "potentially large for spill-heavy kernels"
+    applies_to: [gemm, attention, dual_gemm, all_compute_bound]

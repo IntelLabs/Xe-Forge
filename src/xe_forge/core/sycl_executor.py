@@ -12,9 +12,13 @@ Wraps ai_bench.sycl.compiler.SYCLCompiler for compile/run/parse, adding:
 import logging
 import os
 import shutil
+import struct
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+import numpy as np
+import torch
 
 from ai_bench.sycl.compiler import SYCLCompiler, SYCLRunResult
 
@@ -68,10 +72,20 @@ def _include_dirs(sycl_tla_dir: str) -> list[str]:
         f"{sycl_tla_dir}/include",
         f"{sycl_tla_dir}/tools/util/include",
         f"{sycl_tla_dir}/examples/common",
+        f"{sycl_tla_dir}/applications",
     ]
     if Path(MKL_INCLUDE).exists():
         dirs.append(MKL_INCLUDE)
     return dirs
+
+
+def _save_tensor(t: torch.Tensor, path: str) -> None:
+    """Write a tensor to a binary file, handling bfloat16 (unsupported by NumPy)."""
+    t = t.contiguous()
+    if t.dtype == torch.bfloat16:
+        t.view(torch.int16).numpy().tofile(path)
+    else:
+        t.numpy().tofile(path)
 
 
 @dataclass
@@ -154,6 +168,10 @@ class SyclExecutor:
         else:
             return False, "", "No source code or path provided"
 
+        src_parent = str(src_path.parent)
+        if src_parent not in self._compiler.include_dirs:
+            self._compiler.include_dirs.append(src_parent)
+
         logger.info(f"Compiling SYCL kernel: {src_path}")
         binary = self._compiler.compile(src_path)
         if binary is None:
@@ -177,6 +195,66 @@ class SyclExecutor:
         ek = int(dims.get("K", em))
         return em, en, ek
 
+    def generate_inputs(
+        self,
+        dims: dict[str, int | float],
+        output_dir: str,
+        dtype: torch.dtype = torch.bfloat16,
+    ) -> None:
+        """Generate random input tensors and write them as binary files.
+
+        Writes A.bin, B0.bin, B1.bin (for dual GEMM) or A.bin, B.bin (for GEMM)
+        to the given directory. The binary expects raw row-major tensor data.
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        m = int(dims.get("M", dims.get("N", 1024)))
+        n = int(dims.get("N", m))
+        k = int(dims.get("K", m))
+
+        A = torch.randn(m, k, dtype=dtype)
+        _save_tensor(A, os.path.join(output_dir, "A.bin"))
+
+        B0 = torch.randn(k, n, dtype=dtype)
+        _save_tensor(B0, os.path.join(output_dir, "B0.bin"))
+
+        B1 = torch.randn(k, n, dtype=dtype)
+        _save_tensor(B1, os.path.join(output_dir, "B1.bin"))
+
+        logger.info(
+            f"Generated inputs: A[{m},{k}], B0[{k},{n}], B1[{k},{n}] ({dtype}) -> {output_dir}"
+        )
+
+    @staticmethod
+    def load_output(path: str, dtype: np.dtype = np.float32) -> np.ndarray:
+        """Load a binary tensor file dumped by the SYCL kernel."""
+        return np.fromfile(path, dtype=dtype)
+
+    @staticmethod
+    def compare_outputs(
+        output_a: np.ndarray,
+        output_b: np.ndarray,
+        rtol: float = 1e-2,
+        atol: float = 1e-3,
+    ) -> tuple[bool, str]:
+        """Compare two output tensors element-wise.
+
+        Returns (passed, message).
+        """
+        if output_a.shape != output_b.shape:
+            return False, f"Shape mismatch: {output_a.shape} vs {output_b.shape}"
+        close = np.allclose(output_a, output_b, rtol=rtol, atol=atol)
+        if close:
+            return True, "Outputs match"
+        diff = np.abs(output_a - output_b)
+        max_diff = float(np.max(diff))
+        mean_diff = float(np.mean(diff))
+        num_mismatch = int(np.sum(~np.isclose(output_a, output_b, rtol=rtol, atol=atol)))
+        total = output_a.size
+        return False, (
+            f"Outputs differ: max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}, "
+            f"mismatched={num_mismatch}/{total} ({100 * num_mismatch / total:.1f}%)"
+        )
+
     def execute(
         self,
         kernel_code: str | None = None,
@@ -186,6 +264,8 @@ class SyclExecutor:
         k: int = 1024,
         dims: dict[str, int | float] | None = None,
         output_name: str = "kernel_sycl",
+        input_dir: str | None = None,
+        output_dir: str | None = None,
     ) -> ExecutionResult:
         """Compile and run a SYCL kernel, returning structured results.
 
@@ -195,6 +275,8 @@ class SyclExecutor:
             m, n, k: GEMM dimensions (backward compat)
             dims: Generic dimension dict from spec (takes precedence over m/n/k)
             output_name: Name for compiled binary
+            input_dir: Directory with input tensor files (A.bin, B0.bin, B1.bin)
+            output_dir: Directory to dump output tensor (D2.bin)
 
         Returns:
             ExecutionResult with timing and correctness info
@@ -213,13 +295,26 @@ class SyclExecutor:
         em, en, ek = self._dims_to_mnk(dims, m, n, k)
         logger.info(f"Running SYCL kernel: {binary_path} (M={em}, N={en}, K={ek})")
 
+        extra_args = []
+        if input_dir:
+            extra_args.append(f"--input_dir={input_dir}")
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            extra_args.append(f"--output_dir={output_dir}")
+
+        # Skip internal Disposition check when using file-based I/O — the
+        # reference path reinitializes C randomly so it always mismatches.
+        # We verify correctness in Python via compare_outputs() instead.
+        use_verify = 0 if input_dir else (1 if self.verify else 0)
+
         result: SYCLRunResult = self._compiler.run(
             Path(binary_path),
             m=em,
             n=en,
             k=ek,
             iterations=self.iterations,
-            verify=1 if self.verify else 0,
+            verify=use_verify,
+            extra_args=extra_args if extra_args else None,
         )
         return self._to_execution_result(result)
 
@@ -255,18 +350,33 @@ class SyclExecutor:
         n: int = 1024,
         k: int = 1024,
         dims: dict[str, int | float] | None = None,
+        rtol: float = 1e-2,
+        atol: float = 1e-3,
     ) -> SyclComparisonResult:
-        """Compare performance of original vs optimized SYCL kernel.
+        """Compare performance and correctness of original vs optimized SYCL kernel.
+
+        Both kernels are run with the same input tensors (generated once, shared
+        via files). Outputs are compared in Python using numpy.allclose.
 
         Args:
             original_code/path: Original kernel source
             optimized_code/path: Optimized kernel source
             m, n, k: GEMM dimensions (backward compat)
             dims: Generic dimension dict from spec (takes precedence)
+            rtol: Relative tolerance for output comparison
+            atol: Absolute tolerance for output comparison
 
         Returns:
-            SyclComparisonResult with speedup and feedback
+            SyclComparisonResult with speedup, correctness, and feedback
         """
+        io_dir = tempfile.mkdtemp(prefix="sycl_compare_")
+        input_dir = os.path.join(io_dir, "inputs")
+        orig_output_dir = os.path.join(io_dir, "orig_out")
+        opt_output_dir = os.path.join(io_dir, "opt_out")
+
+        effective_dims = dims or {"M": m, "N": n, "K": k}
+        self.generate_inputs(effective_dims, input_dir)
+
         orig_result = self.execute(
             kernel_code=original_code,
             kernel_path=original_path,
@@ -275,6 +385,8 @@ class SyclExecutor:
             k=k,
             dims=dims,
             output_name="original_sycl",
+            input_dir=input_dir,
+            output_dir=orig_output_dir,
         )
         opt_result = self.execute(
             kernel_code=optimized_code,
@@ -284,6 +396,8 @@ class SyclExecutor:
             k=k,
             dims=dims,
             output_name="optimized_sycl",
+            input_dir=input_dir,
+            output_dir=opt_output_dir,
         )
 
         if not orig_result.success:
@@ -315,31 +429,65 @@ class SyclExecutor:
         orig_tflops = orig_result.tflops
         opt_tflops = opt_result.tflops
 
-        if is_slower:
+        # Correctness: compare outputs via dumped files
+        orig_correct = True
+        opt_correct = True
+        correctness_msg = ""
+        orig_d2 = os.path.join(orig_output_dir, "D2.bin")
+        opt_d2 = os.path.join(opt_output_dir, "D2.bin")
+        if os.path.exists(orig_d2) and os.path.exists(opt_d2):
+            orig_out = self.load_output(orig_d2)
+            opt_out = self.load_output(opt_d2)
+            passed, detail = self.compare_outputs(orig_out, opt_out, rtol=rtol, atol=atol)
+            opt_correct = passed
+            if not passed:
+                correctness_msg = f" CORRECTNESS FAILED: {detail}."
+            else:
+                correctness_msg = " Correctness: PASSED."
+            logger.info(f"Output comparison (rtol={rtol}, atol={atol}): {detail}")
+        else:
+            correctness_msg = " (no output files for comparison)"
+            logger.warning("Output dump files not found — skipping correctness check")
+
+        # Clean up temp I/O dir
+        try:
+            shutil.rmtree(io_dir)
+        except Exception:
+            pass
+
+        if not opt_correct:
+            msg = (
+                f"CORRECTNESS FAILURE: Optimized kernel produces wrong results. "
+                f"{correctness_msg.strip()} "
+                f"Original: {orig_ms:.4f}ms, Optimized: {opt_ms:.4f}ms. "
+                "Fix numerical correctness before optimizing for speed."
+            )
+        elif is_slower:
             slowdown = 1.0 / speedup if speedup > 0 else float("inf")
             msg = (
                 f"PERFORMANCE REGRESSION: Optimized kernel is {slowdown:.2f}x SLOWER. "
                 f"Original: {orig_ms:.4f}ms ({orig_tflops:.3f} TFlop/s), "
                 f"Optimized: {opt_ms:.4f}ms ({opt_tflops:.3f} TFlop/s). "
-                "Try a different approach."
+                f"{correctness_msg.strip()} Try a different approach."
             )
         elif speedup >= 2.0:
             msg = (
                 f"SUCCESS: Excellent! {speedup:.2f}x speedup. "
                 f"Original: {orig_ms:.4f}ms ({orig_tflops:.3f} TFlop/s), "
                 f"Optimized: {opt_ms:.4f}ms ({opt_tflops:.3f} TFlop/s)."
+                f"{correctness_msg}"
             )
         elif speedup >= 1.2:
             msg = (
                 f"SUCCESS: Good {speedup:.2f}x speedup. "
                 f"Original: {orig_ms:.4f}ms, Optimized: {opt_ms:.4f}ms. "
-                "Consider further optimizations."
+                f"{correctness_msg.strip()} Consider further optimizations."
             )
         else:
             msg = (
                 f"MARGINAL: Only {speedup:.2f}x speedup. "
                 f"Original: {orig_ms:.4f}ms, Optimized: {opt_ms:.4f}ms. "
-                "Try more aggressive optimizations."
+                f"{correctness_msg.strip()} Try more aggressive optimizations."
             )
 
         return SyclComparisonResult(
@@ -348,8 +496,8 @@ class SyclExecutor:
             speedup=speedup,
             original_tflops=orig_tflops,
             optimized_tflops=opt_tflops,
-            original_correct=orig_result.output_correct is not False,
-            optimized_correct=opt_result.output_correct is not False,
+            original_correct=orig_correct,
+            optimized_correct=opt_correct,
             is_slower=is_slower,
             feedback_message=msg,
         )

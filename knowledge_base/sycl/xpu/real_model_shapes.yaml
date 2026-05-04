@@ -1,0 +1,106 @@
+# Real LLM model shapes from sycl-tla benchmarks (BMG/B580 target)
+# Source: sycl-tla/benchmarks/device/bmg/input_files/model_configs/
+#
+# These shapes represent actual inference workloads. Decode shapes have tiny M
+# (1-128 tokens), prefill shapes have large M (1024-131072).
+
+llm_attention_shapes:
+  llama3_8b:
+    hidden_dim: 4096
+    num_heads_q: 32
+    num_heads_kv: 8  # GQA: 4:1 ratio
+    head_dim: 128
+    decode:
+      batch: 128
+      seq_qo: 1
+      seq_kv: [1152, 1280, 1408, 1536, 1664, 1792, 1920, 2048]
+    prefill:
+      batch: 128
+      seq_qo: 1024
+      seq_kv: 1024
+
+  llama3_70b:
+    hidden_dim: 8192
+    num_heads_q: 64
+    num_heads_kv: 8  # GQA: 8:1 ratio
+    head_dim: 128
+    decode:
+      batch: 128
+      seq_qo: 1
+      seq_kv: [1152, 1280, 1408, 1536, 1664, 1792, 1920, 2048]
+
+  llama4_scout:
+    hidden_dim: 5120
+    num_heads_q: 40
+    num_heads_kv: 8  # GQA: 5:1 ratio
+    head_dim: 128
+    decode:
+      batch: 128
+      seq_qo: 1
+      seq_kv: [1152, 1280, 1408, 1536, 1664, 1792, 1920, 2048]
+    prefill:
+      batch: 128
+      seq_qo: 1024
+      seq_kv: 1024
+
+  qwen3_235b_a22b:
+    hidden_dim: 4096
+    num_heads_q: 64
+    num_heads_kv: 4  # GQA: 16:1 ratio
+    head_dim: 128
+    decode:
+      batch: 128
+      seq_qo: 1
+      seq_kv: [1152, 1280, 1408, 1536, 1664, 1792, 1920, 2048]
+
+  deepseekv2_236b:
+    hidden_dim: 5120
+    head_dim_qk: 128  # MLA: separate QK and V head dims
+    head_dim_vo: 512
+    note: "Uses Multi-Latent Attention (MLA), not standard MHA"
+    decode_attention_gemm:
+      # av1: attention value projection
+      - {m: 16, n: 512, k: [1152, 1280, 1408, 1536, 1664, 1792, 1920, 2048], l: 128}
+      # wq_b: query B projection
+      - {m: 1, n: 3072, k: 1536, l: 128}
+
+llm_gemm_shapes:
+  # SGLang serving shapes (Llama3-8B decode, BF16)
+  sglang_decode:
+    - {name: q_mm, m: [1, 8], k: 4096, n: 4096}
+    - {name: k_v_mm, m: [1, 8], k: 4096, n: 1024}
+    - {name: qkv_fusion, m: [1, 8], k: 4096, n: 6144}
+    - {name: mm_common, m: [1, 8], k: 4096, n: 4096}
+    - {name: mm_silu, m: [1, 8], k: 4096, n: 14336, epilogue: SiLU}
+    - {name: mm_mul, m: [1, 8], k: 4096, n: 14336, epilogue: elementwise_multiply}
+    - {name: mm_fusion, m: [1, 8], k: 4096, n: 28672, note: "2x14336 fused FFN"}
+    - {name: mm_add, m: [1, 8], k: 14336, n: 4096, note: "FFN down proj, beta=1"}
+    - {name: lmhead_mm, m: [1, 8], k: 4096, n: 128256, note: "LM head, very wide N"}
+
+  # MoE routing (GEMM + TopK + Softmax)
+  moe_router:
+    - {model: llama4_scout, m: 128, n: 16, k: 5120, note: "decode, 16 experts"}
+    - {model: llama4_scout, m: 131072, n: 16, k: 5120, note: "prefill"}
+    - {model: qwen3_235b, m: 128, n: 128, k: 4096, note: "decode, 128 experts"}
+    - {model: qwen3_235b, m: 131072, n: 128, k: 4096, note: "prefill"}
+    - {model: deepseekv2, m: 128, n: 160, k: 5120, note: "decode, 160 experts"}
+    - {model: deepseekv2, m: 131072, n: 160, k: 5120, note: "prefill"}
+
+  # MoE expert FFN (grouped GEMM, l = num_active_experts)
+  moe_expert:
+    - {model: llama4_scout, m: 8, n: 5120, k: 8192, l: 16, name: down_proj}
+    - {model: qwen3_235b, m: 8, n: 4096, k: 1536, l: 128, name: down_proj}
+    - {model: deepseekv2, m: 4, n: 3072, k: 5120, l: 20, name: up_gate_proj}
+    - {model: deepseekv2, m: 4, n: 5120, k: 1536, l: 20, name: down_proj}
+
+  # Dense FFN
+  dense_ffn:
+    - {model: deepseekv2, m: 1, n: 5120, k: 1536, l: 128, name: down_w2_proj}
+
+key_observations:
+  - Decode M is always tiny (1-128 tokens) — memory-bandwidth bound
+  - Prefill M can be very large (131072 for MoE routing) — compute bound
+  - All attention uses head_dim=128 (except GPT_OSS with head_dim=64)
+  - GQA ratios vary widely: 4:1 (Llama3-8B), 5:1 (Llama4), 8:1 (Llama3-70B), 16:1 (Qwen3-235B)
+  - MoE expert GEMMs are batched (l=16-128) with very small per-expert M (4-16)
+  - SGLang mm_silu and mm_mul use fused epilogues (SiLU activation, elementwise multiply)
