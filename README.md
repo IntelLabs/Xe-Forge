@@ -5,6 +5,19 @@ Multi-stage LLM-driven optimization pipeline for Triton kernels targeting Intel 
 
 The optimizer analyzes Triton kernels, identifies performance issues, and applies optimizations through a series of stages — each powered by an LLM that understands GPU programming, numerical linear algebra, and Intel XPU hardware.
 
+Xe-Forge supports two usage modes on a shared toolbox:
+
+- **Python / dspy mode** — `xe-forge …` runs the full pipeline in-process through dspy agents (analyzer, planner, optimizer, generator) driven by a tree-structured trial search.
+- **Claude Code mode** — Claude drives the workflow via `/optimize-kernel <N>`, invoking the same tools (under `src/xe_forge/core/`) as stand-alone Python files. See [Claude Code mode](#claude-code-mode) below.
+
+### What's new
+
+- **PyTorch → Triton generation**: pass a PyTorch baseline directly; `GeneratorAgent` synthesizes the initial Triton kernel (detected automatically when the input file has no `@triton.jit`, or force with `--generate`).
+- **Tree-structured trial exploration**: the old flat `best_k` loop is replaced by a tree where each trial branches from a parent the search chose. The default `tree_walk` search backtracks on regression and escalates on plateau, matching Triton8 semantics. Trial state lives in `trials/<kernel_name>/state.json` and is inspectable via `trial_manager.py`.
+- **Pluggable search strategy**: swap `TRIAL_SEARCH` among `tree_walk` (default), `best_first`, `beam`/`mcts` (skeletons). Register your own via `xe_forge.trials.search.register_search`.
+- **VTune integration**: when `VTUNE_ENABLED=true`, the runner profiles the best trial on plateau and feeds the report into `OptimizerAgent`'s `vtune_report` field — closing a loop that was plumbed but empty.
+- **Standalone tool set** (under `src/xe_forge/core/`): `analyze_kernel`, `validate_triton`, `benchmark`, `trial_manager`, `xpu_profiler` — all runnable as `python src/xe_forge/core/<tool>.py` and importable as modules.
+
 ⚠️ **Disclaimer**: This project is currently in active development. The code is **not stable** and **not intended for use in production environments**. Interfaces, features, and behaviors are subject to change without notice.
 
 ---
@@ -99,6 +112,14 @@ xe-forge -i kernel.py -s spec.yaml --best-k 3
 
 # Debug mode
 xe-forge -i kernel.py -s spec.yaml --debug
+
+# Start from a PyTorch baseline — GeneratorAgent produces the initial Triton
+xe-forge -i model_pytorch.py -s spec.yaml --name my_model
+# (same as above, explicit)
+xe-forge -i model_pytorch.py -s spec.yaml --name my_model --generate
+
+# Override trial-tree knobs without editing .env
+xe-forge -i kernel.py -s spec.yaml --search best_first --max-trials 8
 ```
 
 ---
@@ -444,12 +465,21 @@ All settings can be controlled via environment variables or a `.env` file:
 | `AGENT_MAX_ITERATIONS` | `5` | CoVeR iterations per stage |
 | `AGENT_STRATEGY` | `cover` | Agent strategy: cover, react |
 | `USE_COVER` | `true` | Enable Chain of Verification |
-| `BEST_K` | `1` | Candidate solutions per run |
+| `BEST_K` | `1` | Legacy alias — maps onto `TRIAL_MAX_TRIALS` when that is unset |
 | `REQUIRE_CORRECTNESS` | `true` | Validate output correctness |
 | `CORRECTNESS_RTOL` | `0.01` | Relative tolerance |
 | `CORRECTNESS_ATOL` | `1e-5` | Absolute tolerance |
 | `TARGET_SPEEDUP` | `2.0` | Minimum acceptable speedup |
 | `TARGET_DTYPE` | — | Target dtype |
+| `TRIAL_MAX_TRIALS` | `10` | Max trials in the tree (includes t0) |
+| `TRIAL_EARLY_STOP_SPEEDUP` | `5.0` | Stop early when global best reaches this speedup |
+| `TRIAL_PLATEAU_WINDOW` | `2` | # trials without a new global best before "try harder" |
+| `TRIAL_SEARCH` | `tree_walk` | Search strategy: `tree_walk`, `best_first`, `beam`, `mcts` |
+| `TRIAL_WRITER` | `stage_sequence` | Writer used per trial (register additional writers via the API) |
+| `TRIALS_DIR` | `./trials` | Trial-tree state directory |
+| `OUTPUT_DIR` | `./output` | Finalized-kernel output directory |
+| `VTUNE_ENABLED` | `false` | Enable VTune profiling on plateau |
+| `VTUNE_BIN` | — | Path to VTune binary (falls back to shell `$VTUNE_BIN`) |
 | `XPU_DEVICE` | `xpu` | Device identifier |
 | `DEFAULT_NUM_WARPS` | `32` | Default warp count |
 | `DEFAULT_NUM_STAGES` | `2` | Default pipeline stages |
@@ -506,6 +536,78 @@ Curated kernels from [KernelBench](https://github.com/ScalingIntelligence/Kernel
 
 ---
 
+## Trial Exploration
+
+Optimization is driven by a tree of trials. The root `t0` is either the Triton kernel you passed in or one synthesized by `GeneratorAgent` from a PyTorch baseline. Each subsequent trial is produced by the **writer** (which runs the analyzer + planner + per-stage optimizer pipeline on a parent kernel) and placed as a child of the parent the **search** chose.
+
+### Default: `tree_walk`
+
+Mirrors Triton8's semantics:
+
+- If the latest trial improved — extend from it.
+- If it regressed vs. its parent — backtrack to the global best.
+- If the branch has plateaued for `TRIAL_PLATEAU_WINDOW` trials without a new global best — emit a `try_harder` hint and branch from the best.
+- Correctness failures retry on the same branch.
+
+Early-stop: speedup ≥ `TRIAL_EARLY_STOP_SPEEDUP`, or `TRIAL_MAX_TRIALS` trials total.
+
+### Other strategies
+
+Set `TRIAL_SEARCH` (or pass `--search`) to pick a different policy:
+
+| Value | Behavior |
+|-------|----------|
+| `tree_walk` | Triton8 default (above) |
+| `best_first` | Priority queue over leaves by speedup |
+| `beam` | Skeleton — `NotImplementedError` |
+| `mcts` | Skeleton — `NotImplementedError` |
+
+Register your own via `xe_forge.trials.search.register_search(name, cls)`.
+
+### Inspecting a run
+
+Trial state is written to `trials/<kernel_name>/state.json` with each trial's parent, strategy, correctness, and speedup. Any time:
+
+```bash
+python src/xe_forge/core/trial_manager.py status <kernel_name>
+python src/xe_forge/core/trial_manager.py best <kernel_name>
+```
+
+### VTune profiling
+
+When `VTUNE_ENABLED=true`, the runner calls `xpu_profiler` on the current best trial when a plateau is detected. The resulting markdown report flows into `OptimizerAgent.vtune_report` so the next trial's prompt includes actual hardware-counter data (XVE Active/Stalled, occupancy limiters, L3 miss ratio, etc.).
+
+---
+
+## Claude Code mode
+
+You can drive the same toolbox by hand through [Claude Code](https://claude.com/claude-code) instead of the Python CLI. The project ships with `.claude/commands/optimize-kernel.md` so the slash command `/optimize-kernel <N>` runs the full workflow described in `CLAUDE.md`.
+
+In this mode Claude itself is the trial-writer and decision-maker — it picks strategies, writes kernel files, and invokes the standalone tools as subprocesses. Python/dspy mode is not involved.
+
+### The five tools (all runnable as stand-alone files)
+
+| Task | Command |
+|------|---------|
+| Analyze a PyTorch baseline | `python src/xe_forge/core/analyze_kernel.py <pytorch_file>` |
+| Static-validate a Triton kernel | `python src/xe_forge/core/validate_triton.py <triton_file>` |
+| Benchmark baseline vs. Triton | `python src/xe_forge/core/benchmark.py <baseline> <triton> [--triton-baseline] [--baseline-us <cached>]` |
+| Manage the trial tree | `python src/xe_forge/core/trial_manager.py <init\|save\|result\|status\|best\|baseline-us\|finalize> ...` |
+| Profile with VTune | `python src/xe_forge/core/xpu_profiler.py <triton_file>` |
+
+Tools are delegated to a dedicated sub-agent defined in `.claude/agents/tool-runner.md`, which keeps the main conversation context clean and enforces single-XPU serialization (benchmark + profiler cannot run concurrently).
+
+### Shared state
+
+Both modes use the same on-disk layout — `trials/<kernel_name>/state.json` for the trial tree, `output/` for finalized kernels, and the same `.env` for configuration. Switching modes mid-session is safe: `trial_manager.py status <kernel_name>` shows the full tree regardless of who produced each trial.
+
+### When to use which mode
+
+- **Python mode** when you want a reproducible, largely hands-off run: `xe-forge -i ... -s ...` and let the dspy pipeline do its thing.
+- **Claude Code mode** when you want interactive exploration, want to inject domain hints mid-run, or are experimenting with optimization ideas that don't fit the built-in stage taxonomy.
+
+---
+
 ## How It Works
 
 1. **Analysis**: The analyzer agent examines the kernel and produces a structured list of issues, each tagged with a category (e.g. `dtype_float64`, `suboptimal_tile_size`, `missing_autotune`).
@@ -519,6 +621,8 @@ Curated kernels from [KernelBench](https://github.com/ScalingIntelligence/Kernel
 5. **Re-analysis**: After each stage, the kernel is re-analyzed so later stages see the updated code.
 
 6. **Final measurement**: The fully-optimized kernel is benchmarked against the original with full warmup iterations.
+
+Steps 1–6 are what the `stage_sequence` writer does for a single trial. The tree runs that writer up to `TRIAL_MAX_TRIALS` times, each trial starting from the parent the search chose rather than from the original kernel — so improvements compound across trials.
 
 ### What the LLM Sees
 
