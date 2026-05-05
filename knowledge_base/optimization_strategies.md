@@ -47,6 +47,28 @@
 - Do NOT mix block pointer and tensor descriptor APIs on same load/store
 - Do NOT use fp64 unless absolutely required (5-10x slower)
 
+## VTune Profiling
+
+Run when `VTUNE_ENABLED=true` and speedup plateaus:
+
+```bash
+python src/xe_forge/core/xpu_profiler.py <triton_file>
+```
+
+**Prerequisite**: OA hardware counters require `observation_paranoid=0`:
+```bash
+echo 0 | sudo tee /proc/sys/dev/xe/observation_paranoid
+```
+
+**Reading the output** — match the dominant signal to a KB pattern:
+- XVE Stalled > Active → memory bound → `knowledge_base/xpu_optimizations.yaml (xpu_descriptor_gemm_pattern)` + `knowledge_base/optimization_levels.yaml (level_2)`
+- Low occupancy + Work Size limiter → grid too small → `knowledge_base/xpu_optimizations.yaml (xpu_tile_swizzling)`
+- Low occupancy + SLM limiter → tile too large → `knowledge_base/xpu_optimizations.yaml (xpu_grf_mode)`
+- High L3 Miss → poor reuse → `knowledge_base/xpu_optimizations.yaml (xpu_descriptor_gemm_pattern, xpu_tile_swizzling)`
+- Register spill > 0 → reduce liveness → `knowledge_base/memory_patterns.yaml (reduce_liveness_sink_load_and_prefetch)`
+- Overhead kernels dominate → pre-pack to bf16 → `knowledge_base/optimization_levels.yaml (level_2_bandwidth_reduction)`
+- Host time >> GPU time → sync in hot path → `knowledge_base/memory_patterns.yaml (no_device_to_host_scalar_sync)`
+
 ## KB Quick Index
 
 - **Starting a GEMM kernel?** -> `knowledge_base/xpu_optimizations.yaml`

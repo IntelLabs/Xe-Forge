@@ -108,8 +108,7 @@ python src/xe_forge/core/trial_manager.py finalize <kernel_name> <name>_triton.p
 | Doc | Contents |
 |-----|----------|
 | `knowledge_base/implementation_reference.md` | Code templates, `Model` class pattern, GEMM example |
-| `knowledge_base/optimization_strategies.md` | Strategy reference, optimization levels, checklist, KB index |
-| `knowledge_base/workflow_details.md` | Detailed workflow, decision tree, benchmarking/validation details |
+| `knowledge_base/optimization_strategies.md` | Strategy reference, optimization levels, VTune output reading, checklist, KB index |
 | `knowledge_base/correctness.yaml` | Critical constraints to avoid bugs |
 | `knowledge_base/xpu_optimizations.yaml` | XPU-specific patterns (tensor descriptors, GRF, swizzling) |
 | `knowledge_base/fusion_patterns.yaml` | When to fuse vs split operations |
