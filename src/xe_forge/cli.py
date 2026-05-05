@@ -16,6 +16,19 @@ from xe_forge.models import OptimizationStage
 from xe_forge.pipeline import XeForgePipeline
 
 
+def _looks_like_pytorch(source: str) -> bool:
+    """Heuristic: Triton kernels import triton and use @triton.jit.
+
+    If neither appears, assume the file is a PyTorch baseline and the user
+    wants us to generate a Triton kernel for it.
+    """
+    if "@triton.jit" in source:
+        return False
+    if "import triton" in source or "from triton" in source:
+        return False
+    return True
+
+
 def main():
     sys.stdout.reconfigure(line_buffering=True)
 
@@ -122,6 +135,32 @@ Examples:
     # Other options
     parser.add_argument("--debug", action="store_true", help="Enable debug output")
 
+    # Trial-tree exploration overrides (all default to values in .env / config).
+    parser.add_argument(
+        "--search",
+        type=str,
+        default=None,
+        help="Trial search strategy: tree_walk (default), best_first, beam, mcts",
+    )
+    parser.add_argument(
+        "--writer",
+        type=str,
+        default=None,
+        help="Trial writer: stage_sequence (default), cover, react, explorer",
+    )
+    parser.add_argument(
+        "--max-trials",
+        type=int,
+        default=None,
+        help="Max trials in the tree (overrides TRIAL_MAX_TRIALS)",
+    )
+    parser.add_argument(
+        "--generate",
+        action="store_true",
+        help="Treat --input as PyTorch and synthesize the initial Triton kernel "
+        "via GeneratorAgent (auto-detected when the file has no @triton.jit)",
+    )
+
     args = parser.parse_args()
 
     # Validate input
@@ -149,6 +188,12 @@ Examples:
         overrides["optimization_best_k"] = args.best_k
     if args.debug:
         overrides["logging_level"] = "DEBUG"
+    if args.search:
+        overrides["trial_search"] = args.search
+    if args.writer:
+        overrides["trial_writer"] = args.writer
+    if args.max_trials is not None:
+        overrides["trial_max_trials"] = args.max_trials
 
     # Correctness overrides
     if args.no_correctness:
@@ -246,19 +291,36 @@ Examples:
 
     # Read input file
     with open(args.input) as f:
-        triton_code = f.read()
+        input_code = f.read()
 
-    # Read the pytorch file
-    try:
-        with open(f"{os.path.splitext(args.input)[0]}_pytorch.py") as f:
-            pytorch_code = f.read()
-    except FileNotFoundError:
-        pytorch_code = ""
-        print(f"No PyTorch reference file found at {os.path.splitext(args.input)[0]}_pytorch.py")
+    # Decide whether the input is a PyTorch baseline (needs generation) or
+    # an already-written Triton kernel.
+    is_pytorch_input = args.generate or _looks_like_pytorch(input_code)
+
+    triton_code: str = ""
+    pytorch_code: str = ""
+    pytorch_path: str | None = None
+
+    if is_pytorch_input:
+        pytorch_code = input_code
+        pytorch_path = args.input
+        print(f"Detected PyTorch input — will generate initial Triton kernel via GeneratorAgent.")
+    else:
+        triton_code = input_code
+        # Pick up the _pytorch.py sibling if present (used by the analyzer
+        # for the algorithmic stage).
+        sibling = f"{os.path.splitext(args.input)[0]}_pytorch.py"
+        if os.path.exists(sibling):
+            with open(sibling) as f:
+                pytorch_code = f.read()
+            pytorch_path = sibling
+        else:
+            print(f"No PyTorch reference file found at {sibling}")
 
     result = pipeline.optimize(
         triton_code=triton_code,
         pytorch_code=pytorch_code,
+        pytorch_path=pytorch_path,
         kernel_name=args.name if args.name != "kernel" else None,
         input_shapes=input_shapes,
         stages=stages,
@@ -267,6 +329,7 @@ Examples:
         target_dtype=args.target_dtype,
         rtol=args.rtol,
         atol=args.atol,
+        output_path=args.output,
     )
 
     # Save output if requested
