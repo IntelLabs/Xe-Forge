@@ -3,7 +3,7 @@
 Analyze PyTorch kernel to extract structure and guide Triton optimization.
 
 Usage:
-    python skills/analyze_kernel.py <pytorch_file>
+    python src/xe_forge/core/analyze_kernel.py <pytorch_file>
 """
 
 import ast
@@ -217,11 +217,11 @@ def print_analysis(analysis: Dict, filepath: Path):
 
     # KB references
     print("Relevant KB Files:")
-    print("  • kb/xpu_optimizations.yaml - Core XPU patterns")
+    print("  • knowledge_base/xpu_optimizations.yaml - Core XPU patterns")
     if analysis["fusion_opportunities"]:
-        print("  • kb/fusion_patterns.yaml - Fusion guidelines")
-    print("  • kb/memory_patterns.yaml - Memory access patterns")
-    print("  • kb/correctness.yaml - Critical constraints")
+        print("  • knowledge_base/fusion_patterns.yaml - Fusion guidelines")
+    print("  • knowledge_base/memory_patterns.yaml - Memory access patterns")
+    print("  • knowledge_base/correctness.yaml - Critical constraints")
     print()
 
     # Template suggestion
@@ -236,7 +236,7 @@ def print_analysis(analysis: Dict, filepath: Path):
 
 def main():
     if len(sys.argv) != 2:
-        print("Usage: python skills/analyze_kernel.py <pytorch_file>")
+        print("Usage: python src/xe_forge/core/analyze_kernel.py <pytorch_file>")
         sys.exit(1)
 
     filepath = Path(sys.argv[1])

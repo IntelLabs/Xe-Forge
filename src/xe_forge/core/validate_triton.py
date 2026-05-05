@@ -3,7 +3,7 @@
 Validate Triton kernel for common XPU optimization issues.
 
 Usage:
-    python skills/validate_triton.py <triton_file>
+    python src/xe_forge/core/validate_triton.py <triton_file>
 """
 
 import re
@@ -323,7 +323,7 @@ def print_validation_results(errors: List[ValidationError], filepath: Path):
 
 def main():
     if len(sys.argv) != 2:
-        print("Usage: python skills/validate_triton.py <triton_file>")
+        print("Usage: python src/xe_forge/core/validate_triton.py <triton_file>")
         sys.exit(1)
 
     filepath = Path(sys.argv[1])
