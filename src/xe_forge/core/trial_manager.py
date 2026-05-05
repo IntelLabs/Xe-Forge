@@ -6,12 +6,12 @@ relationships, strategies, correctness, and speedup results. Supports
 branching back to the best ancestor when a trial regresses.
 
 Usage:
-    python skills/trial_manager.py init <kernel_name> <pytorch_file>
-    python skills/trial_manager.py save <kernel_name> <trial_file> --parent <parent_id> --strategy "description"
-    python skills/trial_manager.py result <kernel_name> <trial_id> --validation <pass|fail> --correctness <pass|fail> --speedup <float> --baseline_us <float> --triton_us <float>
-    python skills/trial_manager.py status <kernel_name>
-    python skills/trial_manager.py best <kernel_name>
-    python skills/trial_manager.py finalize <kernel_name> <output_file>
+    python src/xe_forge/core/trial_manager.py init <kernel_name> <pytorch_file>
+    python src/xe_forge/core/trial_manager.py save <kernel_name> <trial_file> --parent <parent_id> --strategy "description"
+    python src/xe_forge/core/trial_manager.py result <kernel_name> <trial_id> --validation <pass|fail> --correctness <pass|fail> --speedup <float> --baseline_us <float> --triton_us <float>
+    python src/xe_forge/core/trial_manager.py status <kernel_name>
+    python src/xe_forge/core/trial_manager.py best <kernel_name>
+    python src/xe_forge/core/trial_manager.py finalize <kernel_name> <output_file>
 """
 
 import argparse
@@ -19,17 +19,51 @@ import json
 import os
 import shutil
 import sys
+from types import SimpleNamespace
 
-TRIALS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "trials")
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "output")
+
+def _trials_dir() -> str:
+    """Trial root directory. Resolves to CWD/trials unless XE_FORGE_TRIALS_DIR set."""
+    env = os.environ.get("XE_FORGE_TRIALS_DIR", "").strip()
+    if env:
+        return env
+    try:
+        from xe_forge.config import get_config
+
+        return get_config().trial.trials_dir
+    except Exception:
+        return os.path.join(os.getcwd(), "trials")
+
+
+def _output_dir() -> str:
+    """Finalize output directory. Resolves to CWD/output unless XE_FORGE_OUTPUT_DIR set."""
+    env = os.environ.get("XE_FORGE_OUTPUT_DIR", "").strip()
+    if env:
+        return env
+    try:
+        from xe_forge.config import get_config
+
+        return get_config().trial.output_dir
+    except Exception:
+        return os.path.join(os.getcwd(), "output")
+
+
+# Back-compat module-level aliases — evaluated lazily via properties on a
+# namespace; reading TRIALS_DIR / OUTPUT_DIR gives the current value.
+def __getattr__(name):
+    if name == "TRIALS_DIR":
+        return _trials_dir()
+    if name == "OUTPUT_DIR":
+        return _output_dir()
+    raise AttributeError(name)
 
 
 def _state_path(kernel_name):
-    return os.path.join(TRIALS_DIR, kernel_name, "state.json")
+    return os.path.join(_trials_dir(), kernel_name, "state.json")
 
 
 def _trial_dir(kernel_name):
-    return os.path.join(TRIALS_DIR, kernel_name)
+    return os.path.join(_trials_dir(), kernel_name)
 
 
 def _load_state(kernel_name):
@@ -323,8 +357,8 @@ def cmd_baseline_us(args):
 def cmd_finalize(args):
     """Copy the best correct trial to the output path.
 
-    If output_file has no directory component it is placed inside OUTPUT_DIR
-    (``output/`` at the project root) which is created automatically.
+    If output_file has no directory component it is placed inside the configured
+    output directory (``output/`` at the project root) which is created automatically.
     """
     kernel_name = args.kernel_name
     output_file = args.output_file
@@ -339,10 +373,11 @@ def cmd_finalize(args):
     best = state["trials"][best_id]
     src = os.path.join(_trial_dir(kernel_name), best["file"])
 
-    # Default bare filenames into output/
+    # Default bare filenames into the configured output directory
     if os.path.dirname(output_file) == "":
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        output_file = os.path.join(OUTPUT_DIR, output_file)
+        out_dir = _output_dir()
+        os.makedirs(out_dir, exist_ok=True)
+        output_file = os.path.join(out_dir, output_file)
 
     shutil.copy2(src, output_file)
     runtime_str = ""
@@ -350,6 +385,185 @@ def cmd_finalize(args):
         runtime_str = f", baseline={best['baseline_us']:.2f}us, triton={best['triton_us']:.2f}us"
     print(f"Finalized {best_id} ({best['speedup']}x{runtime_str}) -> {output_file}")
     print(f"  Strategy: {best['strategy']}")
+
+
+# ============================================================================
+# Python API — importable wrappers around the CLI actions
+#
+# These return dicts instead of printing/exiting, so the in-process trial
+# runner can use them without shelling out. The CLI functions (cmd_*) remain
+# the authoritative implementations.
+# ============================================================================
+
+
+def init_state(kernel_name: str, baseline_file: str, triton_baseline: bool = False) -> dict:
+    """Initialize a new trial tree. Returns the initial state dict."""
+    trial_dir = _trial_dir(kernel_name)
+    if os.path.exists(_state_path(kernel_name)):
+        return _load_state(kernel_name)
+    os.makedirs(trial_dir, exist_ok=True)
+    state = {
+        "kernel_name": kernel_name,
+        "pytorch_file": baseline_file,
+        "baseline_type": "triton" if triton_baseline else "pytorch",
+        "trials": {},
+        "best_trial": None,
+        "next_id": 0,
+        "baseline_us": None,
+    }
+    _save_state(kernel_name, state)
+    return state
+
+
+def save_trial(
+    kernel_name: str,
+    trial_file: str,
+    parent: str | None = None,
+    strategy: str = "",
+) -> str:
+    """Save a trial by copying the file into the trial directory.
+
+    Returns the trial ID (e.g. ``"t3"``).
+    """
+    if not os.path.exists(trial_file):
+        raise FileNotFoundError(f"Trial file '{trial_file}' not found")
+
+    state = _load_state(kernel_name)
+    if parent is not None and parent not in state["trials"]:
+        if state["next_id"] == 0:
+            parent = None
+        else:
+            raise ValueError(
+                f"Parent trial '{parent}' not found. "
+                f"Available: {list(state['trials'].keys())}"
+            )
+
+    trial_id = f"t{state['next_id']}"
+    state["next_id"] += 1
+    dest = os.path.join(_trial_dir(kernel_name), f"{trial_id}.py")
+    # Only copy if source and destination differ (runner may have written
+    # directly into the trial dir).
+    if os.path.abspath(trial_file) != os.path.abspath(dest):
+        shutil.copy2(trial_file, dest)
+
+    state["trials"][trial_id] = {
+        "parent": parent,
+        "file": f"{trial_id}.py",
+        "strategy": strategy,
+        "validation": None,
+        "correctness": None,
+        "speedup": None,
+        "baseline_us": None,
+        "triton_us": None,
+        "status": "saved",
+    }
+    _save_state(kernel_name, state)
+    return trial_id
+
+
+def record_result(
+    kernel_name: str,
+    trial_id: str,
+    validation: str | None = None,
+    correctness: str | None = None,
+    speedup: float | None = None,
+    baseline_us: float | None = None,
+    triton_us: float | None = None,
+) -> dict:
+    """Record results for a trial. Returns the updated trial record."""
+    state = _load_state(kernel_name)
+    if trial_id not in state["trials"]:
+        raise KeyError(
+            f"Trial '{trial_id}' not found. Available: {list(state['trials'].keys())}"
+        )
+
+    trial = state["trials"][trial_id]
+    if validation is not None:
+        trial["validation"] = validation
+    if correctness is not None:
+        trial["correctness"] = correctness
+    if speedup is not None:
+        trial["speedup"] = speedup
+    if baseline_us is not None:
+        trial["baseline_us"] = baseline_us
+    if triton_us is not None:
+        trial["triton_us"] = triton_us
+
+    if baseline_us is not None and state.get("baseline_us") is None:
+        state["baseline_us"] = [baseline_us]
+
+    if trial["validation"] == "fail" or trial["correctness"] == "fail":
+        trial["status"] = "failed"
+    elif trial["correctness"] == "pass" and trial["speedup"] is not None:
+        trial["status"] = "completed"
+    else:
+        trial["status"] = "partial"
+
+    best_speedup = -1.0
+    best_id = None
+    for tid, t in state["trials"].items():
+        if t.get("correctness") == "pass" and t.get("speedup") is not None:
+            if t["speedup"] > best_speedup:
+                best_speedup = t["speedup"]
+                best_id = tid
+    state["best_trial"] = best_id
+
+    _save_state(kernel_name, state)
+    return trial
+
+
+def get_state(kernel_name: str) -> dict:
+    """Return the current state dict (raises if not initialized)."""
+    return _load_state(kernel_name)
+
+
+def best_trial(kernel_name: str) -> dict | None:
+    """Return the best trial record, or None if no correct trial exists."""
+    state = _load_state(kernel_name)
+    best_id = state.get("best_trial")
+    if best_id is None:
+        return None
+    trial = dict(state["trials"][best_id])
+    trial["trial_id"] = best_id
+    trial["path"] = os.path.join(_trial_dir(kernel_name), trial["file"])
+    return trial
+
+
+def get_baseline_us(kernel_name: str) -> list[float] | None:
+    """Return cached baseline runtime(s) in microseconds, or None."""
+    state = _load_state(kernel_name)
+    return state.get("baseline_us")
+
+
+def read_trial(kernel_name: str, trial_id: str) -> str:
+    """Read a trial's source code as a string."""
+    state = _load_state(kernel_name)
+    if trial_id not in state["trials"]:
+        raise KeyError(
+            f"Trial '{trial_id}' not found. Available: {list(state['trials'].keys())}"
+        )
+    path = os.path.join(_trial_dir(kernel_name), state["trials"][trial_id]["file"])
+    with open(path) as f:
+        return f.read()
+
+
+def finalize(kernel_name: str, output_file: str) -> str:
+    """Copy the best correct trial to output_file. Returns the final path."""
+    state = _load_state(kernel_name)
+    if state["best_trial"] is None:
+        raise RuntimeError(f"No correct trials to finalize for '{kernel_name}'")
+
+    best_id = state["best_trial"]
+    best = state["trials"][best_id]
+    src = os.path.join(_trial_dir(kernel_name), best["file"])
+
+    if os.path.dirname(output_file) == "":
+        out_dir = _output_dir()
+        os.makedirs(out_dir, exist_ok=True)
+        output_file = os.path.join(out_dir, output_file)
+
+    shutil.copy2(src, output_file)
+    return output_file
 
 
 # ============================================================================
