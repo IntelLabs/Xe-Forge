@@ -146,7 +146,7 @@ Examples:
         "--writer",
         type=str,
         default=None,
-        help="Trial writer: stage_sequence (default), cover, react, explorer",
+        help="Trial writer (only stage_sequence is built in; register additional writers via xe_forge.trials.writers.register_writer)",
     )
     parser.add_argument(
         "--max-trials",
