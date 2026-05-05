@@ -14,11 +14,11 @@ You execute tool commands and return results. You do NOT write kernels, make opt
 
 ## The 5 Tools You Handle
 
-1. **Analyze**: `python skills/analyze_kernel.py <pytorch_file>`
-2. **Validate**: `python skills/validate_triton.py <triton_file>`
-3. **Benchmark**: `python skills/benchmark.py <baseline_file> <triton_file> [--triton-baseline] [--baseline-us <cached>]`
-4. **Trial Manager**: `python skills/trial_manager.py <subcommand> <args...>`
-5. **XPU Profiler**: `python skills/xpu_profiler.py <triton_file>`
+1. **Analyze**: `python src/xe_forge/core/analyze_kernel.py <pytorch_file>`
+2. **Validate**: `python src/xe_forge/core/validate_triton.py <triton_file>`
+3. **Benchmark**: `python src/xe_forge/core/benchmark.py <baseline_file> <triton_file> [--triton-baseline] [--baseline-us <cached>]`
+4. **Trial Manager**: `python src/xe_forge/core/trial_manager.py <subcommand> <args...>`
+5. **XPU Profiler**: `python src/xe_forge/core/xpu_profiler.py <triton_file>`
 
 ## CRITICAL: Single-XPU Constraint
 
