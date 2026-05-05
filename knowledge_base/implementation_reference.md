@@ -2,12 +2,9 @@
 
 Code templates and patterns for Triton kernel development on Intel XPU.
 
-## Template Selection
+## Reference Kernel Selection
 
-Start with a template from `templates/` that matches your kernel type:
-- `gemm_template.py` - Basic GEMM
-- `gemm_epilogue_template.py` - GEMM with fused epilogue
-- `reduction_template.py` - Reduction operations
+Start from a reference in `knowledge_base/examples/` that matches your kernel type. See `knowledge_base/examples/index.yaml` for the full catalog — GEMM, GEMM + epilogue, reductions, attention, etc.
 
 ## Core Implementation Pattern
 
@@ -201,7 +198,7 @@ x = x * self.scaling_factor  # Scaling
 
 **Output**: `gemm_kernel` (matmul + divide fused) + `row_sum_kernel` (sum + scaling).
 
-See `kb/examples/gemm_activation_optimized.py` for a similar pattern.
+See `knowledge_base/examples/gemm_activation_optimized.py` for a similar pattern.
 
 ## File Naming Convention
 

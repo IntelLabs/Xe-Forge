@@ -4,7 +4,7 @@
 
 When given a PyTorch kernel (typically `*_pytorch.py`, but can be any user-specified path):
 
-> **Note**: The existing `test_kernels/*.py` Triton files (non-pytorch) are **naive, unoptimized baselines**. Do NOT treat them as examples of good Triton code. Use `templates/` and `kb/examples/` instead.
+> **Note**: The existing `test_kernels/*.py` Triton files (non-pytorch) are **naive, unoptimized baselines**. Do NOT treat them as examples of good Triton code. Use `knowledge_base/examples/` as the source of good patterns.
 
 1. **Parse the PyTorch code** to identify:
    - Input/output shapes and dtypes
@@ -12,7 +12,7 @@ When given a PyTorch kernel (typically `*_pytorch.py`, but can be any user-speci
    - Operation fusion opportunities
    - Memory access patterns
 
-2. **Consult the knowledge base** (`kb/` directory):
+2. **Consult the knowledge base** (`knowledge_base/` directory):
    - `xpu_optimizations.yaml`: XPU-specific patterns (tensor descriptors, GRF mode, warp count, tile swizzling)
    - `fusion_patterns.yaml`: When to fuse operations
    - `memory_patterns.yaml`: Memory access best practices
@@ -20,14 +20,14 @@ When given a PyTorch kernel (typically `*_pytorch.py`, but can be any user-speci
    - `dtype_optimizations.yaml`: Data type choices
 
 3. **Use the skills** to help:
-   - `python skills/analyze_kernel.py <pytorch_file>` - Extract operation structure
-   - Review `kb/examples/index.yaml` for similar patterns
+   - `python src/xe_forge/core/analyze_kernel.py <pytorch_file>` - Extract operation structure
+   - Review `knowledge_base/examples/index.yaml` for similar patterns
 
 ## Design Phase
 
 1. **Identify the kernel type**: Pure GEMM, GEMM + epilogue, GEMM + reduction, complex fusion
 2. **Select optimization strategies** from KB (memory, tiling, parallelism, fusion, dtypes)
-3. **Apply critical constraints** (from `kb/correctness.yaml` and `kb/xpu_optimizations.yaml`):
+3. **Apply critical constraints** (from `knowledge_base/correctness.yaml` and `knowledge_base/xpu_optimizations.yaml`):
    - NO default values for `@triton.autotune` meta-parameters in kernel signature
    - Use 1D grid when applying tile swizzling (GROUP_SIZE_M)
    - boundary_check uses dimension indices (0, 1), not booleans
@@ -41,35 +41,35 @@ When given a PyTorch kernel (typically `*_pytorch.py`, but can be any user-speci
 For each trial:
 
 ### a. Implement / Modify Kernel
-Start from a template (`templates/`) or modify the previous trial's code. See `kb/implementation_reference.md`.
+Start from a reference in `knowledge_base/examples/` or modify the previous trial's code. See `knowledge_base/implementation_reference.md`.
 
 ### b. Validate Syntax
 ```bash
-python skills/validate_triton.py <triton_file>
+python src/xe_forge/core/validate_triton.py <triton_file>
 ```
 If validation fails, fix and retry - doesn't count as a new trial. Note: `<triton_file>` should be `t<trial_id>.py`.
 
 ### c. Save Trial
 ```bash
-python skills/trial_manager.py save <kernel_name> <triton_file> --parent <parent_id> --strategy "description"
+python src/xe_forge/core/trial_manager.py save <kernel_name> <triton_file> --parent <parent_id> --strategy "description"
 ```
 For the first trial, omit `--parent`.
 
 ### d. Benchmark
 ```bash
 # Trial t0 — measures both baseline and triton:
-python skills/benchmark.py <baseline_file> <triton_file> [--triton-baseline]
+python src/xe_forge/core/benchmark.py <baseline_file> <triton_file> [--triton-baseline]
 
 # Trials t1+ — use cached baseline to save time:
-python skills/trial_manager.py baseline-us <kernel_name>   # get cached value
-python skills/benchmark.py <baseline_file> <triton_file> [--triton-baseline] --baseline-us <cached_value>
+python src/xe_forge/core/trial_manager.py baseline-us <kernel_name>   # get cached value
+python src/xe_forge/core/benchmark.py <baseline_file> <triton_file> [--triton-baseline] --baseline-us <cached_value>
 
 # After finalize — re-run without --baseline-us for final accurate comparison
 ```
 
 ### e. Record Results
 ```bash
-python skills/trial_manager.py result <kernel_name> <trial_id> \
+python src/xe_forge/core/trial_manager.py result <kernel_name> <trial_id> \
     --validation pass --correctness <pass|fail> --speedup <float> \
     --baseline_us <float> --triton_us <float>
 ```
@@ -82,31 +82,31 @@ python skills/trial_manager.py result <kernel_name> <trial_id> \
 | **Speedup improved**                       | Continue on this branch, try next optimization level                                                                                                  |
 | **Speedup regressed**                      | Branch back to best trial, try a different strategy                                                                                                   |
 | **Correctness failed**                     | Fix code on same branch                                                                                                                               |
-| **After t1 (if `vtune_enabled`)**          | Run `python skills/xpu_profiler.py <triton_file>` — mandatory first profile                                                                           |
+| **After t1 (if `vtune_enabled`)**          | Run `python src/xe_forge/core/xpu_profiler.py <triton_file>` — mandatory first profile                                                                           |
 | **Speedup plateaued after 2+ more trials** | Run profiler again (if `vtune_enabled`); try a fundamentally different approach                                                                       |
 | **Plateau / diminishing returns**          | Do NOT stop. Try a fundamentally different approach (different algorithm, tiling, fusion strategy). LLM sampling can discover new ideas at any point. |
-| **Max trials reached**                     | Stop — must run all `max_trials` from `config.yaml`                                                                                                   |
+| **Max trials reached**                     | Stop — must run all `TRIAL_MAX_TRIALS` from `.env`                                                                                                    |
 
 ### g. Check Status
 ```bash
-python skills/trial_manager.py status <kernel_name>
-python skills/trial_manager.py best <kernel_name>
+python src/xe_forge/core/trial_manager.py status <kernel_name>
+python src/xe_forge/core/trial_manager.py best <kernel_name>
 ```
 
 ## Trial Manager Commands Reference
 ```bash
-python skills/trial_manager.py init <kernel_name> <baseline_file> [--triton-baseline]
-python skills/trial_manager.py save <kernel_name> <file> [--parent <parent_id>] [--strategy "..."]
-python skills/trial_manager.py result <kernel_name> <trial_id> [--validation pass] [--correctness pass] [--speedup 3.2] [--baseline_us 150.0] [--triton_us 47.0]
-python skills/trial_manager.py status <kernel_name>
-python skills/trial_manager.py best <kernel_name>
-python skills/trial_manager.py baseline-us <kernel_name>
-python skills/trial_manager.py finalize <kernel_name> <name>_triton.py
+python src/xe_forge/core/trial_manager.py init <kernel_name> <baseline_file> [--triton-baseline]
+python src/xe_forge/core/trial_manager.py save <kernel_name> <file> [--parent <parent_id>] [--strategy "..."]
+python src/xe_forge/core/trial_manager.py result <kernel_name> <trial_id> [--validation pass] [--correctness pass] [--speedup 3.2] [--baseline_us 150.0] [--triton_us 47.0]
+python src/xe_forge/core/trial_manager.py status <kernel_name>
+python src/xe_forge/core/trial_manager.py best <kernel_name>
+python src/xe_forge/core/trial_manager.py baseline-us <kernel_name>
+python src/xe_forge/core/trial_manager.py finalize <kernel_name> <name>_triton.py
 ```
 
 ## Benchmarking Details
 
-`skills/benchmark.py` uses ai-bench (`modules/ai-bench/`) for both correctness and performance:
+`src/xe_forge/core/benchmark.py` uses ai-bench (`modules/ai-bench/`) for both correctness and performance:
 
 1. **Correctness** - Compares outputs between PyTorch and Triton implementations
    - Uses `check_correctness()` with per-variant tolerances from YAML spec (defaults: rtol=1e-2, atol=1e-5)
@@ -121,10 +121,10 @@ python skills/trial_manager.py finalize <kernel_name> <name>_triton.py
 
 **Setup**: External tools must be initialised: `git submodule update --init`
 
-## Profiling with VTune (`skills/xpu_profiler.py`)
+## Profiling with VTune (`src/xe_forge/core/xpu_profiler.py`)
 
 ```bash
-python skills/xpu_profiler.py <triton_file> [--warmup 5] [--iters 20]
+python src/xe_forge/core/xpu_profiler.py <triton_file> [--warmup 5] [--iters 20]
 ```
 
 Runs Intel VTune `gpu-offload` collection to capture both Level Zero API tasks and OA (Observation Architecture) hardware counters, then maps bottlenecks to KB optimization patterns.
@@ -150,27 +150,27 @@ echo 0 | sudo tee /proc/sys/dev/xe/observation_paranoid
    - Cache hierarchy: L3 Busy/Stalled %, L3 Miss Ratio, LSC Miss Ratio, LSC→L3 Miss Ratio
    - Register spill size, SLM bank conflicts, TLB misses
 5. **Optimization recommendations**: Each grounded in a specific KB pattern:
-   - XVE Stalled > Active → memory bound → `kb/xpu_optimizations.yaml (xpu_descriptor_gemm_pattern)` + `kb/optimization_levels.yaml (level_2)`
-   - Low occupancy + Work Size limiter → grid too small → `kb/xpu_optimizations.yaml (xpu_tile_swizzling)`
-   - Low occupancy + SLM limiter → tile too large → `kb/xpu_optimizations.yaml (xpu_grf_mode)`
-   - High L3 Miss → poor reuse → `kb/xpu_optimizations.yaml (xpu_descriptor_gemm_pattern, xpu_tile_swizzling)`
-   - Register spill > 0 → reduce liveness → `kb/memory_patterns.yaml (reduce_liveness_sink_load_and_prefetch)`
-   - Overhead kernels dominate → pre-pack to bf16 → `kb/optimization_levels.yaml (level_2_bandwidth_reduction)`
-   - Host time >> GPU time → sync in hot path → `kb/memory_patterns.yaml (no_device_to_host_scalar_sync)`
+   - XVE Stalled > Active → memory bound → `knowledge_base/xpu_optimizations.yaml (xpu_descriptor_gemm_pattern)` + `knowledge_base/optimization_levels.yaml (level_2)`
+   - Low occupancy + Work Size limiter → grid too small → `knowledge_base/xpu_optimizations.yaml (xpu_tile_swizzling)`
+   - Low occupancy + SLM limiter → tile too large → `knowledge_base/xpu_optimizations.yaml (xpu_grf_mode)`
+   - High L3 Miss → poor reuse → `knowledge_base/xpu_optimizations.yaml (xpu_descriptor_gemm_pattern, xpu_tile_swizzling)`
+   - Register spill > 0 → reduce liveness → `knowledge_base/memory_patterns.yaml (reduce_liveness_sink_load_and_prefetch)`
+   - Overhead kernels dominate → pre-pack to bf16 → `knowledge_base/optimization_levels.yaml (level_2_bandwidth_reduction)`
+   - Host time >> GPU time → sync in hot path → `knowledge_base/memory_patterns.yaml (no_device_to_host_scalar_sync)`
 
 ### How to Use the Output
 The profiler prints specific recommendations with KB references:
 ```
 >> XVE Stalled (72%) > Active (28%): memory/dependency bound.
    Use tensor descriptors for better address codegen, pre-pack to bf16 to halve bandwidth.
-   Reference: kb/xpu_optimizations.yaml (xpu_descriptor_gemm_pattern, xpu_tile_swizzling) +
-              kb/optimization_levels.yaml (level_2_bandwidth_reduction)
+   Reference: knowledge_base/xpu_optimizations.yaml (xpu_descriptor_gemm_pattern, xpu_tile_swizzling) +
+              knowledge_base/optimization_levels.yaml (level_2_bandwidth_reduction)
 ```
 Read the referenced KB file and apply the suggested pattern in your next trial.
 
 ## Validation Details
 
-`skills/validate_triton.py` checks:
+`src/xe_forge/core/validate_triton.py` checks:
 - Syntax correctness
 - Autotune config issues (no default params)
 - Grid/swizzling consistency
@@ -179,12 +179,12 @@ Read the referenced KB file and apply the suggested pattern in your next trial.
 
 ## Project Structure
 ```
-triton8/
-├── CLAUDE.md                    # Core rules and workflow (concise)
-├── config.yaml                  # max_trials, vtune_enabled, vtune_bin
+Xe-Forge/
+├── CLAUDE.md                        # Core rules and workflow (concise)
+├── .env / .env.example              # Session settings: TRIAL_MAX_TRIALS, VTUNE_ENABLED, VTUNE_BIN, ...
 │
-├── kb/                          # Knowledge base
-│   ├── implementation_reference.md  # Templates, code patterns, Model class
+├── knowledge_base/                  # Knowledge base
+│   ├── implementation_reference.md  # Code patterns, Model class
 │   ├── optimization_strategies.md   # Strategy reference, checklist, KB index
 │   ├── workflow_details.md          # This file — detailed workflow
 │   ├── correctness.yaml             # Correctness constraints
@@ -196,21 +196,19 @@ triton8/
 │   ├── persistent_kernel_patterns.yaml # Stream K and persistent kernel patterns
 │   └── examples/                    # Annotated before/after reference implementations
 │
-├── templates/                       # Copy-and-modify kernel starting points
-│   ├── gemm_template.py
-│   ├── gemm_epilogue_template.py
-│   └── reduction_template.py
-│
-├── skills/                          # Standalone tools (DO NOT recreate)
+├── src/xe_forge/core/               # Standalone tools (DO NOT recreate)
 │   ├── analyze_kernel.py            # PyTorch → operations, shapes, fusion opportunities
 │   ├── validate_triton.py           # Syntax + constraint checks before benchmarking
 │   ├── benchmark.py                 # Correctness + performance via ai-bench
 │   ├── trial_manager.py             # Tree-structured trial init/save/record/finalize
 │   ├── xpu_profiler.py              # VTune GPU hardware counters + recommendations
-│   └── config.py                    # Shared configuration loader for config.yaml
+│   └── executor.py                  # Python-mode benchmark path (KernelBenchExecutor)
+│
+├── src/xe_forge/trials/             # Python-mode trial-tree engine (pluggable search + writer)
+├── src/xe_forge/agents/             # dspy agents (analyzer, planner, optimizer, generator)
 │
 ├── test_kernels/                    # PyTorch reference implementations + YAML specs
-├── modules/ai-bench/               # Benchmark harness (git submodule)
+├── modules/ai-bench/                # Benchmark harness (git submodule)
 ├── output/                          # Finalized optimized kernels (created by finalize)
 └── trials/                          # Trial tree state (created by trial_manager.py init)
 ```

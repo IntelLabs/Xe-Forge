@@ -9,7 +9,7 @@
 | **3. Algebraic** | Fold BN/scale/affine into weights (eliminate epilogue) | 3-6x |
 | **4. Expert** | Stream K, persistent kernels, warp sweeping | 5-10x+ |
 
-**"Try harder" decision tree** (from `kb/optimization_levels.yaml`):
+**"Try harder" decision tree** (from `knowledge_base/optimization_levels.yaml`):
 - Speedup < 2x after Level 1 -> apply Level 2 (bandwidth is the bottleneck)
 - Speedup 2-3x after Level 2 -> check Level 3 (can epilogue be algebraically eliminated?)
 - Speedup 3-5x -> good for most workloads; Level 4 only for critical-path kernels
@@ -25,8 +25,8 @@
 5. Smaller tiles for skinny-M: BLOCK_M in {32, 64}, fewer warps
 6. Mixed precision: bf16/fp16 inputs, fp32 accumulator
 7. Pre-pack weight transposes: `weight_t = weight.t().contiguous()` once in `_pack_weights()`
-8. Pre-pack to bf16: Convert weights AND inputs to bf16 before kernel launch (not in-kernel) - see `kb/dtype_optimizations.yaml`
-9. Algebraic weight folding: Fold BN/scale/affine into GEMM weights at pack time - see `kb/fusion_patterns.yaml`
+8. Pre-pack to bf16: Convert weights AND inputs to bf16 before kernel launch (not in-kernel) - see `knowledge_base/dtype_optimizations.yaml`
+9. Algebraic weight folding: Fold BN/scale/affine into GEMM weights at pack time - see `knowledge_base/fusion_patterns.yaml`
 
 ## Fusion
 1. Fuse light epilogues: bias + simple activation (ReLU, SiLU)
@@ -49,14 +49,14 @@
 
 ## KB Quick Index
 
-- **Starting a GEMM kernel?** -> `kb/xpu_optimizations.yaml`
-- **Fusing operations?** -> `kb/fusion_patterns.yaml`
-- **Memory access issues?** -> `kb/memory_patterns.yaml`
-- **Kernel crashes or wrong results?** -> `kb/correctness.yaml`
-- **Slow due to fp64?** -> `kb/dtype_optimizations.yaml`
-- **Advanced techniques?** -> `kb/persistent_kernel_patterns.yaml`
-- **Need more speedup?** -> `kb/optimization_levels.yaml`
-- **Looking for examples?** -> `kb/examples/index.yaml` + `kb/examples/*.py`
+- **Starting a GEMM kernel?** -> `knowledge_base/xpu_optimizations.yaml`
+- **Fusing operations?** -> `knowledge_base/fusion_patterns.yaml`
+- **Memory access issues?** -> `knowledge_base/memory_patterns.yaml`
+- **Kernel crashes or wrong results?** -> `knowledge_base/correctness.yaml`
+- **Slow due to fp64?** -> `knowledge_base/dtype_optimizations.yaml`
+- **Advanced techniques?** -> `knowledge_base/persistent_kernel_patterns.yaml`
+- **Need more speedup?** -> `knowledge_base/optimization_levels.yaml`
+- **Looking for examples?** -> `knowledge_base/examples/index.yaml` + `knowledge_base/examples/*.py`
 
 ## Common Patterns Checklist
 
@@ -74,5 +74,5 @@ When transforming PyTorch -> Triton:
 - [ ] Model class compatible with ai-bench (standard nn.Module with nn.Linear)
 - [ ] Matched `get_inputs()`, `get_init_inputs()`, module-level constants from *_pytorch.py
 - [ ] Triton file name matches base kernel name (for spec YAML auto-detection)
-- [ ] Validated with `python skills/validate_triton.py <triton_file>`
-- [ ] Benchmarked with `python skills/benchmark.py <pytorch_file> <triton_file>`
+- [ ] Validated with `python src/xe_forge/core/validate_triton.py <triton_file>`
+- [ ] Benchmarked with `python src/xe_forge/core/benchmark.py <pytorch_file> <triton_file>`
