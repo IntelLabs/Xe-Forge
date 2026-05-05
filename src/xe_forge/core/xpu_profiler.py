@@ -7,15 +7,17 @@ optimization patterns.  Use when speedup plateaus or you need guidance on
 which optimization level to try next.
 
 Usage:
-    python skills/xpu_profiler.py <triton_file> [--warmup 5] [--iters 20]
+    python src/xe_forge/core/xpu_profiler.py <triton_file> [--warmup 5] [--iters 20]
 
 Examples:
-    python skills/xpu_profiler.py test_kernels/39_Gemm_Scale_BatchNorm_triton.py
-    python skills/xpu_profiler.py output/14_Gemm_Divide_Sum_Scaling_triton.py --iters 50
+    python src/xe_forge/core/xpu_profiler.py test_kernels/39_Gemm_Scale_BatchNorm_triton.py
+    python src/xe_forge/core/xpu_profiler.py output/14_Gemm_Divide_Sum_Scaling_triton.py --iters 50
 """
 
 import argparse
+import contextlib
 import csv
+import io
 import os
 import re
 import shutil
@@ -25,13 +27,25 @@ import tempfile
 import time
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
 
-from skills.config import load_config as _load_config
+def _resolve_vtune_bin() -> str:
+    """Resolve VTune binary path from env / xe_forge config.
 
-_CFG = _load_config()
-VTUNE_BIN = _CFG["vtune_bin"]
+    Order: VTUNE_BIN env var > xe_forge.config.get_config().profiler.vtune_bin > "".
+    Returns empty string when not configured — callers must check existence.
+    """
+    env = os.environ.get("VTUNE_BIN", "").strip()
+    if env:
+        return env
+    try:
+        from xe_forge.config import get_config
+
+        return (get_config().profiler.vtune_bin or "").strip()
+    except Exception:
+        return ""
+
+
+VTUNE_BIN = _resolve_vtune_bin()
 
 # PyTorch runtime kernel patterns — these are NOT user compute kernels
 _OVERHEAD_KERNEL_PATTERNS = [
@@ -965,24 +979,23 @@ def _merge_pass2(main_csv: Path, pass2_csv: Path):
 # ---------------------------------------------------------------------------
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Profile Triton kernel with Intel VTune on XPU")
-    parser.add_argument("triton_file", type=Path, help="Triton kernel implementation")
-    parser.add_argument("--warmup", type=int, default=5, help="Warmup iterations")
-    parser.add_argument("--iters", type=int, default=20, help="Profiled iterations")
-    parser.add_argument("--timeout", type=int, default=300, help="VTune timeout (s)")
-    args = parser.parse_args()
+def _run_profile(
+    triton_file: Path,
+    warmup: int = 5,
+    iters: int = 20,
+    timeout: int = 300,
+) -> int:
+    """Run the full VTune profile + print report. Returns exit code."""
+    if not triton_file.exists():
+        print(f"Error: Triton file not found: {triton_file}")
+        return 1
 
-    if not args.triton_file.exists():
-        print(f"Error: Triton file not found: {args.triton_file}")
-        sys.exit(1)
+    vtune_bin = _resolve_vtune_bin()
+    if not vtune_bin or (not shutil.which(vtune_bin) and not Path(vtune_bin).is_file()):
+        print(f"Error: VTune binary not found at: {vtune_bin or '<unset>'}")
+        return 1
 
-    vtune_bin = os.environ.get("VTUNE_BIN", VTUNE_BIN)
-    if not shutil.which(vtune_bin) and not Path(vtune_bin).is_file():
-        print(f"Error: VTune binary not found at: {vtune_bin}")
-        sys.exit(1)
-
-    kernel_name = args.triton_file.stem
+    kernel_name = triton_file.stem
     timestamp = int(time.time())
     result_dir = f"/tmp/vtune_result_{kernel_name}_{timestamp}"
     summary_csv = Path(f"/tmp/vtune_{kernel_name}_{timestamp}_summary.csv")
@@ -991,13 +1004,12 @@ def main():
     print(f"\n{'=' * 70}")
     print("VTune Profiling Configuration")
     print(f"{'=' * 70}")
-    print(f"  Triton kernel:  {args.triton_file}")
+    print(f"  Triton kernel:  {triton_file}")
     print("  Collection:     gpu-offload (with OA hardware counters)")
-    print(f"  Warmup iters:   {args.warmup}")
-    print(f"  Profiled iters: {args.iters}")
-    print(f"  Timeout:        {args.timeout}s")
+    print(f"  Warmup iters:   {warmup}")
+    print(f"  Profiled iters: {iters}")
+    print(f"  Timeout:        {timeout}s")
 
-    # --- Step 1: Run VTune collection ---
     print(f"\n{'=' * 70}")
     print("Running VTune Collection...")
     print(f"{'=' * 70}")
@@ -1005,47 +1017,41 @@ def main():
     try:
         result = run_vtune_collection(
             vtune_bin,
-            args.triton_file,
+            triton_file,
             result_dir,
             summary_csv,
-            args.warmup,
-            args.iters,
-            args.timeout,
+            warmup,
+            iters,
+            timeout,
         )
     except subprocess.TimeoutExpired:
-        print(f"\nError: VTune collection timed out after {args.timeout}s")
-        sys.exit(1)
+        print(f"\nError: VTune collection timed out after {timeout}s")
+        return 1
 
     if result.returncode != 0:
         print(f"\nError: VTune exited with code {result.returncode}")
         if result.stderr:
             print(f"  stderr: {result.stderr[:2000]}")
-        sys.exit(1)
+        return 1
 
-    # --- Step 2: Parse summary report ---
     scalar_metrics, gpu_tasks, host_tasks = parse_vtune_summary_csv(summary_csv)
 
-    # --- Step 3: Run hotspots report for OA hardware counters ---
     has_oa = False
     hotspot_tasks: list[dict] = []
     if os.path.isdir(result_dir):
         ok = run_hotspots_report(vtune_bin, result_dir, hotspots_csv)
         if ok:
             hotspot_tasks = parse_hotspots_csv(hotspots_csv)
-            # Check if OA columns are actually populated
             if hotspot_tasks:
                 sample = hotspot_tasks[0]
                 has_oa = bool(_extract(sample.get("XVE Array:Active(%)", "")))
 
-    # Use hotspot_tasks if available (richer data), else fall back to summary gpu_tasks
     display_tasks = hotspot_tasks if hotspot_tasks else gpu_tasks
 
-    # --- Step 4: Display results ---
     print(f"\n{'=' * 70}")
     print("VTune Profiling Results")
     print(f"{'=' * 70}")
 
-    # Platform info (compact)
     gpu_name = scalar_metrics.get("Name", "")
     xve_count = scalar_metrics.get("XVE Count", "")
     max_freq = scalar_metrics.get("Max Core Frequency", "")
@@ -1058,10 +1064,8 @@ def main():
     if elapsed:
         print(f"  Elapsed: {elapsed}s  GPU Time: {gpu_pct}% of elapsed")
 
-    # VTune's own recommendations (XVE Stalled/Idle)
     xve_stall_reco = scalar_metrics.get("_reco_XVE Array Stalled/Idle", "")
     if xve_stall_reco:
-        # Extract the percentage
         match = re.search(r"([\d.]+)", xve_stall_reco)
         if match:
             print(f"  XVE Array Stalled/Idle: {match.group(1)}% of GPU busy time")
@@ -1069,12 +1073,10 @@ def main():
     print_host_tasks(host_tasks)
     print_gpu_tasks_summary(display_tasks, has_oa)
 
-    # --- Step 5: Primary kernel detail ---
     primary = find_primary_kernel(display_tasks)
     if primary:
         print_primary_kernel_detail(primary, has_oa)
 
-    # --- Step 6: Recommendations ---
     print_recommendations(primary, display_tasks, host_tasks, scalar_metrics, has_oa)
 
     print(f"\n{'=' * 70}")
@@ -1089,6 +1091,40 @@ def main():
         print("\n  Note: OA hardware counters not available.")
         print("  To enable: echo 0 | sudo tee /proc/sys/dev/xe/observation_paranoid")
     print()
+    return 0
+
+
+def profile(
+    triton_file: Path | str,
+    warmup: int = 5,
+    iters: int = 20,
+    timeout: int = 300,
+) -> str:
+    """Run VTune profile on a Triton kernel and return the report as a string.
+
+    This is the in-process entrypoint used by the trial runner. It captures the
+    same stdout that the CLI prints, so the caller can feed it into
+    OptimizerAgent.vtune_report.
+
+    Returns an empty string on any failure (caller can treat it as "no report").
+    """
+    path = triton_file if isinstance(triton_file, Path) else Path(triton_file)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = _run_profile(path, warmup=warmup, iters=iters, timeout=timeout)
+    if rc != 0:
+        return ""
+    return buf.getvalue()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Profile Triton kernel with Intel VTune on XPU")
+    parser.add_argument("triton_file", type=Path, help="Triton kernel implementation")
+    parser.add_argument("--warmup", type=int, default=5, help="Warmup iterations")
+    parser.add_argument("--iters", type=int, default=20, help="Profiled iterations")
+    parser.add_argument("--timeout", type=int, default=300, help="VTune timeout (s)")
+    args = parser.parse_args()
+    sys.exit(_run_profile(args.triton_file, args.warmup, args.iters, args.timeout))
 
 
 if __name__ == "__main__":
