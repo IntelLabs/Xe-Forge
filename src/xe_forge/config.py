@@ -103,6 +103,37 @@ class LoggingConfig:
 
 
 @dataclass
+class TrialConfig:
+    """Trial-tree exploration configuration.
+
+    Drives the new tree-structured search that replaces the flat best_k loop.
+    Each trial is a node in a tree; the search policy picks the parent to
+    branch from and when to stop, and the writer produces the child kernel.
+    """
+
+    max_trials: int = 10
+    early_stop_speedup: float = 5.0
+    plateau_window: int = 2
+    search: str = "tree_walk"       # tree_walk, best_first, beam, mcts
+    writer: str = "stage_sequence"  # stage_sequence, cover, react, explorer
+    trials_dir: str = "./trials"
+    output_dir: str = "./output"
+
+
+@dataclass
+class ProfilerConfig:
+    """VTune profiler configuration.
+
+    When vtune_enabled is True and the trial search signals a plateau, the
+    runner calls xpu_profiler.profile() on the current best trial and the
+    resulting markdown report is forwarded into OptimizerAgent.vtune_report.
+    """
+
+    vtune_enabled: bool = False
+    vtune_bin: str | None = None
+
+
+@dataclass
 class Config:
     """Master configuration"""
 
@@ -112,6 +143,8 @@ class Config:
     xpu: XPUConfig = field(default_factory=XPUConfig)
     knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    trial: TrialConfig = field(default_factory=TrialConfig)
+    profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
 
 
 class ConfigManager:
@@ -166,6 +199,28 @@ class ConfigManager:
             target_dtype=self._get_env("TARGET_DTYPE", None),
         )
 
+        # Trial Exploration Configuration
+        # BEST_K aliases onto TRIAL_MAX_TRIALS when TRIAL_MAX_TRIALS is unset,
+        # so existing BEST_K=N users keep working during the transition.
+        trial_max_trials = self._get_env("TRIAL_MAX_TRIALS", None, int)
+        if trial_max_trials is None:
+            trial_max_trials = optimization.best_k if optimization.best_k > 1 else 10
+        trial = TrialConfig(
+            max_trials=trial_max_trials,
+            early_stop_speedup=self._get_env("TRIAL_EARLY_STOP_SPEEDUP", 5.0, float),
+            plateau_window=self._get_env("TRIAL_PLATEAU_WINDOW", 2, int),
+            search=self._get_env("TRIAL_SEARCH", "tree_walk"),
+            writer=self._get_env("TRIAL_WRITER", "stage_sequence"),
+            trials_dir=self._get_env("TRIALS_DIR", "./trials"),
+            output_dir=self._get_env("OUTPUT_DIR", "./output"),
+        )
+
+        # Profiler Configuration
+        profiler = ProfilerConfig(
+            vtune_enabled=self._get_env("VTUNE_ENABLED", False, bool),
+            vtune_bin=self._get_env("VTUNE_BIN", None),
+        )
+
         # XPU Configuration
         xpu = XPUConfig(
             device=self._get_env("XPU_DEVICE", "xpu"),
@@ -200,6 +255,8 @@ class ConfigManager:
             xpu=xpu,
             knowledge=knowledge,
             logging=logging_cfg,
+            trial=trial,
+            profiler=profiler,
         )
 
     def override(self, **kwargs) -> "ConfigManager":
