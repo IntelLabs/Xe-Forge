@@ -7,17 +7,25 @@ import dspy
 import httpx
 import litellm
 
-from xe_forge.agents import AnalyzerAgent, Optimizer, OptimizerAgent, OptimizerReActAgent
+from xe_forge.agents import (
+    AnalyzerAgent,
+    GeneratorAgent,
+    Optimizer,
+    OptimizerAgent,
+    OptimizerReActAgent,
+)
 from xe_forge.config import Config, get_config
 from xe_forge.core import get_xpu_config_for_pipeline
 from xe_forge.knowledge.loader import KnowledgeBase, load_knowledge_base
 from xe_forge.models import (
-    IssueType,
     OptimizationResult,
     OptimizationStage,
 )
-from xe_forge.planner import DEFAULT_STAGE_ORDER as PLANNER_DEFAULT_STAGE_ORDER
+from xe_forge.planner import DEFAULT_STAGE_ORDER as PLANNER_DEFAULT_STAGE_ORDER  # noqa: F401
 from xe_forge.planner import PlannerAgent
+from xe_forge.trials import TrialContext, TrialRunner
+from xe_forge.trials.search import get_search
+from xe_forge.trials.writers import get_writer_cls
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +152,19 @@ class XeForgePipeline:
         target_dtype=None,
         rtol=None,
         atol=None,
+        pytorch_path=None,
+        output_path=None,
     ):
+        """Drive the trial-tree engine and return an ``OptimizationResult``.
+
+        Back-compat shape: the signature of the old flat-``best_k`` method is
+        preserved so existing callers (CLI + tests) keep working. Internally
+        this now delegates to ``TrialRunner``, which does tree-structured
+        search (default: Triton8 semantics) using configurable writers.
+
+        When ``triton_code`` is empty and ``pytorch_code`` is provided the
+        runner invokes ``GeneratorAgent`` to synthesize t0.
+        """
         import torch
 
         spec, flop, dtype, init_args = None, None, None, None
@@ -158,7 +178,8 @@ class XeForgePipeline:
             dtype = spec.get_dtype(variant_type)
             init_args = spec.get_init_args(variant_type)
             logger.info(
-                f"Loaded spec: variant={variant_type}, shapes={input_shapes}, flop={flop}, dtype={dtype}"
+                f"Loaded spec: variant={variant_type}, shapes={input_shapes}, "
+                f"flop={flop}, dtype={dtype}"
             )
             if init_args:
                 logger.info(f"  Model init args: {init_args}")
@@ -170,238 +191,114 @@ class XeForgePipeline:
             self.executor.atol = eatol
 
         if target_dtype:
-            dm = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
+            dm = {
+                "float16": torch.float16,
+                "bfloat16": torch.bfloat16,
+                "float32": torch.float32,
+            }
             dtype = dm.get(target_dtype, dtype)
 
         display_name = kernel_name or "Model"
-        logger.info(f"Starting optimization for kernel: {display_name}")
+        logger.info(f"Starting trial-tree optimization for kernel: {display_name}")
 
-        val_orig_tflops, val_orig_ms = None, None
-        from xe_forge.core.executor import KernelBenchExecutor
+        etd = target_dtype or self.config.optimization.target_dtype
+        if etd is None and dtype is not None:
+            etd = {
+                torch.float16: "float16",
+                torch.bfloat16: "bfloat16",
+                torch.float32: "float32",
+            }.get(dtype)
 
-        _bench_ex = (
-            self.executor
-            if isinstance(self.executor, KernelBenchExecutor)
-            else KernelBenchExecutor(device=self.config.xpu.device)
+        xpu_config = get_xpu_config_for_pipeline(
+            input_shapes=input_shapes, config=self.config, dtype=etd or "float16"
         )
-        if self.executor and input_shapes:
-            try:
-                orig_r = _bench_ex.execute(
-                    triton_code,
-                    None,
-                    input_shapes,
-                    flop=flop,
-                    dtype=dtype,
-                    init_args=init_args,
-                )
-                if orig_r.success:
-                    val_orig_tflops, val_orig_ms = orig_r.tflops, orig_r.execution_time_ms
-                    logger.info(
-                        f"Original: {orig_r.tflops:.2f} TFLOPS, {orig_r.execution_time_ms:.2f} ms"
-                    )
-                else:
-                    logger.error(f"Baseline FAILED: {orig_r.error_message}")
-                    logger.debug(orig_r.error_traceback)
-            except Exception as e:
-                logger.warning(f"Failed to measure original: {e}")
 
-        candidates = []
-        best_k = max(1, self.config.optimization.best_k)
+        ctx = TrialContext(
+            kernel_name=display_name,
+            config=self.config,
+            spec=spec,
+            variant_type=variant_type,
+            input_shapes=input_shapes,
+            flop=flop,
+            dtype=dtype,
+            init_args=init_args,
+            xpu_config=xpu_config,
+            knowledge_base=self.knowledge_base,
+            pytorch_code=pytorch_code or "",
+            pytorch_path=pytorch_path,
+        )
 
-        for attempt in range(best_k):
-            if best_k > 1:
-                logger.info(f"Attempt {attempt + 1}/{best_k}")
+        search = get_search(self.config.trial.search)
+        writer = self._build_writer(self.config.trial.writer)
+        generator = self._build_generator()
 
-            result = OptimizationResult(
-                kernel_name=display_name, original_code=triton_code, timestamp=datetime.now()
-            )
-            result.original_tflops, result.original_ms = val_orig_tflops, val_orig_ms
+        runner = TrialRunner(
+            ctx=ctx,
+            search=search,
+            writer=writer,
+            executor=self.executor,
+            generator=generator,
+        )
 
-            etd = target_dtype or self.config.optimization.target_dtype
-            if etd is None and dtype is not None:
-                etd = {
-                    torch.float16: "float16",
-                    torch.bfloat16: "bfloat16",
-                    torch.float32: "float32",
-                }.get(dtype)
-
-            xpu_config = get_xpu_config_for_pipeline(
-                input_shapes=input_shapes, config=self.config, dtype=etd or "float16"
+        if triton_code:
+            trial_result = runner.run(triton_code=triton_code, output_path=output_path)
+        else:
+            trial_result = runner.run(
+                pytorch_code=pytorch_code or "",
+                pytorch_path=pytorch_path,
+                output_path=output_path,
             )
 
-            logger.info("=" * 60 + "\nSTAGE: ANALYSIS\n" + "=" * 60)
-            analysis = self.analyzer.analyze(
-                triton_code, pytorch_code, display_name, input_shapes, flop, target_dtype=etd
-            )
-            result.analysis = analysis
+        # Translate TrialRunResult -> OptimizationResult so callers unchanged.
+        result = OptimizationResult(
+            kernel_name=display_name,
+            original_code=triton_code or pytorch_code or "",
+            timestamp=datetime.now(),
+        )
+        result.success = trial_result.success
+        result.optimized_code = trial_result.best_code or triton_code or ""
+        if trial_result.baseline_us:
+            result.original_ms = trial_result.baseline_us / 1000.0
+        if trial_result.best_speedup and trial_result.best_speedup > 0:
+            result.total_speedup = trial_result.best_speedup
+            if result.original_ms:
+                result.optimized_ms = result.original_ms / trial_result.best_speedup
 
-            logger.info(f"Detected {len(analysis.detected_issues)} issues:")
-            for iss in analysis.detected_issues:
-                logger.info(f"  [{iss.severity}] {iss.issue_type.value}: {iss.description}")
-
-            if not analysis.detected_issues:
-                result.success, result.optimized_code = True, triton_code
-                candidates.append(result)
-                continue
-
-            logger.info("=" * 60 + "\nSTAGE: PLANNING\n" + "=" * 60)
-            from xe_forge.knowledge.patterns import get_stage_for_issue
-
-            stages_needed: dict[OptimizationStage, list[str]] = {}
-            for iss in analysis.detected_issues:
-                st = get_stage_for_issue(iss.issue_type)
-                stages_needed.setdefault(st, []).append(iss.issue_type.value)
-
-            if stages:
-                stages_to_apply = [
-                    s for s in stages if s in stages_needed and s != OptimizationStage.ANALYSIS
-                ]
-                logger.info("Stage order: manual override")
-            else:
-                stages_to_apply = self.planner.plan(
-                    stages_needed=stages_needed,
-                    analysis=analysis,
-                    input_shapes=input_shapes,
-                    flop=flop,
-                )
-
-            logger.info("Optimization plan:")
-            for s in PLANNER_DEFAULT_STAGE_ORDER:
-                if s == OptimizationStage.ANALYSIS:
-                    continue
-                if s in stages_needed:
-                    if s in stages_to_apply:
-                        pos = stages_to_apply.index(s) + 1
-                        issues_str = ", ".join(stages_needed[s])
-                        logger.info(f"  + {s.value} [#{pos}]: {issues_str}")
-                    else:
-                        issues_str = ", ".join(stages_needed[s])
-                        logger.info(f"  ~ {s.value} (deferred): {issues_str}")
-                else:
-                    logger.info(f"  - {s.value}: skipped")
-
-            if not stages_to_apply:
-                result.success, result.optimized_code = True, triton_code
-                candidates.append(result)
-                continue
-
-            current_code = triton_code
-            current_ms: float | None = val_orig_ms
-
-            for stage in stages_to_apply:
-                logger.info("=" * 60 + f"\nSTAGE: {stage.value.upper()}\n" + "=" * 60)
-                logger.info(f"Issues: {', '.join(stages_needed.get(stage, []))}")
-
-                stage_result = self.optimizer.optimize_stage(
-                    code=current_code,
-                    stage=stage,
-                    analysis=analysis,
-                    xpu_config=xpu_config,
-                    kernel_name=kernel_name,
-                    input_shapes=input_shapes,
-                    flop=flop,
-                    dtype=dtype,
-                    pytorch_code=pytorch_code,
-                    init_args=init_args,
-                    perf_context={
-                        "original_ms": val_orig_ms,
-                        "original_tflops": val_orig_tflops,
-                        "current_ms": current_ms,
-                        "speedup_so_far": (
-                            round(val_orig_ms / current_ms, 3)
-                            if val_orig_ms and current_ms and current_ms > 0
-                            else None
-                        ),
-                    },
-                )
-                result.stages_applied.append(stage_result)
-
-                if (
-                    stage_result.success
-                    and stage_result.output_code
-                    and stage_result.output_code != current_code
-                ):
-                    current_code = stage_result.output_code
-                    if stage_result.speedup and val_orig_ms:
-                        current_ms = val_orig_ms / stage_result.speedup
-                    elif (
-                        stage_result.metrics_after
-                        and "execution_time_ms" in stage_result.metrics_after
-                    ):
-                        current_ms = stage_result.metrics_after["execution_time_ms"]
-                    logger.info(
-                        f"Stage {stage.value} OK"
-                        + (f" ({stage_result.speedup:.2f}x)" if stage_result.speedup else "")
-                    )
-                elif not stage_result.success:
-                    logger.warning(f"Stage {stage.value} failed: {stage_result.error_message}")
-
-                if stage == OptimizationStage.DISCOVERY and stage_result.success:
-                    open_ended_issues = [
-                        i
-                        for i in analysis.detected_issues
-                        if i.issue_type == IssueType.OPEN_ENDED and i.open_ended_proposal
-                    ]
-                    for oi in open_ended_issues:
-                        logger.info(
-                            "DISCOVERY succeeded — promote to named IssueType:\n%s",
-                            oi.open_ended_proposal,
-                        )
-
-                analysis = self.analyzer.analyze(
-                    current_code, pytorch_code, display_name, input_shapes, flop, target_dtype=etd
-                )
-
-            if self.executor and input_shapes and current_code != triton_code:
-                try:
-                    opt_r = _bench_ex.execute(
-                        current_code,
-                        kernel_name,
-                        input_shapes,
-                        flop=flop,
-                        dtype=dtype,
-                        init_args=init_args,
-                    )
-                    if opt_r.success:
-                        result.optimized_tflops, result.optimized_ms = (
-                            opt_r.tflops,
-                            opt_r.execution_time_ms,
-                        )
-                        if result.original_ms and result.optimized_ms:
-                            result.total_speedup = result.original_ms / result.optimized_ms
-                            logger.info(f"Total speedup: {result.total_speedup:.2f}x")
-                except Exception as e:
-                    logger.warning(f"Failed to measure optimized: {e}")
-                    if current_ms and current_ms != val_orig_ms:
-                        result.optimized_ms = current_ms
-                        if result.original_ms and result.optimized_ms:
-                            result.total_speedup = result.original_ms / result.optimized_ms
-                            logger.info(
-                                f"Total speedup (from stage measurements): {result.total_speedup:.2f}x"
-                            )
-
-            result.optimized_code, result.success = current_code, True
-            candidates.append(result)
-
-        if not candidates:
-            return OptimizationResult(
-                kernel_name=display_name, original_code=triton_code, timestamp=datetime.now()
-            )
-
-        result = max(
-            candidates, key=lambda r: r.total_speedup if r.total_speedup is not None else -1.0
+        logger.info("=" * 60 + "\nTRIAL RUN COMPLETE\n" + "=" * 60)
+        logger.info(
+            "trials=%d best=%s speedup=%s output=%s",
+            trial_result.trials_count,
+            trial_result.best_trial_id,
+            f"{trial_result.best_speedup:.2f}x" if trial_result.best_speedup else "n/a",
+            trial_result.output_path,
         )
         self._save_results(result)
-
-        logger.info("=" * 60 + "\nOPTIMIZATION COMPLETE\n" + "=" * 60)
-        ok = [s for s in result.stages_applied if s.success]
-        fail = [s for s in result.stages_applied if not s.success]
-        logger.info(f"Stages: {len(ok)}/{len(result.stages_applied)} succeeded")
-        if fail:
-            logger.info(f"Failed: {[s.stage.value for s in fail]}")
-        if result.total_speedup:
-            logger.info(f"Speedup: {result.total_speedup:.2f}x")
         return result
+
+    def _build_writer(self, name: str):
+        """Construct a writer with the deps it needs.
+
+        Only ``stage_sequence`` is built-in; it wires the existing per-stage
+        pipeline (analyzer + planner + optimizer) into the trial tree. If a
+        user registers additional writer types, this method is where their
+        dependency wiring lives.
+        """
+        cls = get_writer_cls(name)
+        if name == "stage_sequence":
+            return cls(
+                analyzer=self.analyzer,
+                planner=self.planner,
+                optimizer=self.optimizer,
+                display_name="Model",
+            )
+        # Unknown writer — assume zero-dep constructor.
+        return cls()
+
+    def _build_generator(self) -> GeneratorAgent:
+        return GeneratorAgent(
+            knowledge_base=self.knowledge_base,
+            max_iterations=self.config.agent.max_iterations,
+        )
 
     def optimize_file(
         self,
