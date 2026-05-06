@@ -42,7 +42,9 @@ def _verify_sycl(code, original_code, executor, input_shapes, spec_dims=None):
 
     if executor:
         try:
-            _dims = spec_dims or dict(zip(("M", "N", "K"), _extract_gemm_dims(input_shapes)))
+            _dims = spec_dims or dict(
+                zip(("M", "N", "K"), _extract_gemm_dims(input_shapes), strict=False)
+            )
             comparison = executor.compare_kernels(
                 original_code=original_code,
                 optimized_code=code,
@@ -477,7 +479,7 @@ class OptimizerAgent(Optimizer):
                 result = _verify_sycl(code, original_code, executor, input_shapes, spec_dims)
                 if result == SUCCESS_MESSAGE and executor:
                     _dims = spec_dims or dict(
-                        zip(("M", "N", "K"), _extract_gemm_dims(input_shapes))
+                        zip(("M", "N", "K"), _extract_gemm_dims(input_shapes), strict=False)
                     )
                     try:
                         c = executor.compare_kernels(
@@ -1198,7 +1200,9 @@ class OptimizerAgent(Optimizer):
                 if cached_comparison is not None:
                     c = cached_comparison
                 elif self.dsl == DSL.SYCL:
-                    _dims = spec_dims or dict(zip(("M", "N", "K"), _extract_gemm_dims(shapes)))
+                    _dims = spec_dims or dict(
+                        zip(("M", "N", "K"), _extract_gemm_dims(shapes), strict=False)
+                    )
                     c = self.executor.compare_kernels(
                         original_code=orig,
                         optimized_code=opt,

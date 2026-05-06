@@ -12,14 +12,12 @@ Wraps ai_bench.sycl.compiler.SYCLCompiler for compile/run/parse, adding:
 import logging
 import os
 import shutil
-import struct
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import torch
-
 from ai_bench.sycl.compiler import SYCLCompiler, SYCLRunResult
 
 from xe_forge.models import ExecutionResult

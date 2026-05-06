@@ -52,7 +52,9 @@ def _verify_sycl(code, original_code, executor, input_shapes, spec_dims=None):
 
     if executor:
         try:
-            _dims = spec_dims or dict(zip(("M", "N", "K"), _extract_gemm_dims(input_shapes)))
+            _dims = spec_dims or dict(
+                zip(("M", "N", "K"), _extract_gemm_dims(input_shapes), strict=False)
+            )
             comparison = executor.compare_kernels(
                 original_code=original_code,
                 optimized_code=code,
@@ -154,18 +156,16 @@ class SyclOptimizationReActSignature(dspy.Signature):
     - Keep the Cutlass GEMM Performance output format
     """
 
-    original_code: dspy.Code["cpp"] = dspy.InputField(
+    original_code: dspy.Code[cpp] = dspy.InputField(
         desc="Original SYCL C++ kernel code for reference"
     )
-    current_code: dspy.Code["cpp"] = dspy.InputField(
-        desc="Current SYCL C++ kernel code to optimize"
-    )
+    current_code: dspy.Code[cpp] = dspy.InputField(desc="Current SYCL C++ kernel code to optimize")
     stage: str = dspy.InputField(desc="Optimization stage to apply")
     issues: list[DetectedIssue] = dspy.InputField(desc="Specific issues to fix in this stage")
     knowledge_patterns: str = dspy.InputField(desc="Optimization patterns and examples to follow")
     xpu_config: str = dspy.InputField(desc="Intel XPU configuration parameters")
 
-    optimized_code: dspy.Code["cpp"] = dspy.OutputField(
+    optimized_code: dspy.Code[cpp] = dspy.OutputField(
         desc="Complete optimized SYCL C++ kernel with all #includes, templates, ExampleRunner, and main()."
     )
 
@@ -439,7 +439,7 @@ class OptimizerReActAgent(Optimizer):
                 try:
                     if self.dsl == DSL.SYCL:
                         _dims = spec_dims or dict(
-                            zip(("M", "N", "K"), _extract_gemm_dims(input_shapes))
+                            zip(("M", "N", "K"), _extract_gemm_dims(input_shapes), strict=False)
                         )
                         comparison = self.executor.compare_kernels(
                             original_code=original_code,

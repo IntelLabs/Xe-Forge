@@ -25,10 +25,6 @@ from xe_forge.core.executor import (
     KernelExecutor,
     create_executor_tool,
 )
-from xe_forge.core.sycl_executor import (
-    SyclComparisonResult,
-    SyclExecutor,
-)
 from xe_forge.core.spec_loader import (
     InputSpec,
     KernelSpec,
@@ -37,6 +33,10 @@ from xe_forge.core.spec_loader import (
     load_spec,
     load_spec_from_string,
     parse_spec,
+)
+from xe_forge.core.sycl_executor import (
+    SyclComparisonResult,
+    SyclExecutor,
 )
 
 # Backward-compatible XPU-specific exports

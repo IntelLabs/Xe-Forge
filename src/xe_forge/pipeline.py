@@ -228,7 +228,7 @@ class XeForgePipeline:
             try:
                 if _is_sycl:
                     _sycl_dims = spec_dims or dict(
-                        zip(("M", "N", "K"), _extract_gemm_dims(input_shapes))
+                        zip(("M", "N", "K"), _extract_gemm_dims(input_shapes), strict=False)
                     )
                     orig_r = _bench_ex.execute(
                         kernel_code=kernel_code,
