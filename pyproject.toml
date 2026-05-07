@@ -1,9 +1,9 @@
 [project]
 name = "xe-forge"
-version = "0.1.0"
-description = "Multi-stage Triton kernel optimization for Intel XPU"
+version = "0.1.1"
+description = "Multi-stage kernel optimization for GPU computing"
 authors = [{ name = "Intel Labs" }]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
   "numpy>=1.24.0",
   "pydantic>=2.0.0",
@@ -12,11 +12,18 @@ dependencies = [
   "python-dotenv>=1.0.0",
   "PyYAML>=6.0.0",
   "httpx>=0.24.0",
-  "torch==2.10+xpu",
-  "ai-bench @ git+https://github.com/libxsmm/AI-bench@9afa0d8356e42fee09d69d9e5731a5dcb5edd5d2",
+  "ai-bench @ git+https://github.com/libxsmm/AI-bench@c11b0ed4801e9dd4eeaa48c5aed8136dd439dfea",
 ]
 
 [project.optional-dependencies]
+intel = [
+  "torch==2.11+xpu",
+  "pytorch-triton-xpu",
+]
+nvidia = [
+  "torch>=2.0.0",
+  "pytorch-triton",
+]
 wandb = ["weave>=0.52.24"]
 
 [project.scripts]
@@ -33,15 +40,31 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.uv.sources]
-torch = { index = "pytorch-xpu" }
-
 [tool.uv]
 index-strategy = "unsafe-best-match"
+conflicts = [
+  [
+    { extra = "intel" },
+    { extra = "nvidia" },
+  ],
+]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-xpu", extra = "intel" },
+  { index = "pytorch-cuda", extra = "nvidia" },
+]
+triton-xpu = { index = "pytorch-xpu" }
+pytorch-triton-xpu = { index = "pytorch-xpu" }
+pytorch-triton = { index = "pytorch-cuda" }
 
 [[tool.uv.index]]
 name = "pytorch-xpu"
 url = "https://download.pytorch.org/whl/xpu"
+
+[[tool.uv.index]]
+name = "pytorch-cuda"
+url = "https://download.pytorch.org/whl/cu128"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/xe_forge"]
@@ -52,8 +75,7 @@ allow-direct-references = true
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-exclude =     ["test_kernels", "knowledge_base/examples", "outputs/kernels", "examples",]
-
+exclude = ["test_kernels", "knowledge_base/**/examples", "outputs/kernels", "examples"]
 
 [tool.ruff.lint]
 select = [

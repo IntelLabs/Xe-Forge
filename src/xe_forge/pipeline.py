@@ -9,9 +9,10 @@ import litellm
 
 from xe_forge.agents import AnalyzerAgent, Optimizer, OptimizerAgent, OptimizerReActAgent
 from xe_forge.config import Config, get_config
-from xe_forge.core import get_xpu_config_for_pipeline
+from xe_forge.core.device_query import get_device_config_for_pipeline
 from xe_forge.knowledge.loader import KnowledgeBase, load_knowledge_base
 from xe_forge.models import (
+    DSL,
     IssueType,
     OptimizationResult,
     OptimizationStage,
@@ -20,6 +21,18 @@ from xe_forge.planner import DEFAULT_STAGE_ORDER as PLANNER_DEFAULT_STAGE_ORDER
 from xe_forge.planner import PlannerAgent
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_gemm_dims(
+    input_shapes: list[tuple[int, ...]] | None,
+) -> tuple[int, int, int]:
+    """Extract M, N, K from GEMM input shapes [(M, K), (K, N)]."""
+    if input_shapes and len(input_shapes) >= 2:
+        a, b = input_shapes[0], input_shapes[1]
+        if len(a) >= 2 and len(b) >= 2:
+            return a[-2], b[-1], a[-1]
+    return 1024, 1024, 1024
+
 
 DEFAULT_STAGE_ORDER: list[OptimizationStage] = [
     OptimizationStage.ANALYSIS,
@@ -30,7 +43,7 @@ DEFAULT_STAGE_ORDER: list[OptimizationStage] = [
     OptimizationStage.MEMORY_ACCESS,
     OptimizationStage.BLOCK_POINTERS,
     OptimizationStage.PERSISTENT_KERNEL,
-    OptimizationStage.XPU_SPECIFIC,
+    OptimizationStage.DEVICE_SPECIFIC,
     OptimizationStage.AUTOTUNING,
 ]
 
@@ -46,23 +59,37 @@ class XeForgePipeline:
         self._setup_llm()
 
         if executor is None:
-            from xe_forge.core import KernelBenchExecutor
+            if self.config.device_config.dsl == DSL.SYCL:
+                from xe_forge.core import SyclExecutor
 
-            executor = KernelBenchExecutor(
-                device=self.config.xpu.device,
-                require_correctness=self.config.optimization.require_correctness,
-                rtol=self.config.optimization.correctness_rtol,
-                atol=self.config.optimization.correctness_atol,
-            )
+                executor = SyclExecutor(
+                    verify=self.config.optimization.require_correctness,
+                )
+            else:
+                from xe_forge.core import KernelBenchExecutor
+
+                executor = KernelBenchExecutor(
+                    device=self.config.device_config.device,
+                    require_correctness=self.config.optimization.require_correctness,
+                    rtol=self.config.optimization.correctness_rtol,
+                    atol=self.config.optimization.correctness_atol,
+                )
 
         self.knowledge_base: KnowledgeBase | None = None
         if self.config.knowledge.enabled:
-            self.knowledge_base = load_knowledge_base(self.config.knowledge.knowledge_dir)
+            self.knowledge_base = load_knowledge_base(
+                self.config.knowledge.knowledge_dir,
+                dsl=self.config.device_config.dsl,
+                device_type=self.config.device_config.device,
+            )
             logger.info("  Knowledge base: %s", self.knowledge_base.summary())
         else:
             logger.info("  Knowledge base: disabled (set KNOWLEDGE_BASE_ENABLED=true to enable)")
 
-        self.analyzer = AnalyzerAgent(knowledge_base=self.knowledge_base)
+        self.analyzer = AnalyzerAgent(
+            knowledge_base=self.knowledge_base,
+            dsl=self.config.device_config.dsl,
+        )
         self.planner = PlannerAgent()
 
         match self.config.agent.strategy:
@@ -78,6 +105,7 @@ class XeForgePipeline:
             validator=validator,
             max_iterations=self.config.agent.max_iterations,
             knowledge_base=self.knowledge_base,
+            dsl=self.config.device_config.dsl,
         )
         self.executor = executor
         self.validator = validator
@@ -112,7 +140,7 @@ class XeForgePipeline:
                 max_tokens=self.config.llm.max_tokens,
                 cache=False,
             )
-            dspy.configure(lm=lm)
+            dspy.configure(lm=lm, warn_on_type_mismatch=False)
         except Exception as e:
             raise RuntimeError(f"Failed to initialize LLM: {e}") from e
 
@@ -133,8 +161,8 @@ class XeForgePipeline:
 
     def optimize(
         self,
-        triton_code,
-        pytorch_code,
+        kernel_code=None,
+        reference_code=None,
         kernel_name=None,
         input_shapes=None,
         reference_fn=None,
@@ -144,21 +172,31 @@ class XeForgePipeline:
         target_dtype=None,
         rtol=None,
         atol=None,
+        *,
+        triton_code=None,
+        pytorch_code=None,
     ):
+        # Backward compat aliases
+        if kernel_code is None:
+            kernel_code = triton_code
+        if reference_code is None:
+            reference_code = pytorch_code or ""
         import torch
 
-        spec, flop, dtype, init_args = None, None, None, None
+        spec, flop, dtype, init_args, spec_dims = None, None, None, None, None
         if spec_path:
             from xe_forge.core.spec_loader import load_spec
 
             spec = load_spec(spec_path)
             variant_type = spec.resolve_variant(variant_type)
             input_shapes = spec.get_input_shapes(variant_type)
+            spec_dims = spec.get_dims(variant_type)
             flop = spec.get_flop(variant_type)
             dtype = spec.get_dtype(variant_type)
             init_args = spec.get_init_args(variant_type)
             logger.info(
-                f"Loaded spec: variant={variant_type}, shapes={input_shapes}, flop={flop}, dtype={dtype}"
+                f"Loaded spec: variant={variant_type}, shapes={input_shapes}, "
+                f"dims={spec_dims}, flop={flop}, dtype={dtype}"
             )
             if init_args:
                 logger.info(f"  Model init args: {init_args}")
@@ -178,30 +216,40 @@ class XeForgePipeline:
 
         val_orig_tflops, val_orig_ms = None, None
         from xe_forge.core.executor import KernelBenchExecutor
+        from xe_forge.core.sycl_executor import SyclExecutor
 
+        _is_sycl = isinstance(self.executor, SyclExecutor)
         _bench_ex = (
             self.executor
-            if isinstance(self.executor, KernelBenchExecutor)
-            else KernelBenchExecutor(device=self.config.xpu.device)
+            if isinstance(self.executor, (KernelBenchExecutor, SyclExecutor))
+            else KernelBenchExecutor(device=self.config.device_config.device)
         )
-        if self.executor and input_shapes:
+        if self.executor and (_is_sycl or input_shapes):
             try:
-                orig_r = _bench_ex.execute(
-                    triton_code,
-                    None,
-                    input_shapes,
-                    flop=flop,
-                    dtype=dtype,
-                    init_args=init_args,
-                )
-                if orig_r.success:
-                    val_orig_tflops, val_orig_ms = orig_r.tflops, orig_r.execution_time_ms
-                    logger.info(
-                        f"Original: {orig_r.tflops:.2f} TFLOPS, {orig_r.execution_time_ms:.2f} ms"
+                if _is_sycl:
+                    _sycl_dims = spec_dims or dict(
+                        zip(("M", "N", "K"), _extract_gemm_dims(input_shapes), strict=False)
+                    )
+                    orig_r = _bench_ex.execute(
+                        kernel_code=kernel_code,
+                        dims=_sycl_dims,
                     )
                 else:
+                    orig_r = _bench_ex.execute(
+                        kernel_code,
+                        None,
+                        input_shapes,
+                        flop=flop,
+                        dtype=dtype,
+                        init_args=init_args,
+                    )
+                if orig_r.success:
+                    val_orig_tflops, val_orig_ms = orig_r.tflops, orig_r.execution_time_ms
+                    logger.info(f"Original: {val_orig_tflops:.2f} TFLOPS, {val_orig_ms:.2f} ms")
+                else:
                     logger.error(f"Baseline FAILED: {orig_r.error_message}")
-                    logger.debug(orig_r.error_traceback)
+                    if hasattr(orig_r, "error_traceback"):
+                        logger.debug(orig_r.error_traceback)
             except Exception as e:
                 logger.warning(f"Failed to measure original: {e}")
 
@@ -213,7 +261,7 @@ class XeForgePipeline:
                 logger.info(f"Attempt {attempt + 1}/{best_k}")
 
             result = OptimizationResult(
-                kernel_name=display_name, original_code=triton_code, timestamp=datetime.now()
+                kernel_name=display_name, original_code=kernel_code, timestamp=datetime.now()
             )
             result.original_tflops, result.original_ms = val_orig_tflops, val_orig_ms
 
@@ -225,13 +273,22 @@ class XeForgePipeline:
                     torch.float32: "float32",
                 }.get(dtype)
 
-            xpu_config = get_xpu_config_for_pipeline(
-                input_shapes=input_shapes, config=self.config, dtype=etd or "float16"
+            device_type = self.config.device_config.device
+            xpu_config = get_device_config_for_pipeline(
+                device_type=device_type,
+                input_shapes=input_shapes,
+                config=self.config,
+                dtype=etd or "float16",
             )
 
             logger.info("=" * 60 + "\nSTAGE: ANALYSIS\n" + "=" * 60)
             analysis = self.analyzer.analyze(
-                triton_code, pytorch_code, display_name, input_shapes, flop, target_dtype=etd
+                kernel_code,
+                reference_code,
+                display_name,
+                input_shapes,
+                flop,
+                target_dtype=etd,
             )
             result.analysis = analysis
 
@@ -240,7 +297,7 @@ class XeForgePipeline:
                 logger.info(f"  [{iss.severity}] {iss.issue_type.value}: {iss.description}")
 
             if not analysis.detected_issues:
-                result.success, result.optimized_code = True, triton_code
+                result.success, result.optimized_code = True, kernel_code
                 candidates.append(result)
                 continue
 
@@ -251,6 +308,11 @@ class XeForgePipeline:
             for iss in analysis.detected_issues:
                 st = get_stage_for_issue(iss.issue_type)
                 stages_needed.setdefault(st, []).append(iss.issue_type.value)
+
+            from xe_forge.dsl_registry import get_stages_for_dsl
+
+            _supported = set(get_stages_for_dsl(self.config.device_config.dsl))
+            stages_needed = {s: v for s, v in stages_needed.items() if s in _supported}
 
             if stages:
                 stages_to_apply = [
@@ -281,11 +343,11 @@ class XeForgePipeline:
                     logger.info(f"  - {s.value}: skipped")
 
             if not stages_to_apply:
-                result.success, result.optimized_code = True, triton_code
+                result.success, result.optimized_code = True, kernel_code
                 candidates.append(result)
                 continue
 
-            current_code = triton_code
+            current_code = kernel_code
             current_ms: float | None = val_orig_ms
 
             for stage in stages_to_apply:
@@ -299,9 +361,10 @@ class XeForgePipeline:
                     xpu_config=xpu_config,
                     kernel_name=kernel_name,
                     input_shapes=input_shapes,
+                    spec_dims=spec_dims,
                     flop=flop,
                     dtype=dtype,
-                    pytorch_code=pytorch_code,
+                    pytorch_code=reference_code,
                     init_args=init_args,
                     perf_context={
                         "original_ms": val_orig_ms,
@@ -349,19 +412,30 @@ class XeForgePipeline:
                         )
 
                 analysis = self.analyzer.analyze(
-                    current_code, pytorch_code, display_name, input_shapes, flop, target_dtype=etd
+                    current_code,
+                    reference_code,
+                    display_name,
+                    input_shapes,
+                    flop,
+                    target_dtype=etd,
                 )
 
-            if self.executor and input_shapes and current_code != triton_code:
+            if self.executor and (_is_sycl or input_shapes) and current_code != kernel_code:
                 try:
-                    opt_r = _bench_ex.execute(
-                        current_code,
-                        kernel_name,
-                        input_shapes,
-                        flop=flop,
-                        dtype=dtype,
-                        init_args=init_args,
-                    )
+                    if _is_sycl:
+                        opt_r = _bench_ex.execute(
+                            kernel_code=current_code,
+                            dims=_sycl_dims,
+                        )
+                    else:
+                        opt_r = _bench_ex.execute(
+                            current_code,
+                            kernel_name,
+                            input_shapes,
+                            flop=flop,
+                            dtype=dtype,
+                            init_args=init_args,
+                        )
                     if opt_r.success:
                         result.optimized_tflops, result.optimized_ms = (
                             opt_r.tflops,
@@ -385,7 +459,7 @@ class XeForgePipeline:
 
         if not candidates:
             return OptimizationResult(
-                kernel_name=display_name, original_code=triton_code, timestamp=datetime.now()
+                kernel_name=display_name, original_code=kernel_code, timestamp=datetime.now()
             )
 
         result = max(
@@ -413,9 +487,9 @@ class XeForgePipeline:
         target_dtype=None,
     ):
         with open(input_path) as f:
-            triton_code = f.read()
+            kernel_code = f.read()
         result = self.optimize(
-            triton_code,
+            kernel_code,
             "",
             kernel_name,
             spec_path=spec_path,
@@ -430,16 +504,18 @@ class XeForgePipeline:
     def _save_results(self, result):
         if not self.config.logging.save_intermediate:
             return
+        ext = ".cpp" if DSL(self.config.device_config.dsl).code_language == "cpp" else ".py"
+        comment = "//" if ext == ".cpp" else "#"
         ts = result.timestamp.strftime("%Y%m%d_%H%M%S")
         kd = Path(self.config.logging.kernel_dir)
-        with open(kd / f"{result.kernel_name}_{ts}_original.py", "w") as f:
-            f.write(f"# Original: {result.kernel_name}\n\n{result.original_code}")
+        with open(kd / f"{result.kernel_name}_{ts}_original{ext}", "w") as f:
+            f.write(f"{comment} Original: {result.kernel_name}\n\n{result.original_code}")
         if result.optimized_code and result.optimized_code != result.original_code:
-            with open(kd / f"{result.kernel_name}_{ts}_optimized.py", "w") as f:
-                f.write(f"# Optimized: {result.kernel_name}\n")
+            with open(kd / f"{result.kernel_name}_{ts}_optimized{ext}", "w") as f:
+                f.write(f"{comment} Optimized: {result.kernel_name}\n")
                 if result.total_speedup:
-                    f.write(f"# Speedup: {result.total_speedup:.2f}x\n")
+                    f.write(f"{comment} Speedup: {result.total_speedup:.2f}x\n")
                 f.write(
-                    f"# Stages: {[s.stage.value for s in result.stages_applied if s.success]}\n\n"
+                    f"{comment} Stages: {[s.stage.value for s in result.stages_applied if s.success]}\n\n"
                 )
                 f.write(result.optimized_code)

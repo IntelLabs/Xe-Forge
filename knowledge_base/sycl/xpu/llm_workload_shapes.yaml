@@ -1,0 +1,284 @@
+# Real LLM Workload Shapes for Intel BMG (B580) Benchmarking
+#
+# Source: sycl-tla/benchmarks/device/bmg/input_files/
+# These shapes come from production LLM serving (SGLang) and model profiling.
+# Use these to create realistic spec files and benchmark configurations.
+
+sglang_decode_gemm:
+  description: |
+    Core GEMM shapes from SGLang LLM serving, Llama3-8B-class model.
+    Decode phase: M=1 (single token) or M=8 (small batch).
+    hidden_dim=4096, intermediate_dim=14336, 32 Q heads / 8 KV heads, head_dim=128.
+  shapes:
+    - name: q_mm (query projection)
+      M: [1, 8]
+      N: 4096
+      K: 4096
+    - name: k_v_mm (key/value projection)
+      M: [1, 8]
+      N: 1024
+      K: 4096
+    - name: qkv_fusion (fused QKV projection)
+      M: [1, 8]
+      N: 6144
+      K: 4096
+    - name: mm_common (output projection)
+      M: [1, 8]
+      N: 4096
+      K: 4096
+    - name: mm_silu (gate projection with SiLU — SwiGLU gate)
+      M: [1, 8]
+      N: 14336
+      K: 4096
+    - name: mm_mul (up projection — SwiGLU up)
+      M: [1, 8]
+      N: 14336
+      K: 4096
+    - name: mm_fusion (fused gate+up = 2x14336)
+      M: [1, 8]
+      N: 28672
+      K: 4096
+    - name: mm_add (down projection with residual)
+      M: [1, 8]
+      N: 4096
+      K: 14336
+      note: "beta=1 (accumulate into residual)"
+    - name: lmhead_mm (language model head)
+      M: [1, 8]
+      N: 128256
+      K: 4096
+      note: "Very large N — vocab projection"
+
+sglang_quantized_gemm:
+  description: |
+    Quantized GEMM for SGLang serving (INT4/INT8 weights).
+    Larger M=32 batch for amortizing dequant overhead.
+  shapes:
+    - name: "INT4 (FP16 x UINT4)"
+      M: 32
+      N: 14336
+      K: 4096
+      note: "6 variants: FP16xU4, BF16xU4, various scale types"
+    - name: "INT8 (BF16 x INT8)"
+      M: 32
+      N: 14336
+      K: 4096
+      note: "2 variants: BF16xS8, FP16xS8"
+
+deepseek_v2_236b:
+  description: |
+    DeepSeekV2-236B MoE model. hidden=5120, compressed_kv=1536,
+    160 MoE experts, expert_dim=3072/1536, batch L=128 for dense layers.
+  decode_shapes:
+    - name: wq_b (latent query projection)
+      M: 1
+      N: 3072
+      K: 1536
+      L: 128
+    - name: attention.av1 (attention value multiply)
+      M: 16
+      N: 512
+      K: [1152, 1280, 1408, 1536, 1664, 1792, 1920, 2048]
+      L: 128
+      note: "K varies with KV cache length"
+    - name: ffn_dense.down_proj
+      M: 1
+      N: 5120
+      K: 1536
+      L: 128
+    - name: moe_router.gate
+      M: 128
+      N: 160
+      K: 5120
+      L: 1
+    - name: expert.up_gate_proj
+      M: 4
+      N: 3072
+      K: 5120
+      L: 20
+    - name: expert.down_proj
+      M: 4
+      N: 5120
+      K: 1536
+      L: 20
+  prefill_shapes:
+    - name: moe_router.gate
+      M: 131072
+      N: 160
+      K: 5120
+      L: 1
+      note: "Huge M for prefill — router processes all tokens at once"
+
+llama4_scout:
+  description: |
+    LLaMA 4 Scout MoE model. hidden=5120, 16 experts,
+    expert_dim=16384/8192, 40 Q heads / 8 KV heads, head_dim=128.
+  decode_shapes:
+    - name: moe_router.gate
+      M: 128
+      N: 16
+      K: 5120
+      L: 1
+    - name: expert.down_proj
+      M: 8
+      N: 5120
+      K: 8192
+      L: 16
+    - name: expert.up_gate_proj
+      M: 8
+      N: 16384
+      K: 5120
+      L: 16
+      note: "Very large N — dual projection"
+  attention:
+    batch: 128
+    num_heads_q: 40
+    num_heads_kv: 8
+    seq_len_qo: 1
+    head_size: 128
+    seq_len_kv: [1152, 1280, 1408, 1536, 1664, 1792, 1920, 2048]
+  vision_shapes:
+    - name: expert.down_proj (vision encoder)
+      M: 16256
+      N: 5120
+      K: 8192
+      L: 1
+      note: "Large M from vision token count"
+
+qwen3_235b_a22b:
+  description: |
+    Qwen3-235B-A22B MoE model. hidden=4096, 128 experts,
+    expert_dim=3072/1536, 64 Q heads / 4 KV heads, head_dim=128.
+  decode_shapes:
+    - name: moe_router.gate
+      M: 128
+      N: 128
+      K: 4096
+      L: 1
+    - name: expert.down_proj
+      M: 8
+      N: 4096
+      K: 1536
+      L: 128
+    - name: expert.up_gate_proj
+      M: 8
+      N: 3072
+      K: 4096
+      L: 128
+  attention:
+    batch: 128
+    num_heads_q: 64
+    num_heads_kv: 4
+    seq_len_qo: 1
+    head_size: 128
+
+gpt_oss_120b:
+  description: |
+    GPT_OSS 120B MoE. hidden=2880, 128 experts, expert_dim=5760/2880,
+    64 Q heads / 8 KV heads, head_dim=64.
+  decode_shapes:
+    - name: moe_router.gate
+      M: 128
+      N: 128
+      K: 2880
+      L: 1
+    - name: expert.down_proj
+      M: 4
+      N: 2880
+      K: 2880
+      L: 128
+    - name: expert.up_gate_proj
+      M: 4
+      N: 5760
+      K: 2880
+      L: 128
+  attention:
+    batch: 128
+    num_heads_q: 64
+    num_heads_kv: 8
+    head_size: 64
+    note: "Uses sliding window attention (128 tokens) + dense attention (1152-2048)"
+
+llama3_8b:
+  description: |
+    Llama3-8B. hidden=4096, 32 Q heads / 8 KV heads, head_dim=128.
+    Benchmark includes attention shapes only (GEMM shapes match SGLang).
+  attention_decode:
+    batch: 128
+    num_heads_q: 32
+    num_heads_kv: 8
+    seq_len_qo: 1
+    head_size: 128
+    seq_len_kv: [1152, 1280, 1408, 1536, 1664, 1792, 1920, 2048]
+  attention_prefill:
+    batch: 128
+    num_heads_q: 32
+    num_heads_kv: 8
+    seq_len_qo: 1024
+    seq_len_kv: 1024
+    head_size: 128
+
+llama3_70b:
+  description: |
+    Llama3-70B. 64 Q heads / 8 KV heads, head_dim=128.
+    Attention-only benchmark shapes.
+  attention_decode:
+    batch: 128
+    num_heads_q: 64
+    num_heads_kv: 8
+    seq_len_qo: 1
+    head_size_qk: 128
+    head_size_vo: 128
+
+flux_diffusion:
+  description: |
+    Flux.1-dev diffusion model. hidden=3072, DiT architecture with
+    double-stream and single-stream blocks, CLIP (768), T5-XXL (4096).
+  key_shapes:
+    - name: double_stream_blocks.img_qkv
+      M: 4080
+      N: 9216
+      K: 3072
+    - name: single_stream_blocks.linear1
+      M: 4336
+      N: 21504
+      K: 3072
+      note: "Largest GEMM in Flux"
+    - name: single_stream_blocks.linear2
+      M: 4336
+      N: 3072
+      K: 15360
+    - name: double_stream_blocks.img_mlp_l1
+      M: 4080
+      N: 12288
+      K: 3072
+    - name: t5_transformer0.ffn.up_gate_proj_w1
+      M: 512
+      N: 20480
+      K: 4096
+    - name: decoder.middle_block.attn_block.qkv_bmm2
+      M: 16320
+      N: 512
+      K: 16320
+      note: "Very large self-attention — 16K tokens"
+
+key_observations:
+  - |
+    DECODE IS EXTREMELY SKINNY: M=1 or M=8 for decode GEMMs. These are
+    memory-bandwidth bound, not compute bound. Standard 256x256 tiles waste
+    parallelism. Need M=1-8 optimized tile shapes or batching across layers.
+  - |
+    MoE EXPERT M IS SMALL: M=4-16 tokens per expert in decode. Grouped GEMM
+    with persistent scheduling is essential to avoid launch overhead.
+  - |
+    MoE ROUTER GATE IS WIDE IN PREFILL: M=131072 tokens x N=16-160 experts.
+    Extremely skinny in N dimension. Needs N-thin tile shapes.
+  - |
+    VOCAB PROJECTION IS HUGE N: lmhead N=128256. Split across multiple
+    launches or use Stream-K for load balancing.
+  - |
+    VISION MODELS HAVE LARGE M: Flux M=4080-16320, LLaMA4 vision M=16256.
+    These benefit from large tiles and high parallelism.
+  - |
+    ATTENTION HEAD SIZES: 64 (GPT_OSS), 128 (Llama/Qwen standard),
+    192 (Llama3-70B). Each needs different Flash Attention tile config.

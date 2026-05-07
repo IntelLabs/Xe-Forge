@@ -36,8 +36,11 @@ _STAGE_ALIASES: dict[str, str] = {
     "fuse": "fusion",
     "persist": "persistent_kernel",
     "persistent": "persistent_kernel",
-    "xpu": "xpu_specific",
-    "gemm": "xpu_specific",
+    "xpu_specific": "device_specific",
+    "cuda": "device_specific",
+    "nvidia": "device_specific",
+    "sycl": "device_specific",
+    "gemm": "device_specific",
     "autotune": "autotuning",
     "stream_k": "persistent_kernel",
     "discovery": "discovery",
@@ -47,7 +50,7 @@ _STAGE_ALIASES: dict[str, str] = {
 _CONSTRAINT_STAGE_HINTS: dict[str, OptimizationStage] = {
     "streamk": OptimizationStage.PERSISTENT_KERNEL,
     "stream_k": OptimizationStage.PERSISTENT_KERNEL,
-    "int64": OptimizationStage.XPU_SPECIFIC,
+    "int64": OptimizationStage.DEVICE_SPECIFIC,
     "descriptor": OptimizationStage.BLOCK_POINTERS,
     "block_ptr": OptimizationStage.BLOCK_POINTERS,
     "boundary_check": OptimizationStage.BLOCK_POINTERS,
@@ -57,15 +60,15 @@ _CONSTRAINT_STAGE_HINTS: dict[str, OptimizationStage] = {
     "device_to_host": OptimizationStage.MEMORY_ACCESS,
     "contiguous": OptimizationStage.MEMORY_ACCESS,
     "tl_multiple_of": OptimizationStage.MEMORY_ACCESS,
-    "repack": OptimizationStage.XPU_SPECIFIC,
-    "gemm2": OptimizationStage.XPU_SPECIFIC,
-    "packed_weight": OptimizationStage.XPU_SPECIFIC,
-    "grid": OptimizationStage.XPU_SPECIFIC,
-    "grf": OptimizationStage.XPU_SPECIFIC,
-    "sigmoid": OptimizationStage.XPU_SPECIFIC,
-    "warp_sweep": OptimizationStage.XPU_SPECIFIC,
-    "warp_count": OptimizationStage.XPU_SPECIFIC,
-    "exp2": OptimizationStage.XPU_SPECIFIC,
+    "repack": OptimizationStage.DEVICE_SPECIFIC,
+    "gemm2": OptimizationStage.DEVICE_SPECIFIC,
+    "packed_weight": OptimizationStage.DEVICE_SPECIFIC,
+    "grid": OptimizationStage.DEVICE_SPECIFIC,
+    "grf": OptimizationStage.DEVICE_SPECIFIC,
+    "sigmoid": OptimizationStage.DEVICE_SPECIFIC,
+    "warp_sweep": OptimizationStage.DEVICE_SPECIFIC,
+    "warp_count": OptimizationStage.DEVICE_SPECIFIC,
+    "exp2": OptimizationStage.DEVICE_SPECIFIC,
     "open_ended": OptimizationStage.DISCOVERY,
     "discovery": OptimizationStage.DISCOVERY,
 }
@@ -277,7 +280,11 @@ class KnowledgeBase:
 # ---------------------------------------------------------------------------
 
 
-def load_knowledge_base(knowledge_dir: str | Path) -> KnowledgeBase:
+def load_knowledge_base(
+    knowledge_dir: str | Path,
+    dsl: str = "triton",
+    device_type: str = "xpu",
+) -> KnowledgeBase:
     kb = KnowledgeBase()
     kp = Path(knowledge_dir)
 
@@ -285,19 +292,18 @@ def load_knowledge_base(knowledge_dir: str | Path) -> KnowledgeBase:
         logger.warning("Knowledge directory not found: %s — KB disabled", kp)
         return kb
 
-    yaml_files = sorted(kp.glob("*.yaml")) + sorted(kp.glob("*.yml"))
+    yaml_files = _collect_yaml_files(kp, dsl, device_type)
     if not yaml_files:
-        logger.warning("No YAML files found in %s", kp)
+        logger.warning("No YAML files found in %s for dsl=%s device=%s", kp, dsl, device_type)
         return kb
 
     for yf in yaml_files:
         _load_yaml_file(kb, yf)
 
-    examples_dir = kp / "examples"
-    if examples_dir.exists():
+    for examples_dir in _collect_examples_dirs(kp, dsl, device_type):
         _load_examples(kb, examples_dir)
 
-    logger.info("Knowledge base loaded: %s", kb.summary())
+    logger.info("Knowledge base loaded (dsl=%s, device=%s): %s", dsl, device_type, kb.summary())
 
     if kb.skipped:
         logger.warning("Skipped %d patterns (unknown/unmappable stage):", len(kb.skipped))
@@ -307,6 +313,42 @@ def load_knowledge_base(knowledge_dir: str | Path) -> KnowledgeBase:
             logger.warning("  … and %d more", len(kb.skipped) - 5)
 
     return kb
+
+
+def _collect_yaml_files(kp: Path, dsl: str, device_type: str) -> list[Path]:
+    """Collect YAML files in priority order: common → dsl-common → dsl/device.
+
+    Falls back to flat *.yaml in the root if no subdirectory structure is found.
+    """
+    common_dir = kp / "common"
+    dsl_dir = kp / dsl
+    device_dir = dsl_dir / device_type
+
+    has_subdirs = common_dir.is_dir() or dsl_dir.is_dir()
+
+    if not has_subdirs:
+        return sorted(kp.glob("*.yaml")) + sorted(kp.glob("*.yml"))
+
+    files: list[Path] = []
+    if common_dir.is_dir():
+        files.extend(sorted(common_dir.glob("*.yaml")) + sorted(common_dir.glob("*.yml")))
+    dsl_common = dsl_dir / "common"
+    if dsl_common.is_dir():
+        files.extend(sorted(dsl_common.glob("*.yaml")) + sorted(dsl_common.glob("*.yml")))
+    if device_dir.is_dir():
+        files.extend(sorted(device_dir.glob("*.yaml")) + sorted(device_dir.glob("*.yml")))
+    return files
+
+
+def _collect_examples_dirs(kp: Path, dsl: str, device_type: str) -> list[Path]:
+    """Return examples directories that exist, in priority order."""
+    candidates = [
+        kp / "common" / "examples",
+        kp / dsl / "common" / "examples",
+        kp / dsl / device_type / "examples",
+        kp / "examples",  # legacy flat layout
+    ]
+    return [d for d in candidates if d.is_dir()]
 
 
 # ---------------------------------------------------------------------------
@@ -518,20 +560,20 @@ _EXAMPLE_STAGE_KEYWORDS: list[tuple[str, OptimizationStage]] = [
     ("autotune", OptimizationStage.AUTOTUNING),
     ("fusion", OptimizationStage.FUSION),
     ("fuse", OptimizationStage.FUSION),
-    ("swizzl", OptimizationStage.XPU_SPECIFIC),
-    ("grf_mode", OptimizationStage.XPU_SPECIFIC),
-    ("warp", OptimizationStage.XPU_SPECIFIC),
-    ("tile", OptimizationStage.XPU_SPECIFIC),
+    ("swizzl", OptimizationStage.DEVICE_SPECIFIC),
+    ("grf_mode", OptimizationStage.DEVICE_SPECIFIC),
+    ("warp", OptimizationStage.DEVICE_SPECIFIC),
+    ("tile", OptimizationStage.DEVICE_SPECIFIC),
     ("dtype", OptimizationStage.DTYPE_FIX),
     ("float16", OptimizationStage.DTYPE_FIX),
     ("bfloat16", OptimizationStage.DTYPE_FIX),
     ("memory", OptimizationStage.MEMORY_ACCESS),
     ("coalesc", OptimizationStage.MEMORY_ACCESS),
     ("liveness", OptimizationStage.MEMORY_ACCESS),
-    ("attention", OptimizationStage.XPU_SPECIFIC),
-    ("flash", OptimizationStage.XPU_SPECIFIC),
-    ("exp2", OptimizationStage.XPU_SPECIFIC),
-    ("sigmoid", OptimizationStage.XPU_SPECIFIC),
+    ("attention", OptimizationStage.DEVICE_SPECIFIC),
+    ("flash", OptimizationStage.DEVICE_SPECIFIC),
+    ("exp2", OptimizationStage.DEVICE_SPECIFIC),
+    ("sigmoid", OptimizationStage.DEVICE_SPECIFIC),
     ("gelu", OptimizationStage.FUSION),
 ]
 
@@ -560,6 +602,6 @@ def _infer_example_stages(meta: dict) -> list[OptimizationStage]:
             result.append(stage)
 
     if not result:
-        result.append(OptimizationStage.XPU_SPECIFIC)
+        result.append(OptimizationStage.DEVICE_SPECIFIC)
 
     return result

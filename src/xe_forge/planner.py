@@ -29,7 +29,7 @@ DEFAULT_STAGE_ORDER: list[OptimizationStage] = [
     OptimizationStage.MEMORY_ACCESS,
     OptimizationStage.BLOCK_POINTERS,
     OptimizationStage.PERSISTENT_KERNEL,
-    OptimizationStage.XPU_SPECIFIC,
+    OptimizationStage.DEVICE_SPECIFIC,
     OptimizationStage.AUTOTUNING,
 ]
 
@@ -46,9 +46,9 @@ _HARD_DEPENDENCIES: list[tuple[OptimizationStage, OptimizationStage]] = [
     (OptimizationStage.DISCOVERY, OptimizationStage.FUSION),
     (OptimizationStage.DTYPE_FIX, OptimizationStage.FUSION),
     (OptimizationStage.MEMORY_ACCESS, OptimizationStage.BLOCK_POINTERS),
-    (OptimizationStage.FUSION, OptimizationStage.XPU_SPECIFIC),
-    (OptimizationStage.BLOCK_POINTERS, OptimizationStage.XPU_SPECIFIC),
-    (OptimizationStage.XPU_SPECIFIC, OptimizationStage.AUTOTUNING),
+    (OptimizationStage.FUSION, OptimizationStage.DEVICE_SPECIFIC),
+    (OptimizationStage.BLOCK_POINTERS, OptimizationStage.DEVICE_SPECIFIC),
+    (OptimizationStage.DEVICE_SPECIFIC, OptimizationStage.AUTOTUNING),
 ]
 
 
@@ -58,9 +58,9 @@ _HARD_DEPENDENCIES: list[tuple[OptimizationStage, OptimizationStage]] = [
 
 
 class PlanningSignature(dspy.Signature):
-    """Determine the optimal order to apply optimization stages to a Triton kernel.
+    """Determine the optimal order to apply optimization stages to a GPU kernel.
 
-    You are an expert in GPU kernel optimization for Intel XPU Xe.
+    You are an expert in GPU kernel optimization.
     You have analyzed a kernel and found issues in specific optimization categories.
     Your task: decide the OPTIMAL ORDER to apply the available stages.
 
@@ -86,12 +86,12 @@ class PlanningSignature(dspy.Signature):
         before converting to block pointer API (block pointers assume good layout).
 
     Low-level tuning last:
-      - XPU_SPECIFIC and AUTOTUNING last — tile sizes, warp counts, and autotune
+      - DEVICE_SPECIFIC and AUTOTUNING last — tile sizes, warp counts, and autotune
         configs should be applied to the final kernel structure, not intermediate forms.
 
     Persistent kernel placement:
-      - PERSISTENT_KERNEL before XPU_SPECIFIC — persistence changes the kernel
-        structure; XPU tuning should happen on the persistent form.
+      - PERSISTENT_KERNEL before DEVICE_SPECIFIC — persistence changes the kernel
+        structure; device tuning should happen on the persistent form.
       - Skip PERSISTENT_KERNEL entirely if grid size is small (< 512 tiles) or
         if the kernel produces a scalar/[M] output — persistence won't help.
 
@@ -100,7 +100,7 @@ class PlanningSignature(dspy.Signature):
     - Do NOT add stages that have no detected issues.
     - Do NOT include ANALYSIS.
     - Your ordered_stages output must be a JSON array of stage value strings,
-      e.g. ["algorithmic", "dtype_fix", "xpu_specific"].
+      e.g. ["algorithmic", "dtype_fix", "device_specific"].
     - Every stage in ordered_stages must appear in available_stages.
     - Provide clear rationale explaining why you chose this specific order.
     """

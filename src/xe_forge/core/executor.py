@@ -43,8 +43,9 @@ class ComparisonResult:
 
 class KernelBenchExecutor:
     """
-    Executes Triton kernels using KernelBench-style testing.
+    Executes GPU kernels using KernelBench-style testing.
 
+    Supports XPU, CUDA, and CPU devices.
     """
 
     def __init__(
@@ -60,8 +61,8 @@ class KernelBenchExecutor:
         Initialize executor.
 
         Args:
-            device: Target device (xpu)
-            warmup_iters: Warmup iterations (200 recommended for XPU)
+            device: Target device (xpu, cuda, cpu)
+            warmup_iters: Warmup iterations (200 recommended for GPU)
             benchmark_iters: Benchmark iterations
             require_correctness: If True, validate output correctness (default: True)
             rtol: Relative tolerance for correctness check (default: 1e-2)

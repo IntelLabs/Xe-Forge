@@ -14,11 +14,62 @@ from xe_forge.agents.base import Optimizer
 from xe_forge.agents.cover import CoVeR
 from xe_forge.knowledge.loader import KnowledgeBase
 from xe_forge.models import (
+    DSL,
     OptimizationStage,
     StageResult,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_gemm_dims(
+    input_shapes: list[tuple[int, ...]] | None,
+) -> tuple[int, int, int]:
+    """Extract M, N, K from GEMM input shapes [(M, K), (K, N)]."""
+    if input_shapes and len(input_shapes) >= 2:
+        a, b = input_shapes[0], input_shapes[1]
+        if len(a) >= 2 and len(b) >= 2:
+            return a[-2], b[-1], a[-1]
+    return 1024, 1024, 1024
+
+
+def _verify_sycl(code, original_code, executor, input_shapes, spec_dims=None):
+    """Verify a SYCL C++ kernel: basic structure check + runtime comparison."""
+    if "#include" not in code:
+        return "MISSING: C++ code must contain #include directives."
+    if "sycl" not in code.lower() and "cutlass" not in code.lower():
+        return "MISSING: Code does not appear to be a SYCL/CUTLASS kernel."
+
+    if executor:
+        try:
+            _dims = spec_dims or dict(
+                zip(("M", "N", "K"), _extract_gemm_dims(input_shapes), strict=False)
+            )
+            comparison = executor.compare_kernels(
+                original_code=original_code,
+                optimized_code=code,
+                dims=_dims,
+            )
+            if not comparison.optimized_correct:
+                return comparison.feedback_message or "Optimized kernel failed."
+            if comparison.is_slower:
+                sd = 1.0 / comparison.speedup if comparison.speedup > 0 else float("inf")
+                return (
+                    f"PERFORMANCE REGRESSION: {sd:.2f}x SLOWER.\n"
+                    f"Original: {comparison.original_time_ms:.4f}ms ({comparison.original_tflops or 0:.3f} TFlop/s)\n"
+                    f"Optimized: {comparison.optimized_time_ms:.4f}ms ({comparison.optimized_tflops or 0:.3f} TFlop/s)"
+                )
+            logger.info(
+                f"SYCL optimization verified: {comparison.speedup:.2f}x speedup "
+                f"({comparison.original_tflops or 0:.3f} -> {comparison.optimized_tflops or 0:.3f} TFlop/s)"
+            )
+            return SUCCESS_MESSAGE
+        except Exception as e:
+            return f"RUNTIME ERROR: {e!s}"
+
+    logger.warning("No executor - accepting SYCL code based on static checks only")
+    return SUCCESS_MESSAGE
+
 
 SUCCESS_MESSAGE = "Success! Optimization verified and kernel is faster."
 
@@ -216,6 +267,102 @@ class AutotuneSignature(dspy.Signature):
     )
 
 
+class SyclOptimizationSignature(dspy.Signature):
+    """Optimize a SYCL/CUTLASS C++ kernel for Intel XPU.
+
+    You are an expert in SYCL, CUTLASS/XeTLA, Intel XPU GPU architecture,
+    and high-performance C++ kernel optimization.
+
+    Optimize the kernel for maximum performance while producing numerically
+    equivalent outputs. You may change template parameters, dispatch policies,
+    data types, and memory layouts.
+
+    === SYCL/CUTLASS OPTIMIZATION KNOBS ===
+    - TileShape: Shape<_M, _N, _K> — try 256x256x32, 128x128x64, 128x256x32
+    - PipelineStages: 2, 3, or 4 — more prefetching vs register pressure
+    - MMA Atom: XE_DPAS_TT<SubgroupSize, AccumType, InputType> — SubgroupSize 4 or 8
+    - Dispatch Policy: MainloopXeL1Staged (L1 cached), MainloopXeL0Staged (uncached)
+    - Data types: bfloat16_t/half_t inputs, float/bfloat16_t accumulators
+    - Memory layout: RowMajor vs ColumnMajor for A, B, C, D
+    - Epilogue: LinearCombination, bias, activation via FusionCallbacks
+    - GmemTiledCopy: void (auto) or explicit copy atoms
+
+    === STAGE-SPECIFIC GUIDANCE ===
+    ALGORITHMIC: mathematical simplifications, CSE, loop-invariant hoisting,
+      exploit GEMM structure (symmetric, triangular, low-rank).
+    DTYPE_FIX: use bfloat16_t/half_t inputs, float accumulators, avoid double.
+    FUSION: fuse into CUTLASS epilogue callbacks — LinearCombination, bias, activation.
+    MEMORY_ACCESS: fix layout mismatch (RowMajor vs ColumnMajor), increase PipelineStages
+      for better prefetching, reduce register pressure.
+    DEVICE_SPECIFIC: TileShape 256x256x32 or 128x128x64, PipelineStages=2-3,
+      XE_DPAS_TT<8, float, bfloat16_t>, MainloopXeL1Staged dispatch policy.
+    DISCOVERY: apply the open-ended optimization described in the issues field.
+
+    === CODE REQUIREMENTS ===
+    - Must be complete, valid SYCL C++ with all #include directives
+    - Must use cutlass namespace and CUTLASS template types
+    - Must include ExampleRunner template and main() function
+    - Must compile with icpx -fsycl
+    - Keep the same output format (Cutlass GEMM Performance line)
+    """
+
+    original_code: str = dspy.InputField(desc="Original SYCL/CUTLASS C++ kernel for reference")
+    current_code: str = dspy.InputField(desc="Current SYCL C++ kernel code to optimize")
+    stage: str = dspy.InputField(desc="Optimization stage to apply")
+    issues: str = dspy.InputField(desc="Specific issues to fix in this stage")
+    xpu_config: str = dspy.InputField(desc="Intel XPU configuration parameters")
+    problem_context: str = dspy.InputField(
+        desc="Problem context: GEMM dimensions (M, N, K), FLOP count, compute intensity."
+    )
+    performance_context: str = dspy.InputField(
+        desc="Current execution performance: baseline time, speedup so far. Empty if not measured."
+    )
+    vtune_report: str = dspy.InputField(
+        desc="VTune profiling report. Empty string if not available."
+    )
+    knowledge_base_context: str = dspy.InputField(
+        desc="Relevant optimization patterns from knowledge base. Empty if KB disabled."
+    )
+    optimized_code: dspy.Code["cpp"] = dspy.OutputField(
+        desc="Complete optimized SYCL C++ kernel. Must include all #includes, templates, ExampleRunner, and main()."
+    )
+
+
+class SyclAlgorithmicOptimizationSignature(dspy.Signature):
+    """Apply algorithmic / mathematical optimization to a SYCL/CUTLASS C++ kernel.
+
+    You are an expert in numerical linear algebra, compiler optimizations, and
+    high-performance GPU kernel design for Intel XPU.
+
+    Transform the kernel to perform FEWER FLOPs and/or FEWER memory accesses
+    while producing numerically equivalent results.
+
+    Think about:
+    1. Matrix structure exploitation (symmetric, triangular, diagonal, low-rank)
+    2. Associative / distributive law rewrites to reduce FLOPs
+    3. Common sub-expression elimination in template expressions
+    4. Data layout optimization (RowMajor vs ColumnMajor)
+    5. Batch dimension exploitation
+
+    === CODE REQUIREMENTS ===
+    - Must be complete, valid SYCL C++ with all #include directives
+    - Keep CUTLASS GEMM structure (GemmUniversalAdapter, ExampleRunner, main)
+    - Must compile with icpx -fsycl
+    """
+
+    original_code: str = dspy.InputField(desc="Original SYCL C++ kernel for reference")
+    current_code: str = dspy.InputField(desc="Current SYCL C++ kernel to optimize")
+    pytorch_code: str = dspy.InputField(desc="Reference description. May be empty.")
+    issues: str = dspy.InputField(desc="Specific algorithmic issues identified")
+    xpu_config: str = dspy.InputField(desc="Intel XPU configuration parameters")
+    problem_context: str = dspy.InputField(desc="Problem context: dimensions, FLOP count.")
+    performance_context: str = dspy.InputField(desc="Current performance. Empty if not measured.")
+    knowledge_base_context: str = dspy.InputField(desc="KB patterns. Empty if disabled.")
+    optimized_code: dspy.Code["cpp"] = dspy.OutputField(
+        desc="Complete optimized SYCL C++ kernel with algorithmic improvements."
+    )
+
+
 def _build_performance_context(perf_context: dict | None) -> str:
     """Format perf_context dict into a human-readable string for the LLM prompt."""
     if not perf_context:
@@ -272,6 +419,10 @@ def _extract_code_from_response(code_str):
         m = re.search(r"```python\s*(.*?)\s*```", code, re.DOTALL)
         if m:
             code = m.group(1)
+    elif "```cpp" in code or "```c++" in code:
+        m = re.search(r"```(?:cpp|c\+\+)\s*(.*?)\s*```", code, re.DOTALL)
+        if m:
+            code = m.group(1)
     elif "```" in code:
         m = re.search(r"```\s*(.*?)\s*```", code, re.DOTALL)
         if m:
@@ -288,11 +439,13 @@ class OptimizerAgent(Optimizer):
         executor=None,
         validator=None,
         max_iterations=5,
+        dsl: DSL | str = DSL.TRITON,
     ):
         self.executor = executor
         self.validator = validator
         self.max_iterations = max_iterations
         self.knowledge_base: KnowledgeBase | None = knowledge_base
+        self.dsl = DSL(dsl) if isinstance(dsl, str) else dsl
         if not executor:
             logger.warning("No executor provided - kernels will NOT be verified at runtime!")
 
@@ -307,11 +460,13 @@ class OptimizerAgent(Optimizer):
         skip_speedup_check=False,
         stage=None,
         baseline_ms: float | None = None,
+        spec_dims=None,
     ):
         executor = self.executor
+        dsl = self.dsl
         last_accepted = {"comparison": None}
 
-        _verify_call_count = [0]  # mutable counter in closure
+        _verify_call_count = [0]
 
         def compile_and_verify(optimized_code: dspy.Code["python"]) -> str:
             _verify_call_count[0] += 1
@@ -320,6 +475,24 @@ class OptimizerAgent(Optimizer):
                 optimized_code.code if hasattr(optimized_code, "code") else str(optimized_code)
             )
 
+            if dsl == DSL.SYCL:
+                result = _verify_sycl(code, original_code, executor, input_shapes, spec_dims)
+                if result == SUCCESS_MESSAGE and executor:
+                    _dims = spec_dims or dict(
+                        zip(("M", "N", "K"), _extract_gemm_dims(input_shapes), strict=False)
+                    )
+                    try:
+                        c = executor.compare_kernels(
+                            original_code=original_code,
+                            optimized_code=code,
+                            dims=_dims,
+                        )
+                        last_accepted["comparison"] = c
+                    except Exception:
+                        pass
+                return result
+
+            # --- Triton path ---
             try:
                 ast.parse(code)
             except SyntaxError as e:
@@ -459,7 +632,7 @@ class OptimizerAgent(Optimizer):
         tool = dspy.Tool(
             func=compile_and_verify,
             name="compile_and_verify",
-            desc=f'Compiles and verifies optimized Triton kernel. Returns "{SUCCESS_MESSAGE}" on success.',
+            desc=f'Compiles and verifies optimized kernel. Returns "{SUCCESS_MESSAGE}" on success.',
         )
         return tool, last_accepted
 
@@ -471,6 +644,7 @@ class OptimizerAgent(Optimizer):
         xpu_config,
         kernel_name=None,
         input_shapes=None,
+        spec_dims=None,
         flop=None,
         dtype=None,
         pytorch_code="",
@@ -503,9 +677,11 @@ class OptimizerAgent(Optimizer):
             ]
         )
 
-        xpu_text = "Intel XPU Configuration:\n" + "\n".join(
-            f"  {k}: {v}" for k, v in xpu_config.items()
-        )
+        from xe_forge.config import get_config
+        from xe_forge.core.device_query import format_device_config_for_llm
+
+        _cfg = get_config()
+        xpu_text = format_device_config_for_llm(xpu_config, _cfg.device_config.device)
 
         CORRECTNESS_ONLY_STAGES = {}
         skip_speedup = stage in CORRECTNESS_ONLY_STAGES
@@ -522,6 +698,7 @@ class OptimizerAgent(Optimizer):
             skip_speedup_check=skip_speedup,
             stage=stage,
             baseline_ms=_baseline_ms,
+            spec_dims=spec_dims,
         )
 
         problem_ctx = self._build_problem_context(input_shapes, dtype, init_args, flop)
@@ -538,7 +715,33 @@ class OptimizerAgent(Optimizer):
         else:
             logger.debug("No KB context for stage %s (KB disabled or empty)", stage.value)
 
-        if stage == OptimizationStage.ALGORITHMIC:
+        if self.dsl == DSL.SYCL:
+            if stage == OptimizationStage.ALGORITHMIC:
+                sig = SyclAlgorithmicOptimizationSignature
+                kwargs = {
+                    "original_code": original_code,
+                    "current_code": code,
+                    "pytorch_code": pytorch_code or "",
+                    "issues": issues_text,
+                    "xpu_config": xpu_text,
+                    "problem_context": problem_ctx,
+                    "performance_context": perf_ctx,
+                    "knowledge_base_context": kb_context,
+                }
+            else:
+                sig = SyclOptimizationSignature
+                kwargs = {
+                    "original_code": original_code,
+                    "current_code": code,
+                    "stage": stage.value,
+                    "issues": issues_text,
+                    "xpu_config": xpu_text,
+                    "problem_context": problem_ctx,
+                    "performance_context": perf_ctx,
+                    "vtune_report": vtune_report or "",
+                    "knowledge_base_context": kb_context,
+                }
+        elif stage == OptimizationStage.ALGORITHMIC:
             sig = AlgorithmicOptimizationSignature
             kwargs = {
                 "original_code": original_code,
@@ -627,6 +830,7 @@ class OptimizerAgent(Optimizer):
                     skip_speedup_check=skip_speedup,
                     cached_comparison=last_accepted["comparison"],
                     baseline_ms=_baseline_ms,
+                    spec_dims=spec_dims,
                 )
 
                 # Record this attempt for feedback to the next run
@@ -981,15 +1185,29 @@ class OptimizerAgent(Optimizer):
         skip_speedup_check=False,
         cached_comparison=None,
         baseline_ms: float | None = None,
+        spec_dims=None,
     ):
-        if not self._valid_py(opt):
-            return False, None, None, None, "Invalid Python syntax"
-        if not self._valid_triton(opt):
-            return False, None, None, None, "Not valid Triton"
-        if self.executor and shapes:
+        if self.dsl == DSL.SYCL:
+            if "#include" not in opt:
+                return False, None, None, None, "Not valid SYCL C++"
+        else:
+            if not self._valid_py(opt):
+                return False, None, None, None, "Invalid Python syntax"
+            if not self._valid_triton(opt):
+                return False, None, None, None, "Not valid Triton"
+        if self.executor and (self.dsl == DSL.SYCL or shapes):
             try:
                 if cached_comparison is not None:
                     c = cached_comparison
+                elif self.dsl == DSL.SYCL:
+                    _dims = spec_dims or dict(
+                        zip(("M", "N", "K"), _extract_gemm_dims(shapes), strict=False)
+                    )
+                    c = self.executor.compare_kernels(
+                        original_code=orig,
+                        optimized_code=opt,
+                        dims=_dims,
+                    )
                 else:
                     c = self.executor.compare_kernels(
                         original_code=orig,
@@ -1011,7 +1229,6 @@ class OptimizerAgent(Optimizer):
                 ma = None
                 if c.optimized_time_us and c.optimized_tflops:
                     ma = {"time_us": c.optimized_time_us, "tflops": c.optimized_tflops}
-                # Use true pipeline baseline for speedup if available
                 if baseline_ms and c.optimized_time_us:
                     spd = (baseline_ms * 1000) / c.optimized_time_us
                 else:
