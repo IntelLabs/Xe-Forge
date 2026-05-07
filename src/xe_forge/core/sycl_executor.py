@@ -18,15 +18,16 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from ai_bench.harness.runner.benchmark_compare import set_all_seeds
 from ai_bench.sycl.compiler import SYCLCompiler, SYCLRunResult
 
 from xe_forge.models import ExecutionResult
 
 logger = logging.getLogger(__name__)
 
-SYCL_TLA_DIR = os.environ.get("SYCL_TLA_DIR", "/data/nfs_home/mspoczy/temp/sycl-tla")
+SYCL_TLA_DIR = os.environ.get("SYCL_TLA_DIR", "")
 
-MKL_INCLUDE = "/swtools/intel/mkl/latest/include"
+MKL_INCLUDE = os.environ.get("MKL_INCLUDE", "/swtools/intel/mkl/latest/include")
 
 _DEVICE_NAME_TO_TARGET: dict[str, str] = {
     "b580": "bmg-g31",
@@ -135,6 +136,8 @@ class SyclExecutor:
         self.iterations = iterations
         self.verify = verify
         self._build_dir = None
+        self._cached_input_dir: str | None = None
+        self._cached_input_key: tuple | None = None
 
     @property
     def build_dir(self) -> str:
@@ -198,12 +201,15 @@ class SyclExecutor:
         dims: dict[str, int | float],
         output_dir: str,
         dtype: torch.dtype = torch.bfloat16,
+        seed: int | None = None,
     ) -> None:
         """Generate random input tensors and write them as binary files.
 
         Writes A.bin, B0.bin, B1.bin (for dual GEMM) or A.bin, B.bin (for GEMM)
         to the given directory. The binary expects raw row-major tensor data.
         """
+        if seed is not None:
+            set_all_seeds(seed)
         os.makedirs(output_dir, exist_ok=True)
         m = int(dims.get("M", dims.get("N", 1024)))
         n = int(dims.get("N", m))
@@ -221,6 +227,27 @@ class SyclExecutor:
         logger.info(
             f"Generated inputs: A[{m},{k}], B0[{k},{n}], B1[{k},{n}] ({dtype}) -> {output_dir}"
         )
+
+    def get_or_create_inputs(
+        self,
+        dims: dict[str, int | float],
+        seed: int = 42,
+        dtype: torch.dtype = torch.bfloat16,
+    ) -> str:
+        """Return a directory with deterministic input tensors, caching across calls."""
+        key = (tuple(sorted(dims.items())), seed)
+        if self._cached_input_dir is not None and self._cached_input_key == key:
+            return self._cached_input_dir
+        if self._cached_input_dir is not None:
+            try:
+                shutil.rmtree(self._cached_input_dir)
+            except Exception:
+                pass
+        input_dir = tempfile.mkdtemp(prefix="sycl_inputs_")
+        self.generate_inputs(dims, input_dir, dtype=dtype, seed=seed)
+        self._cached_input_dir = input_dir
+        self._cached_input_key = key
+        return input_dir
 
     @staticmethod
     def load_output(path: str, dtype: np.dtype = np.float32) -> np.ndarray:
@@ -350,6 +377,8 @@ class SyclExecutor:
         dims: dict[str, int | float] | None = None,
         rtol: float = 1e-2,
         atol: float = 1e-3,
+        input_dir: str | None = None,
+        seed: int = 42,
     ) -> SyclComparisonResult:
         """Compare performance and correctness of original vs optimized SYCL kernel.
 
@@ -367,13 +396,13 @@ class SyclExecutor:
         Returns:
             SyclComparisonResult with speedup, correctness, and feedback
         """
+        caller_owns_inputs = input_dir is not None
         io_dir = tempfile.mkdtemp(prefix="sycl_compare_")
-        input_dir = os.path.join(io_dir, "inputs")
+        if not caller_owns_inputs:
+            effective_dims = dims or {"M": m, "N": n, "K": k}
+            input_dir = self.get_or_create_inputs(effective_dims, seed=seed)
         orig_output_dir = os.path.join(io_dir, "orig_out")
         opt_output_dir = os.path.join(io_dir, "opt_out")
-
-        effective_dims = dims or {"M": m, "N": n, "K": k}
-        self.generate_inputs(effective_dims, input_dir)
 
         orig_result = self.execute(
             kernel_code=original_code,
@@ -504,5 +533,10 @@ class SyclExecutor:
         if self._build_dir is not None:
             try:
                 shutil.rmtree(self._build_dir)
+            except Exception:
+                pass
+        if self._cached_input_dir is not None:
+            try:
+                shutil.rmtree(self._cached_input_dir)
             except Exception:
                 pass
