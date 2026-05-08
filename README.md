@@ -1,7 +1,7 @@
 # Xe Forge
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/IntelLabs/Xe-Forge/badge)](https://scorecard.dev/viewer/?uri=github.com/IntelLabs/Xe-Forge)
 
-Multi-stage kernel optimization for Intel XPU — automated (DSPy) or interactive (Claude Code).
+Multi-stage LLM-driven optimization pipeline for Triton kernels targeting Intel XPU.
 
 The optimizer analyzes Triton kernels, identifies performance issues, and applies optimizations through a series of stages — each powered by an LLM that understands GPU programming, numerical linear algebra, and Intel XPU hardware. Two engines are available: a fully automated DSPy pipeline and a Claude Code engine that generates a ready-to-run workspace you can drive interactively or let xe-forge auto-launch.
 
