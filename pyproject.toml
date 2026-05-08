@@ -28,6 +28,7 @@ wandb = ["weave>=0.52.24"]
 
 [project.scripts]
 xe-forge = "xe_forge.cli:main"
+xe-forge-skill = "xe_forge.skills:main"
 
 [dependency-groups]
 dev = [
@@ -75,7 +76,7 @@ allow-direct-references = true
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-exclude = ["test_kernels", "knowledge_base/**/examples", "outputs/kernels", "examples"]
+exclude = ["test_kernels", "knowledge_base/**/examples", "outputs/kernels", "examples", "templates"]
 
 [tool.ruff.lint]
 select = [

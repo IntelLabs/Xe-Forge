@@ -53,8 +53,12 @@ class XeForgePipeline:
     analyzer: AnalyzerAgent
     optimizer: Optimizer
 
-    def __init__(self, config=None, executor=None, validator=None):
+    def __init__(
+        self, config=None, executor=None, validator=None, trial_manager=None, profiler=None
+    ):
         self.config = config or get_config()
+        self.trial_manager = trial_manager
+        self.profiler = profiler
         self._setup_logging()
         self._setup_llm()
 
@@ -253,6 +257,17 @@ class XeForgePipeline:
             except Exception as e:
                 logger.warning(f"Failed to measure original: {e}")
 
+        if self.trial_manager and kernel_name:
+            try:
+                import tempfile
+
+                tmp = Path(tempfile.mkdtemp()) / f"{kernel_name}_baseline.py"
+                tmp.write_text(kernel_code)
+                self.trial_manager.init(kernel_name, str(tmp))
+                logger.info("Trial tree initialized for '%s'", kernel_name)
+            except Exception as e:
+                logger.warning("Could not initialize trial tree: %s", e)
+
         candidates = []
         best_k = max(1, self.config.optimization.best_k)
 
@@ -349,8 +364,10 @@ class XeForgePipeline:
 
             current_code = kernel_code
             current_ms: float | None = val_orig_ms
+            vtune_report = ""
+            last_trial_id: str | None = None
 
-            for stage in stages_to_apply:
+            for stage_idx, stage in enumerate(stages_to_apply):
                 logger.info("=" * 60 + f"\nSTAGE: {stage.value.upper()}\n" + "=" * 60)
                 logger.info(f"Issues: {', '.join(stages_needed.get(stage, []))}")
 
@@ -366,6 +383,7 @@ class XeForgePipeline:
                     dtype=dtype,
                     pytorch_code=reference_code,
                     init_args=init_args,
+                    vtune_report=vtune_report,
                     perf_context={
                         "original_ms": val_orig_ms,
                         "original_tflops": val_orig_tflops,
@@ -398,6 +416,62 @@ class XeForgePipeline:
                     )
                 elif not stage_result.success:
                     logger.warning(f"Stage {stage.value} failed: {stage_result.error_message}")
+
+                if self.trial_manager and kernel_name and stage_result.output_code:
+                    try:
+                        import tempfile
+
+                        tmp = Path(tempfile.mkdtemp()) / f"{kernel_name}_stage_{stage.value}.py"
+                        tmp.write_text(stage_result.output_code)
+                        trial_id = self.trial_manager.save_trial(
+                            kernel_name,
+                            str(tmp),
+                            parent=last_trial_id,
+                            strategy=f"stage:{stage.value}",
+                        )
+                        speedup = (
+                            val_orig_ms / current_ms
+                            if val_orig_ms and current_ms and current_ms > 0
+                            else None
+                        )
+                        self.trial_manager.record_result(
+                            kernel_name,
+                            trial_id,
+                            correctness="pass" if stage_result.success else "fail",
+                            speedup=speedup,
+                            baseline_us=(val_orig_ms or 0) * 1000,
+                            triton_us=(current_ms or 0) * 1000,
+                        )
+                        if stage_result.success:
+                            last_trial_id = trial_id
+                        logger.info("Trial %s recorded for stage %s", trial_id, stage.value)
+                    except Exception as e:
+                        logger.warning("Could not record trial for stage %s: %s", stage.value, e)
+
+                if (
+                    self.profiler
+                    and stage_idx > 0
+                    and stage_result.success
+                    and stage_result.output_code
+                    and spec_path
+                ):
+                    try:
+                        import tempfile
+
+                        tmp = Path(tempfile.mkdtemp()) / f"{kernel_name}_profile.py"
+                        tmp.write_text(stage_result.output_code)
+                        profile_result = self.profiler.profile(
+                            str(tmp),
+                            spec_path=spec_path,
+                            variant=variant_type,
+                        )
+                        if not profile_result.error:
+                            vtune_report = profile_result.format_for_llm()
+                            logger.info("VTune profile updated after stage %s", stage.value)
+                        else:
+                            logger.warning("VTune profiling error: %s", profile_result.error)
+                    except Exception as e:
+                        logger.warning("VTune profiling failed after stage %s: %s", stage.value, e)
 
                 if stage == OptimizationStage.DISCOVERY and stage_result.success:
                     open_ended_issues = [
