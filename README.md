@@ -1,9 +1,9 @@
 # Xe Forge
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/IntelLabs/Xe-Forge/badge)](https://scorecard.dev/viewer/?uri=github.com/IntelLabs/Xe-Forge)
 
-Multi-stage LLM-driven optimization pipeline for Triton kernels targeting Intel XPU.
+Multi-stage kernel optimization for Intel XPU — automated (DSPy) or interactive (Claude Code).
 
-The optimizer analyzes Triton kernels, identifies performance issues, and applies optimizations through a series of stages — each powered by an LLM that understands GPU programming, numerical linear algebra, and Intel XPU hardware.
+The optimizer analyzes Triton kernels, identifies performance issues, and applies optimizations through a series of stages — each powered by an LLM that understands GPU programming, numerical linear algebra, and Intel XPU hardware. Two engines are available: a fully automated DSPy pipeline and an interactive Claude Code agent.
 
 ⚠️ **Disclaimer**: This project is currently in active development. The code is **not stable** and **not intended for use in production environments**. Interfaces, features, and behaviors are subject to change without notice.
 
@@ -102,6 +102,65 @@ xe-forge -i kernel.py -s spec.yaml --best-k 3
 
 # Debug mode
 xe-forge -i kernel.py -s spec.yaml --debug
+
+# Use Claude Code engine (interactive)
+xe-forge -i kernel.py -s spec.yaml --engine claude --workspace ./workspace --max-trials 5
+
+# With VTune GPU profiling
+xe-forge -i kernel.py -s spec.yaml --vtune
+
+# Target CUDA device
+xe-forge -i kernel.py -s spec.yaml --device cuda
+```
+
+---
+
+## Engines
+
+Xe-Forge has two optimization engines:
+
+### DSPy (default) — fully automated
+
+```bash
+xe-forge -i kernel.py -s spec.yaml --engine dspy
+```
+
+Runs the full pipeline automatically. DSPy agents analyze the kernel, plan optimization stages, and apply them sequentially with Chain of Verification (CoVeR). Trial tree tracks progress across stages.
+
+### Claude Code — interactive
+
+```bash
+xe-forge -i kernel.py -s spec.yaml --engine claude --workspace ./workspace --max-trials 5
+cd workspace
+claude /optimize-kernel my_kernel
+```
+
+Generates a workspace with `CLAUDE.md` workflow, `config.yaml`, knowledge base, and skill commands. Claude Code then optimizes interactively — reading patterns, writing trials, benchmarking, and branching based on results.
+
+---
+
+## Skill CLI
+
+Standalone tools for kernel development, also used internally by the Claude Code engine:
+
+```bash
+# Analyze a PyTorch/Triton kernel (AST-based)
+xe-forge-skill analyze kernel.py
+
+# Validate a Triton kernel (static checks)
+xe-forge-skill validate kernel.py --dsl triton
+
+# Benchmark baseline vs optimized
+xe-forge-skill benchmark baseline.py optimized.py --spec spec.yaml
+
+# Trial management
+xe-forge-skill trial init my_kernel baseline.py
+xe-forge-skill trial save my_kernel trial.py --parent t0 --strategy "fused reduction"
+xe-forge-skill trial status my_kernel
+xe-forge-skill trial finalize my_kernel output.py
+
+# VTune GPU profiling (Intel XPU)
+xe-forge-skill profile kernel.py --spec spec.yaml
 ```
 
 ---
@@ -414,6 +473,25 @@ xe-forge --input KERNEL --spec SPEC [OPTIONS]
 | `--num-warps` | Default number of warps |
 | `--tile-size` | Preferred tile size (sets both M and N) |
 
+### Device & DSL
+
+| Flag | Description |
+|------|-------------|
+| `--device` | Target device: `xpu`, `cuda`, `cpu` (default: `xpu`) |
+| `--dsl` | Kernel DSL: `triton`, `gluon`, `sycl`, `cuda` (default: `triton`) |
+
+### Engine & Trials
+
+| Flag | Description |
+|------|-------------|
+| `--engine` | `dspy` (automated) or `claude` (interactive, default: `dspy`) |
+| `--max-trials` | Max optimization trials (default: 10) |
+| `--trials-dir` | Trial state directory (default: `./trials`) |
+| `--no-trials` | Disable trial tracking |
+| `--vtune` | Enable VTune GPU profiling (see [VTUNE.md](VTUNE.md)) |
+| `--vtune-bin` | Path to VTune binary |
+| `--workspace` | Workspace directory (Claude engine only) |
+
 ### Other
 
 | Flag | Description |
@@ -461,6 +539,13 @@ All settings can be controlled via environment variables or a `.env` file:
 | `PREFERRED_TILE_K` | `32` | Preferred tile size K |
 | `GROUP_SIZE_M` | `4` | L2 cache swizzling group |
 | `GRF_MODE` | `256` | XPU register file mode |
+| `ENGINE` | `dspy` | Optimization engine (`dspy`, `claude`) |
+| `MAX_TRIALS` | `10` | Trial tree max trials |
+| `TRIALS_DIR` | `./trials` | Trial state directory |
+| `VTUNE_ENABLED` | `false` | Enable VTune GPU profiling |
+| `VTUNE_BIN` | `vtune` | VTune binary path |
+| `VTUNE_WARMUP` | `5` | Warmup iterations before profiling |
+| `VTUNE_ITERS` | `20` | Iterations to profile |
 | `LOG_LEVEL` | `INFO` | Logging level |
 | `SAVE_INTERMEDIATE` | `true` | Save intermediate kernels |
 | `LOG_DIR` | `./outputs/logs` | Log directory |
