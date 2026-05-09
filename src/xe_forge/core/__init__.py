@@ -46,6 +46,7 @@ from xe_forge.core.spec_loader import (
     parse_spec,
 )
 from xe_forge.core.sycl_executor import (
+    KernelType,
     SyclComparisonResult,
     SyclExecutor,
 )
@@ -79,6 +80,7 @@ __all__ = [
     "KernelBenchExecutor",
     "KernelExecutor",
     "KernelSpec",
+    "KernelType",
     "KernelValidator",
     "ProfileMetrics",
     "ProfileResult",
@@ -113,7 +115,10 @@ __all__ = [
 ]
 
 
-def create_executor_from_config(config) -> KernelBenchExecutor | SyclExecutor:
+def create_executor_from_config(
+    config,
+    kernel_type: KernelType | str = KernelType.GEMM,
+) -> KernelBenchExecutor | SyclExecutor:
     """
     Create an executor with settings from Config.
 
@@ -124,6 +129,7 @@ def create_executor_from_config(config) -> KernelBenchExecutor | SyclExecutor:
     if config.device_config.dsl == DSL.SYCL:
         return SyclExecutor(
             verify=config.optimization.require_correctness,
+            kernel_type=kernel_type,
         )
     return KernelBenchExecutor(
         device=config.device_config.device,

@@ -1,0 +1,294 @@
+"""
+C++ template generator for CUTLASS GEMM tile tuning benchmarks.
+
+Generates complete, compilable SYCL C++ source files parameterized by tile
+shape. Based on sycl-tla/examples/01_bmg_gemm_with_collective_builder.
+Uses CollectiveBuilder so the MMA atom and subgroup layout are auto-derived.
+
+The output matches the format expected by ai_bench.sycl.compiler.SYCLCompiler:
+  - "Disposition: Passed" / "Disposition: Failed"
+  - "Cutlass GEMM Performance:     [X]TFlop/s  (Y)ms"
+"""
+
+from __future__ import annotations
+
+_DTYPE_MAP = {
+    "bf16": ("bfloat16_t", "float"),
+    "f16": ("half_t", "float"),
+    "tf32": ("tfloat32_t", "float"),
+}
+
+_TEMPLATE = '''\
+#include "cutlass/gemm/device/gemm_universal.h"
+#include "cutlass/gemm/device/gemm_universal_adapter.h"
+
+#include "cutlass/gemm/collective/collective_builder.hpp"
+#include "cutlass/epilogue/collective/collective_builder.hpp"
+#include "cutlass/kernel_hardware_info.h"
+
+#include "cutlass/util/command_line.h"
+#include "cutlass/util/device_memory.h"
+#include "cutlass/util/packed_stride.hpp"
+#include "cutlass/util/reference/device/gemm_complex.h"
+#include "cutlass/util/reference/device/tensor_compare.h"
+#include "cutlass/util/GPU_Clock.hpp"
+
+#include "sycl_common.hpp"
+#include "helper.h"
+
+using namespace cute;
+
+struct Options {{
+  bool help = false;
+  bool error = false;
+  int m = 5120, n = 4096, k = 4096, l = 1, iterations = 100, verify = 1;
+  float alpha = 1.f, beta = 0.f;
+
+  void parse(int argc, char const **args) {{
+    cutlass::CommandLine cmd(argc, args);
+    if (cmd.check_cmd_line_flag("help")) {{ help = true; return; }}
+    cmd.get_cmd_line_argument("m", m, 5120);
+    cmd.get_cmd_line_argument("n", n, 4096);
+    cmd.get_cmd_line_argument("k", k, 4096);
+    cmd.get_cmd_line_argument("l", l, 1);
+    cmd.get_cmd_line_argument("alpha", alpha, 1.f);
+    cmd.get_cmd_line_argument("beta", beta, 0.f);
+    cmd.get_cmd_line_argument("iterations", iterations, 100);
+    cmd.get_cmd_line_argument("verify", verify, 1);
+  }}
+
+  std::ostream & print_usage(std::ostream &out) const {{
+    out << "Tile Tuning GEMM Benchmark\\n\\n"
+      << "Options:\\n"
+      << "  --help         Show usage\\n"
+      << "  --m=<int>      M extent (default 5120)\\n"
+      << "  --n=<int>      N extent (default 4096)\\n"
+      << "  --k=<int>      K extent (default 4096)\\n"
+      << "  --l=<int>      Batch count (default 1)\\n"
+      << "  --iterations=<int>  Iterations (default 100)\\n"
+      << "  --verify=<int> Verify correctness (default 1)\\n";
+    return out;
+  }}
+}};
+
+template <class Gemm>
+struct ExampleRunner {{
+
+  using StrideA = typename Gemm::GemmKernel::StrideA;
+  using StrideB = typename Gemm::GemmKernel::StrideB;
+  using StrideC = typename Gemm::GemmKernel::StrideC;
+  using StrideD = typename Gemm::GemmKernel::StrideD;
+
+  using LayoutA = typename Gemm::LayoutA;
+  using LayoutB = typename Gemm::LayoutB;
+  using LayoutC = typename Gemm::LayoutC;
+  using LayoutD = typename Gemm::LayoutD;
+
+  using ElementA = typename Gemm::ElementA;
+  using ElementB = typename Gemm::ElementB;
+  using ElementAcc = typename Gemm::ElementAccumulator;
+
+  using CollectiveEpilogue = typename Gemm::CollectiveEpilogue;
+  using ElementC = typename Gemm::ElementC;
+  using ElementOutput = typename CollectiveEpilogue::ElementOutput;
+  using ElementCompute = typename CollectiveEpilogue::ElementCompute;
+
+  using ProblemShapeType = typename Gemm::GemmKernel::ProblemShape;
+
+  StrideA stride_A;
+  StrideB stride_B;
+  StrideC stride_C;
+  StrideD stride_D;
+  uint64_t seed = 0;
+
+  cutlass::DeviceAllocation<ElementA> block_A;
+  cutlass::DeviceAllocation<ElementB> block_B;
+  cutlass::DeviceAllocation<ElementC> block_C;
+  cutlass::DeviceAllocation<ElementOutput> block_D;
+  cutlass::DeviceAllocation<ElementOutput> block_ref_D;
+
+  bool verify(const ProblemShapeType& problem_size, ElementCompute alpha, ElementCompute beta) {{
+    auto [M, N, K, L] = problem_size;
+
+    cutlass::TensorRef ref_A(block_A.get(), LayoutA::packed({{M, K}}));
+    cutlass::TensorRef ref_B(block_B.get(), LayoutB::packed({{K, N}}));
+    cutlass::TensorRef ref_C(block_C.get(), LayoutC::packed({{M, N}}));
+    cutlass::TensorRef ref_D(block_ref_D.get(), LayoutD::packed({{M, N}}));
+
+    cutlass::reference::device::GemmComplex(
+          {{M, N, K}},
+          alpha,
+          ref_A, cutlass::ComplexTransform::kNone,
+          ref_B, cutlass::ComplexTransform::kNone,
+          beta,
+          ref_C, ref_D,
+          ElementAcc(0),
+          L, M * K, K * N, M * N, M * N);
+
+    compat::wait();
+
+    bool passed = cutlass::reference::device::BlockCompareEqual(
+      block_ref_D.get(), block_D.get(), block_D.size());
+    return passed;
+  }}
+
+  void initialize(const ProblemShapeType& problem_size) {{
+    auto problem_shape_MNKL = cute::append<4>(problem_size, 1);
+    auto [M, N, K, L] = problem_shape_MNKL;
+
+    stride_A = cutlass::make_cute_packed_stride(StrideA{{}}, cute::make_shape(M, K, L));
+    stride_B = cutlass::make_cute_packed_stride(StrideB{{}}, cute::make_shape(N, K, L));
+    stride_C = cutlass::make_cute_packed_stride(StrideC{{}}, cute::make_shape(M, N, L));
+    stride_D = cutlass::make_cute_packed_stride(StrideD{{}}, cute::make_shape(M, N, L));
+
+    block_A.reset(static_cast<std::size_t>(M) * K * L);
+    block_B.reset(static_cast<std::size_t>(K) * N * L);
+    block_C.reset(static_cast<std::size_t>(M) * N * L);
+    block_D.reset(static_cast<std::size_t>(M) * N * L);
+    block_ref_D.reset(static_cast<std::size_t>(M) * N * L);
+
+    initialize_block(block_A, seed + 2023);
+    initialize_block(block_B, seed + 2022);
+    initialize_block(block_C, seed + 2021);
+  }}
+
+  cutlass::Status run(const Options& options, const cutlass::KernelHardwareInfo& hw_info) {{
+    ProblemShapeType problem_size = ProblemShapeType{{options.m, options.n, options.k, options.l}};
+
+    initialize(problem_size);
+
+    typename Gemm::GemmKernel::Arguments arguments{{
+      cutlass::gemm::GemmUniversalMode::kGemm,
+      problem_size,
+      {{block_A.get(), stride_A, block_B.get(), stride_B}},
+      {{{{options.alpha, options.beta}}, block_C.get(), stride_C, block_D.get(), stride_D}},
+      hw_info
+    }};
+
+    Gemm gemm_op;
+
+    size_t workspace_size = Gemm::get_workspace_size(arguments);
+    cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
+
+    CUTLASS_CHECK(gemm_op.can_implement(arguments));
+    CUTLASS_CHECK(gemm_op.initialize(arguments, workspace.get()));
+    CUTLASS_CHECK(gemm_op.run());
+
+    compat::wait();
+
+    if (options.verify != 0) {{
+      bool passed = verify(problem_size, options.alpha, options.beta);
+      std::cout << "Disposition: " << (passed ? "Passed" : "Failed") << std::endl;
+      if (!passed) return cutlass::Status::kErrorInternal;
+    }} else {{
+      std::cout << "Disposition is skipped." << std::endl;
+    }}
+
+    if (options.iterations > 0) {{
+      GPU_Clock timer;
+      timer.start();
+      for (int i = 0; i < options.iterations; ++i) {{
+        gemm_op.run();
+      }}
+      compat::wait();
+
+      float cute_time = timer.seconds() / options.iterations;
+      double tflops = (2.0 * options.m * options.n * options.k * options.l) * 1e-12;
+      std::cout << "Problem Size: " << options.m << 'x' << options.n << 'x' << options.k << 'x' << options.l << std::endl;
+      printf("Cutlass GEMM Performance:     [%4.3f]TFlop/s  (%6.4f)ms\\n", tflops / cute_time, cute_time*1000);
+    }}
+
+    return cutlass::Status::kSuccess;
+  }}
+}};
+
+int main(int argc, const char** argv)
+{{
+  Options options;
+  options.parse(argc, argv);
+
+  if (options.help) {{
+    options.print_usage(std::cout) << std::endl;
+    return 0;
+  }}
+  if (options.error) {{
+    std::cerr << "Aborting execution." << std::endl;
+    return -1;
+  }}
+
+  cutlass::KernelHardwareInfo hw_info;
+  hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
+
+  using ElementAccumulator = {acc_type};
+  using ElementComputeEpilogue = {acc_type};
+  using ElementInputA = {input_type};
+  using ElementInputB = {input_type};
+  using ElementOutput = {acc_type};
+
+  constexpr int AlignmentA = sizeof(ElementInputA);
+  constexpr int AlignmentB = sizeof(ElementInputB);
+  constexpr int AlignmentC = sizeof(ElementAccumulator);
+  constexpr int AlignmentD = sizeof(ElementOutput);
+
+  using LayoutA = cutlass::layout::{layout_a};
+  using LayoutB = cutlass::layout::{layout_b};
+  using LayoutC = cutlass::layout::RowMajor;
+  using LayoutD = cutlass::layout::RowMajor;
+
+  using TileShape = Shape<_{wg_m}, _{wg_n}, _{wg_k}>;
+
+  using CollectiveMainloop = cutlass::gemm::collective::CollectiveBuilder<
+    cutlass::arch::IntelXe, cutlass::arch::OpClassTensorOp,
+    ElementInputA, LayoutA, AlignmentA,
+    ElementInputB, LayoutB, AlignmentB,
+    ElementAccumulator,
+    TileShape, Shape<_1, _1, _1>,
+    cutlass::gemm::collective::StageCountAuto,
+    cutlass::gemm::collective::KernelScheduleAuto
+  >::CollectiveOp;
+
+  using CollectiveEpilogue = cutlass::epilogue::collective::CollectiveBuilder<
+    cutlass::arch::IntelXe, cutlass::arch::OpClassTensorOp,
+    TileShape, Shape<_1, _1, _1>,
+    cutlass::epilogue::collective::EpilogueTileAuto, ElementComputeEpilogue,
+    ElementAccumulator,
+    ElementAccumulator, LayoutC, AlignmentC,
+    ElementOutput, LayoutD, AlignmentD,
+    cutlass::epilogue::collective::EpilogueScheduleAuto
+  >::CollectiveOp;
+
+  using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
+    Shape<int, int, int, int>,
+    CollectiveMainloop,
+    CollectiveEpilogue
+  >;
+
+  using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
+
+  ExampleRunner<Gemm> runner;
+  CUTLASS_CHECK(runner.run(options, hw_info));
+
+  return 0;
+}}
+'''
+
+
+def generate_gemm_source(
+    wg_m: int,
+    wg_n: int,
+    wg_k: int,
+    dtype: str = "bf16",
+    layout_a: str = "RowMajor",
+    layout_b: str = "RowMajor",
+) -> str:
+    """Generate a complete CUTLASS GEMM C++ source for the given tile config."""
+    input_type, acc_type = _DTYPE_MAP.get(dtype, _DTYPE_MAP["bf16"])
+    return _TEMPLATE.format(
+        wg_m=wg_m,
+        wg_n=wg_n,
+        wg_k=wg_k,
+        input_type=input_type,
+        acc_type=acc_type,
+        layout_a=layout_a,
+        layout_b=layout_b,
+    )
