@@ -99,7 +99,7 @@ template <class TA, class TB> auto choose_tiled_mma(TA *A, TB *B) {{
   return MMA{{}};
 }}
 
-template <typename, typename, typename, char, char> class GemmCuteName;
+template <typename, typename, typename, char, char, int Phase = 0> class GemmCuteName;
 
 template <char layoutA, char layoutB, typename ElementA, typename ElementB,
           typename ElementS, typename ElementD>
@@ -146,21 +146,24 @@ void MoEGEMMLauncher(const ElementA *activations, const ElementB *weights,
                                   intelex::grf_size<256>}};
   sycl::queue Q = compat::get_default_queue();
 
+  // Warmup + benchmark use a single kernel name (no duplicate lambda bodies)
+  auto run_kernel = [&]() {{
+    return Q.parallel_for<
+        GemmCuteName<ElementA, ElementB, ElementD, layoutA, layoutB>>(
+        sycl::nd_range<3>(global, local), kernel_props, [=](auto) {{
+          MoE::MoEGEMM<void, void, void, 'R', 'R', 'R'>(
+              activations, weights, scales, outputs, mma,
+              num_rows_per_expert_device, num_experts, gemm_n, gemm_k,
+              scheduler_params);
+        }});
+  }};
+
   // Warmup
-  auto warmup_event = Q.parallel_for<
-      GemmCuteName<ElementA, ElementB, ElementD, layoutA, layoutB>>(
-      sycl::nd_range<3>(global, local), kernel_props, [=](auto) {{
-        MoE::MoEGEMM<void, void, void, 'R', 'R', 'R'>(
-            activations, weights, scales, outputs, mma,
-            num_rows_per_expert_device, num_experts, gemm_n, gemm_k,
-            scheduler_params);
-      }});
-  EventManager::getInstance().addEvent(warmup_event);
+  EventManager::getInstance().addEvent(run_kernel());
   Q.wait_and_throw();
 
   // Verification
   if (do_verify) {{
-    // Simple sum check
     std::cout << "Disposition: Passed" << std::endl;
   }} else {{
     std::cout << "Disposition is skipped." << std::endl;
@@ -170,15 +173,7 @@ void MoEGEMMLauncher(const ElementA *activations, const ElementB *weights,
   GPU_Clock timer;
   timer.start();
   for (int iter = 0; iter < {iterations_default}; iter++) {{
-    auto event = Q.parallel_for<
-        GemmCuteName<ElementA, ElementB, ElementD, layoutA, layoutB>>(
-        sycl::nd_range<3>(global, local), kernel_props, [=](auto) {{
-          MoE::MoEGEMM<void, void, void, 'R', 'R', 'R'>(
-              activations, weights, scales, outputs, mma,
-              num_rows_per_expert_device, num_experts, gemm_n, gemm_k,
-              scheduler_params);
-        }});
-    EventManager::getInstance().addEvent(event);
+    EventManager::getInstance().addEvent(run_kernel());
   }}
   Q.wait_and_throw();
   float total_time = timer.seconds();
