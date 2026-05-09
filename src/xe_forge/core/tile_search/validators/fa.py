@@ -47,7 +47,16 @@ def validate_fa_tile(cfg: FATileConfig) -> FATileValidation:
 
     if any(
         v <= 0
-        for v in [cfg.qk_m, cfg.qk_n, cfg.qk_k, cfg.pv_m, cfg.pv_n, cfg.pv_k, cfg.head_dim, cfg.sg_q]
+        for v in [
+            cfg.qk_m,
+            cfg.qk_n,
+            cfg.qk_k,
+            cfg.pv_m,
+            cfg.pv_n,
+            cfg.pv_k,
+            cfg.head_dim,
+            cfg.sg_q,
+        ]
     ):
         errors.append("All dimensions must be positive")
         return FATileValidation(valid=False, errors=errors)
@@ -95,35 +104,65 @@ def validate_fa_tile(cfg: FATileConfig) -> FATileValidation:
 
 KNOWN_FA_CONFIGS: dict[int, FATileConfig] = {
     64: FATileConfig(
-        qk_m=128, qk_n=64, qk_k=32,
-        pv_m=128, pv_n=32, pv_k=64,
-        head_dim=64, sg_q=8,
+        qk_m=128,
+        qk_n=64,
+        qk_k=32,
+        pv_m=128,
+        pv_n=32,
+        pv_k=64,
+        head_dim=64,
+        sg_q=8,
     ),
     96: FATileConfig(
-        qk_m=128, qk_n=64, qk_k=32,
-        pv_m=128, pv_n=32, pv_k=64,
-        head_dim=96, sg_q=8,
+        qk_m=128,
+        qk_n=64,
+        qk_k=32,
+        pv_m=128,
+        pv_n=32,
+        pv_k=64,
+        head_dim=96,
+        sg_q=8,
     ),
     128: FATileConfig(
-        qk_m=256, qk_n=32, qk_k=32,
-        pv_m=256, pv_n=32, pv_k=32,
-        head_dim=128, sg_q=16,
+        qk_m=256,
+        qk_n=32,
+        qk_k=32,
+        pv_m=256,
+        pv_n=32,
+        pv_k=32,
+        head_dim=128,
+        sg_q=16,
     ),
     192: FATileConfig(
-        qk_m=256, qk_n=64, qk_k=32,
-        pv_m=256, pv_n=32, pv_k=64,
-        head_dim=192, sg_q=32,
+        qk_m=256,
+        qk_n=64,
+        qk_k=32,
+        pv_m=256,
+        pv_n=32,
+        pv_k=64,
+        head_dim=192,
+        sg_q=32,
     ),
     256: FATileConfig(
-        qk_m=256, qk_n=64, qk_k=32,
-        pv_m=256, pv_n=32, pv_k=64,
-        head_dim=256, sg_q=32,
+        qk_m=256,
+        qk_n=64,
+        qk_k=32,
+        pv_m=256,
+        pv_n=32,
+        pv_k=64,
+        head_dim=256,
+        sg_q=32,
         pipeline_stages=1,
     ),
     512: FATileConfig(
-        qk_m=128, qk_n=64, qk_k=32,
-        pv_m=128, pv_n=32, pv_k=64,
-        head_dim=512, sg_q=32,
+        qk_m=128,
+        qk_n=64,
+        qk_k=32,
+        pv_m=128,
+        pv_n=32,
+        pv_k=64,
+        head_dim=512,
+        sg_q=32,
         pipeline_stages=1,
     ),
 }

@@ -354,7 +354,9 @@ class SyclExecutor:
 
         if extra_cli:
             args_dict: dict[str, int | float | bool | str] = {
-                "m": em, "n": en, "k": ek,
+                "m": em,
+                "n": en,
+                "k": ek,
                 "iterations": self.iterations,
                 "verify": use_verify,
                 **extra_cli,
@@ -417,7 +419,10 @@ class SyclExecutor:
 
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout,
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
             )
         except subprocess.TimeoutExpired:
             return ExecutionResult(success=False, error_message="Execution timed out")

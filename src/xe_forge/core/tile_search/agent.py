@@ -84,7 +84,9 @@ class GEMMTileTuningSignature(dspy.Signature):
     proposed_configs: str = dspy.OutputField(
         desc='JSON list of {"wg_M": int, "wg_N": int, "wg_K": int} dicts. Propose 3-5 new configs.'
     )
-    reasoning: str = dspy.OutputField(desc="Brief reasoning for why these configs should work well.")
+    reasoning: str = dspy.OutputField(
+        desc="Brief reasoning for why these configs should work well."
+    )
 
 
 class GroupedGEMMTileTuningSignature(dspy.Signature):
@@ -114,7 +116,9 @@ class GroupedGEMMTileTuningSignature(dspy.Signature):
     proposed_configs: str = dspy.OutputField(
         desc='JSON list of {"wg_M": int, "wg_N": int, "wg_K": int} dicts. Propose 3-5 new configs.'
     )
-    reasoning: str = dspy.OutputField(desc="Brief reasoning for why these configs should work well.")
+    reasoning: str = dspy.OutputField(
+        desc="Brief reasoning for why these configs should work well."
+    )
 
 
 class MoEGEMMTileTuningSignature(dspy.Signature):
@@ -150,7 +154,9 @@ class MoEGEMMTileTuningSignature(dspy.Signature):
     proposed_configs: str = dspy.OutputField(
         desc='JSON list of {"wg_M": int, "wg_N": int, "wg_K": int} dicts. Propose 3-5 new configs.'
     )
-    reasoning: str = dspy.OutputField(desc="Brief reasoning for why these configs should work well.")
+    reasoning: str = dspy.OutputField(
+        desc="Brief reasoning for why these configs should work well."
+    )
 
 
 class FATileTuningSignature(dspy.Signature):
@@ -199,7 +205,9 @@ class FATileTuningSignature(dspy.Signature):
     proposed_configs: str = dspy.OutputField(
         desc="JSON list of FA tile config dicts. Propose 3-5 new configs."
     )
-    reasoning: str = dspy.OutputField(desc="Brief reasoning for why these configs should work well.")
+    reasoning: str = dspy.OutputField(
+        desc="Brief reasoning for why these configs should work well."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +222,9 @@ class KernelStrategy(Protocol):
     def build_problem_str(self, workload: dict) -> str: ...
     def build_hardware_info(self, dtype: str) -> str: ...
     def get_reference_configs(self) -> str: ...
-    def build_propose_kwargs(self, problem_str: str, hw_info: str, history_json: str) -> dict[str, str]: ...
+    def build_propose_kwargs(
+        self, problem_str: str, hw_info: str, history_json: str
+    ) -> dict[str, str]: ...
     def enrich_config(self, cfg: dict, workload: dict) -> dict: ...
     def parse_proposed(self, raw_configs: list[dict]) -> list[dict]: ...
     def validate(self, cfg: dict, dtype: str) -> tuple[bool, list[str], dict]: ...
@@ -223,7 +233,9 @@ class KernelStrategy(Protocol):
     def config_key(self, cfg: dict) -> tuple: ...
     def to_tile_config(self, cfg: dict, derived: dict | None = None) -> TileConfig: ...
     def output_name(self, cfg: dict) -> str: ...
-    def make_history_entry(self, cfg: dict, bench: TileBenchResult, derived: dict | None = None) -> dict: ...
+    def make_history_entry(
+        self, cfg: dict, bench: TileBenchResult, derived: dict | None = None
+    ) -> dict: ...
     def get_seed_config(self, workload: dict) -> dict | None: ...
 
 
@@ -236,11 +248,25 @@ class GEMMStrategy:
     """Tile tuning strategy for CUTLASS GEMM kernels."""
 
     DEFAULT_TILE_CONFIGS: ClassVar[list[list[int]]] = [
-        [256, 128, 64], [128, 256, 64], [128, 128, 64], [256, 64, 64],
-        [64, 256, 64], [32, 32, 64], [16, 64, 64], [64, 16, 64],
-        [512, 128, 32], [256, 256, 32], [256, 128, 32], [256, 64, 32],
-        [128, 256, 32], [128, 64, 32], [32, 32, 32], [16, 64, 32],
-        [64, 128, 32], [128, 128, 32], [256, 256, 16],
+        [256, 128, 64],
+        [128, 256, 64],
+        [128, 128, 64],
+        [256, 64, 64],
+        [64, 256, 64],
+        [32, 32, 64],
+        [16, 64, 64],
+        [64, 16, 64],
+        [512, 128, 32],
+        [256, 256, 32],
+        [256, 128, 32],
+        [256, 64, 32],
+        [128, 256, 32],
+        [128, 64, 32],
+        [32, 32, 32],
+        [16, 64, 32],
+        [64, 128, 32],
+        [128, 128, 32],
+        [256, 256, 16],
     ]
 
     def __init__(self, layout_a: str = "RowMajor", layout_b: str = "RowMajor"):
@@ -266,7 +292,9 @@ class GEMMStrategy:
     def get_reference_configs(self) -> str:
         return json.dumps(self.DEFAULT_TILE_CONFIGS)
 
-    def build_propose_kwargs(self, problem_str: str, hw_info: str, history_json: str) -> dict[str, str]:
+    def build_propose_kwargs(
+        self, problem_str: str, hw_info: str, history_json: str
+    ) -> dict[str, str]:
         return {
             "problem_shape": problem_str,
             "hardware_info": hw_info,
@@ -281,7 +309,9 @@ class GEMMStrategy:
         valid = []
         for cfg in raw_configs:
             if isinstance(cfg, dict) and "wg_M" in cfg and "wg_N" in cfg and "wg_K" in cfg:
-                valid.append({"wg_M": int(cfg["wg_M"]), "wg_N": int(cfg["wg_N"]), "wg_K": int(cfg["wg_K"])})
+                valid.append(
+                    {"wg_M": int(cfg["wg_M"]), "wg_N": int(cfg["wg_N"]), "wg_K": int(cfg["wg_K"])}
+                )
             else:
                 logger.warning("Skipping malformed GEMM config: %s", cfg)
         return valid
@@ -294,14 +324,21 @@ class GEMMStrategy:
 
     def generate_source(self, cfg: dict, dtype: str) -> str:
         return generate_gemm_source(
-            cfg["wg_M"], cfg["wg_N"], cfg["wg_K"],
-            dtype=dtype, layout_a=self.layout_a, layout_b=self.layout_b,
+            cfg["wg_M"],
+            cfg["wg_N"],
+            cfg["wg_K"],
+            dtype=dtype,
+            layout_a=self.layout_a,
+            layout_b=self.layout_b,
         )
 
     def build_run_args(self, cfg: dict, workload: dict) -> dict[str, Any]:
         return {
-            "m": workload["M"], "n": workload["N"], "k": workload["K"],
-            "iterations": 20, "verify": 1,
+            "m": workload["M"],
+            "n": workload["N"],
+            "k": workload["K"],
+            "iterations": 20,
+            "verify": 1,
         }
 
     def config_key(self, cfg: dict) -> tuple:
@@ -314,7 +351,9 @@ class GEMMStrategy:
     def output_name(self, cfg: dict) -> str:
         return f"tile_{cfg['wg_M']}x{cfg['wg_N']}x{cfg['wg_K']}"
 
-    def make_history_entry(self, cfg: dict, bench: TileBenchResult, derived: dict | None = None) -> dict:
+    def make_history_entry(
+        self, cfg: dict, bench: TileBenchResult, derived: dict | None = None
+    ) -> dict:
         sg = derived.get("sg", [0, 0, 1]) if derived else [0, 0, 1]
         return {
             "wg": [cfg["wg_M"], cfg["wg_N"], cfg["wg_K"]],
@@ -372,7 +411,9 @@ class FAStrategy:
         }
         return json.dumps(known)
 
-    def build_propose_kwargs(self, problem_str: str, hw_info: str, history_json: str) -> dict[str, str]:
+    def build_propose_kwargs(
+        self, problem_str: str, hw_info: str, history_json: str
+    ) -> dict[str, str]:
         return {
             "problem_shape": problem_str,
             "hardware_info": hw_info,
@@ -403,9 +444,14 @@ class FAStrategy:
     def validate(self, cfg: dict, dtype: str) -> tuple[bool, list[str], dict]:
         head_dim = cfg.get("head_dim", 128)
         fa_cfg = FATileConfig(
-            qk_m=cfg["qk_m"], qk_n=cfg["qk_n"], qk_k=cfg["qk_k"],
-            pv_m=cfg["qk_m"], pv_n=cfg["pv_n"], pv_k=cfg["pv_k"],
-            head_dim=head_dim, sg_q=cfg["sg_q"],
+            qk_m=cfg["qk_m"],
+            qk_n=cfg["qk_n"],
+            qk_k=cfg["qk_k"],
+            pv_m=cfg["qk_m"],
+            pv_n=cfg["pv_n"],
+            pv_k=cfg["pv_k"],
+            head_dim=head_dim,
+            sg_q=cfg["sg_q"],
             pipeline_stages=cfg.get("pipeline_stages", 2),
         )
         result = validate_fa_tile(fa_cfg)
@@ -415,10 +461,16 @@ class FAStrategy:
     def generate_source(self, cfg: dict, dtype: str) -> str:
         head_dim = cfg.get("head_dim", 128)
         return generate_fa_source(
-            qk_m=cfg["qk_m"], qk_n=cfg["qk_n"], qk_k=cfg["qk_k"],
-            pv_m=cfg["qk_m"], pv_n=cfg["pv_n"], pv_k=cfg["pv_k"],
-            head_dim=head_dim, sg_q=cfg["sg_q"],
-            dtype=dtype, pipeline_stages=cfg.get("pipeline_stages", 2),
+            qk_m=cfg["qk_m"],
+            qk_n=cfg["qk_n"],
+            qk_k=cfg["qk_k"],
+            pv_m=cfg["qk_m"],
+            pv_n=cfg["pv_n"],
+            pv_k=cfg["pv_k"],
+            head_dim=head_dim,
+            sg_q=cfg["sg_q"],
+            dtype=dtype,
+            pipeline_stages=cfg.get("pipeline_stages", 2),
         )
 
     def build_run_args(self, cfg: dict, workload: dict) -> dict[str, Any]:
@@ -438,8 +490,12 @@ class FAStrategy:
 
     def config_key(self, cfg: dict) -> tuple:
         return (
-            cfg["qk_m"], cfg["qk_n"], cfg["qk_k"],
-            cfg["pv_n"], cfg["pv_k"], cfg["sg_q"],
+            cfg["qk_m"],
+            cfg["qk_n"],
+            cfg["qk_k"],
+            cfg["pv_n"],
+            cfg["pv_k"],
+            cfg["sg_q"],
             cfg.get("pipeline_stages", 2),
         )
 
@@ -460,7 +516,9 @@ class FAStrategy:
             f"_pv{cfg['pv_n']}x{cfg['pv_k']}_sg{cfg['sg_q']}"
         )
 
-    def make_history_entry(self, cfg: dict, bench: TileBenchResult, derived: dict | None = None) -> dict:
+    def make_history_entry(
+        self, cfg: dict, bench: TileBenchResult, derived: dict | None = None
+    ) -> dict:
         return {
             "qk": [cfg["qk_m"], cfg["qk_n"], cfg["qk_k"]],
             "pv": [cfg["qk_m"], cfg["pv_n"], cfg["pv_k"]],
@@ -478,8 +536,12 @@ class FAStrategy:
         if seed is None:
             return None
         return {
-            "qk_m": seed.qk_m, "qk_n": seed.qk_n, "qk_k": seed.qk_k,
-            "pv_n": seed.pv_n, "pv_k": seed.pv_k, "sg_q": seed.sg_q,
+            "qk_m": seed.qk_m,
+            "qk_n": seed.qk_n,
+            "qk_k": seed.qk_k,
+            "pv_n": seed.pv_n,
+            "pv_k": seed.pv_k,
+            "sg_q": seed.sg_q,
             "pipeline_stages": seed.pipeline_stages,
             "head_dim": head_dim,
         }
@@ -494,9 +556,16 @@ class GroupedGEMMStrategy:
     """Tile tuning strategy for CUTLASS Grouped GEMM kernels."""
 
     DEFAULT_TILE_CONFIGS: ClassVar[list[list[int]]] = [
-        [256, 256, 32], [256, 128, 32], [128, 256, 32], [128, 128, 32],
-        [256, 64, 32], [64, 256, 32], [256, 128, 64], [128, 256, 64],
-        [128, 128, 64], [256, 256, 16],
+        [256, 256, 32],
+        [256, 128, 32],
+        [128, 256, 32],
+        [128, 128, 32],
+        [256, 64, 32],
+        [64, 256, 32],
+        [256, 128, 64],
+        [128, 256, 64],
+        [128, 128, 64],
+        [256, 256, 16],
     ]
 
     def __init__(self, layout_a: str = "RowMajor", layout_b: str = "RowMajor"):
@@ -526,7 +595,9 @@ class GroupedGEMMStrategy:
     def get_reference_configs(self) -> str:
         return json.dumps(self.DEFAULT_TILE_CONFIGS)
 
-    def build_propose_kwargs(self, problem_str: str, hw_info: str, history_json: str) -> dict[str, str]:
+    def build_propose_kwargs(
+        self, problem_str: str, hw_info: str, history_json: str
+    ) -> dict[str, str]:
         return {
             "problem_shape": problem_str,
             "hardware_info": hw_info,
@@ -541,7 +612,9 @@ class GroupedGEMMStrategy:
         valid = []
         for cfg in raw_configs:
             if isinstance(cfg, dict) and "wg_M" in cfg and "wg_N" in cfg and "wg_K" in cfg:
-                valid.append({"wg_M": int(cfg["wg_M"]), "wg_N": int(cfg["wg_N"]), "wg_K": int(cfg["wg_K"])})
+                valid.append(
+                    {"wg_M": int(cfg["wg_M"]), "wg_N": int(cfg["wg_N"]), "wg_K": int(cfg["wg_K"])}
+                )
             else:
                 logger.warning("Skipping malformed Grouped GEMM config: %s", cfg)
         return valid
@@ -556,16 +629,24 @@ class GroupedGEMMStrategy:
         wg = [cfg["wg_M"], cfg["wg_N"], cfg["wg_K"]]
         result = validate_and_derive(wg, dtype=dtype)
         return generate_grouped_gemm_source(
-            cfg["wg_M"], cfg["wg_N"], cfg["wg_K"],
-            sg_m=result.sg_m, sg_n=result.sg_n,
-            dtype=dtype, layout_a=self.layout_a, layout_b=self.layout_b,
+            cfg["wg_M"],
+            cfg["wg_N"],
+            cfg["wg_K"],
+            sg_m=result.sg_m,
+            sg_n=result.sg_n,
+            dtype=dtype,
+            layout_a=self.layout_a,
+            layout_b=self.layout_b,
         )
 
     def build_run_args(self, cfg: dict, workload: dict) -> dict[str, Any]:
         return {
-            "m": workload["M"], "n": workload["N"], "k": workload["K"],
+            "m": workload["M"],
+            "n": workload["N"],
+            "k": workload["K"],
             "groups": workload.get("groups", 2),
-            "iterations": 20, "verify": 1,
+            "iterations": 20,
+            "verify": 1,
         }
 
     def config_key(self, cfg: dict) -> tuple:
@@ -578,7 +659,9 @@ class GroupedGEMMStrategy:
     def output_name(self, cfg: dict) -> str:
         return f"grp_{cfg['wg_M']}x{cfg['wg_N']}x{cfg['wg_K']}"
 
-    def make_history_entry(self, cfg: dict, bench: TileBenchResult, derived: dict | None = None) -> dict:
+    def make_history_entry(
+        self, cfg: dict, bench: TileBenchResult, derived: dict | None = None
+    ) -> dict:
         sg = derived.get("sg", [0, 0, 1]) if derived else [0, 0, 1]
         return {
             "wg": [cfg["wg_M"], cfg["wg_N"], cfg["wg_K"]],
@@ -602,8 +685,14 @@ class MoEGEMMStrategy:
     """Tile tuning strategy for CUTLASS MoE GEMM kernels."""
 
     DEFAULT_TILE_CONFIGS: ClassVar[list[list[int]]] = [
-        [256, 128, 32], [128, 128, 32], [256, 256, 32], [128, 256, 32],
-        [256, 64, 32], [64, 128, 32], [256, 128, 64], [128, 128, 64],
+        [256, 128, 32],
+        [128, 128, 32],
+        [256, 256, 32],
+        [128, 256, 32],
+        [256, 64, 32],
+        [64, 128, 32],
+        [256, 128, 64],
+        [128, 128, 64],
     ]
 
     def get_signature(self) -> type:
@@ -631,7 +720,9 @@ class MoEGEMMStrategy:
     def get_reference_configs(self) -> str:
         return json.dumps(self.DEFAULT_TILE_CONFIGS)
 
-    def build_propose_kwargs(self, problem_str: str, hw_info: str, history_json: str) -> dict[str, str]:
+    def build_propose_kwargs(
+        self, problem_str: str, hw_info: str, history_json: str
+    ) -> dict[str, str]:
         return {
             "problem_shape": problem_str,
             "hardware_info": hw_info,
@@ -646,7 +737,9 @@ class MoEGEMMStrategy:
         valid = []
         for cfg in raw_configs:
             if isinstance(cfg, dict) and "wg_M" in cfg and "wg_N" in cfg and "wg_K" in cfg:
-                valid.append({"wg_M": int(cfg["wg_M"]), "wg_N": int(cfg["wg_N"]), "wg_K": int(cfg["wg_K"])})
+                valid.append(
+                    {"wg_M": int(cfg["wg_M"]), "wg_N": int(cfg["wg_N"]), "wg_K": int(cfg["wg_K"])}
+                )
             else:
                 logger.warning("Skipping malformed MoE GEMM config: %s", cfg)
         return valid
@@ -661,17 +754,22 @@ class MoEGEMMStrategy:
         wg = [cfg["wg_M"], cfg["wg_N"], cfg["wg_K"]]
         result = validate_and_derive(wg, dtype=dtype)
         return generate_moe_gemm_source(
-            cfg["wg_M"], cfg["wg_N"], cfg["wg_K"],
-            sg_m=result.sg_m, sg_n=result.sg_n,
+            cfg["wg_M"],
+            cfg["wg_N"],
+            cfg["wg_K"],
+            sg_m=result.sg_m,
+            sg_n=result.sg_n,
             dtype=dtype,
         )
 
     def build_run_args(self, cfg: dict, workload: dict) -> dict[str, Any]:
         return {
-            "n": workload["N"], "k": workload["K"],
+            "n": workload["N"],
+            "k": workload["K"],
             "num_experts": workload.get("num_experts", 8),
             "total_tokens": workload.get("total_tokens", 4096),
-            "iterations": 20, "verify": 0,
+            "iterations": 20,
+            "verify": 0,
         }
 
     def config_key(self, cfg: dict) -> tuple:
@@ -684,7 +782,9 @@ class MoEGEMMStrategy:
     def output_name(self, cfg: dict) -> str:
         return f"moe_{cfg['wg_M']}x{cfg['wg_N']}x{cfg['wg_K']}"
 
-    def make_history_entry(self, cfg: dict, bench: TileBenchResult, derived: dict | None = None) -> dict:
+    def make_history_entry(
+        self, cfg: dict, bench: TileBenchResult, derived: dict | None = None
+    ) -> dict:
         sg = derived.get("sg", [0, 0, 1]) if derived else [0, 0, 1]
         return {
             "wg": [cfg["wg_M"], cfg["wg_N"], cfg["wg_K"]],
@@ -781,10 +881,12 @@ class TileTuningAgent:
                 valid, errors, derived = self.strategy.validate(cfg, self.dtype)
                 if not valid:
                     history.append({"key": key, "status": "invalid", "errors": errors})
-                    all_results.append(TileBenchResult(
-                        config=self.strategy.to_tile_config(cfg),
-                        error="; ".join(errors),
-                    ))
+                    all_results.append(
+                        TileBenchResult(
+                            config=self.strategy.to_tile_config(cfg),
+                            error="; ".join(errors),
+                        )
+                    )
                     logger.info("Invalid config %s: %s", key, errors)
                     continue
 
@@ -799,7 +901,9 @@ class TileTuningAgent:
                     best_time_ms = bench.time_ms
                     best_config = self.strategy.to_tile_config(cfg, derived)
                     improved = True
-                    logger.info("New best: %s -> %.2f TFLOPS (%.4f ms)", key, best_tflops, best_time_ms)
+                    logger.info(
+                        "New best: %s -> %.2f TFLOPS (%.4f ms)", key, best_tflops, best_time_ms
+                    )
 
             if improved:
                 rounds_without_improvement = 0
@@ -809,7 +913,11 @@ class TileTuningAgent:
                     logger.info("No improvement for 2 rounds, stopping early")
                     break
 
-        logger.info("Tile tuning complete: tested %d configs, best=%.2f TFLOPS", len(all_results), best_tflops)
+        logger.info(
+            "Tile tuning complete: tested %d configs, best=%.2f TFLOPS",
+            len(all_results),
+            best_tflops,
+        )
 
         return TileTuningResult(
             problem_shape=workload,
@@ -859,7 +967,9 @@ class TileTuningAgent:
         tile_config = self.strategy.to_tile_config(cfg)
 
         if not result.success:
-            return TileBenchResult(config=tile_config, error=result.error_message or "Unknown error")
+            return TileBenchResult(
+                config=tile_config, error=result.error_message or "Unknown error"
+            )
 
         return TileBenchResult(
             config=tile_config,

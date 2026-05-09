@@ -181,11 +181,13 @@ Examples:
     # Tile tuning options
     tune_group = parser.add_argument_group("tile tuning", "Tile search / auto-tuning options")
     tune_group.add_argument(
-        "--tile-tune", action="store_true",
+        "--tile-tune",
+        action="store_true",
         help="Run tile tuning for a single GEMM shape (requires --m, --gemm-n, --k)",
     )
     tune_group.add_argument(
-        "--tune-config", type=str,
+        "--tune-config",
+        type=str,
         help="YAML config file for multi-workload tile tuning (see TILE.md)",
     )
     tune_group.add_argument("--m", type=int, default=4096, help="GEMM M dimension")
@@ -193,12 +195,16 @@ Examples:
     tune_group.add_argument("--k", type=int, default=4096, help="GEMM K dimension")
     tune_group.add_argument("--max-rounds", type=int, default=5, help="Max LLM proposal rounds")
     tune_group.add_argument(
-        "--gemm-dtype", type=str, default="bf16",
+        "--gemm-dtype",
+        type=str,
+        default="bf16",
         choices=["bf16", "f16", "tf32", "f32", "int8"],
         help="Data type for tile tuning (default: bf16)",
     )
     tune_group.add_argument(
-        "--tune-output", type=str, default="tile_tuning_results.json",
+        "--tune-output",
+        type=str,
+        default="tile_tuning_results.json",
         help="Output JSON file for tuning results",
     )
 
@@ -318,7 +324,9 @@ def _run_tile_tune(args, config: Config) -> int:
     print(f"\nResults saved to {args.tune_output}")
 
     if result.best_tflops:
-        print(f"Best: {result.best_config.wg} -> {result.best_tflops:.2f} TFLOPS ({result.best_time_ms:.4f} ms)")
+        print(
+            f"Best: {result.best_config.wg} -> {result.best_tflops:.2f} TFLOPS ({result.best_time_ms:.4f} ms)"
+        )
     else:
         print("No successful configuration found.")
 
