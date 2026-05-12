@@ -22,51 +22,6 @@ _DTYPE_MAP = {
     "fp8_e4m3": "cutlass::float_e4m3_t",
 }
 
-_TEMPLATE = '''\
-#ifndef HEAD_DIM
-#define HEAD_DIM {head_dim}
-#endif
-#ifndef PREFILL
-#define PREFILL
-#endif
-{split_v_define}
-#include "xe_fmha_fwd_runner.hpp"
-
-int main(int argc, const char **argv) {{
-  Options options;
-  options.parse(argc, argv);
-
-  if (options.help) {{
-    options.print_usage(std::cout) << std::endl;
-    return 0;
-  }}
-  if (options.error) {{
-    std::cerr << "Aborting execution." << std::endl;
-    return -1;
-  }}
-
-  // Tile shapes from tile tuning search
-  using ShapeQK  = Shape<_{qk_m}, _{qk_n}, _{qk_k}>;
-  using ShapePV  = Shape<_{pv_m}, _{pv_n}, _{pv_k}>;
-  using ShapeOut = Shape<_{out_m}, _{out_n}>;
-  using SubgroupLayoutQK = Layout<Shape<_{sg_q}, _1, _1>>;
-
-  using ElementQ = {element_type};
-  using ElementK = {element_type};
-  using ElementV = {element_type};
-
-  constexpr int PipelineStages = {pipeline_stages};
-
-  return options.is_causal
-    ? FMHAConfig<true,  ShapeQK, ShapePV, ShapeOut, SubgroupLayoutQK,
-                 void, PipelineStages, false,
-                 ElementQ, ElementK, ElementV>::run(options)
-    : FMHAConfig<false, ShapeQK, ShapePV, ShapeOut, SubgroupLayoutQK,
-                 void, PipelineStages, false,
-                 ElementQ, ElementK, ElementV>::run(options);
-}}
-'''
-
 
 def generate_fa_source(
     qk_m: int,
@@ -87,6 +42,8 @@ def generate_fa_source(
     reduce output accumulator register pressure. ShapeOut uses the FULL
     head_dim -- the runner internally divides VTiles by SPLIT_V_GROUPS.
     """
+    from xe_forge.core.tile_search.templates import render
+
     element_type = _DTYPE_MAP.get(dtype, _DTYPE_MAP["bf16"])
 
     out_n = head_dim
@@ -95,7 +52,8 @@ def generate_fa_source(
     else:
         split_v_define = ""
 
-    return _TEMPLATE.format(
+    return render(
+        "fa.cpp.j2",
         qk_m=qk_m,
         qk_n=qk_n,
         qk_k=qk_k,
