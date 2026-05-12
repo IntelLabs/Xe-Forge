@@ -1,0 +1,19 @@
+Optimize `$ARGUMENTS` into a {{ dsl | upper }} kernel.
+
+Resolve the argument to a file in `test_kernels/` — it could be a full filename, partial name, or just a number. Glob to find the match; if ambiguous, ask.
+
+First read `config.yaml` for session settings (max_trials, vtune_enabled).
+Follow the CLAUDE.md workflow exactly — every step, in order:
+
+1. Read the baseline kernel file in `test_kernels/` to understand the operations.
+2. Run `xe-forge-skill analyze test_kernels/<name>.py`.
+3. Read relevant knowledge_base/ files.
+4. Initialize: `xe-forge-skill trial init <kernel_name> test_kernels/<name>.py`
+5. Run ALL max_trials trials (from config.yaml). For EACH trial you MUST:
+   - Validate with `xe-forge-skill validate`
+   - Save with `xe-forge-skill trial save`
+   - Benchmark with `xe-forge-skill benchmark` — NEVER create custom test scripts
+   - Record with `xe-forge-skill trial result`
+6. Finalize the best correct trial
+
+CRITICAL: ONLY create kernel files — NO benchmark scripts, NO test scripts, NO helpers.
