@@ -13,6 +13,7 @@ import logging
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -192,13 +193,11 @@ class XPUProfiler:
                 self.vtune_bin,
                 "-collect",
                 "gpu-offload",
-                "-knob",
-                "collect-programming-api=true",
                 "-start-paused",
                 "-result-dir",
                 str(result_dir),
                 "--",
-                "python",
+                sys.executable,
                 str(runner_path),
             ]
             proc = subprocess.run(
@@ -236,7 +235,7 @@ class XPUProfiler:
         result_dir: Path,
     ) -> str:
         return f"""\
-import importlib.util, sys, torch, os, subprocess
+import importlib.util, sys, torch, subprocess
 
 spec = importlib.util.spec_from_file_location("kernel_mod", "{kernel_file}")
 mod = importlib.util.module_from_spec(spec)
@@ -247,39 +246,48 @@ get_inputs = mod.get_inputs
 get_init_inputs = mod.get_init_inputs
 
 device = "xpu" if hasattr(torch, "xpu") and torch.xpu.is_available() else "cuda"
-model = Model(*get_init_inputs()).to(device)
+model = Model(*get_init_inputs()).to(device).eval()
 inputs = [x.to(device) if isinstance(x, torch.Tensor) else x for x in get_inputs()]
 
-# Warmup
-for _ in range({warmup}):
-    model(*inputs)
-if device == "xpu":
-    torch.xpu.synchronize()
-else:
-    torch.cuda.synchronize()
+_sync = torch.xpu.synchronize if device == "xpu" else torch.cuda.synchronize
+
+# Warmup (collection paused)
+with torch.no_grad():
+    for _ in range({warmup}):
+        model(*inputs)
+        _sync()
 
 # Resume VTune
 vtune_bin = "{self.vtune_bin}"
 result_dir = "{result_dir}"
-subprocess.run([vtune_bin, "-command", "resume", "-result-dir", result_dir],
-               capture_output=True, timeout=10)
+subprocess.run([vtune_bin, "-command", "resume", "-r", result_dir],
+               capture_output=True, timeout=30)
 
-# Profiled iterations
-for _ in range({iters}):
-    model(*inputs)
-if device == "xpu":
-    torch.xpu.synchronize()
-else:
-    torch.cuda.synchronize()
+# Profiled iterations — sync each iter so OA sampling sees every kernel
+with torch.no_grad():
+    for _ in range({iters}):
+        model(*inputs)
+        _sync()
 
-# Pause VTune
-subprocess.run([vtune_bin, "-command", "pause", "-result-dir", result_dir],
-               capture_output=True, timeout=10)
+subprocess.run([vtune_bin, "-command", "pause", "-r", result_dir],
+               capture_output=True, timeout=30)
 """
 
     def _extract_counters(self, result_dir: Path) -> dict[str, dict]:
-        """Extract counters from VTune CSV report."""
+        """Extract counters from VTune CSV report.
+
+        Keeps overhead kernels so ``_identify_primary_kernel`` can fall back
+        to them when no user compute kernels are captured. Aggregates
+        VTune's per-SIMD-width variants of the same kernel name by picking
+        the longest-running variant as representative and summing times.
+        """
         counters: dict[str, dict] = {}
+
+        def _num(v: str) -> float:
+            try:
+                return float(str(v).replace(",", "").rstrip("%").strip())
+            except (ValueError, TypeError):
+                return 0.0
 
         for columns in (_HOTSPOTS_COLUMNS_PASS1, _HOTSPOTS_COLUMNS_PASS2):
             report_cmd = [
@@ -294,6 +302,8 @@ subprocess.run([vtune_bin, "-command", "pause", "-result-dir", result_dir],
                 columns,
                 "-format",
                 "csv",
+                "-csv-delimiter",
+                "tab",
             ]
             proc = subprocess.run(
                 report_cmd,
@@ -302,32 +312,73 @@ subprocess.run([vtune_bin, "-command", "pause", "-result-dir", result_dir],
                 timeout=60,
             )
             if proc.returncode != 0:
+                logger.warning("VTune hotspots report failed: %s", proc.stderr[:200])
                 continue
 
-            reader = csv.DictReader(io.StringIO(proc.stdout))
+            # VTune may emit warning lines (e.g. "war:Column filter is ON.")
+            # before the actual header; skip to the row starting with
+            # "Computing Task".
+            lines = proc.stdout.splitlines()
+            header_idx = next(
+                (i for i, ln in enumerate(lines) if ln.startswith("Computing Task")),
+                0,
+            )
+            payload = "\n".join(lines[header_idx:])
+
+            reader = csv.DictReader(io.StringIO(payload), delimiter="\t")
             for row in reader:
-                name = row.get("Computing Task", "").strip()
-                if not name or _is_overhead_kernel(name):
+                name = (row.get("Computing Task") or "").strip()
+                if not name or name.startswith("["):
                     continue
-                counters.setdefault(name, {}).update(
-                    {k: v for k, v in row.items() if v and v.strip()}
-                )
+                new_time = _num(row.get("Computing Task:Total Time", ""))
+                existing = counters.get(name)
+                if existing is None:
+                    counters[name] = {k: v for k, v in row.items() if v and v.strip()}
+                    continue
+                # Same kernel name across autotune variants: keep the
+                # longest-running variant's per-iteration metrics, but sum
+                # total time so primary-kernel selection sees the full cost.
+                old_time = _num(existing.get("Computing Task:Total Time", ""))
+                if new_time > old_time:
+                    merged = {k: v for k, v in row.items() if v and v.strip()}
+                    # Preserve pass-1 columns that pass-2 doesn't populate
+                    for k, v in existing.items():
+                        merged.setdefault(k, v)
+                    existing = merged
+                else:
+                    for k, v in row.items():
+                        if v and v.strip():
+                            existing.setdefault(k, v)
+                existing["Computing Task:Total Time"] = f"{old_time + new_time}"
+                counters[name] = existing
 
         return counters
 
     def _identify_primary_kernel(self, counters: dict[str, dict]) -> str | None:
-        """Pick the kernel with the highest total time."""
-        best_name = None
-        best_time = -1.0
+        """Pick the user compute kernel with the highest total time.
+
+        Falls back to the overall hottest kernel (possibly a PyTorch
+        overhead kernel) if no user kernels were captured — better to
+        return *something* with a warning than to fail silently.
+        """
+        best_user: tuple[float, str] | None = None
+        best_any: tuple[float, str] | None = None
         for name, cols in counters.items():
             try:
-                t = float(cols.get("Computing Task:Total Time", 0))
+                t = float(str(cols.get("Computing Task:Total Time", 0)).replace(",", ""))
             except (ValueError, TypeError):
                 continue
-            if t > best_time:
-                best_time = t
-                best_name = name
-        return best_name
+            if best_any is None or t > best_any[0]:
+                best_any = (t, name)
+            if not _is_overhead_kernel(name):
+                if best_user is None or t > best_user[0]:
+                    best_user = (t, name)
+        if best_user is not None:
+            return best_user[1]
+        if best_any is not None:
+            logger.warning("Only PyTorch overhead kernels captured; using %s", best_any[1])
+            return best_any[1]
+        return None
 
     def _build_metrics(self, cols: dict) -> ProfileMetrics:
         def _f(key: str) -> float | None:
@@ -339,15 +390,21 @@ subprocess.run([vtune_bin, "-command", "pause", "-result-dir", result_dir],
             except (ValueError, TypeError):
                 return None
 
+        # VTune CSV appends "(%)" to percentage column headers — the
+        # request column names do not include it, but the emitted headers
+        # do. Fall back to the unsuffixed name for robustness.
+        def _pct(key: str) -> float | None:
+            return _f(f"{key}(%)") if f"{key}(%)" in cols else _f(key)
+
         return ProfileMetrics(
-            xve_active_pct=_f("XVE Array:Active"),
-            xve_stalled_pct=_f("XVE Array:Stalled"),
-            xve_idle_pct=_f("XVE Array:Idle"),
-            peak_occupancy_pct=_f("Peak XVE Threads Occupancy"),
-            l3_miss_pct=_f("GPU L3:Miss Ratio"),
+            xve_active_pct=_pct("XVE Array:Active"),
+            xve_stalled_pct=_pct("XVE Array:Stalled"),
+            xve_idle_pct=_pct("XVE Array:Idle"),
+            peak_occupancy_pct=_pct("Peak XVE Threads Occupancy"),
+            l3_miss_pct=_pct("GPU L3:Miss Ratio"),
             gpu_memory_bw_read_gbps=_f("GPU Memory Bandwidth, GB/sec:Read"),
             gpu_memory_bw_write_gbps=_f("GPU Memory Bandwidth, GB/sec:Write"),
-            lsc_miss_pct=_f("GPU Load Store Cache:Miss Ratio"),
+            lsc_miss_pct=_pct("GPU Load Store Cache:Miss Ratio"),
             lsc_bw_read_gbps=_f("GPU Load Store Cache:Average Bandwidth, GB/s:Read"),
             lsc_bw_write_gbps=_f("GPU Load Store Cache:Average Bandwidth, GB/s:Write"),
         )
