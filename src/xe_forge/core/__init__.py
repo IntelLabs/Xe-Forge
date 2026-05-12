@@ -25,6 +25,17 @@ from xe_forge.core.executor import (
     KernelExecutor,
     create_executor_tool,
 )
+from xe_forge.core.kernel_analyzer import (
+    AnalysisResult,
+    KernelAnalyzer,
+    format_analysis,
+)
+from xe_forge.core.profiler import (
+    ProfileMetrics,
+    ProfileResult,
+    Recommendation,
+    XPUProfiler,
+)
 from xe_forge.core.spec_loader import (
     InputSpec,
     KernelSpec,
@@ -37,6 +48,12 @@ from xe_forge.core.spec_loader import (
 from xe_forge.core.sycl_executor import (
     SyclComparisonResult,
     SyclExecutor,
+)
+from xe_forge.core.trial_manager import TrialManager
+from xe_forge.core.validator import (
+    KernelValidator,
+    ValidationIssue,
+    format_issues,
 )
 
 # Backward-compatible XPU-specific exports
@@ -53,21 +70,32 @@ from xe_forge.core.xpu_query import (
 )
 
 __all__ = [
+    "AnalysisResult",
     "CUDADeviceInfo",
     "ComparisonResult",
     "DeviceInfo",
     "InputSpec",
+    "KernelAnalyzer",
     "KernelBenchExecutor",
     "KernelExecutor",
     "KernelSpec",
+    "KernelValidator",
+    "ProfileMetrics",
+    "ProfileResult",
+    "Recommendation",
     "SyclComparisonResult",
     "SyclExecutor",
+    "TrialManager",
+    "ValidationIssue",
     "VariantSpec",
     "XPUDeviceInfo",
+    "XPUProfiler",
     "create_executor_from_config",
     "create_executor_tool",
     "extract_mnk_from_shapes",
+    "format_analysis",
     "format_device_config_for_llm",
+    "format_issues",
     "format_xpu_config_for_llm",
     "get_autotune_configs",
     "get_device_config_for_pipeline",

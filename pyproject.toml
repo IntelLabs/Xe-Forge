@@ -12,6 +12,7 @@ dependencies = [
   "python-dotenv>=1.0.0",
   "PyYAML>=6.0.0",
   "httpx>=0.24.0",
+  "jinja2>=3.1.0",
   "ai-bench @ git+https://github.com/libxsmm/AI-bench@c11b0ed4801e9dd4eeaa48c5aed8136dd439dfea",
 ]
 
@@ -28,6 +29,7 @@ wandb = ["weave>=0.52.24"]
 
 [project.scripts]
 xe-forge = "xe_forge.cli:main"
+xe-forge-skill = "xe_forge.skills:main"
 
 [dependency-groups]
 dev = [
@@ -75,7 +77,7 @@ allow-direct-references = true
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-exclude = ["test_kernels", "knowledge_base/**/examples", "outputs/kernels", "examples"]
+exclude = ["test_kernels", "knowledge_base/**/examples", "outputs/kernels", "examples", "templates"]
 
 [tool.ruff.lint]
 select = [

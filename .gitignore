@@ -16,3 +16,7 @@ sycl_build/
 # IDE
 .vscode/
 .idea/
+
+# Output
+/trials
+/output

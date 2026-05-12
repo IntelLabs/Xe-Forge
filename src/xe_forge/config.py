@@ -128,6 +128,35 @@ class LoggingConfig:
 
 
 @dataclass
+class EngineConfig:
+    """Engine selection configuration"""
+
+    engine: str = "dspy"  # "dspy" or "claude"
+    auto_launch: bool = False  # Claude engine: auto-launch claude CLI
+    workspace: str = "./"  # Claude engine: workspace directory
+    git_init: bool = False  # Claude engine: initialize workspace as git repo
+
+
+@dataclass
+class TrialConfig:
+    """Trial tree management configuration"""
+
+    enabled: bool = True
+    trials_dir: str = "./trials"
+    max_trials: int = 10
+
+
+@dataclass
+class ProfilerConfig:
+    """VTune profiler configuration"""
+
+    vtune_enabled: bool = False
+    vtune_bin: str = "vtune"
+    warmup_iters: int = 5
+    profile_iters: int = 20
+
+
+@dataclass
 class Config:
     """Master configuration"""
 
@@ -137,6 +166,9 @@ class Config:
     device_config: DeviceConfig = field(default_factory=XPUConfig)
     knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    engine: EngineConfig = field(default_factory=EngineConfig)
+    trial: TrialConfig = field(default_factory=TrialConfig)
+    profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
 
     @property
     def xpu(self) -> XPUConfig:
@@ -218,6 +250,29 @@ class ConfigManager:
             save_intermediate=self._get_env("SAVE_INTERMEDIATE", True, bool),
         )
 
+        # Engine Configuration
+        engine_cfg = EngineConfig(
+            engine=self._get_env("ENGINE", "dspy"),
+            auto_launch=self._get_env("AUTO_LAUNCH", False, bool),
+            workspace=self._get_env("WORKSPACE", "./"),
+            git_init=self._get_env("WORKSPACE_GIT_INIT", False, bool),
+        )
+
+        # Trial Configuration
+        trial_cfg = TrialConfig(
+            enabled=self._get_env("TRIALS_ENABLED", True, bool),
+            trials_dir=self._get_env("TRIALS_DIR", "./trials"),
+            max_trials=self._get_env("MAX_TRIALS", 10, int),
+        )
+
+        # Profiler Configuration
+        profiler_cfg = ProfilerConfig(
+            vtune_enabled=self._get_env("VTUNE_ENABLED", False, bool),
+            vtune_bin=self._get_env("VTUNE_BIN", "vtune"),
+            warmup_iters=self._get_env("VTUNE_WARMUP", 5, int),
+            profile_iters=self._get_env("VTUNE_ITERS", 20, int),
+        )
+
         return Config(
             llm=llm,
             agent=agent,
@@ -225,6 +280,9 @@ class ConfigManager:
             device_config=device_cfg,
             knowledge=knowledge,
             logging=logging_cfg,
+            engine=engine_cfg,
+            trial=trial_cfg,
+            profiler=profiler_cfg,
         )
 
     def _build_device_config(self, device_type: str, dsl: str) -> DeviceConfig:

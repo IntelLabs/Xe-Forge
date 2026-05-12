@@ -325,6 +325,7 @@ class OptimizerReActAgent(Optimizer):
         dtype=None,
         pytorch_code: str = "",
         init_args: list | None = None,
+        vtune_report: str = "",
         perf_context: dict | None = None,
     ) -> StageResult:
         """

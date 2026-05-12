@@ -13,7 +13,6 @@ from pathlib import Path
 
 from xe_forge.config import get_config, override_config
 from xe_forge.models import OptimizationStage
-from xe_forge.pipeline import XeForgePipeline
 
 
 def main():
@@ -139,6 +138,29 @@ Examples:
         help="Absolute tolerance override for correctness check (overrides spec and config values)",
     )
 
+    # Engine selection
+    parser.add_argument(
+        "--engine",
+        type=str,
+        choices=["dspy", "claude"],
+        default=None,
+        help="Optimization engine (default: dspy)",
+    )
+
+    # Trial management
+    parser.add_argument("--max-trials", type=int, help="Max optimization trials (default: 10)")
+    parser.add_argument("--trials-dir", type=str, help="Directory for trial state")
+    parser.add_argument("--no-trials", action="store_true", help="Disable trial tracking")
+
+    # VTune profiling
+    parser.add_argument("--vtune", action="store_true", default=None, help="Enable VTune profiling")
+    parser.add_argument("--no-vtune", action="store_true", help="Disable VTune profiling")
+    parser.add_argument("--vtune-bin", type=str, help="Path to VTune binary")
+
+    # Claude Code specific
+    parser.add_argument("--workspace", type=str, help="Workspace dir for Claude Code engine")
+    parser.add_argument("--auto-launch", action="store_true", help="Auto-launch claude CLI")
+
     # Other options
     parser.add_argument("--debug", action="store_true", help="Enable debug output")
 
@@ -182,6 +204,26 @@ Examples:
         os.environ["DEVICE_TYPE"] = args.device
     if args.dsl:
         os.environ["DSL"] = args.dsl
+
+    # Engine/trial/profiler env var overrides
+    if args.engine:
+        os.environ["ENGINE"] = args.engine
+    if args.max_trials is not None:
+        os.environ["MAX_TRIALS"] = str(args.max_trials)
+    if args.trials_dir:
+        os.environ["TRIALS_DIR"] = args.trials_dir
+    if args.no_trials:
+        os.environ["TRIALS_ENABLED"] = "false"
+    if args.vtune:
+        os.environ["VTUNE_ENABLED"] = "true"
+    if args.no_vtune:
+        os.environ["VTUNE_ENABLED"] = "false"
+    if args.vtune_bin:
+        os.environ["VTUNE_BIN"] = args.vtune_bin
+    if args.workspace:
+        os.environ["WORKSPACE"] = args.workspace
+    if args.auto_launch:
+        os.environ["AUTO_LAUNCH"] = "true"
 
     # Load and override config
     config = get_config()
@@ -275,9 +317,6 @@ Examples:
         )
         print(f"Executor: KernelBenchExecutor (device={config.device_config.device})")
 
-    # Create pipeline and optimize
-    pipeline = XeForgePipeline(config=config, executor=executor)  # type: ignore
-
     # Read input file
     with open(args.input) as f:
         kernel_code = f.read()
@@ -293,7 +332,22 @@ Examples:
                 f"No PyTorch reference file found at {os.path.splitext(args.input)[0]}_pytorch.py"
             )
 
-    result = pipeline.optimize(
+    # Create engine and optimize
+    from xe_forge.engines import create_engine
+
+    engine = create_engine(config)
+    engine_name = config.engine.engine
+    print(f"Engine: {engine_name}")
+    if config.trial.enabled:
+        print(f"Trials: enabled (max={config.trial.max_trials}, dir={config.trial.trials_dir})")
+    if config.profiler.vtune_enabled:
+        print(f"VTune: enabled (bin={config.profiler.vtune_bin})")
+
+    # For DSPy engine, pass executor if available
+    if engine_name == "dspy" and executor is not None:
+        engine.executor = executor
+
+    result = engine.optimize(
         kernel_code=kernel_code,
         reference_code=reference_code,
         kernel_name=args.name if args.name != "kernel" else None,
