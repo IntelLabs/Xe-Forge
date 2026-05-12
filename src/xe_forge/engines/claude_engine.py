@@ -1,4 +1,4 @@
-"""Claude Code engine: generates a workspace for interactive optimization."""
+"""Claude Code engine: generates an agent-driven workspace for optimization."""
 
 from __future__ import annotations
 

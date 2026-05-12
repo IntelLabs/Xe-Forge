@@ -3,7 +3,7 @@
 
 Multi-stage LLM-driven optimization pipeline for Triton kernels targeting Intel XPU.
 
-The optimizer analyzes Triton kernels, identifies performance issues, and applies optimizations through a series of stages — each powered by an LLM that understands GPU programming, numerical linear algebra, and Intel XPU hardware. Two engines are available: a fully automated DSPy pipeline and an interactive Claude Code agent.
+The optimizer analyzes Triton kernels, identifies performance issues, and applies optimizations through a series of stages — each powered by an LLM that understands GPU programming, numerical linear algebra, and Intel XPU hardware. Two engines are available: a fully automated DSPy pipeline and a Claude Code engine that generates a ready-to-run workspace you can drive interactively or let xe-forge auto-launch.
 
 ⚠️ **Disclaimer**: This project is currently in active development. The code is **not stable** and **not intended for use in production environments**. Interfaces, features, and behaviors are subject to change without notice.
 
@@ -103,8 +103,11 @@ xe-forge -i kernel.py -s spec.yaml --best-k 3
 # Debug mode
 xe-forge -i kernel.py -s spec.yaml --debug
 
-# Use Claude Code engine (interactive)
+# Claude Code engine: generate a workspace, then run `claude` in it yourself (interactive)
 xe-forge -i kernel.py -s spec.yaml --engine claude --workspace ./workspace --max-trials 5
+
+# Same, but auto-launch `claude -p` headless (no user interaction)
+AUTO_LAUNCH=true xe-forge -i kernel.py -s spec.yaml --engine claude --workspace ./workspace
 
 # With VTune GPU profiling
 xe-forge -i kernel.py -s spec.yaml --vtune
@@ -127,15 +130,21 @@ xe-forge -i kernel.py -s spec.yaml --engine dspy
 
 Runs the full pipeline automatically. DSPy agents analyze the kernel, plan optimization stages, and apply them sequentially with Chain of Verification (CoVeR). Trial tree tracks progress across stages.
 
-### Claude Code — interactive
+### Claude Code — agentic workspace
 
 ```bash
+# Interactive: xe-forge prepares the workspace, you run `claude` yourself
 xe-forge -i kernel.py -s spec.yaml --engine claude --workspace ./workspace --max-trials 5
 cd workspace
 claude /optimize-kernel my_kernel
 ```
 
-Generates a workspace with `CLAUDE.md` workflow, `config.yaml`, knowledge base, and skill commands. Claude Code then optimizes interactively — reading patterns, writing trials, benchmarking, and branching based on results.
+Generates a workspace with `CLAUDE.md` workflow, `config.yaml`, knowledge base, and skill commands. Claude Code then drives the optimization agentically — reading patterns, writing trials, benchmarking, and branching based on results.
+
+Two ways to run it:
+
+- **Interactive (default)** — xe-forge prints the `cd` + `claude` command; you run it and watch/steer the session live.
+- **Headless** — set `AUTO_LAUNCH=true` and xe-forge spawns `claude -p "/optimize-kernel <name>" --max-turns 80` for you. No user input; useful for CI or batch runs.
 
 ---
 
@@ -484,7 +493,7 @@ xe-forge --input KERNEL --spec SPEC [OPTIONS]
 
 | Flag | Description |
 |------|-------------|
-| `--engine` | `dspy` (automated) or `claude` (interactive, default: `dspy`) |
+| `--engine` | `dspy` (automated) or `claude` (workspace + agent, default: `dspy`) |
 | `--max-trials` | Max optimization trials (default: 10) |
 | `--trials-dir` | Trial state directory (default: `./trials`) |
 | `--no-trials` | Disable trial tracking |
