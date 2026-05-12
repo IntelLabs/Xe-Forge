@@ -134,6 +134,7 @@ class EngineConfig:
     engine: str = "dspy"  # "dspy" or "claude"
     auto_launch: bool = False  # Claude engine: auto-launch claude CLI
     workspace: str = "./"  # Claude engine: workspace directory
+    git_init: bool = False  # Claude engine: initialize workspace as git repo
 
 
 @dataclass
@@ -254,6 +255,7 @@ class ConfigManager:
             engine=self._get_env("ENGINE", "dspy"),
             auto_launch=self._get_env("AUTO_LAUNCH", False, bool),
             workspace=self._get_env("WORKSPACE", "./"),
+            git_init=self._get_env("WORKSPACE_GIT_INIT", False, bool),
         )
 
         # Trial Configuration
