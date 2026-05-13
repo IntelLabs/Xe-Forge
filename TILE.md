@@ -133,6 +133,59 @@ tune-xpu:
 python -m xe_forge.cli --dsl sycl --tune-config tune_fa2.yaml
 ```
 
+#### FA2 mode flags
+
+The FA V2 config supports three optional top-level flags that map to
+`FMHAConfigGenWithTileShape` template parameters:
+
+| YAML field | C++ template param | Default | Description |
+|---|---|---|---|
+| `causal` | `Causal` | `false` | Enable causal (triangular) attention mask |
+| `fa_mode` | `FMHAMode` | `prefill` | `prefill` (seq_qo > 1) or `decode` (seq_qo = 1, autoregressive) |
+| `persistent` | `Persistent` | `false` | Persistent kernel scheduling |
+
+**Constraint:** `causal` and `persistent` are mutually exclusive (C++ static_assert).
+Decode mode automatically uses `pipeline_stages=1`.
+
+Example — causal prefill:
+
+```yaml
+mode: fa
+dtype: bf16
+causal: true
+fa_mode: prefill
+max_rounds: 5
+
+tune-xpu:
+  - name: "Llama 3 8B causal prefill"
+    dims:
+      head_dim: 128
+      batch: 1
+      num_heads_q: 32
+      num_heads_kv: 8
+      seq_qo: 4096
+      seq_kv: 4096
+```
+
+Example — decode (autoregressive token generation):
+
+```yaml
+mode: fa
+dtype: bf16
+fa_mode: decode
+max_rounds: 5
+
+tune-xpu:
+  - name: "Llama 3 8B decode KV=2048"
+    dims:
+      head_dim: 128
+      batch: 1
+      num_heads_q: 32
+      num_heads_kv: 8
+      seq_qo: 1
+      seq_kv: 2048
+```
+
 ### Step 5 — MoE GEMM tuning
 
 Create `tune_moe.yaml`:
@@ -271,6 +324,11 @@ dtype: bf16         # bf16, f16, tf32, f32, int8
 max_rounds: 5       # LLM proposal rounds per workload
 output: results.json
 
+# FA-specific (optional, ignored for non-FA modes)
+causal: false       # causal attention mask
+fa_mode: prefill    # "prefill" or "decode"
+persistent: false   # persistent kernel scheduling
+
 tune-xpu:
   - name: "workload name"
     dims:
@@ -301,7 +359,6 @@ src/xe_forge/core/tile_search/
     config.py             # YAML config parser (TuneConfig, workload dataclasses)
     templates/
         gemm.py / gemm.cpp.j2               # GEMM C++ template
-        fa.py / fa.cpp.j2                    # FA legacy template (xe_fmha_fwd_runner)
         fa_v2.py / fa_v2.cpp.j2              # FA V2 template (FMHAConfigGenWithTileShape)
         moe_gemm.py / moe_gemm.cpp.j2       # MoE GEMM template
         grouped_gemm.py / grouped_gemm.cpp.j2  # Grouped GEMM template
@@ -327,13 +384,11 @@ Key classes:
 ### FA V2 Template
 
 The Flash Attention V2 template uses `FMHAConfigGenWithTileShape` from
-`sycl-tla/benchmarks/flash_attention/fmha_configuration.hpp`. This is an
-upgrade from the legacy FA template that manually constructed ShapeQK/ShapePV.
-
-The new approach:
-- Takes 7 integer tile params + 5 boolean mode flags
+`sycl-tla/benchmarks/flash_attention/fmha_configuration.hpp`:
+- Takes 7 integer tile params + FMHAMode + boolean flags
 - Automatically derives ShapeQK, ShapePV, ShapeOutput, and SubgroupLayout
-- Supports Causal, VarLen, CachedKV, PagedKV, and Persistent modes
+- Configurable: `causal`, `fa_mode` (prefill/decode), `persistent` via YAML
+- VarLen, CachedKV, PagedKV reserved for future use (hardcoded false)
 - Includes standalone runner with correctness verification and timing
 
 ## Adding New Kernel Types

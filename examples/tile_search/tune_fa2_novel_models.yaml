@@ -1,0 +1,45 @@
+mode: fa
+dtype: bf16
+max_rounds: 5
+output: fa2_novel_results.json
+
+tune-xpu:
+  # Phi-2 / OPT-2.7B (HD=80 — no seed config in sycl-tla)
+  - name: "Phi-2 HD80 32Q/32KV seq=2048"
+    dims:
+      head_dim: 80
+      batch: 1
+      num_heads_q: 32
+      num_heads_kv: 32
+      seq_qo: 2048
+      seq_kv: 2048
+
+  # Qwen3-235B extreme GQA 16:1
+  - name: "Qwen3-235B HD128 64Q/4KV seq=4096"
+    dims:
+      head_dim: 128
+      batch: 1
+      num_heads_q: 64
+      num_heads_kv: 4
+      seq_qo: 4096
+      seq_kv: 4096
+
+  # Gemma 4 31B global attention layers (HD=512)
+  - name: "Gemma4 31B HD512 global 32Q/16KV seq=4096"
+    dims:
+      head_dim: 512
+      batch: 1
+      num_heads_q: 32
+      num_heads_kv: 16
+      seq_qo: 4096
+      seq_kv: 4096
+
+  # Gemma 4 31B local sliding-window (HD=256, short seq)
+  - name: "Gemma4 31B HD256 local 32Q/16KV seq=1024"
+    dims:
+      head_dim: 256
+      batch: 1
+      num_heads_q: 32
+      num_heads_kv: 16
+      seq_qo: 1024
+      seq_kv: 1024

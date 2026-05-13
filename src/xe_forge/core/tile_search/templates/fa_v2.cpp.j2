@@ -18,11 +18,11 @@ using namespace cute;
 using namespace cutlass::flash_attention;
 
 using FAConfig = FMHAConfigGenWithTileShape<
-    FMHAMode::Prefill,
+    <% mode %>,
     <% element_type %>, <% element_type %>, <% element_type %>, float,
     cutlass::layout::RowMajor, cutlass::layout::ColumnMajor,
     cutlass::layout::RowMajor, cutlass::layout::RowMajor,
-    <% causal %>, false, false, false, false,
+    <% causal %>, false, false, false, <% persistent %>,
     <% wg_tile_q %>, <% wg_tile_k %>, <% wg_tile_v %>,
     <% sg_tile_q %>, <% sg_tile_k %>,
     <% head_dim_qk %>, <% head_dim_v %>

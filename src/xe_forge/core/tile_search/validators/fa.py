@@ -31,6 +31,9 @@ class FATileConfig:
     head_dim: int
     sg_q: int
     pipeline_stages: int = 2
+    causal: bool = False
+    mode: str = "prefill"
+    persistent: bool = False
 
 
 @dataclass
@@ -101,6 +104,12 @@ def validate_fa_tile(cfg: FATileConfig) -> FATileValidation:
 
     if cfg.pipeline_stages not in (1, 2, 3):
         errors.append(f"pipeline_stages must be 1, 2, or 3, got {cfg.pipeline_stages}")
+
+    if cfg.persistent and cfg.causal:
+        errors.append("persistent and causal are mutually exclusive")
+
+    if cfg.mode == "decode" and cfg.pipeline_stages != 1:
+        errors.append(f"decode mode requires pipeline_stages=1, got {cfg.pipeline_stages}")
 
     if errors:
         return FATileValidation(valid=False, errors=errors, config=cfg)

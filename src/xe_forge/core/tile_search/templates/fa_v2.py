@@ -30,12 +30,15 @@ def generate_fa_v2_source(
     head_dim_v: int,
     dtype: str = "bf16",
     causal: bool = False,
+    mode: str = "prefill",
+    persistent: bool = False,
     iterations: int = 100,
 ) -> str:
     """Generate a complete FA V2 C++ source using FMHAConfigGenWithTileShape."""
     from xe_forge.core.tile_search.templates import render
 
     element_type = _DTYPE_MAP.get(dtype, _DTYPE_MAP["bf16"])
+    mode_cpp = "FMHAMode::Decode" if mode == "decode" else "FMHAMode::Prefill"
 
     return render(
         "fa_v2.cpp.j2",
@@ -48,5 +51,7 @@ def generate_fa_v2_source(
         head_dim_v=head_dim_v,
         element_type=element_type,
         causal="true" if causal else "false",
+        mode=mode_cpp,
+        persistent="true" if persistent else "false",
         iterations_default=iterations,
     )

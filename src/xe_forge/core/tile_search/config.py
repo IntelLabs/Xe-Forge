@@ -46,6 +46,9 @@ class TuneConfig:
     dtype: str = "bf16"
     max_rounds: int = 5
     output: str = "tile_tuning_results.json"
+    causal: bool = False
+    fa_mode: str = "prefill"  # "prefill" or "decode"
+    persistent: bool = False
     workloads: list[dict] = field(default_factory=list)
 
 
@@ -60,6 +63,9 @@ def load_tune_config(path: str | Path) -> TuneConfig:
         dtype=raw.get("dtype", "bf16"),
         max_rounds=raw.get("max_rounds", 5),
         output=raw.get("output", "tile_tuning_results.json"),
+        causal=raw.get("causal", False),
+        fa_mode=raw.get("fa_mode", "prefill"),
+        persistent=raw.get("persistent", False),
     )
 
     variant_key = None

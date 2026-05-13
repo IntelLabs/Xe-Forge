@@ -379,18 +379,30 @@ class GEMMStrategy:
 class FAStrategy:
     """Tile tuning strategy for Flash Attention V2 kernels."""
 
+    def __init__(
+        self,
+        causal: bool = False,
+        mode: str = "prefill",
+        persistent: bool = False,
+    ):
+        self.causal = causal
+        self.mode = mode
+        self.persistent = persistent
+
     def get_signature(self) -> type:
         return FATileTuningSignature
 
     def build_problem_str(self, workload: dict) -> str:
-        return (
+        parts = (
             f"head_dim={workload.get('head_dim', 128)}, "
             f"batch={workload.get('batch', 1)}, "
             f"num_heads_q={workload.get('num_heads_q', 32)}, "
             f"num_heads_kv={workload.get('num_heads_kv', 8)}, "
             f"seq_qo={workload.get('seq_qo', 4096)}, "
-            f"seq_kv={workload.get('seq_kv', 4096)}"
+            f"seq_kv={workload.get('seq_kv', 4096)}, "
+            f"mode={self.mode}, causal={self.causal}, persistent={self.persistent}"
         )
+        return parts
 
     def build_hardware_info(self, dtype: str) -> str:
         return (
@@ -456,6 +468,9 @@ class FAStrategy:
             head_dim=head_dim,
             sg_q=cfg["sg_q"],
             pipeline_stages=cfg.get("pipeline_stages", 2),
+            causal=self.causal,
+            mode=self.mode,
+            persistent=self.persistent,
         )
         result = validate_fa_tile(fa_cfg)
         derived = {"fa_cfg": fa_cfg} if result.valid else {}
@@ -472,12 +487,15 @@ class FAStrategy:
             head_dim_qk=cfg["qk_k"],
             head_dim_v=head_dim,
             dtype=dtype,
+            causal=self.causal,
+            mode=self.mode,
+            persistent=self.persistent,
         )
 
     def build_run_args(self, cfg: dict, workload: dict) -> dict[str, Any]:
         hd_qk = workload.get("head_dim_qk") or workload.get("head_dim", 128)
         hd_vo = workload.get("head_dim_vo") or workload.get("head_dim", 128)
-        return {
+        args: dict[str, Any] = {
             "batch": workload.get("batch", 1),
             "num_heads_q": workload.get("num_heads_q", 32),
             "num_heads_kv": workload.get("num_heads_kv", 8),
@@ -488,6 +506,9 @@ class FAStrategy:
             "iterations": 100,
             "verify": 0,
         }
+        if self.causal:
+            args["is_causal"] = ""
+        return args
 
     def config_key(self, cfg: dict) -> tuple:
         return (
@@ -501,14 +522,21 @@ class FAStrategy:
         )
 
     def to_tile_config(self, cfg: dict, derived: dict | None = None) -> TileConfig:
+        extra: dict = {
+            "pv_n": cfg["pv_n"],
+            "pv_k": cfg["pv_k"],
+            "pipeline_stages": cfg.get("pipeline_stages", 2),
+        }
+        if self.causal:
+            extra["causal"] = True
+        if self.mode != "prefill":
+            extra["mode"] = self.mode
+        if self.persistent:
+            extra["persistent"] = True
         return TileConfig(
             wg=[cfg["qk_m"], cfg["qk_n"], cfg["qk_k"]],
             sg=[cfg["sg_q"], 1, 1],
-            extra={
-                "pv_n": cfg["pv_n"],
-                "pv_k": cfg["pv_k"],
-                "pipeline_stages": cfg.get("pipeline_stages", 2),
-            },
+            extra=extra,
         )
 
     def output_name(self, cfg: dict) -> str:

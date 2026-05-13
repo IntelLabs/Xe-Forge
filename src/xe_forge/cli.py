@@ -359,6 +359,8 @@ def _run_tune_config(args, config: Config) -> int:
     print(f"Model: {config.llm.model}")
     print(f"Max rounds: {cfg.max_rounds}")
     print(f"Output: {cfg.output}")
+    if cfg.mode == "fa":
+        print(f"FA mode: {cfg.fa_mode}, causal: {cfg.causal}, persistent: {cfg.persistent}")
     print(f"Workloads: {len(cfg.workloads)}")
     for w in cfg.workloads:
         print(f"  - {w.get('name', '?')}: {w}")
@@ -378,7 +380,10 @@ def _run_tune_config(args, config: Config) -> int:
     }
     kernel_type = mode_to_kernel_type.get(cfg.mode, KernelType.GEMM)
     executor = SyclExecutor(kernel_type=kernel_type, verify=False)
-    strategy = mode_to_strategy.get(cfg.mode, GEMMStrategy)()
+    if cfg.mode == "fa":
+        strategy = FAStrategy(causal=cfg.causal, mode=cfg.fa_mode, persistent=cfg.persistent)
+    else:
+        strategy = mode_to_strategy.get(cfg.mode, GEMMStrategy)()
 
     agent = TileTuningAgent(executor, strategy, dtype=cfg.dtype)
     all_results = []
