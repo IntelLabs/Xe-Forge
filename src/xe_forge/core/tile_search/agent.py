@@ -177,9 +177,12 @@ class FATileTuningSignature(dspy.Signature):
     - DPAS atom: M=8, N=16
     - qk_m must be divisible by sg_q, and sg_tile_q = qk_m/sg_q must work with DPAS
     - qk_n must be divisible by 16
+    - qk_n must be divisible by pv_k (maps to WgTileK % SgTileK == 0)
+    - pv_k <= qk_n (SgTileK cannot exceed WgTileK)
     - sg_q <= 32 (max subgroups per workgroup)
     - SLM = 128 KB
     - Typical qk_k values: 16, 32, 64
+    - Typical pv_k values: 32, 64 (must divide qk_n)
     - pipeline_stages = 2 for prefill
 
     KNOWN-GOOD CONFIGS (from sycl-tla):

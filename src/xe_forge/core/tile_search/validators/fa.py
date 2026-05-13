@@ -93,6 +93,12 @@ def validate_fa_tile(cfg: FATileConfig) -> FATileValidation:
     if cfg.pv_k not in (16, 32, 64, 128, 256, 512):
         errors.append(f"pv_k ({cfg.pv_k}) should be a power of 2 (16-512)")
 
+    if cfg.qk_n > 0 and cfg.pv_k > 0 and cfg.qk_n % cfg.pv_k != 0:
+        errors.append(
+            f"qk_n ({cfg.qk_n}) must be divisible by pv_k ({cfg.pv_k}) "
+            f"(maps to WgTileK % SgTileK == 0)"
+        )
+
     if cfg.pipeline_stages not in (1, 2, 3):
         errors.append(f"pipeline_stages must be 1, 2, or 3, got {cfg.pipeline_stages}")
 

@@ -123,6 +123,23 @@ tile_configurations:
       ```
       KV_TILE_SIZE: 256 or 512 (configurable).
 
+      FMHAConfigGenWithTileShape mapping (from tile search params):
+        WgTileQ  = qk_m       (workgroup Q rows)
+        WgTileK  = qk_n       (workgroup K cols)
+        WgTileV  = pv_n       (workgroup V head tile)
+        SgTileQ  = qk_m/sg_q  (subgroup Q tile)
+        SgTileK  = pv_k       (subgroup K tile)
+        HeadDimQK = qk_k      (DPAS K-dim tile, typically 32)
+        HeadDimV  = head_dim   (full output head dimension)
+
+      CONSTRAINTS (from fmha_configuration.hpp):
+        - WgTileK % SgTileK == 0  →  qk_n must be divisible by pv_k
+        - pv_k <= qk_n            →  SgTileK cannot exceed WgTileK
+        - qk_n must be divisible by 16 (DPAS atom N)
+        - qk_m must be divisible by sg_q
+        - sg_q <= 32 (max subgroups per workgroup)
+        - head_dim must be divisible by pv_n (VTiles = head_dim / pv_n)
+
       Features: causal masking, variable-length, paged KV cache,
       GQA/MQA (different num_heads_q vs num_heads_kv),
       persistent scheduler option.
