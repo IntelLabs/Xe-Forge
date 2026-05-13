@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 import dspy
 
 from xe_forge.core.tile_search.templates import (
-    generate_fa_source,
     generate_fa_v2_source,
     generate_gemm_source,
     generate_grouped_gemm_source,
