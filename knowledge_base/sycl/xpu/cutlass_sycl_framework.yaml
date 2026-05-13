@@ -137,8 +137,39 @@ tile_configurations:
         - pv_k <= qk_n            →  SgTileK cannot exceed WgTileK
         - qk_n must be divisible by 16 (DPAS atom N)
         - qk_m must be divisible by sg_q
+        - qk_m must be divisible by 8 (DPAS atom M)
         - sg_q <= 32 (max subgroups per workgroup)
         - head_dim must be divisible by pv_n (VTiles = head_dim / pv_n)
+        - qk_m values that are NOT multiples of 8 (e.g. 192) will fail
+          because sg_tile_q = qk_m/sg_q must align with DPAS atom M=8
+        - pv_k must be a power of 2 (16, 32, 64, 128, 256, 512)
+        - qk_k should be 16, 32, or 64
+
+      TILE SEARCH RESULTS (BMG G31, bf16, seq=4096):
+
+      HD=128, Llama 3 8B (32Q/8KV):
+        Best: qk=(256,32,32) pv_n=32 pv_k=32 sg=16 → 119.5 TFLOPS (75% peak)
+        The default sycl-tla config is optimal. LLM search tested 9 configs,
+        none beat the baseline. Configs with qk_n=16 fail compilation
+        (too small for FMHAConfigGenWithTileShape).
+
+      HD=192, Gemma 2 9B (16Q/8KV):
+        Best: qk=(256,64,32) pv_n=32 pv_k=64 sg=32 → 79.8 TFLOPS (50% peak)
+        Default sycl-tla config is best. LLM closest: qk=(256,64,16) at 77.3 TF.
+        Configs with qk_k=64 degrade to 59-62 TF. pv_n=64 drops to 48 TF.
+
+      HD=192, extreme GQA (32Q/4KV):
+        Best: qk=(256,64,32) pv_n=32 pv_k=64 sg=32 → 81.1 TFLOPS (51% peak)
+        Same default tile works well even with extreme GQA ratio.
+        LLM closest: qk=(128,64,32) at 74.3 TF. Configs with pv_n=64
+        or qk_k=64 degrade significantly (24-30 TF).
+
+      KEY FINDINGS:
+        - qk_k=32 is strongly preferred over qk_k=16 or qk_k=64
+        - pv_n=32 consistently outperforms pv_n=64
+        - qk_m=256 generally beats qk_m=128 (more Q rows per workgroup)
+        - qk_n=64 works well for HD>=192; qk_n=32 is better for HD=128
+        - The sycl-tla default configs are well-tuned baselines
 
       Features: causal masking, variable-length, paged KV cache,
       GQA/MQA (different num_heads_q vs num_heads_kv),
