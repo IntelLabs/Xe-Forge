@@ -18,6 +18,7 @@ import dspy
 
 from xe_forge.core.tile_search.templates import (
     generate_fa_source,
+    generate_fa_v2_source,
     generate_gemm_source,
     generate_grouped_gemm_source,
     generate_moe_gemm_source,
@@ -460,17 +461,15 @@ class FAStrategy:
 
     def generate_source(self, cfg: dict, dtype: str) -> str:
         head_dim = cfg.get("head_dim", 128)
-        return generate_fa_source(
-            qk_m=cfg["qk_m"],
-            qk_n=cfg["qk_n"],
-            qk_k=cfg["qk_k"],
-            pv_m=cfg["qk_m"],
-            pv_n=cfg["pv_n"],
-            pv_k=cfg["pv_k"],
-            head_dim=head_dim,
-            sg_q=cfg["sg_q"],
+        return generate_fa_v2_source(
+            wg_tile_q=cfg["qk_m"],
+            wg_tile_k=cfg["qk_n"],
+            wg_tile_v=cfg["pv_n"],
+            sg_tile_q=cfg["qk_m"] // cfg["sg_q"],
+            sg_tile_k=cfg["pv_k"],
+            head_dim_qk=cfg["qk_k"],
+            head_dim_v=head_dim,
             dtype=dtype,
-            pipeline_stages=cfg.get("pipeline_stages", 2),
         )
 
     def build_run_args(self, cfg: dict, workload: dict) -> dict[str, Any]:
