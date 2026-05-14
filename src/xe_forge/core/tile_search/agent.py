@@ -892,7 +892,7 @@ class TileTuningAgent:
             if not proposed:
                 logger.warning("LLM returned no configs in round %d", round_idx + 1)
                 rounds_without_improvement += 1
-                if rounds_without_improvement >= 2:
+                if rounds_without_improvement >= max_rounds:
                     break
                 continue
 
@@ -938,8 +938,10 @@ class TileTuningAgent:
                 rounds_without_improvement = 0
             else:
                 rounds_without_improvement += 1
-                if rounds_without_improvement >= 2:
-                    logger.info("No improvement for 2 rounds, stopping early")
+                if rounds_without_improvement >= max_rounds:
+                    logger.info(
+                        "No improvement for %d rounds, stopping early", rounds_without_improvement
+                    )
                     break
 
         logger.info(
