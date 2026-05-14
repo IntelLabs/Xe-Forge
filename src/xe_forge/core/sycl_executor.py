@@ -11,9 +11,12 @@ Wraps ai_bench.sycl.compiler.SYCLCompiler for compile/run/parse, adding:
 
 import logging
 import os
+import re
 import shutil
+import subprocess
 import tempfile
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 import numpy as np
@@ -47,6 +50,14 @@ _DEVICE_NAME_TO_TARGET: dict[str, str] = {
 }
 
 
+class KernelType(Enum):
+    GEMM = "gemm"
+    FA = "fa"
+    DUAL_GEMM = "dual_gemm"
+    GROUPED_GEMM = "grouped_gemm"
+    MOE_GEMM = "moe_gemm"
+
+
 def _detect_device_target() -> str:
     """Auto-detect the icpx AOT device target from torch.xpu."""
     try:
@@ -66,13 +77,19 @@ def _detect_device_target() -> str:
         return ""
 
 
-def _include_dirs(sycl_tla_dir: str) -> list[str]:
+def _include_dirs(sycl_tla_dir: str, kernel_type: KernelType = KernelType.GEMM) -> list[str]:
     dirs = [
         f"{sycl_tla_dir}/include",
         f"{sycl_tla_dir}/tools/util/include",
         f"{sycl_tla_dir}/examples/common",
-        f"{sycl_tla_dir}/applications",
     ]
+    if kernel_type in (KernelType.FA, KernelType.DUAL_GEMM):
+        dirs.append(f"{sycl_tla_dir}/applications")
+    if kernel_type == KernelType.FA:
+        dirs.append(f"{sycl_tla_dir}/examples/06_bmg_flash_attention")
+        dirs.append(f"{sycl_tla_dir}/benchmarks/flash_attention")
+    if kernel_type == KernelType.MOE_GEMM:
+        dirs.append(f"{sycl_tla_dir}/examples/12_xe20_moe_gemm_cute_interface")
     if Path(MKL_INCLUDE).exists():
         dirs.append(MKL_INCLUDE)
     return dirs
@@ -126,11 +143,15 @@ class SyclExecutor:
         run_timeout: int = 120,
         iterations: int = 20,
         verify: bool = True,
+        kernel_type: KernelType | str = KernelType.GEMM,
     ):
+        if isinstance(kernel_type, str):
+            kernel_type = KernelType(kernel_type)
+        self.kernel_type = kernel_type
         if device_target is None:
             device_target = _detect_device_target()
         self._compiler = SYCLCompiler(
-            include_dirs=_include_dirs(sycl_tla_dir),
+            include_dirs=_include_dirs(sycl_tla_dir, kernel_type),
             target_device=device_target or None,
         )
         self.iterations = iterations
@@ -320,17 +341,28 @@ class SyclExecutor:
         em, en, ek = self._dims_to_mnk(dims, m, n, k)
         logger.info(f"Running SYCL kernel: {binary_path} (M={em}, N={en}, K={ek})")
 
-        extra_args = []
-        if input_dir:
-            extra_args.append(f"--input_dir={input_dir}")
-        if output_dir:
-            os.makedirs(output_dir, exist_ok=True)
-            extra_args.append(f"--output_dir={output_dir}")
-
         # Skip internal Disposition check when using file-based I/O — the
         # reference path reinitializes C randomly so it always mismatches.
         # We verify correctness in Python via compare_outputs() instead.
         use_verify = 0 if input_dir else (1 if self.verify else 0)
+
+        extra_cli: dict[str, int | float | bool | str] = {}
+        if input_dir:
+            extra_cli["input_dir"] = input_dir
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+            extra_cli["output_dir"] = output_dir
+
+        if extra_cli:
+            args_dict: dict[str, int | float | bool | str] = {
+                "m": em,
+                "n": en,
+                "k": ek,
+                "iterations": self.iterations,
+                "verify": use_verify,
+                **extra_cli,
+            }
+            return self._run_binary(binary_path, args=args_dict)
 
         result: SYCLRunResult = self._compiler.run(
             Path(binary_path),
@@ -339,9 +371,106 @@ class SyclExecutor:
             k=ek,
             iterations=self.iterations,
             verify=use_verify,
-            extra_args=extra_args if extra_args else None,
         )
         return self._to_execution_result(result)
+
+    def execute_raw(
+        self,
+        kernel_code: str | None = None,
+        kernel_path: str | None = None,
+        output_name: str = "kernel_sycl",
+        args: dict[str, int | float | bool | str] | None = None,
+        args_str: str | None = None,
+        timeout: int = 600,
+    ) -> ExecutionResult:
+        """Compile and run a kernel with arbitrary CLI args.
+
+        Use for kernels that don't follow GEMM --m/--n/--k convention
+        (e.g. Flash Attention, dual GEMM). Pass args as a dict
+        (converted to --key=value) or a raw argument string.
+        """
+        success, binary_path, err = self.compile(
+            source_code=kernel_code,
+            source_path=kernel_path,
+            output_name=output_name,
+        )
+        if not success:
+            return ExecutionResult(
+                success=False,
+                error_message=f"Compilation failed:\n{err[-2000:]}",
+            )
+        return self._run_binary(binary_path, args=args, args_str=args_str, timeout=timeout)
+
+    def _run_binary(
+        self,
+        binary_path: str,
+        args: dict[str, int | float | bool | str] | None = None,
+        args_str: str | None = None,
+        timeout: int = 600,
+    ) -> ExecutionResult:
+        """Run an already-compiled binary with arbitrary CLI args."""
+        cmd = [binary_path]
+        if args:
+            for k, v in args.items():
+                cmd.append(f"--{k}={v}")
+        elif args_str:
+            cmd.extend(args_str.split())
+
+        logger.info("Running kernel: %s", " ".join(cmd))
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return ExecutionResult(success=False, error_message="Execution timed out")
+        except Exception as e:
+            return ExecutionResult(success=False, error_message=str(e))
+
+        output = result.stdout + result.stderr
+        if result.returncode != 0:
+            return ExecutionResult(
+                success=False,
+                error_message=f"Exit code {result.returncode}\n{output[-2000:]}",
+            )
+
+        return self._parse_raw_output(output)
+
+    @staticmethod
+    def _parse_raw_output(output: str) -> ExecutionResult:
+        """Parse stdout from a CUTLASS SYCL kernel (GEMM or FA runner)."""
+        passed = None
+        disp = re.search(r"Disposition:\s*(Passed|Failed)", output)
+        if disp:
+            passed = disp.group(1) == "Passed"
+
+        tflops = None
+        time_ms = None
+        perf = re.search(r"\[([0-9.]+)\]\s*TFlop/s\s+\(([0-9.]+)\)\s*ms", output)
+        if not perf:
+            perf = re.search(r"([0-9.]+)\s+TFlop/s.*?([0-9.]+)\s+ms", output)
+        if perf:
+            tflops = float(perf.group(1))
+            time_ms = float(perf.group(2))
+
+        if passed is False:
+            return ExecutionResult(
+                success=False,
+                output_correct=False,
+                execution_time_ms=time_ms,
+                tflops=tflops,
+                error_message="Correctness verification failed (Disposition: Failed)",
+            )
+
+        return ExecutionResult(
+            success=True,
+            execution_time_ms=time_ms,
+            tflops=tflops,
+            output_correct=passed,
+        )
 
     @staticmethod
     def _to_execution_result(r: SYCLRunResult) -> ExecutionResult:

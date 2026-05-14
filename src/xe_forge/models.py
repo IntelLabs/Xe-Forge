@@ -186,3 +186,30 @@ class ExecutionResult(BaseModel):
     output_correct: bool | None = None
     error_message: str | None = None
     error_traceback: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Tile search models
+# ---------------------------------------------------------------------------
+
+
+class TileConfig(BaseModel):
+    wg: list[int] = Field(description="Workgroup tile shape [M, N, K]")
+    sg: list[int] = Field(description="Subgroup layout [sg_m, sg_n, sg_k]")
+    extra: dict | None = Field(default=None, description="Kernel-specific parameters")
+
+
+class TileBenchResult(BaseModel):
+    config: TileConfig
+    time_ms: float | None = None
+    tflops: float | None = None
+    passed: bool = False
+    error: str | None = None
+
+
+class TileTuningResult(BaseModel):
+    problem_shape: dict
+    configs_tested: list[TileBenchResult]
+    best_config: TileConfig | None = None
+    best_tflops: float | None = None
+    best_time_ms: float | None = None

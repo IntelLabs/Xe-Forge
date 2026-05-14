@@ -1,0 +1,11 @@
+mode: gemm
+dtype: bf16
+max_rounds: 3
+output: gemm_basic_results.json
+
+tune-xpu:
+  - name: "Square 4K"
+    dims: { M: 4096, N: 4096, K: 4096 }
+
+  - name: "LLM FFN (Llama 3 8B)"
+    dims: { M: 8192, N: 4096, K: 12288 }
