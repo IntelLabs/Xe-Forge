@@ -1,4 +1,4 @@
-mode: fa
+mode: fa2
 dtype: bf16
 max_rounds: 5
 output: fa2_novel_results.json

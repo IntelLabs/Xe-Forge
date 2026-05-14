@@ -180,9 +180,9 @@ void launcher(int *M_per_expert, int N, int K, int num_experts, bool verify) {
 
   num_rows_device.reset(num_experts);
   num_rows_device.copy_from_host(M_per_expert);
-  activations.reset(total_tokens * K);
-  weights.reset(num_experts * N * K);
-  outputs.reset(total_tokens * N);
+  activations.reset(int64_t(total_tokens) * K);
+  weights.reset(int64_t(num_experts) * N * K);
+  outputs.reset(int64_t(total_tokens) * N);
 
   uint64_t seed = 2023;
   initialize_block(activations, seed + 1);

@@ -2,6 +2,7 @@ mode: fa
 dtype: bf16
 fa_mode: decode
 causal: false
+persistent: true
 max_rounds: 5
 output: fa2_decode_results.json
 
