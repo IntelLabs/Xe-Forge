@@ -147,6 +147,20 @@ Two ways to run it:
 - **Interactive (default)** — xe-forge prints the `cd` + `claude` command; you run it and watch/steer the session live.
 - **Headless** — set `AUTO_LAUNCH=true` and xe-forge spawns `claude -p "/optimize-kernel <name>" --max-turns 80` for you. No user input; useful for CI or batch runs.
 
+### Tile Search — CUTLASS SYCL tile tuning
+
+```bash
+# Single GEMM tile search
+python -m xe_forge.cli --dsl sycl --tile-tune \
+    --m 4096 --gemm-n 4096 --k 4096 \
+    --max-rounds 3 --gemm-dtype bf16
+
+# Multi-shape tuning from YAML config
+python -m xe_forge.cli --dsl sycl --tile-tune --tune-config tune.yaml
+```
+
+LLM-driven tile configuration tuning for CUTLASS SYCL kernels (GEMM, Flash Attention V2, MoE GEMM, Grouped GEMM) on Intel Xe GPUs. Uses a propose-validate-benchmark loop: an LLM proposes tile shapes, a hardware validator checks them against Intel Xe DPAS constraints, and valid configs are compiled and benchmarked on the GPU. Supports batch tuning via YAML configs. See [TILE.md](TILE.md) for the full setup guide, supported kernel types, and YAML config format.
+
 ---
 
 ## Skill CLI
