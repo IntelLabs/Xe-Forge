@@ -1,0 +1,311 @@
+
+inputs:
+  query:
+    shape: [TQ, QH, D]
+    dtype: bfloat16
+  key_cache:
+    shape: [NB, BS, KH, D]
+    dtype: bfloat16
+  value_cache:
+    shape: [NB, BS, KH, D]
+    dtype: bfloat16
+
+inits:
+  - dim: QH
+  - dim: KH
+  - dim: D
+  - dim: BS
+  - dim: NS
+  - dim: TQ
+  - dim: MKV
+  - dim: NB
+  - dim: SW
+  - dim: SCAP
+  - dim: KQM
+
+ci:
+  - params: [query, key_cache, value_cache]
+    dtype: bfloat16
+    dims:
+      QH: 8
+      KH: 4
+      D: 64
+      BS: 16
+      NS: 1
+      TQ: 64
+      MKV: 64
+      NB: 32
+      SW: 0
+      SCAP: 0
+      KQM: 0
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu-1:
+  # llama3.1-8B prefill (4k context)
+  - params: [query, key_cache, value_cache]
+    dtype: bfloat16
+    dims:
+      QH: 32
+      KH: 8
+      D: 128
+      BS: 16
+      NS: 1
+      TQ: 4096
+      MKV: 4096
+      NB: 2048
+      SW: 0
+      SCAP: 0
+      KQM: 0
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu-2:
+  # llama3.1-8B decode (8 sequences, 1 token each)
+  - params: [query, key_cache, value_cache]
+    dtype: bfloat16
+    dims:
+      QH: 32
+      KH: 8
+      D: 128
+      BS: 16
+      NS: 8
+      TQ: 8
+      MKV: 4096
+      NB: 2048
+      SW: 0
+      SCAP: 0
+      KQM: 0
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu-3:
+  # llama3.3-70B prefill (4k context)
+  - params: [query, key_cache, value_cache]
+    dtype: bfloat16
+    dims:
+      QH: 64
+      KH: 8
+      D: 128
+      BS: 16
+      NS: 1
+      TQ: 4096
+      MKV: 4096
+      NB: 2048
+      SW: 0
+      SCAP: 0
+      KQM: 0
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu-4:
+  # llama3.3-70B decode (8 sequences)
+  - params: [query, key_cache, value_cache]
+    dtype: bfloat16
+    dims:
+      QH: 64
+      KH: 8
+      D: 128
+      BS: 16
+      NS: 8
+      TQ: 8
+      MKV: 4096
+      NB: 2048
+      SW: 0
+      SCAP: 0
+      KQM: 0
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu-5:
+  # Qwen2.5-235B prefill (4k context)
+  - params: [query, key_cache, value_cache]
+    dtype: bfloat16
+    dims:
+      QH: 64
+      KH: 4
+      D: 128
+      BS: 16
+      NS: 1
+      TQ: 4096
+      MKV: 4096
+      NB: 2048
+      SW: 0
+      SCAP: 0
+      KQM: 0
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu-6:
+  # Qwen2.5-235B decode (8 sequences)
+  - params: [query, key_cache, value_cache]
+    dtype: bfloat16
+    dims:
+      QH: 64
+      KH: 4
+      D: 128
+      BS: 16
+      NS: 8
+      TQ: 8
+      MKV: 4096
+      NB: 2048
+      SW: 0
+      SCAP: 0
+      KQM: 0
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu-7:
+  # llama3.1-8B chunked prefill (4 x 512 tokens)
+  - params: [query, key_cache, value_cache]
+    dtype: bfloat16
+    dims:
+      QH: 32
+      KH: 8
+      D: 128
+      BS: 16
+      NS: 4
+      TQ: 2048
+      MKV: 2048
+      NB: 2048
+      SW: 0
+      SCAP: 0
+      KQM: 0
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu-8:
+  # llama3.3-70B decode large context (8k KV)
+  - params: [query, key_cache, value_cache]
+    dtype: bfloat16
+    dims:
+      QH: 64
+      KH: 8
+      D: 128
+      BS: 16
+      NS: 8
+      TQ: 8
+      MKV: 8192
+      NB: 32768
+      SW: 0
+      SCAP: 0
+      KQM: 0
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu-9:
+  # Gemma3-27B prefill (sliding window 1024)
+  - params: [query, key_cache, value_cache]
+    dtype: bfloat16
+    dims:
+      QH: 32
+      KH: 8
+      D: 128
+      BS: 16
+      NS: 1
+      TQ: 4096
+      MKV: 4096
+      NB: 2048
+      SW: 1024
+      SCAP: 0
+      KQM: 0
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu-10:
+  # Gemma3-27B decode (sliding window 1024, 8 sequences)
+  - params: [query, key_cache, value_cache]
+    dtype: bfloat16
+    dims:
+      QH: 32
+      KH: 8
+      D: 128
+      BS: 16
+      NS: 8
+      TQ: 8
+      MKV: 4096
+      NB: 2048
+      SW: 1024
+      SCAP: 0
+      KQM: 0
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu:
+  # Gemma2-27B prefill (softcap 50 = tanh cap 0.5)
+  - params: [query, key_cache, value_cache]
+    dtype: bfloat16
+    dims:
+      QH: 32
+      KH: 16
+      D: 128
+      BS: 16
+      NS: 1
+      TQ: 4096
+      MKV: 4096
+      NB: 2048
+      SW: 0
+      SCAP: 50
+      KQM: 0
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu-12:
+  # llama3.1-8B prefill: fp8 per-tensor KV cache
+  - params: [query, key_cache, value_cache]
+    dtype: bfloat16
+    dims:
+      QH: 32
+      KH: 8
+      D: 128
+      BS: 16
+      NS: 1
+      TQ: 4096
+      MKV: 4096
+      NB: 2048
+      SW: 0
+      SCAP: 0
+      KQM: 1
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu-13:
+  # llama3.1-8B decode: fp8 per-tensor KV cache
+  - params: [query, key_cache, value_cache]
+    dtype: bfloat16
+    dims:
+      QH: 32
+      KH: 8
+      D: 128
+      BS: 16
+      NS: 8
+      TQ: 8
+      MKV: 4096
+      NB: 2048
+      SW: 0
+      SCAP: 0
+      KQM: 1
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu-14:
+  # llama3.3-70B prefill: int8 per-token-head KV cache
+  - params: [query, key_cache, value_cache]
+    dtype: bfloat16
+    dims:
+      QH: 64
+      KH: 8
+      D: 128
+      BS: 16
+      NS: 1
+      TQ: 4096
+      MKV: 4096
+      NB: 2048
+      SW: 0
+      SCAP: 0
+      KQM: 2
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu-15:
+  # llama3.3-70B decode: fp8 per-token-head KV cache
+  - params: [query, key_cache, value_cache]
+    dtype: bfloat16
+    dims:
+      QH: 64
+      KH: 8
+      D: 128
+      BS: 16
+      NS: 8
+      TQ: 8
+      MKV: 4096
+      NB: 2048
+      SW: 0
+      SCAP: 0
+      KQM: 3
+    flop: "4*TQ*QH*D*MKV"
