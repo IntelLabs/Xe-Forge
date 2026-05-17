@@ -1,0 +1,270 @@
+
+inputs:
+  A:
+    shape: [E, M, K]
+    dtype: bfloat16
+  B:
+    shape: [E, N, K]
+    dtype: bfloat16
+  expert_num_tokens:
+    shape: [E]
+    dtype: int32
+    range: [0, M]
+
+inits:
+  - dim: E
+  - dim: M
+  - dim: K
+  - dim: N
+  - dim: QUANT
+
+ci:
+  - params: [A, B, expert_num_tokens]
+    dtype: bfloat16
+    dims:
+      E: 8
+      M: 32
+      K: 128
+      N: 128
+      QUANT: 0
+    flop: "E*M*N*K*2"
+
+bench-gpu-1:
+  # gpt-oss 20b: input -> swiglu input
+  - params: [A, B, expert_num_tokens]
+    dtype: bfloat16
+    dims:
+      E: 32
+      M: 64
+      K: 2880
+      N: 5760
+      QUANT: 0
+    flop: "E*M*N*K*2"
+
+bench-gpu-2:
+  # gpt-oss 20b: swiglu output -> final output
+  - params: [A, B, expert_num_tokens]
+    dtype: bfloat16
+    dims:
+      E: 32
+      M: 64
+      K: 2880
+      N: 2880
+      QUANT: 0
+    flop: "E*M*N*K*2"
+
+bench-gpu-3:
+  # llama4 scout: input -> swiglu input
+  - params: [A, B, expert_num_tokens]
+    dtype: bfloat16
+    dims:
+      E: 16
+      M: 64
+      K: 5120
+      N: 16384
+      QUANT: 0
+    flop: "E*M*N*K*2"
+
+bench-gpu-4:
+  # llama4 scout: swiglu output -> final output
+  - params: [A, B, expert_num_tokens]
+    dtype: bfloat16
+    dims:
+      E: 16
+      M: 64
+      K: 8192
+      N: 5120
+      QUANT: 0
+    flop: "E*M*N*K*2"
+
+bench-gpu-5:
+  # qwen3-235b-A22B: input -> swiglu input
+  - params: [A, B, expert_num_tokens]
+    dtype: bfloat16
+    dims:
+      E: 128
+      M: 64
+      K: 4096
+      N: 3072
+      QUANT: 0
+    flop: "E*M*N*K*2"
+
+bench-gpu-6:
+  # qwen3-235b-A22B: swiglu output -> final output
+  - params: [A, B, expert_num_tokens]
+    dtype: bfloat16
+    dims:
+      E: 128
+      M: 64
+      K: 1536
+      N: 4096
+      QUANT: 0
+    flop: "E*M*N*K*2"
+
+bench-gpu-7:
+  # qwen3-30b-A3B: input -> swiglu input
+  - params: [A, B, expert_num_tokens]
+    dtype: bfloat16
+    dims:
+      E: 128
+      M: 64
+      K: 2048
+      N: 1536
+      QUANT: 0
+    flop: "E*M*N*K*2"
+
+bench-gpu:
+  # qwen3-30b-A3B: swiglu output -> final output
+  - params: [A, B, expert_num_tokens]
+    dtype: bfloat16
+    dims:
+      E: 128
+      M: 64
+      K: 768
+      N: 2048
+      QUANT: 0
+    flop: "E*M*N*K*2"
+
+bench-gpu-9:
+  # gpt-oss 20b: M=256 (larger batch)
+  - params: [A, B, expert_num_tokens]
+    dtype: bfloat16
+    dims:
+      E: 32
+      M: 256
+      K: 2880
+      N: 5760
+      QUANT: 0
+    flop: "E*M*N*K*2"
+
+bench-gpu-10:
+  # llama4 scout: M=256
+  - params: [A, B, expert_num_tokens]
+    dtype: bfloat16
+    dims:
+      E: 16
+      M: 256
+      K: 5120
+      N: 16384
+      QUANT: 0
+    flop: "E*M*N*K*2"
+
+bench-gpu-11:
+  # gpt-oss 20b: M=1 (single token decode)
+  - params: [A, B, expert_num_tokens]
+    dtype: bfloat16
+    dims:
+      E: 32
+      M: 8
+      K: 2880
+      N: 5760
+      QUANT: 0
+    flop: "E*M*N*K*2"
+
+bench-gpu-12:
+  # llama4 scout: M=8
+  - params: [A, B, expert_num_tokens]
+    dtype: bfloat16
+    dims:
+      E: 16
+      M: 8
+      K: 5120
+      N: 16384
+      QUANT: 0
+    flop: "E*M*N*K*2"
+
+bench-gpu-13:
+  # gpt-oss 20b: fp8 w8a8 (M=64)
+  - params: [A, B, expert_num_tokens]
+    dtype: bfloat16
+    dims:
+      E: 32
+      M: 64
+      K: 2880
+      N: 5760
+      QUANT: 1
+    flop: "E*M*N*K*2"
+
+bench-gpu-14:
+  # llama4 scout: fp8 w8a8 (M=64)
+  - params: [A, B, expert_num_tokens]
+    dtype: bfloat16
+    dims:
+      E: 16
+      M: 64
+      K: 5120
+      N: 16384
+      QUANT: 1
+    flop: "E*M*N*K*2"
+
+bench-gpu-15:
+  # qwen3-235b-A22B: fp8 w8a8 (M=64)
+  - params: [A, B, expert_num_tokens]
+    dtype: bfloat16
+    dims:
+      E: 128
+      M: 64
+      K: 4096
+      N: 3072
+      QUANT: 1
+    flop: "E*M*N*K*2"
+
+bench-gpu-16:
+  # gpt-oss 20b: fp8 w8a8 (M=256, larger batch)
+  - params: [A, B, expert_num_tokens]
+    dtype: bfloat16
+    dims:
+      E: 32
+      M: 256
+      K: 2880
+      N: 5760
+      QUANT: 1
+    flop: "E*M*N*K*2"
+
+bench-gpu-17:
+  # gpt-oss 20b: int8 w8a16 (M=64)
+  - params: [A, B, expert_num_tokens]
+    dtype: bfloat16
+    dims:
+      E: 32
+      M: 64
+      K: 2880
+      N: 5760
+      QUANT: 2
+    flop: "E*M*N*K*2"
+
+bench-gpu-18:
+  # llama4 scout: int8 w8a16 (M=64)
+  - params: [A, B, expert_num_tokens]
+    dtype: bfloat16
+    dims:
+      E: 16
+      M: 64
+      K: 5120
+      N: 16384
+      QUANT: 2
+    flop: "E*M*N*K*2"
+
+bench-gpu-19:
+  # qwen3-235b-A22B: int8 w8a16 (M=64)
+  - params: [A, B, expert_num_tokens]
+    dtype: bfloat16
+    dims:
+      E: 128
+      M: 64
+      K: 4096
+      N: 3072
+      QUANT: 2
+    flop: "E*M*N*K*2"
+
+bench-gpu-20:
+  # gpt-oss 20b: int8 w8a16 (M=256, larger batch)
+  - params: [A, B, expert_num_tokens]
+    dtype: bfloat16
+    dims:
+      E: 32
+      M: 256
+      K: 2880
+      N: 5760
+      QUANT: 2
+    flop: "E*M*N*K*2"

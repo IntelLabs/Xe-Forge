@@ -1,0 +1,175 @@
+
+inputs:
+  A:
+    shape: [M, K]
+    dtype: bfloat16
+  B:
+    shape: [E, N, K]
+    dtype: bfloat16
+  topk_ids:
+    shape: [M, TOPK]
+    dtype: int32
+    range: [0, E]
+
+inits:
+  - dim: M
+  - dim: N
+  - dim: K
+  - dim: E
+  - dim: TOPK
+  - dim: QUANT
+
+ci:
+  - params: [A, B, topk_ids]
+    dtype: bfloat16
+    dims:
+      M: 80
+      TOPK: 1
+      N: 384
+      K: 2048
+      E: 16
+      QUANT: 0
+    flop: "M*TOPK*N*K*2"
+
+bench-gpu-1:
+  # Qwen3-30B-A3B-Instruct w13
+  - params: [A, B, topk_ids]
+    dtype: bfloat16
+    dims:
+      M: 80
+      TOPK: 8
+      N: 384
+      K: 2048
+      E: 128
+      QUANT: 0
+    flop: "M*TOPK*N*K*2"
+
+bench-gpu-2:
+  # Qwen3-30B-A3B-Instruct w2
+  - params: [A, B, topk_ids]
+    dtype: bfloat16
+    dims:
+      M: 80
+      TOPK: 8
+      N: 2048
+      K: 192
+      E: 128
+      QUANT: 0
+    flop: "M*TOPK*N*K*2"
+
+bench-gpu-3:
+  # Qwen3-30B-A3B-Instruct w13 (large batch)
+  - params: [A, B, topk_ids]
+    dtype: bfloat16
+    dims:
+      M: 8192
+      TOPK: 8
+      N: 384
+      K: 2048
+      E: 128
+      QUANT: 0
+    flop: "M*TOPK*N*K*2"
+
+bench-gpu-4:
+  # Qwen3-30B-A3B-Instruct w2 (large batch)
+  - params: [A, B, topk_ids]
+    dtype: bfloat16
+    dims:
+      M: 8192
+      TOPK: 8
+      N: 2048
+      K: 192
+      E: 128
+      QUANT: 0
+    flop: "M*TOPK*N*K*2"
+
+bench-gpu-5:
+  # Llama4 Scout w13 (small batch)
+  - params: [A, B, topk_ids]
+    dtype: bfloat16
+    dims:
+      M: 30
+      TOPK: 1
+      N: 16384
+      K: 5120
+      E: 16
+      QUANT: 0
+    flop: "M*TOPK*N*K*2"
+
+bench-gpu:
+  # Llama4 Scout w13 (large batch)
+  - params: [A, B, topk_ids]
+    dtype: bfloat16
+    dims:
+      M: 8192
+      TOPK: 1
+      N: 16384
+      K: 5120
+      E: 16
+      QUANT: 0
+    flop: "M*TOPK*N*K*2"
+
+bench-gpu-6:
+  # Qwen3-30B-A3B-Instruct w13: fp8 w8a8
+  - params: [A, B, topk_ids]
+    dtype: bfloat16
+    dims:
+      M: 80
+      TOPK: 8
+      N: 384
+      K: 2048
+      E: 128
+      QUANT: 1
+    flop: "M*TOPK*N*K*2"
+
+bench-gpu-7:
+  # Qwen3-30B-A3B-Instruct w13 (large batch): fp8 w8a8
+  - params: [A, B, topk_ids]
+    dtype: bfloat16
+    dims:
+      M: 8192
+      TOPK: 8
+      N: 384
+      K: 2048
+      E: 128
+      QUANT: 1
+    flop: "M*TOPK*N*K*2"
+
+bench-gpu-8:
+  # Llama4 Scout w13 (large batch): fp8 w8a8
+  - params: [A, B, topk_ids]
+    dtype: bfloat16
+    dims:
+      M: 8192
+      TOPK: 1
+      N: 16384
+      K: 5120
+      E: 16
+      QUANT: 1
+    flop: "M*TOPK*N*K*2"
+
+bench-gpu-9:
+  # Qwen3-30B-A3B-Instruct w13: int8 w8a8
+  - params: [A, B, topk_ids]
+    dtype: bfloat16
+    dims:
+      M: 80
+      TOPK: 8
+      N: 384
+      K: 2048
+      E: 128
+      QUANT: 2
+    flop: "M*TOPK*N*K*2"
+
+bench-gpu-10:
+  # Llama4 Scout w13 (large batch): int8 w8a16
+  - params: [A, B, topk_ids]
+    dtype: bfloat16
+    dims:
+      M: 8192
+      TOPK: 1
+      N: 16384
+      K: 5120
+      E: 16
+      QUANT: 3
+    flop: "M*TOPK*N*K*2"
