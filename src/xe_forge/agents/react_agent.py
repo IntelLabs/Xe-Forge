@@ -202,6 +202,7 @@ class OptimizerReActAgent(Optimizer):
         flop: float | None,
         dtype=None,
         spec_dims: dict[str, int] | None = None,
+        input_dtypes: list | None = None,
     ) -> Callable:
         """Create a verification tool for ReAct.
 
@@ -275,6 +276,7 @@ class OptimizerReActAgent(Optimizer):
                         input_shapes=input_shapes,
                         flop=flop,
                         dtype=dtype,
+                        input_dtypes=input_dtypes,
                     )
 
                     logger.debug(
@@ -327,6 +329,7 @@ class OptimizerReActAgent(Optimizer):
         init_args: list | None = None,
         vtune_report: str = "",
         perf_context: dict | None = None,
+        input_dtypes: list | None = None,
     ) -> StageResult:
         """
         Apply a single optimization stage using ReAct.
@@ -385,6 +388,7 @@ class OptimizerReActAgent(Optimizer):
             flop=flop,
             dtype=dtype,
             spec_dims=spec_dims,
+            input_dtypes=input_dtypes,
         )
 
         # Create ReAct agent for this optimization
@@ -455,6 +459,7 @@ class OptimizerReActAgent(Optimizer):
                             input_shapes=input_shapes,
                             flop=flop,
                             dtype=dtype,
+                            input_dtypes=input_dtypes,
                         )
 
                     if not comparison.optimized_correct:

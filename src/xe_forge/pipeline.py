@@ -187,7 +187,7 @@ class XeForgePipeline:
             reference_code = pytorch_code or ""
         import torch
 
-        spec, flop, dtype, init_args, spec_dims = None, None, None, None, None
+        spec, flop, dtype, init_args, spec_dims, input_dtypes = None, None, None, None, None, None
         if spec_path:
             from xe_forge.core.spec_loader import load_spec
 
@@ -197,6 +197,7 @@ class XeForgePipeline:
             spec_dims = spec.get_dims(variant_type)
             flop = spec.get_flop(variant_type)
             dtype = spec.get_dtype(variant_type)
+            input_dtypes = spec.get_input_dtypes(variant_type)
             init_args = spec.get_init_args(variant_type)
             logger.info(
                 f"Loaded spec: variant={variant_type}, shapes={input_shapes}, "
@@ -246,6 +247,7 @@ class XeForgePipeline:
                         flop=flop,
                         dtype=dtype,
                         init_args=init_args,
+                        input_dtypes=input_dtypes,
                     )
                 if orig_r.success:
                     val_orig_tflops, val_orig_ms = orig_r.tflops, orig_r.execution_time_ms
@@ -394,6 +396,7 @@ class XeForgePipeline:
                             else None
                         ),
                     },
+                    input_dtypes=input_dtypes,
                 )
                 result.stages_applied.append(stage_result)
 
@@ -509,6 +512,7 @@ class XeForgePipeline:
                             flop=flop,
                             dtype=dtype,
                             init_args=init_args,
+                            input_dtypes=input_dtypes,
                         )
                     if opt_r.success:
                         result.optimized_tflops, result.optimized_ms = (

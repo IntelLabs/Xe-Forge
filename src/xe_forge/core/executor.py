@@ -115,6 +115,7 @@ class KernelBenchExecutor:
         reference_fn: Callable | None = None,
         dtype=None,
         init_args: list | None = None,
+        input_dtypes: list | None = None,
     ) -> ExecutionResult:
         """
         Execute kernel and measure performance.
@@ -152,7 +153,9 @@ class KernelBenchExecutor:
             # Create inputs if not provided
             if inputs is None:
                 if input_shapes:
-                    inputs = self._create_inputs(input_shapes, dtype=dtype)
+                    inputs = self._create_inputs(
+                        input_shapes, dtype=dtype, input_dtypes=input_dtypes
+                    )
                 else:
                     return ExecutionResult(
                         success=False,
@@ -229,6 +232,7 @@ class KernelBenchExecutor:
         input_shapes: list[tuple[int, ...]],
         dtype=None,
         init_args: list | None = None,
+        input_dtypes: list | None = None,
     ) -> bool:
         """
         Check if optimized kernel produces same outputs as original.
@@ -297,7 +301,7 @@ class KernelBenchExecutor:
 
             # Shared inputs with deterministic seed
             set_all_seeds(123)
-            inputs = self._create_inputs(input_shapes, dtype=dtype)
+            inputs = self._create_inputs(input_shapes, dtype=dtype, input_dtypes=input_dtypes)
 
             inputs_orig = [inp.clone() for inp in inputs]
             inputs_opt = [inp.clone() for inp in inputs]
@@ -339,6 +343,7 @@ class KernelBenchExecutor:
         reference_fn: Callable | None = None,
         dtype=None,
         init_args: list | None = None,
+        input_dtypes: list | None = None,
     ) -> ComparisonResult:
         """
         Compare performance AND correctness of original vs optimized kernel.
@@ -370,6 +375,7 @@ class KernelBenchExecutor:
             reference_fn,
             dtype=dtype,
             init_args=init_args,
+            input_dtypes=input_dtypes,
         )
 
         # Execute optimized kernel
@@ -382,6 +388,7 @@ class KernelBenchExecutor:
             reference_fn,
             dtype=dtype,
             init_args=init_args,
+            input_dtypes=input_dtypes,
         )
 
         # Handle failures
@@ -413,6 +420,7 @@ class KernelBenchExecutor:
                 input_shapes=input_shapes,
                 dtype=dtype,
                 init_args=init_args,
+                input_dtypes=input_dtypes,
             )
 
             if not outputs_match:
@@ -586,8 +594,19 @@ class KernelBenchExecutor:
         self,
         shapes: list[tuple[int, ...]],
         dtype=None,
+        input_dtypes: list | None = None,
     ) -> list:
-        """Create input tensors."""
+        """Create input tensors.
+
+        When *input_dtypes* is given, each tensor gets its own dtype.
+        Falls back to *dtype* (broadcast to all inputs) or float16.
+        """
+        if input_dtypes and len(input_dtypes) == len(shapes):
+            return [
+                torch.randn(shape, dtype=dt, device=self.device)
+                for shape, dt in zip(shapes, input_dtypes)
+            ]
+
         if dtype is None:
             dtype = torch.float16
 
@@ -614,6 +633,7 @@ def create_executor_tool(
     input_shapes: list[tuple[int, ...]] | None = None,
     flop: float | None = None,
     dtype=None,
+    input_dtypes: list | None = None,
 ) -> Callable[[str], str]:
     """
     Create a tool function for the CoVeR agent.
@@ -650,6 +670,7 @@ def create_executor_tool(
             input_shapes=input_shapes,
             flop=flop,
             dtype=dtype,
+            input_dtypes=input_dtypes,
         )
 
         return result.feedback_message

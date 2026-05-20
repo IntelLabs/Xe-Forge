@@ -461,6 +461,7 @@ class OptimizerAgent(Optimizer):
         stage=None,
         baseline_ms: float | None = None,
         spec_dims=None,
+        input_dtypes=None,
     ):
         executor = self.executor
         dsl = self.dsl
@@ -594,6 +595,7 @@ class OptimizerAgent(Optimizer):
                         flop=flop,
                         dtype=dtype,
                         init_args=init_args,
+                        input_dtypes=input_dtypes,
                     )
                     if comparison.original_time_us:
                         logger.info("  original : %.2f µs", comparison.original_time_us)
@@ -651,6 +653,7 @@ class OptimizerAgent(Optimizer):
         init_args=None,
         vtune_report="",
         perf_context: dict | None = None,
+        input_dtypes=None,
     ):
         logger.info(f"Applying optimization stage: {stage.value}")
         original_code = code
@@ -699,6 +702,7 @@ class OptimizerAgent(Optimizer):
             stage=stage,
             baseline_ms=_baseline_ms,
             spec_dims=spec_dims,
+            input_dtypes=input_dtypes,
         )
 
         problem_ctx = self._build_problem_context(input_shapes, dtype, init_args, flop)

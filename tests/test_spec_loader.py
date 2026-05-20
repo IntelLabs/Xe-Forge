@@ -1,5 +1,7 @@
 """Tests for spec_loader variant resolution and parsing."""
 
+import torch
+
 from xe_forge.core.spec_loader import load_spec_from_string
 
 BASIC_SPEC = """\
@@ -165,6 +167,58 @@ class TestResolveVariant:
 
 
 # --- load from real YAML files ---
+
+
+MIXED_DTYPE_SPEC = """\
+inputs:
+  query:
+    shape: [S, H, D]
+    dtype: bfloat16
+  key_cache:
+    shape: [B, S, H, D]
+    dtype: float8_e5m2
+  value_cache:
+    shape: [B, S, H, D]
+    dtype: float8_e5m2
+
+ci:
+  - params: [query, key_cache, value_cache]
+    dims: {S: 128, H: 8, D: 64, B: 4}
+
+bench-gpu:
+  - params: [query, key_cache, value_cache]
+    dims: {S: 4096, H: 32, D: 128, B: 16}
+
+bench-gpu-1:
+  - params: [query, key_cache, value_cache]
+    dtype: float16
+    dims: {S: 2048, H: 32, D: 128, B: 8}
+"""
+
+
+class TestMixedInputDtypes:
+    def test_per_input_dtypes_returned(self):
+        spec = load_spec_from_string(MIXED_DTYPE_SPEC)
+        dtypes = spec.get_input_dtypes("ci")
+        assert len(dtypes) == 3
+        assert dtypes[0] == torch.bfloat16
+        assert dtypes[1] == torch.float8_e5m2
+        assert dtypes[2] == torch.float8_e5m2
+
+    def test_variant_override_broadcasts(self):
+        spec = load_spec_from_string(MIXED_DTYPE_SPEC)
+        dtypes = spec.get_input_dtypes("bench-gpu-1")
+        assert all(dt == torch.float16 for dt in dtypes)
+
+    def test_get_dtype_returns_first_input(self):
+        spec = load_spec_from_string(MIXED_DTYPE_SPEC)
+        assert spec.get_dtype("bench-gpu") == torch.bfloat16
+
+    def test_uniform_spec_all_same(self):
+        spec = load_spec_from_string(BASIC_SPEC)
+        dtypes = spec.get_input_dtypes("bench-gpu")
+        assert len(dtypes) == 1
+        assert dtypes[0] == torch.float32
 
 
 class TestLoadFromFile:

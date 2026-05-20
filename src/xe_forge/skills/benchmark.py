@@ -15,6 +15,7 @@ def run(args):
     input_shapes = spec.get_input_shapes(variant)
     flop = spec.get_flop(variant)
     dtype_name = spec.get_dtype(variant)
+    input_dtypes = spec.get_input_dtypes(variant)
     init_args = spec.get_init_args(variant)
 
     dtype = None
@@ -40,6 +41,7 @@ def run(args):
             flop=flop,
             dtype=dtype,
             init_args=init_args,
+            input_dtypes=input_dtypes,
         )
         if optimized_result.success:
             baseline_ms = sum(baseline_us) / len(baseline_us) / 1000.0
@@ -61,6 +63,7 @@ def run(args):
             flop=flop,
             dtype=dtype,
             init_args=init_args,
+            input_dtypes=input_dtypes,
         )
         print(f"Correctness: {'PASSED' if result.optimized_correct else 'FAILED'}")
         if result.original_time_us and result.optimized_time_us:
