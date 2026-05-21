@@ -604,7 +604,8 @@ class KernelBenchExecutor:
         """
         if input_dtypes and len(input_dtypes) == len(shapes):
             return [
-                make_rand_tensor(shape, dt, self.device) for shape, dt in zip(shapes, input_dtypes)
+                make_rand_tensor(shape, dt, self.device)
+                for shape, dt in zip(shapes, input_dtypes, strict=True)
             ]
 
         if dtype is None:

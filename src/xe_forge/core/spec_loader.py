@@ -269,7 +269,9 @@ class KernelSpec:
         """Create input tensors for a variant, respecting per-input dtypes."""
         shapes = self.get_input_shapes(variant_type, variant_index)
         dtypes = self.get_input_dtypes(variant_type, variant_index)
-        return [make_rand_tensor(shape, dt, device) for shape, dt in zip(shapes, dtypes)]
+        return [
+            make_rand_tensor(shape, dt, device) for shape, dt in zip(shapes, dtypes, strict=True)
+        ]
 
     def get_init_args(
         self,
