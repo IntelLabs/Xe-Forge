@@ -21,6 +21,7 @@ from ai_bench.harness.runner.benchmark_compare import (
 )
 from ai_bench.utils import count_torch_flop, import_from_path
 
+from xe_forge.core.dtype_utils import make_rand_tensor
 from xe_forge.models import ExecutionResult
 
 logger = logging.getLogger(__name__)
@@ -603,14 +604,13 @@ class KernelBenchExecutor:
         """
         if input_dtypes and len(input_dtypes) == len(shapes):
             return [
-                torch.randn(shape, dtype=dt, device=self.device)
-                for shape, dt in zip(shapes, input_dtypes)
+                make_rand_tensor(shape, dt, self.device) for shape, dt in zip(shapes, input_dtypes)
             ]
 
         if dtype is None:
             dtype = torch.float16
 
-        return [torch.randn(shape, dtype=dtype, device=self.device) for shape in shapes]
+        return [make_rand_tensor(shape, dtype, self.device) for shape in shapes]
 
     def __del__(self):
         """Cleanup temp directory."""

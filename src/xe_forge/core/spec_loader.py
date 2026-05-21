@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
 
-import torch
 import yaml
 from ai_bench.harness.core import (
     InitKey,
@@ -24,6 +23,8 @@ from ai_bench.harness.core import (
     get_torch_dtype,
 )
 from ai_bench.utils import eval_eq
+
+from xe_forge.core.dtype_utils import make_rand_tensor
 
 V_BENCH_XPU = "bench-xpu"
 
@@ -268,7 +269,7 @@ class KernelSpec:
         """Create input tensors for a variant, respecting per-input dtypes."""
         shapes = self.get_input_shapes(variant_type, variant_index)
         dtypes = self.get_input_dtypes(variant_type, variant_index)
-        return [torch.randn(shape, dtype=dt, device=device) for shape, dt in zip(shapes, dtypes)]
+        return [make_rand_tensor(shape, dt, device) for shape, dt in zip(shapes, dtypes)]
 
     def get_init_args(
         self,
