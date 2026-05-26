@@ -14,20 +14,9 @@ def run(args):
     variant = spec.resolve_variant(args.variant)
     input_shapes = spec.get_input_shapes(variant)
     flop = spec.get_flop(variant)
-    dtype_name = spec.get_dtype(variant)
+    dtype = spec.get_dtype(variant)
     input_dtypes = spec.get_input_dtypes(variant)
     init_args = spec.get_init_args(variant)
-
-    dtype = None
-    if dtype_name is not None:
-        import torch
-
-        dtype_map = {
-            "float16": torch.float16,
-            "bfloat16": torch.bfloat16,
-            "float32": torch.float32,
-        }
-        dtype = dtype_map.get(str(dtype_name))
 
     executor = KernelBenchExecutor(device=args.device)
 
