@@ -1,0 +1,103 @@
+# Algorithmic Patterns for Intel XPU Triton Kernels
+# Stage: algorithmic
+#
+# These patterns cover non-trivial algorithmic choices that affect correctness
+# and performance independently of low-level XPU tuning.
+#
+# Generic algorithmic patterns are in knowledge_base/common/algorithmic_patterns.yaml
+
+patterns:
+- id: two_pass_softmax_for_large_n
+  name: Two-pass tiled softmax for large N (N > single BLOCK fits)
+  stage: algorithmic
+  description: When N is larger than a single tile (e.g. N=8192), use a 2D-tiled softmax decomposed into tile-max, row-reduce-max,
+    tile-sumexp, row-reduce-sum, and tile-norm passes.
+  rationale: "A single-tile softmax kernel requires the whole row to fit in one program's\nBLOCK_N, which is impractical for\
+    \ large N. The 2D tiled decomposition splits\nthe row into tiles processed by separate programs, coordinated by two\n\
+    intermediary reduction kernels. This unlocks parallelism over (rows × tiles).\n\nFive-kernel decomposition:\n  1. _softmax_tile_max:\
+    \       per-tile max  → tile_max [M, num_tiles]\n  2. _softmax_row_reduce_max: row-wise max  → row_max  [M]\n  3. _softmax_tile_sumexp:\
+    \    per-tile sumexp with numerical correction\n  4. _softmax_row_reduce_sum: row-wise sum  → row_sum  [M]\n  5. _softmax_tile_norm:\
+    \      divide each tile element by row_sum\n"
+  pattern_before: "# Single-tile softmax — only works if N <= BLOCK\n@triton.jit\ndef softmax_kernel(x_ptr, out_ptr, M, N,\
+    \ BLOCK: tl.constexpr):\n    row = tl.program_id(0)\n    offs = tl.arange(0, BLOCK)\n    x = tl.load(x_ptr + row * N +\
+    \ offs, mask=offs < N, other=-1e20)\n    x = x - tl.max(x, axis=0)\n    x = tl.exp(x)\n    x = x / tl.sum(x, axis=0)\n\
+    \    tl.store(out_ptr + row * N + offs, x, mask=offs < N)\n"
+  pattern_after: "# 2D-tiled: each of 5 small kernels processes (row, tile) pairs\n# Tile 1: per-tile max\n@triton.jit\ndef\
+    \ _softmax_tile_max_kernel(x_ptr, tile_max_ptr, M, N, num_tiles, BLOCK: tl.constexpr):\n    row  = tl.program_id(0)\n\
+    \    tile = tl.program_id(1)\n    col_start = tile * BLOCK\n    offs = col_start + tl.arange(0, BLOCK)\n    mask = offs\
+    \ < N\n    x = tl.load(x_ptr + row * N + offs, mask=mask, other=-1e20).to(tl.float32)\n    m = tl.max(x, axis=0)\n   \
+    \ tl.store(tile_max_ptr + row * num_tiles + tile, m)\n# ... (row reduce max, tile sumexp, row reduce sum, tile norm follow\
+    \ the same pattern)\n"
+  examples:
+  - file: 84_Gemm_BatchNorm_Scaling_Softmax.py
+    note: Full 5-kernel 2D softmax for N=8192 following GEMM+BN+Scale
+- id: lse_as_separate_row_reduction_kernel
+  name: LogSumExp as a separate row-reduction kernel after GEMM
+  stage: algorithmic
+  description: Compute log(sum(exp(row))) in a dedicated row-reduction kernel, not fused into GEMM.
+  rationale: "LogSumExp requires a full-row scan that conflicts with 2D GEMM tile parallelism.\nThe accepted trade-off is\
+    \ one extra [M, N] memory pass for the LSE input,\nbut the GEMM retains full M×N tile parallelism. Numerically stable\
+    \ via max-subtract.\n\n```python\n@triton.autotune(configs=_cfgs_lse(), key=['M', 'N'])\n@triton.jit\ndef _lse_kernel(x_ptr,\
+    \ out_ptr, M, N, stride_m, stride_n,\n                BM: tl.constexpr, BN: tl.constexpr):\n    # rows handled by this\
+    \ program\n    pid_m = tl.program_id(0)\n    rows = pid_m * BM + tl.arange(0, BM)\n    mask_m = rows < M\n\n    # scan\
+    \ across N in BN tiles to find max\n    row_max = tl.full((BM,), -1e30, dtype=tl.float32)\n    for col in tl.range(0,\
+    \ N, BN):\n        cols = col + tl.arange(0, BN)\n        mask = mask_m[:, None] & (cols[None, :] < N)\n        x = tl.load(x_ptr\
+    \ + rows[:, None]*stride_m + cols[None,:]*stride_n,\n                    mask=mask, other=-1e30).to(tl.float32)\n    \
+    \    row_max = tl.maximum(row_max, tl.max(x, axis=1))\n\n    # sum exp(x - max)\n    sum_exp = tl.zeros((BM,), dtype=tl.float32)\n\
+    \    for col in tl.range(0, N, BN):\n        cols = col + tl.arange(0, BN)\n        mask = mask_m[:, None] & (cols[None,\
+    \ :] < N)\n        x = tl.load(...).to(tl.float32)\n        sum_exp += tl.sum(tl.exp(x - row_max[:, None]), axis=1)\n\n\
+    \    lse = row_max + tl.log(sum_exp)\n    tl.store(out_ptr + rows, lse, mask=mask_m)\n```\n"
+  examples:
+  - file: 45_Gemm_Sigmoid_LogSumExp.py
+    note: Separate LSE kernel after 2-stage GEMM pipeline
+- id: in_register_maxpool_via_reshape
+  name: Pairwise max-pool via tl.reshape + tl.max on the accumulator tile
+  stage: algorithmic
+  description: Perform kernel=2,stride=2 1D max-pool on the [BLOCK_M, BLOCK_N] accumulator tile in registers using reshape
+    + max, without writing to memory.
+  rationale: 'tl.reshape allows re-interpreting the accumulator as [BM, BN/2, 2] so that
+
+    tl.max over axis=2 computes pairwise max entirely in registers. This is valid
+
+    as long as BLOCK_N is even and matches the pool stride. Combined with tl.sum
+
+    over axis=1, the full pool→sum→scale reduction fits in the GEMM epilogue.
+
+
+    ```python
+
+    # acc: [BLOCK_M, BLOCK_N] fp32
+
+    acc_pairs = tl.reshape(acc, (BLOCK_M, BLOCK_N // 2, 2))  # [BM, BN/2, 2]
+
+    pair_max  = tl.max(acc_pairs, axis=2)                    # [BM, BN/2]
+
+    row_sum   = tl.sum(pair_max, axis=1)                     # [BM]
+
+    row_sum   = row_sum * scale
+
+    ```
+
+    Requires: BLOCK_N must be even; output tensor shape is [M] not [M, N].
+
+    '
+  examples:
+  - file: 55_Matmul_MaxPool_Sum_Scale.py
+    note: In-register maxpool(k=2) + sum + scale, result atomic-added to [M] output
+- id: residual_add_as_gemm_epilogue
+  name: Fuse residual/skip-connection add into GEMM epilogue
+  stage: algorithmic
+  description: Load the residual tensor column-slice in the GEMM epilogue and add it to the fp32 accumulator before the final
+    store.
+  rationale: "If the residual is a 1D per-column vector (broadcast over rows), loading it\nonce per tile column costs negligible\
+    \ bandwidth. If the residual is [M, N],\nuse a block pointer to load the matching tile. Either way, this eliminates\n\
+    one full [M, N] read pass compared to a separate add kernel.\n\n```python\n# 1D residual (per-column broadcast)\nres =\
+    \ tl.load(res_ptr + offs_n, mask=mask_n, other=0.0).to(tl.float32)\nacc = acc + res[None, :]\n\n# 2D residual (matching\
+    \ tile)\nr_bp = tl.make_block_ptr(base=res_ptr, shape=(M, N),\n                          strides=(stride_rm, stride_rn),\n\
+    \                          offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),\n                          block_shape=(BLOCK_M,\
+    \ BLOCK_N), order=(1, 0))\nres = tl.load(r_bp, boundary_check=(0, 1)).to(tl.float32)\nacc = acc + res\n```\n"
+  examples:
+  - file: 70_Gemm_Sigmoid_Scaling_ResidualAdd.py
+    note: Residual added after sigmoid; both scaled output and residual are fp32 at add time
+  - file: 95_Matmul_Add_Swish_Tanh_GELU_Hardtanh.py
+    note: add_value (per-column) added as fp32 to accumulator before activation chain
