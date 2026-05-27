@@ -5,7 +5,7 @@ Multi-stage LLM-driven optimization pipeline for Triton kernels targeting Intel 
 
 The optimizer analyzes Triton kernels, identifies performance issues, and applies optimizations through a series of stages — each powered by an LLM that understands GPU programming, numerical linear algebra, and Intel XPU hardware. Two engines are available: a fully automated DSPy pipeline and a Claude Code engine that generates a ready-to-run workspace you can drive interactively or let xe-forge auto-launch.
 
-📄 **Paper**: [Xe-Forge: Multi-Stage LLM-Powered Kernel Optimization for Intel GPU](https://arxiv.org/abs/2605.26118) (arXiv:2605.26118) — describes the system architecture, the Chain-of-Verification-and-Refinement (CoVeR) agent design, and the Intel GPU knowledge base, along with extensive evaluation on 97 KernelBench Level-2 kernels and Flash Attention on the Intel Arc Pro B70. See the paper for the full set of results and additional details beyond what's covered here.
+📄 **Paper**: [Xe-Forge: Multi-Stage LLM-Powered Kernel Optimization for Intel GPU](https://arxiv.org/abs/2605.26118) (arXiv:2605.26118) — describes the system architecture, the Chain-of-Verification-and-Refinement (CoVeR) agent design, and the Intel GPU knowledge base, along with extensive evaluation on KernelBench Level-2 kernels and Flash Attention on the Intel Arc Pro B70. See the paper for the full set of results and additional details beyond what's covered here.
 
 ⚠️ **Disclaimer**: This project is currently in active development. The code is **not stable** and **not intended for use in production environments**. Interfaces, features, and behaviors are subject to change without notice.
 
