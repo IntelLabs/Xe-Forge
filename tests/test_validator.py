@@ -2,7 +2,6 @@
 
 from xe_forge.core.validator import KernelValidator
 
-
 VALID_1D_SWIZZLED_GRID = """\
 import triton
 import triton.language as tl
