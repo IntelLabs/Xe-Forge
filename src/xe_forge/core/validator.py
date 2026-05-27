@@ -209,9 +209,7 @@ class KernelValidator:
 
             if tree is not None:
                 function_defs = {
-                    node.name: node
-                    for node in ast.walk(tree)
-                    if isinstance(node, ast.FunctionDef)
+                    node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
                 }
 
                 for node in ast.walk(tree):
@@ -219,9 +217,7 @@ class KernelValidator:
                         continue
 
                     target_names = [
-                        target.id
-                        for target in node.targets
-                        if isinstance(target, ast.Name)
+                        target.id for target in node.targets if isinstance(target, ast.Name)
                     ]
                     if not any(name.startswith("grid") for name in target_names):
                         continue
@@ -231,7 +227,9 @@ class KernelValidator:
 
                     if isinstance(grid_expr, ast.Tuple):
                         is_2d_grid = len(grid_expr.elts) > 1
-                    elif isinstance(grid_expr, ast.Lambda) and isinstance(grid_expr.body, ast.Tuple):
+                    elif isinstance(grid_expr, ast.Lambda) and isinstance(
+                        grid_expr.body, ast.Tuple
+                    ):
                         is_2d_grid = len(grid_expr.body.elts) > 1
                     elif isinstance(grid_expr, ast.Name) and grid_expr.id in function_defs:
                         grid_func = function_defs[grid_expr.id]
