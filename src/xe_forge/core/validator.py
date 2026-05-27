@@ -201,27 +201,52 @@ class KernelValidator:
 
         # 2. Grid dimensionality with swizzling
         has_swizzling = "GROUP_SIZE_M" in code or "swizzle" in code.lower()
-        for i, line in enumerate(lines):
-            if "grid" in line and "=" in line:
-                if line.count("triton.cdiv") >= 2 and "(" in line and ")" in line:
-                    paren_depth = 0
-                    comma_count = 0
-                    start = line.index("(")
-                    for ch in line[start:]:
-                        if ch == "(":
-                            paren_depth += 1
-                        elif ch == ")":
-                            paren_depth -= 1
-                        elif ch == "," and paren_depth == 1:
-                            comma_count += 1
-                    if comma_count >= 1 and has_swizzling:
+        if has_swizzling:
+            try:
+                tree = ast.parse(code)
+            except SyntaxError:
+                tree = None
+
+            if tree is not None:
+                function_defs = {
+                    node.name: node
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.FunctionDef)
+                }
+
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Assign):
+                        continue
+
+                    target_names = [
+                        target.id
+                        for target in node.targets
+                        if isinstance(target, ast.Name)
+                    ]
+                    if not any(name.startswith("grid") for name in target_names):
+                        continue
+
+                    grid_expr = node.value
+                    is_2d_grid = False
+
+                    if isinstance(grid_expr, ast.Lambda) and isinstance(grid_expr.body, ast.Tuple):
+                        is_2d_grid = len(grid_expr.body.elts) > 1
+                    elif isinstance(grid_expr, ast.Name) and grid_expr.id in function_defs:
+                        grid_func = function_defs[grid_expr.id]
+                        for stmt in grid_func.body:
+                            if isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Tuple):
+                                if len(stmt.value.elts) > 1:
+                                    is_2d_grid = True
+                                    break
+
+                    if is_2d_grid:
                         issues.append(
                             ValidationIssue(
                                 "grid_swizzle_conflict",
                                 "error",
                                 "Grid is 2D but tile swizzling (GROUP_SIZE_M) is used. "
                                 "Grid must be 1D with swizzling.",
-                                line=i + 1,
+                                line=getattr(node, "lineno", None),
                             )
                         )
 
