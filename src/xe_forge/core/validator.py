@@ -229,7 +229,9 @@ class KernelValidator:
                     grid_expr = node.value
                     is_2d_grid = False
 
-                    if isinstance(grid_expr, ast.Lambda) and isinstance(grid_expr.body, ast.Tuple):
+                    if isinstance(grid_expr, ast.Tuple):
+                        is_2d_grid = len(grid_expr.elts) > 1
+                    elif isinstance(grid_expr, ast.Lambda) and isinstance(grid_expr.body, ast.Tuple):
                         is_2d_grid = len(grid_expr.body.elts) > 1
                     elif isinstance(grid_expr, ast.Name) and grid_expr.id in function_defs:
                         grid_func = function_defs[grid_expr.id]
