@@ -73,7 +73,7 @@ def generate_workspace(
     (agent_dir / "tool-runner.md").write_text(_render("tool-runner.md.j2", dsl=dsl))
 
     _write_kernel_files(workspace, kernel_name, kernel_code, reference_code, spec_path)
-    _symlink_knowledge_base(workspace)
+    _symlink_knowledge_base(workspace, dsl)
 
     if config.engine.git_init:
         _git_init(workspace)
@@ -96,11 +96,10 @@ def _write_kernel_files(
         shutil.copy2(spec_path, tk_dir / f"{kernel_name}.yaml")
 
 
-def _symlink_knowledge_base(workspace: Path) -> None:
-    """Create a symlink to the installed knowledge_base directory."""
-    kb_link = workspace / "knowledge_base"
-    if kb_link.exists() or kb_link.is_symlink():
-        return
+def _symlink_knowledge_base(workspace: Path, dsl: str) -> None:
+    """Symlink common and DSL-specific knowledge base subdirectories."""
+    kb_root = workspace / "knowledge_base"
+    kb_root.mkdir(parents=True, exist_ok=True)
 
     import xe_forge
 
@@ -112,7 +111,17 @@ def _symlink_knowledge_base(workspace: Path) -> None:
     ]
     for candidate in candidates:
         if candidate.is_dir():
-            kb_link.symlink_to(candidate.resolve())
+            src_root = candidate.resolve()
+
+            common_src = src_root / "common"
+            dsl_src = src_root / dsl
+            common_dst = kb_root / "common"
+            dsl_dst = kb_root / dsl
+
+            if common_src.is_dir() and not (common_dst.exists() or common_dst.is_symlink()):
+                common_dst.symlink_to(common_src)
+            if dsl_src.is_dir() and not (dsl_dst.exists() or dsl_dst.is_symlink()):
+                dsl_dst.symlink_to(dsl_src)
             return
 
 
