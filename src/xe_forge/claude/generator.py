@@ -73,7 +73,7 @@ def generate_workspace(
     (agent_dir / "tool-runner.md").write_text(_render("tool-runner.md.j2", dsl=dsl))
 
     _write_kernel_files(workspace, kernel_name, kernel_code, reference_code, spec_path)
-    _symlink_knowledge_base(workspace, dsl, device)
+    _copy_knowledge_base(workspace, dsl, device)
 
     if config.engine.git_init:
         _git_init(workspace)
@@ -96,8 +96,8 @@ def _write_kernel_files(
         shutil.copy2(spec_path, tk_dir / f"{kernel_name}.yaml")
 
 
-def _symlink_knowledge_base(workspace: Path, dsl: str, device: str) -> None:
-    """Symlink common and DSL/device-specific knowledge base subdirectories."""
+def _copy_knowledge_base(workspace: Path, dsl: str, device: str) -> None:
+    """Copy common and DSL/device-specific knowledge base subdirectories."""
     kb_root = workspace / "knowledge_base"
     kb_root.mkdir(parents=True, exist_ok=True)
 
@@ -118,13 +118,16 @@ def _symlink_knowledge_base(workspace: Path, dsl: str, device: str) -> None:
             common_dst = kb_root / "common"
             dsl_device_dst = kb_root / dsl / device
 
-            if common_src.is_dir() and not (common_dst.exists() or common_dst.is_symlink()):
-                common_dst.symlink_to(common_src)
+            if common_dst.is_symlink():
+                common_dst.unlink()
+            if common_src.is_dir():
+                shutil.copytree(common_src, common_dst, dirs_exist_ok=True)
+
             dsl_device_dst.parent.mkdir(parents=True, exist_ok=True)
-            if dsl_device_src.is_dir() and not (
-                dsl_device_dst.exists() or dsl_device_dst.is_symlink()
-            ):
-                dsl_device_dst.symlink_to(dsl_device_src)
+            if dsl_device_dst.is_symlink():
+                dsl_device_dst.unlink()
+            if dsl_device_src.is_dir():
+                shutil.copytree(dsl_device_src, dsl_device_dst, dirs_exist_ok=True)
             return
 
 
