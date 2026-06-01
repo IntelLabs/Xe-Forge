@@ -33,12 +33,12 @@ All runtime behavior below is gated by these values; re-read `config.yaml` if an
 | **Benchmark** | `xe-forge-skill benchmark <baseline> <optimized> --spec <spec.yaml> [--baseline-us <cached>]` |
 | **Init trials** | `xe-forge-skill trial init <kernel_name> <baseline_file>` |
 | **Save trial** | `xe-forge-skill trial save <kernel_name> <file> [--parent <id>] [--strategy "..."]` |
-| **Record result** | `xe-forge-skill trial result <kernel_name> <trial_id> --correctness <pass\|fail> --speedup <float> --baseline-us <float> --triton-us <float>` |
+| **Record result** | `xe-forge-skill trial result <kernel_name> <trial_id> --correctness <pass\|fail> --speedup <float> --baseline-us <float> --{{ dsl }}-us <float>` |
 | **Check status** | `xe-forge-skill trial status <kernel_name>` |
 | **Best trial** | `xe-forge-skill trial best <kernel_name>` |
 | **Baseline time** | `xe-forge-skill trial baseline-us <kernel_name>` |
 | **Finalize** | `xe-forge-skill trial finalize <kernel_name> <output_file>` |
-| **Profile** (only when `vtune_enabled: true`) | `xe-forge-skill profile <triton_file> --spec <spec.yaml>` |
+| **Profile** (only when `vtune_enabled: true`) | `xe-forge-skill profile <{{ dsl }}_file> --spec <spec.yaml>` |
 
 ## WORKFLOW — Follow these steps in order
 
@@ -58,10 +58,10 @@ For each trial:
 2. **Validate** — `xe-forge-skill validate <file> --dsl {{ dsl }}` (fix until passing).
 3. **Save** — `xe-forge-skill trial save {{ kernel_name }} <file> --parent <id> --strategy "description"`.
 4. **Benchmark** (MANDATORY every trial):
-   - **Trial t0:** `xe-forge-skill benchmark test_kernels/{{ kernel_name }}.py <triton_file> --spec test_kernels/{{ kernel_name }}.yaml`
-   - **Trials t1+:** Get cached baseline via `xe-forge-skill trial baseline-us {{ kernel_name }}`, then `xe-forge-skill benchmark test_kernels/{{ kernel_name }}.py <triton_file> --spec test_kernels/{{ kernel_name }}.yaml --baseline-us <cached>`
-5. **Record** — `xe-forge-skill trial result {{ kernel_name }} <trial_id> --correctness <pass|fail> --speedup <float> --baseline-us <float> --triton-us <float>`
-6. **Profile** — if `vtune_enabled: true` in `config.yaml` and this is trial t1 or later, run `xe-forge-skill profile <triton_file> --spec <spec.yaml>` and use the output to guide the next trial. If `vtune_enabled: false`, skip this step.
+   - **Trial t0:** `xe-forge-skill benchmark test_kernels/{{ kernel_name }}.py <{{ dsl }}_file> --spec test_kernels/{{ kernel_name }}.yaml`
+   - **Trials t1+:** Get cached baseline via `xe-forge-skill trial baseline-us {{ kernel_name }}`, then `xe-forge-skill benchmark test_kernels/{{ kernel_name }}.py <{{ dsl }}_file> --spec test_kernels/{{ kernel_name }}.yaml --baseline-us <cached>`
+5. **Record** — `xe-forge-skill trial result {{ kernel_name }} <trial_id> --correctness <pass|fail> --speedup <float> --baseline-us <float> --{{ dsl }}-us <float>`
+6. **Profile** — if `vtune_enabled: true` in `config.yaml` and this is trial t1 or later, run `xe-forge-skill profile <{{ dsl }}_file> --spec <spec.yaml>` and use the output to guide the next trial. If `vtune_enabled: false`, skip this step.
 7. **Decide next action**:
    - Speedup > 5x -> stop, finalize
    - Speedup improved -> continue on this branch
@@ -76,7 +76,9 @@ xe-forge-skill trial finalize {{ kernel_name }} output/{{ kernel_name }}_optimiz
 
 ## CRITICAL CORRECTNESS CONSTRAINTS
 
+{% if dsl == "triton" %}
 - NO default values for `@triton.autotune` meta-parameters in kernel signature
+{% endif %}
 - Use 1D grid when applying tile swizzling (GROUP_SIZE_M)
 - `boundary_check` uses dimension indices (0, 1), not booleans
 - Cast batch indices to `int64` before stride multiplication

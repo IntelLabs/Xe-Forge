@@ -70,7 +70,7 @@ def generate_workspace(
 
     agent_dir = workspace / ".claude" / "agents"
     agent_dir.mkdir(parents=True, exist_ok=True)
-    (agent_dir / "tool-runner.md").write_text(_render("tool-runner.md.j2"))
+    (agent_dir / "tool-runner.md").write_text(_render("tool-runner.md.j2", dsl=dsl))
 
     _write_kernel_files(workspace, kernel_name, kernel_code, reference_code, spec_path)
     _symlink_knowledge_base(workspace)
