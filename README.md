@@ -1,13 +1,40 @@
+<p align="center">
+  <img src="assets/xe-forge-logo.png" alt="Xe Forge" width="1000"/>
+</p>
+
 # Xe Forge
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/IntelLabs/Xe-Forge/badge)](https://scorecard.dev/viewer/?uri=github.com/IntelLabs/Xe-Forge)
 
 Multi-stage LLM-driven optimization pipeline for Triton kernels targeting Intel XPU.
+
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/IntelLabs/Xe-Forge/badge)](https://scorecard.dev/viewer/?uri=github.com/IntelLabs/Xe-Forge)
 
 The optimizer analyzes Triton kernels, identifies performance issues, and applies optimizations through a series of stages — each powered by an LLM that understands GPU programming, numerical linear algebra, and Intel XPU hardware. Two engines are available: a fully automated DSPy pipeline and a Claude Code engine that generates a ready-to-run workspace you can drive interactively or let xe-forge auto-launch.
 
 📄 **Paper**: [Xe-Forge: Multi-Stage LLM-Powered Kernel Optimization for Intel GPU](https://arxiv.org/abs/2605.26118) (arXiv:2605.26118) — describes the system architecture, the Chain-of-Verification-and-Refinement (CoVeR) agent design, and the Intel GPU knowledge base, along with extensive evaluation on KernelBench Level-2 kernels and Flash Attention on the Intel Arc Pro B70. See the paper for the full set of results and additional details beyond what's covered here.
 
 ⚠️ **Disclaimer**: This project is currently in active development. The code is **not stable** and **not intended for use in production environments**. Interfaces, features, and behaviors are subject to change without notice.
+
+---
+
+## Table of Contents
+
+- [Results on Intel Arc Pro B70](#results-on-intel-arc-pro-b70)
+- [How It Works](#how-it-works)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Engines](#engines)
+- [Skill CLI](#skill-cli)
+- [Writing the Model Class](#writing-the-model-class)
+- [Writing the YAML Spec File](#writing-the-yaml-spec-file)
+- [File Layout](#file-layout)
+- [Optimization Stages](#optimization-stages)
+- [CLI Reference](#cli-reference)
+- [Environment Variables Reference](#environment-variables-reference)
+- [Knowledge Base](#knowledge-base)
+- [Examples](#examples)
+- [Troubleshooting](#troubleshooting)
+- [Citation](#citation)
+- [License](#license)
 
 ---
 
@@ -28,6 +55,34 @@ FlashAttention benchmark optimized across diverse shapes including skinny, non-s
 <p align="center">
   <img src="plots/l2_roofline_gemm_matmul.png" alt="Roofline analysis for GEMM and Matmul kernels" width="500"/>
 </p>
+
+---
+
+## How It Works
+
+1. **Analysis**: The analyzer agent examines the kernel and produces a structured list of issues, each tagged with a category (e.g. `dtype_float64`, `suboptimal_tile_size`, `missing_autotune`).
+
+2. **Planning**: Each issue is mapped to an optimization stage. Stages with no issues are skipped.
+
+3. **Optimization**: For each active stage, the optimizer agent receives the kernel code, issue descriptions, hardware configuration, and problem context (input shapes, dtype, FLOPs, arithmetic intensity). It generates an optimized kernel.
+
+4. **Verification (CoVeR)**: Each optimization attempt is compiled, executed, and compared against the original. If the optimized kernel is incorrect or slower, the agent receives feedback and tries again (up to `AGENT_MAX_ITERATIONS` times).
+
+5. **Re-analysis**: After each stage, the kernel is re-analyzed so later stages see the updated code.
+
+6. **Final measurement**: The fully-optimized kernel is benchmarked against the original with full warmup iterations.
+
+### What the LLM Sees
+
+For each stage, the LLM receives:
+
+- **Original kernel code** (for reference)
+- **Current kernel code** (after previous stages)
+- **Issues to fix** (with descriptions and suggested fixes)
+- **XPU hardware config** (compute units, memory, tile sizes, warp counts)
+- **Problem context**: input tensor shapes, element counts, memory footprint, dtype, Model init args, FLOP count, arithmetic intensity, and whether the kernel is compute-bound or memory-bound
+- **PyTorch reference** (for the algorithmic stage)
+- **Hardware-aware autotune configs** (for the autotuning stage)
 
 ---
 
@@ -539,7 +594,9 @@ When multiple tolerance sources exist, the priority order is:
 
 ## Environment Variables Reference
 
-All settings can be controlled via environment variables or a `.env` file:
+All settings can be controlled via environment variables or a `.env` file.
+
+> **LLM provider**: Xe Forge uses [litellm](https://github.com/BerriAI/litellm) under the hood, so any provider supported by litellm works — set `LLM_MODEL` with the appropriate prefix (`openai/...`, `anthropic/...`, `azure/...`, `bedrock/...`, etc.) and point `OPENAI_API_BASE` / `OPENAI_API_KEY` at the matching endpoint and credentials.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -620,34 +677,6 @@ Curated kernels from [KernelBench](https://github.com/ScalingIntelligence/Kernel
 
 ---
 
-## How It Works
-
-1. **Analysis**: The analyzer agent examines the kernel and produces a structured list of issues, each tagged with a category (e.g. `dtype_float64`, `suboptimal_tile_size`, `missing_autotune`).
-
-2. **Planning**: Each issue is mapped to an optimization stage. Stages with no issues are skipped.
-
-3. **Optimization**: For each active stage, the optimizer agent receives the kernel code, issue descriptions, hardware configuration, and problem context (input shapes, dtype, FLOPs, arithmetic intensity). It generates an optimized kernel.
-
-4. **Verification (CoVeR)**: Each optimization attempt is compiled, executed, and compared against the original. If the optimized kernel is incorrect or slower, the agent receives feedback and tries again (up to `AGENT_MAX_ITERATIONS` times).
-
-5. **Re-analysis**: After each stage, the kernel is re-analyzed so later stages see the updated code.
-
-6. **Final measurement**: The fully-optimized kernel is benchmarked against the original with full warmup iterations.
-
-### What the LLM Sees
-
-For each stage, the LLM receives:
-
-- **Original kernel code** (for reference)
-- **Current kernel code** (after previous stages)
-- **Issues to fix** (with descriptions and suggested fixes)
-- **XPU hardware config** (compute units, memory, tile sizes, warp counts)
-- **Problem context**: input tensor shapes, element counts, memory footprint, dtype, Model init args, FLOP count, arithmetic intensity, and whether the kernel is compute-bound or memory-bound
-- **PyTorch reference** (for the algorithmic stage)
-- **Hardware-aware autotune configs** (for the autotuning stage)
-
----
-
 ## Troubleshooting
 
 ### "Model.__init__() missing required positional argument"
@@ -675,3 +704,9 @@ If you use Xe-Forge in your research, please cite our paper:
   doi={10.48550/arXiv.2605.26118}
 }
 ```
+
+---
+
+## License
+
+Xe Forge is released under the [Apache License 2.0](LICENSE). See the [`LICENSE`](LICENSE) file for the full text.
