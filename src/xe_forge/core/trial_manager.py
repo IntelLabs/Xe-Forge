@@ -40,6 +40,8 @@ class TrialManager:
         for trial in state.get("trials", {}).values():
             if "pytorch_us" in trial and "baseline_us" not in trial:
                 trial["baseline_us"] = trial.pop("pytorch_us")
+            if "triton_us" in trial and "custom_us" not in trial:
+                trial["custom_us"] = trial.pop("triton_us")
         return state
 
     def _save_state(self, kernel_name: str, state: dict) -> None:
@@ -118,7 +120,7 @@ class TrialManager:
             "correctness": None,
             "speedup": None,
             "baseline_us": None,
-            "triton_us": None,
+            "custom_us": None,
             "status": "saved",
         }
         self._save_state(kernel_name, state)
@@ -134,6 +136,7 @@ class TrialManager:
         correctness: str | None = None,
         speedup: float | None = None,
         baseline_us: float | None = None,
+        custom_us: float | None = None,
         triton_us: float | None = None,
     ) -> dict:
         """Record benchmark results for a trial. Returns the trial dict."""
@@ -153,8 +156,10 @@ class TrialManager:
             trial["speedup"] = speedup
         if baseline_us is not None:
             trial["baseline_us"] = baseline_us
+        if custom_us is not None:
+            trial["custom_us"] = custom_us
         if triton_us is not None:
-            trial["triton_us"] = triton_us
+            trial["custom_us"] = triton_us
 
         if baseline_us is not None and state.get("baseline_us") is None:
             state["baseline_us"] = [baseline_us]
@@ -222,8 +227,8 @@ class TrialManager:
             icon = status_icon.get(trial["status"], "?")
             speedup_str = f"{trial['speedup']:.2f}x" if trial["speedup"] is not None else "---"
             runtime = ""
-            if trial.get("baseline_us") is not None and trial.get("triton_us") is not None:
-                runtime = f" (bl={trial['baseline_us']:.0f}us, tr={trial['triton_us']:.0f}us)"
+            if trial.get("baseline_us") is not None and trial.get("custom_us") is not None:
+                runtime = f" (bl={trial['baseline_us']:.0f}us, opt={trial['custom_us']:.0f}us)"
             best_marker = " <<<< BEST" if tid == state["best_trial"] else ""
             strategy_short = (trial["strategy"] or "")[:60]
             lines.append(

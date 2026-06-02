@@ -30,7 +30,7 @@ def run(args):
                 correctness=args.correctness,
                 speedup=args.speedup,
                 baseline_us=args.baseline_us,
-                triton_us=args.triton_us,
+                custom_us=getattr(args, "custom_us", getattr(args, "triton_us", None)),
             )
             status_icon = {"completed": "+", "failed": "X", "partial": "~", "saved": "?"}
             icon = status_icon.get(trial["status"], "?")

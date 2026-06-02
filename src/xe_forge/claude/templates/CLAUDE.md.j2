@@ -33,7 +33,7 @@ All runtime behavior below is gated by these values; re-read `config.yaml` if an
 | **Benchmark** | `xe-forge-skill benchmark <baseline> <optimized> --spec <spec.yaml> [--baseline-us <cached>]` |
 | **Init trials** | `xe-forge-skill trial init <kernel_name> <baseline_file>` |
 | **Save trial** | `xe-forge-skill trial save <kernel_name> <file> [--parent <id>] [--strategy "..."]` |
-| **Record result** | `xe-forge-skill trial result <kernel_name> <trial_id> --correctness <pass\|fail> --speedup <float> --baseline-us <float> --{{ dsl }}-us <float>` |
+| **Record result** | `xe-forge-skill trial result <kernel_name> <trial_id> --correctness <pass\|fail> --speedup <float> --baseline-us <float> --custom-us <float>` |
 | **Check status** | `xe-forge-skill trial status <kernel_name>` |
 | **Best trial** | `xe-forge-skill trial best <kernel_name>` |
 | **Baseline time** | `xe-forge-skill trial baseline-us <kernel_name>` |
