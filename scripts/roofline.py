@@ -278,8 +278,10 @@ def plot_roofline(points: list[Point], hw: Hardware, cfg: PlotConfig) -> None:
 
     # --- axis ranges with a little padding (log space) ---
     ridge_ai = hw.peak_tflops / (hw.peak_bandwidth_gbps / 1000.0)  # AI where roofs meet
-    x_min = min(min(ais), ridge_ai) / 3.0
-    x_max = max(max(ais), ridge_ai) * 3.0
+    # Gentle left padding so the axis starts just below the left-most point
+    # (a tighter factor than the other edges, which keep the roomier /3 ·3 pad).
+    x_min = min(min(ais), ridge_ai) / 1.4
+    x_max = max(max(ais), ridge_ai) * 1.8
     y_min = min(min(ys), hw.peak_tflops) / 3.0
     y_max = hw.peak_tflops * 1.6
 
@@ -301,20 +303,22 @@ def plot_roofline(points: list[Point], hw: Hardware, cfg: PlotConfig) -> None:
         style="italic",
     )
     # Place the bandwidth label on the sloped part, a bit left of the ridge.
-    bw_label_x = ridge_ai / 6.0
-    if bw_label_x > x_min:
+    # Clamp into the visible window so a tight x_min can't push it off-screen:
+    # keep it left of the ridge but no further left than the axis start.
+    bw_label_x = max(ridge_ai / 6.0, x_min * 1.15)
+    if bw_label_x < ridge_ai:
         bw_label_y = bw_label_x * hw.peak_bandwidth_gbps / 1000.0
         ax.annotate(
             f"{hw.peak_bandwidth_gbps:g} GB/s",
             xy=(bw_label_x, bw_label_y),
-            xytext=(4, 14),
+            xytext=(0, 10),
             textcoords="offset points",
             ha="left",
             va="top",
             fontsize=8,
             color="dimgray",
             style="italic",
-            rotation=25,
+            rotation=23,
             rotation_mode="anchor",
         )
 
@@ -440,26 +444,36 @@ def plot_roofline(points: list[Point], hw: Hardware, cfg: PlotConfig) -> None:
         # Points sharing a `pair` id are the same spec (e.g. baseline vs
         # optimized), so they get ONE number / key line, not two. Points with
         # no pair id are each their own spec.
-        key_lines = []
-        group_number: dict[str, int] = {}
-        next_n = 1
-        # First pass: assign a number per spec and pick its anchor point. The
-        # anchor is the baseline ("Original") point so the number sits at the
-        # arrow's tail, not its head.
-        anchors: list[tuple[int, float, float]] = []  # (number, ai, yval)
+        # First pass: collect each unique spec (one per `pair`; unpaired points
+        # are their own spec) with the point that anchors its number. The anchor
+        # is the baseline ("Original") point so the number sits at the arrow's
+        # tail, not its head.
+        spec_order: list[str] = []  # gids in first-seen order
         anchor_pt: dict[str, Point] = {}
+        label_pt: dict[str, Point] = {}  # representative for family/label
         for i, p in enumerate(points):
             gid = p.pair or f"__point_{i}"  # unpaired points are unique
-            if gid not in group_number:
-                group_number[gid] = next_n
-                key_lines.append(f"{next_n}. {p.label or p.series}")
+            if gid not in label_pt:
+                spec_order.append(gid)
+                label_pt[gid] = p
                 anchor_pt[gid] = p
-                next_n += 1
-            elif p.series.lower().startswith("orig"):
+            if p.series.lower().startswith("orig"):
                 anchor_pt[gid] = p  # prefer the baseline as the anchor
-        for gid, n in group_number.items():
-            p = anchor_pt[gid]
-            anchors.append((n, p.arithmetic_intensity, yval(p)))
+
+        # Number specs in alphabetical order of their label, so the key box
+        # reads A->Z and a point can be found by name. Specs with no label keep
+        # first-seen (CSV) order at the end.
+        spec_order.sort(key=lambda gid: (label_pt[gid].label == "", label_pt[gid].label.lower()))
+
+        key_lines = []
+        group_number: dict[str, int] = {}
+        anchors: list[tuple[int, float, float]] = []  # (number, ai, yval)
+        for n, gid in enumerate(spec_order, start=1):
+            group_number[gid] = n
+            p = label_pt[gid]
+            key_lines.append(f"{n}. {p.label or p.series}")
+            a = anchor_pt[gid]
+            anchors.append((n, a.arithmetic_intensity, yval(a)))
 
         # Second pass: numbers whose anchors nearly coincide (in log space)
         # would print on top of each other. Bucket them and fan the text out
