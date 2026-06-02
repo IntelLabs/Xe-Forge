@@ -88,9 +88,15 @@ class Hardware:
 HARDWARE_PRESETS: dict[str, Hardware] = {
     "arc-pro-b70": Hardware("Intel Arc Pro B70", peak_tflops=160.0, peak_bandwidth_gbps=608.0),
     "arc-b580": Hardware("Intel Arc B580", peak_tflops=117.0, peak_bandwidth_gbps=456.0),
-    "max-1550": Hardware("Intel Data Center GPU Max 1550 (PVC)", peak_tflops=839.0, peak_bandwidth_gbps=3276.0),
-    "max-1100": Hardware("Intel Data Center GPU Max 1100 (PVC)", peak_tflops=362.0, peak_bandwidth_gbps=1228.0),
-    "flex-170": Hardware("Intel Data Center GPU Flex 170", peak_tflops=137.0, peak_bandwidth_gbps=576.0),
+    "max-1550": Hardware(
+        "Intel Data Center GPU Max 1550 (PVC)", peak_tflops=839.0, peak_bandwidth_gbps=3276.0
+    ),
+    "max-1100": Hardware(
+        "Intel Data Center GPU Max 1100 (PVC)", peak_tflops=362.0, peak_bandwidth_gbps=1228.0
+    ),
+    "flex-170": Hardware(
+        "Intel Data Center GPU Flex 170", peak_tflops=137.0, peak_bandwidth_gbps=576.0
+    ),
 }
 
 
@@ -101,8 +107,15 @@ HARDWARE_PRESETS: dict[str, Hardware] = {
 COLUMN_ALIASES: dict[str, set[str]] = {
     "tflops": {"tflops", "perf", "performance", "throughput"},
     "gflops": {"gflops"},
-    "arithmetic_intensity": {"arithmetic_intensity", "ai", "intensity", "flop_per_byte", "flops_per_byte"},
+    "arithmetic_intensity": {
+        "arithmetic_intensity",
+        "ai",
+        "intensity",
+        "flop_per_byte",
+        "flops_per_byte",
+    },
     "series": {"series", "backend", "kind", "category", "engine"},
+    "family": {"family", "group_color", "op", "kernel_family"},
     "label": {"label", "name", "shape", "config"},
     "pair": {"pair", "group", "kernel", "link"},
     "flop": {"flop", "flops", "total_flop", "total_flops"},
@@ -116,6 +129,7 @@ class Point:
     arithmetic_intensity: float
     tflops: float | None  # None => "AI-only", plotted at its roofline ceiling
     series: str = "kernel"
+    family: str = ""  # optional grouping that drives marker COLOR (series drives shape)
     label: str = ""
     pair: str = ""
 
@@ -175,8 +189,7 @@ def load_points(csv_path: str) -> list[Point]:
             # placed on the roof, showing the theoretical ceiling for that shape).
             if ai is None:
                 print(
-                    f"warning: skipping row {lineno} — could not determine "
-                    f"arithmetic_intensity",
+                    f"warning: skipping row {lineno} — could not determine arithmetic_intensity",
                     file=sys.stderr,
                 )
                 continue
@@ -192,7 +205,9 @@ def load_points(csv_path: str) -> list[Point]:
                 Point(
                     arithmetic_intensity=ai,
                     tflops=tflops,
-                    series=(row.get(cols["series"], "").strip() if "series" in cols else "") or "kernel",
+                    series=(row.get(cols["series"], "").strip() if "series" in cols else "")
+                    or "kernel",
+                    family=(row.get(cols["family"], "").strip() if "family" in cols else ""),
                     label=(row.get(cols["label"], "").strip() if "label" in cols else ""),
                     pair=(row.get(cols["pair"], "").strip() if "pair" in cols else ""),
                 )
@@ -292,14 +307,14 @@ def plot_roofline(points: list[Point], hw: Hardware, cfg: PlotConfig) -> None:
         ax.annotate(
             f"{hw.peak_bandwidth_gbps:g} GB/s",
             xy=(bw_label_x, bw_label_y),
-            xytext=(4, -2),
+            xytext=(4, 14),
             textcoords="offset points",
             ha="left",
             va="top",
             fontsize=8,
             color="dimgray",
             style="italic",
-            rotation=38,
+            rotation=25,
             rotation_mode="anchor",
         )
 
@@ -313,13 +328,40 @@ def plot_roofline(points: list[Point], hw: Hardware, cfg: PlotConfig) -> None:
         ordered += [s for s in series_seen if s not in ordered]
         series_seen = ordered
 
+    # `family` (if present) is an independent grouping that drives COLOR, while
+    # `series` drives MARKER SHAPE. This lets one point encode two facts at once
+    # — e.g. color = kernel family (BatchedMoE/FusedMoE/UnifiedAttention), shape
+    # = Original vs Optimized. With no family column we fall back to the old
+    # behavior: series alone drives both color and shape.
+    families_seen: list[str] = []
+    for p in points:
+        if p.family and p.family not in families_seen:
+            families_seen.append(p.family)
+    use_family = bool(families_seen)
+
     cmap = plt.get_cmap("tab10")
     markers = ["o", "*", "D", "s", "^", "v", "P", "X"]
-    style = {
-        s: (cmap(i % 10), markers[i % len(markers)]) for i, s in enumerate(series_seen)
-    }
+    if use_family:
+        color_of = {f: cmap(i % 10) for i, f in enumerate(families_seen)}
+        marker_of = {s: markers[i % len(markers)] for i, s in enumerate(series_seen)}
 
-    # --- optional connector lines between points sharing a `pair` id ---
+        def point_color(p: Point):
+            return color_of[p.family]
+
+        def point_marker(p: Point) -> str:
+            return marker_of[p.series]
+    else:
+        style = {s: (cmap(i % 10), markers[i % len(markers)]) for i, s in enumerate(series_seen)}
+
+        def point_color(p: Point):
+            return style[p.series][0]
+
+        def point_marker(p: Point) -> str:
+            return style[p.series][1]
+
+    # --- optional connector arrows between points sharing a `pair` id ---
+    # The arrow points from the baseline ("Original") to the "Optimized" point,
+    # so direction reads as "where the optimization moved the kernel".
     if cfg.connect:
         from collections import defaultdict
 
@@ -330,33 +372,67 @@ def plot_roofline(points: list[Point], hw: Hardware, cfg: PlotConfig) -> None:
         for members in groups.values():
             if len(members) < 2:
                 continue
-            members = sorted(members, key=yval)
-            ax.plot(
-                [m.arithmetic_intensity for m in members],
-                [yval(m) for m in members],
-                color="gray",
-                linewidth=0.8,
-                alpha=0.6,
+            src = next((m for m in members if m.series.lower().startswith("orig")), None)
+            dst = next((m for m in members if m.series.lower().startswith("opt")), None)
+            if src is None or dst is None:
+                # No explicit Original/Optimized series — fall back to low->high.
+                lo, hi = sorted(members, key=yval)[0], sorted(members, key=yval)[-1]
+                src, dst = lo, hi
+            ax.annotate(
+                "",
+                xy=(dst.arithmetic_intensity, yval(dst)),
+                xytext=(src.arithmetic_intensity, yval(src)),
+                arrowprops=dict(
+                    arrowstyle="->",
+                    color="gray",
+                    linewidth=0.8,
+                    alpha=0.7,
+                    shrinkA=4,
+                    shrinkB=4,
+                ),
                 zorder=2,
             )
 
-    # --- scatter each series ---
-    for s in series_seen:
-        color, marker = style[s]
-        sx = [p.arithmetic_intensity for p in points if p.series == s]
-        sy = [yval(p) for p in points if p.series == s]
-        ax.scatter(
-            sx,
-            sy,
-            label=s,
-            color=color,
-            marker=marker,
-            s=90 if marker == "*" else 55,
-            edgecolors="black",
-            linewidths=0.5,
-            zorder=6,
-            alpha=0.9,
-        )
+    # --- scatter points ---
+    # Group by (family, series) so each combination gets its consistent
+    # color (family) + marker (series). Legend entries are added separately
+    # below so color and shape are explained independently.
+    if use_family:
+        for f in families_seen:
+            for s in series_seen:
+                sx = [p.arithmetic_intensity for p in points if p.family == f and p.series == s]
+                sy = [yval(p) for p in points if p.family == f and p.series == s]
+                if not sx:
+                    continue
+                marker = marker_of[s]
+                ax.scatter(
+                    sx,
+                    sy,
+                    color=color_of[f],
+                    marker=marker,
+                    s=90 if marker == "*" else 55,
+                    edgecolors="black",
+                    linewidths=0.5,
+                    zorder=6,
+                    alpha=0.9,
+                )
+    else:
+        for s in series_seen:
+            color, marker = style[s]
+            sx = [p.arithmetic_intensity for p in points if p.series == s]
+            sy = [yval(p) for p in points if p.series == s]
+            ax.scatter(
+                sx,
+                sy,
+                label=s,
+                color=color,
+                marker=marker,
+                s=90 if marker == "*" else 55,
+                edgecolors="black",
+                linewidths=0.5,
+                zorder=6,
+                alpha=0.9,
+            )
 
     # --- optional per-point annotations ---
     if cfg.key:
@@ -367,22 +443,59 @@ def plot_roofline(points: list[Point], hw: Hardware, cfg: PlotConfig) -> None:
         key_lines = []
         group_number: dict[str, int] = {}
         next_n = 1
+        # First pass: assign a number per spec and pick its anchor point. The
+        # anchor is the baseline ("Original") point so the number sits at the
+        # arrow's tail, not its head.
+        anchors: list[tuple[int, float, float]] = []  # (number, ai, yval)
+        anchor_pt: dict[str, Point] = {}
         for i, p in enumerate(points):
             gid = p.pair or f"__point_{i}"  # unpaired points are unique
             if gid not in group_number:
                 group_number[gid] = next_n
                 key_lines.append(f"{next_n}. {p.label or p.series}")
+                anchor_pt[gid] = p
                 next_n += 1
-            n = group_number[gid]
-            ax.annotate(
-                str(n),
-                xy=(p.arithmetic_intensity, yval(p)),
-                xytext=(4, 4),
-                textcoords="offset points",
-                fontsize=8,
-                fontweight="bold",
-                color="black",
-            )
+            elif p.series.lower().startswith("orig"):
+                anchor_pt[gid] = p  # prefer the baseline as the anchor
+        for gid, n in group_number.items():
+            p = anchor_pt[gid]
+            anchors.append((n, p.arithmetic_intensity, yval(p)))
+
+        # Second pass: numbers whose anchors nearly coincide (in log space)
+        # would print on top of each other. Bucket them and fan the text out
+        # radially so each number lands in its own slot.
+        import math
+
+        TOL = 0.04  # log10 distance under which two anchors are "the same spot"
+        buckets: dict[tuple[int, int], list[tuple[int, float, float]]] = {}
+        for n, ai, y in anchors:
+            key = (round(math.log10(ai) / TOL), round(math.log10(y) / TOL))
+            buckets.setdefault(key, []).append((n, ai, y))
+
+        for members in buckets.values():
+            members.sort(key=lambda m: m[0])
+            count = len(members)
+            for j, (n, ai, y) in enumerate(members):
+                if count == 1:
+                    dx, dy = 9, 5
+                else:
+                    # Fan the cluster around the anchor (radius grows slightly
+                    # with cluster size so big stacks still separate).
+                    angle = 2 * math.pi * j / count
+                    radius = 9 + 2.5 * count
+                    dx = 4 + radius * math.cos(angle)
+                    dy = 4 + radius * math.sin(angle)
+                ax.annotate(
+                    str(n),
+                    xy=(ai, y),
+                    xytext=(dx, dy),
+                    textcoords="offset points",
+                    fontsize=8,
+                    fontweight="bold",
+                    color="black",
+                    ha="center",
+                    va="center",
+                )
         fig.text(
             0.80,
             0.5,
@@ -416,8 +529,42 @@ def plot_roofline(points: list[Point], hw: Hardware, cfg: PlotConfig) -> None:
     ax.set_ylabel("Performance (TFLOPS)")
     ax.set_title(cfg.title)
     ax.grid(True, which="both", linestyle=":", linewidth=0.5, alpha=0.5)
+    if use_family:
+        # Two-part legend: color explains the family, marker shape explains the
+        # series (Original vs Optimized). Proxy handles carry no data.
+        from matplotlib.lines import Line2D
+
+        handles = [
+            Line2D(
+                [],
+                [],
+                linestyle="",
+                marker="o",
+                color=color_of[f],
+                markeredgecolor="black",
+                markeredgewidth=0.5,
+                markersize=7,
+                label=f,
+            )
+            for f in families_seen
+        ]
+        handles += [
+            Line2D(
+                [],
+                [],
+                linestyle="",
+                marker=marker_of[s],
+                color="dimgray",
+                markeredgecolor="black",
+                markeredgewidth=0.5,
+                markersize=9 if marker_of[s] == "*" else 7,
+                label=s,
+            )
+            for s in series_seen
+        ]
+        ax.legend(handles=handles, frameon=True, fontsize=8, loc="lower right")
     # Only show a legend if there's more than the default single series.
-    if len(series_seen) > 1 or series_seen[0] != "kernel":
+    elif len(series_seen) > 1 or series_seen[0] != "kernel":
         ax.legend(frameon=True, fontsize=8, loc="lower right")
 
     if not cfg.key:
@@ -438,7 +585,9 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=__doc__,
     )
     p.add_argument("csv", nargs="?", help="Input CSV file of measurements")
-    p.add_argument("-o", "--output", default="roofline.png", help="Output image path (default: roofline.png)")
+    p.add_argument(
+        "-o", "--output", default="roofline.png", help="Output image path (default: roofline.png)"
+    )
     p.add_argument("-t", "--title", default="Roofline", help="Plot title")
     p.add_argument(
         "--hardware",

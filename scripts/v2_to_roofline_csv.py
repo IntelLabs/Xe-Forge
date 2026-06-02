@@ -67,6 +67,13 @@ FAMILY_SPEC: dict[str, str] = {
     "4_UnifiedAttention": "examples/vllm/3_UnifiedAttention.yaml",
 }
 
+# CSV family name -> clean display name (drops the leading index).
+FAMILY_NAME: dict[str, str] = {
+    "2_BatchedMoE": "BatchedMoE",
+    "3_FusedMoE": "FusedMoE",
+    "4_UnifiedAttention": "UnifiedAttention",
+}
+
 # Per-family quant code -> (activation bytes, weight bytes). The codes are
 # family-specific: the two MoE specs assign different meanings to the same int.
 BATCHEDMOE_QUANT = {0: (2, 2), 1: (1, 1), 2: (2, 1)}  # bf16, fp8 w8a8, int8 w8a16
@@ -149,6 +156,21 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("csv", help="Input v2 benchmark CSV")
     p.add_argument("-o", "--output", default="-", help="Output roofline CSV (default: stdout)")
+    p.add_argument(
+        "--min-tflops",
+        type=float,
+        default=0.0,
+        help="Drop a pair if its Optimized throughput is below this (declutters "
+        "the plot by removing the dense band of memory-bound decode/small-batch "
+        "shapes). Both rows of a surviving pair are kept. Default: 0 (keep all).",
+    )
+    p.add_argument(
+        "--min-ai",
+        type=float,
+        default=0.0,
+        help="Drop a pair whose arithmetic intensity is below this (FLOP/byte). "
+        "Removes the left-most memory-bound shapes. Default: 0 (keep all).",
+    )
     args = p.parse_args(argv)
 
     repo_root = Path(__file__).resolve().parent.parent
@@ -193,15 +215,48 @@ def main(argv: list[str] | None = None) -> int:
 
             label = comments.get(key, key)
             pair = f"{fam}:{key}"
-            rows.append({"series": "Original", "label": label, "pair": pair,
+            family = FAMILY_NAME.get(fam, fam)
+            rows.append({"series": "Original", "family": family, "label": label, "pair": pair,
                          "arithmetic_intensity": f"{ai:.2f}", "tflops": f"{base_tflops:.3f}"})
-            rows.append({"series": "Optimized", "label": label, "pair": pair,
+            rows.append({"series": "Optimized", "family": family, "label": label, "pair": pair,
                          "arithmetic_intensity": f"{ai:.2f}", "tflops": f"{opt_tflops:.3f}"})
 
     if not rows:
         raise SystemExit(f"error: no usable rows in {args.csv}")
 
-    fieldnames = ["series", "label", "pair", "arithmetic_intensity", "tflops"]
+    # Optional declutter: drop a whole pair when its Optimized point is below
+    # the threshold. Filtering on Optimized (the headline result) keeps the
+    # baseline alongside it so the baseline->optimized connector still draws.
+    if args.min_tflops > 0:
+        opt_tflops_by_pair = {
+            r["pair"]: float(r["tflops"]) for r in rows if r["series"] == "Optimized"
+        }
+        dropped = sorted(
+            (p for p, t in opt_tflops_by_pair.items() if t < args.min_tflops),
+            key=lambda p: opt_tflops_by_pair[p],
+        )
+        rows = [r for r in rows if opt_tflops_by_pair.get(r["pair"], 0.0) >= args.min_tflops]
+        for p in dropped:
+            print(f"filtered {p}: {opt_tflops_by_pair[p]:.3f} < {args.min_tflops:g} TFLOPS", file=sys.stderr)
+        if not rows:
+            raise SystemExit(f"error: --min-tflops {args.min_tflops:g} filtered out every pair")
+
+    # Optional declutter on the x-axis: drop the left-most (low arithmetic
+    # intensity) pairs. Both rows of a pair share the same AI, so filtering
+    # row-by-row keeps pairs intact.
+    if args.min_ai > 0:
+        dropped_ai = sorted(
+            {(r["pair"], float(r["arithmetic_intensity"]))
+             for r in rows if float(r["arithmetic_intensity"]) < args.min_ai},
+            key=lambda pa: pa[1],
+        )
+        rows = [r for r in rows if float(r["arithmetic_intensity"]) >= args.min_ai]
+        for p, ai in dropped_ai:
+            print(f"filtered {p}: AI {ai:.2f} < {args.min_ai:g} FLOP/byte", file=sys.stderr)
+        if not rows:
+            raise SystemExit(f"error: --min-ai {args.min_ai:g} filtered out every pair")
+
+    fieldnames = ["series", "family", "label", "pair", "arithmetic_intensity", "tflops"]
     out = sys.stdout if args.output == "-" else open(args.output, "w", newline="")
     writer = csv.DictWriter(out, fieldnames=fieldnames)
     writer.writeheader()
