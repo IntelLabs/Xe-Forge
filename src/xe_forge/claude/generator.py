@@ -1,8 +1,9 @@
 """Generate a Claude Code workspace for kernel optimization.
 
-Creates CLAUDE.md, config.yaml, .claude/commands/, .claude/agents/,
-and copies kernel files into the workspace. All text artifacts are
-rendered from Jinja templates under ``templates/``.
+Creates CLAUDE.md, config.yaml, .claude/settings.local.json,
+.claude/commands/, .claude/agents/, and copies kernel files into
+the workspace. All text artifacts are rendered from Jinja templates
+under ``templates/``.
 """
 
 from __future__ import annotations
@@ -71,6 +72,7 @@ def generate_workspace(
     agent_dir = workspace / ".claude" / "agents"
     agent_dir.mkdir(parents=True, exist_ok=True)
     (agent_dir / "tool-runner.md").write_text(_render("tool-runner.md.j2", dsl=dsl))
+    (workspace / ".claude" / "settings.local.json").write_text(_render("settings.local.json.j2"))
 
     _write_kernel_files(workspace, kernel_name, kernel_code, reference_code, spec_path)
     _copy_knowledge_base(workspace, dsl, device)
