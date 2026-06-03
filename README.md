@@ -32,6 +32,7 @@ The optimizer analyzes Triton kernels, identifies performance issues, and applie
 - [Environment Variables Reference](#environment-variables-reference)
 - [Knowledge Base](#knowledge-base)
 - [Examples](#examples)
+- [Roofline Plots](#roofline-plots)
 - [Troubleshooting](#troubleshooting)
 - [Citation](#citation)
 - [License](#license)
@@ -674,6 +675,12 @@ Both variables have these defaults, so if you place the `knowledge_base/` direct
 ## Examples
 
 Curated kernels from [KernelBench](https://github.com/ScalingIntelligence/KernelBench) Level 2 and the [Intel XPU Triton benchmarks](https://github.com/intel/intel-xpu-backend-for-triton/tree/main/benchmarks/triton_kernels_benchmark), organized by category (GEMM, fused ops, reductions, attention, mixed ops). See [`EXAMPLES.md`](EXAMPLES.md) for the full list and usage instructions.
+
+---
+
+## Roofline Plots
+
+The [`scripts/`](scripts/) folder holds standalone tools for generating roofline plots — achieved performance (TFLOPS) against arithmetic intensity (FLOP/byte), overlaid with the hardware compute/bandwidth ceilings — like the ones at the top of this README. They don't import `xe_forge`, so you can copy a results CSV off an XPU box and plot it anywhere. See [`scripts/README.md`](scripts/README.md) for the CSV formats, hardware presets, and full usage.
 
 ---
 

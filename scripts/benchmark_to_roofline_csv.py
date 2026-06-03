@@ -5,9 +5,9 @@
 #     "PyYAML>=6.0.0",
 # ]
 # ///
-"""Convert a v2 benchmark CSV into the roofline.py input format.
+"""Convert a benchmark results CSV into the roofline.py input format.
 
-The v2 benchmark CSV (one row per kernel variant) carries *measured* times for
+The benchmark CSV (one row per kernel variant) carries *measured* times for
 both the reference (`baseline_us`) and the optimized Triton kernel
 (`triton_us`), plus the optimized throughput (`tflops`). roofline.py instead
 wants one row per *point* with an `arithmetic_intensity` column, and pairs of
@@ -44,10 +44,10 @@ compute-bound position; real kernels with imperfect reuse sit further left.
 ------------------------------------------------------------------------------
 Usage
 ------------------------------------------------------------------------------
-  uv run scripts/v2_to_roofline_csv.py v2_benchmark.csv -o v2_roofline.csv
-  uv run scripts/roofline.py v2_roofline.csv --hardware arc-pro-b70 \
-      --connect --key --title "Roofline — v2 (baseline vs Triton)" \
-      -o plots/v2_roofline.png
+  uv run scripts/benchmark_to_roofline_csv.py benchmark.csv -o roofline_input.csv
+  uv run scripts/roofline.py roofline_input.csv --hardware arc-pro-b70 \
+      --connect --key --title "Roofline (baseline vs Triton)" \
+      -o plots/roofline.png
 """
 
 from __future__ import annotations
@@ -154,7 +154,7 @@ def load_spec_dims(spec_path: Path) -> tuple[dict[str, dict], dict[str, str]]:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("csv", help="Input v2 benchmark CSV")
+    p.add_argument("csv", help="Input benchmark results CSV")
     p.add_argument("-o", "--output", default="-", help="Output roofline CSV (default: stdout)")
     p.add_argument(
         "--min-tflops",
