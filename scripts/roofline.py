@@ -386,14 +386,14 @@ def plot_roofline(points: list[Point], hw: Hardware, cfg: PlotConfig) -> None:
                 "",
                 xy=(dst.arithmetic_intensity, yval(dst)),
                 xytext=(src.arithmetic_intensity, yval(src)),
-                arrowprops=dict(
-                    arrowstyle="->",
-                    color="gray",
-                    linewidth=0.8,
-                    alpha=0.7,
-                    shrinkA=4,
-                    shrinkB=4,
-                ),
+                arrowprops={
+                    "arrowstyle": "->",
+                    "color": "gray",
+                    "linewidth": 0.8,
+                    "alpha": 0.7,
+                    "shrinkA": 4,
+                    "shrinkB": 4,
+                },
                 zorder=2,
             )
 
@@ -518,7 +518,12 @@ def plot_roofline(points: list[Point], hw: Hardware, cfg: PlotConfig) -> None:
             va="center",
             ha="left",
             family="monospace",
-            bbox=dict(boxstyle="round", facecolor="white", edgecolor="lightgray", alpha=0.9),
+            bbox={
+                "boxstyle": "round",
+                "facecolor": "white",
+                "edgecolor": "lightgray",
+                "alpha": 0.9,
+            },
         )
         # Leave room on the right for the key box.
         fig.subplots_adjust(right=0.78)

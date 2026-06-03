@@ -120,7 +120,9 @@ def extract_comments(text: str) -> dict[str, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("spec", help="Path to the kernel spec YAML")
     p.add_argument("-o", "--output", default="-", help="Output CSV path (default: stdout)")
     p.add_argument(

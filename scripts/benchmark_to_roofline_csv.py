@@ -153,7 +153,9 @@ def load_spec_dims(spec_path: Path) -> tuple[dict[str, dict], dict[str, str]]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("csv", help="Input benchmark results CSV")
     p.add_argument("-o", "--output", default="-", help="Output roofline CSV (default: stdout)")
     p.add_argument(
@@ -174,9 +176,7 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     repo_root = Path(__file__).resolve().parent.parent
-    specs = {
-        fam: load_spec_dims(repo_root / rel) for fam, rel in FAMILY_SPEC.items()
-    }
+    specs = {fam: load_spec_dims(repo_root / rel) for fam, rel in FAMILY_SPEC.items()}
 
     rows: list[dict] = []
     skipped: list[str] = []
@@ -216,10 +216,26 @@ def main(argv: list[str] | None = None) -> int:
             label = comments.get(key, key)
             pair = f"{fam}:{key}"
             family = FAMILY_NAME.get(fam, fam)
-            rows.append({"series": "Original", "family": family, "label": label, "pair": pair,
-                         "arithmetic_intensity": f"{ai:.2f}", "tflops": f"{base_tflops:.3f}"})
-            rows.append({"series": "Optimized", "family": family, "label": label, "pair": pair,
-                         "arithmetic_intensity": f"{ai:.2f}", "tflops": f"{opt_tflops:.3f}"})
+            rows.append(
+                {
+                    "series": "Original",
+                    "family": family,
+                    "label": label,
+                    "pair": pair,
+                    "arithmetic_intensity": f"{ai:.2f}",
+                    "tflops": f"{base_tflops:.3f}",
+                }
+            )
+            rows.append(
+                {
+                    "series": "Optimized",
+                    "family": family,
+                    "label": label,
+                    "pair": pair,
+                    "arithmetic_intensity": f"{ai:.2f}",
+                    "tflops": f"{opt_tflops:.3f}",
+                }
+            )
 
     if not rows:
         raise SystemExit(f"error: no usable rows in {args.csv}")
@@ -237,7 +253,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         rows = [r for r in rows if opt_tflops_by_pair.get(r["pair"], 0.0) >= args.min_tflops]
         for p in dropped:
-            print(f"filtered {p}: {opt_tflops_by_pair[p]:.3f} < {args.min_tflops:g} TFLOPS", file=sys.stderr)
+            print(
+                f"filtered {p}: {opt_tflops_by_pair[p]:.3f} < {args.min_tflops:g} TFLOPS",
+                file=sys.stderr,
+            )
         if not rows:
             raise SystemExit(f"error: --min-tflops {args.min_tflops:g} filtered out every pair")
 
@@ -246,8 +265,11 @@ def main(argv: list[str] | None = None) -> int:
     # row-by-row keeps pairs intact.
     if args.min_ai > 0:
         dropped_ai = sorted(
-            {(r["pair"], float(r["arithmetic_intensity"]))
-             for r in rows if float(r["arithmetic_intensity"]) < args.min_ai},
+            {
+                (r["pair"], float(r["arithmetic_intensity"]))
+                for r in rows
+                if float(r["arithmetic_intensity"]) < args.min_ai
+            },
             key=lambda pa: pa[1],
         )
         rows = [r for r in rows if float(r["arithmetic_intensity"]) >= args.min_ai]
