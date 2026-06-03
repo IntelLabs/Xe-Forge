@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
 
-import torch
 import yaml
 from ai_bench.harness.core import (
     InitKey,
@@ -24,6 +23,8 @@ from ai_bench.harness.core import (
     get_torch_dtype,
 )
 from ai_bench.utils import eval_eq
+
+from xe_forge.core.dtype_utils import make_rand_tensor
 
 V_BENCH_XPU = "bench-xpu"
 
@@ -157,7 +158,12 @@ class KernelSpec:
         variant_type: str = "bench-gpu",
         variant_index: int = 0,
     ):
-        """Get torch dtype for variant."""
+        """Get torch dtype for variant (single dtype, for backward compat).
+
+        Returns the variant-level override when present, otherwise the first
+        input's dtype.  Use ``get_input_dtypes`` when per-input resolution is
+        needed.
+        """
         vl = self._variants(variant_type)
 
         # Variant-level dtype override
@@ -172,6 +178,42 @@ class KernelSpec:
             return get_torch_dtype(first_input.dtype)
 
         return get_torch_dtype("float32")
+
+    def get_input_dtypes(
+        self,
+        variant_type: str = "bench-gpu",
+        variant_index: int = 0,
+    ) -> list:
+        """Get per-input torch dtypes for a variant.
+
+        When the variant declares a dtype override, every input uses that
+        dtype.  Otherwise each input uses its own declared dtype from the
+        ``inputs:`` section.
+        """
+        vl = self._variants(variant_type)
+
+        variant_dtype_override = None
+        if vl and variant_index < len(vl):
+            variant = vl[variant_index]
+            if variant.dtype:
+                variant_dtype_override = get_torch_dtype(variant.dtype)
+
+        if variant_dtype_override is not None:
+            params = vl[variant_index].params if vl else list(self.inputs.keys())
+            return [variant_dtype_override] * len(params)
+
+        dtypes = []
+        params = (
+            vl[variant_index].params
+            if (vl and variant_index < len(vl))
+            else list(self.inputs.keys())
+        )
+        for param in params:
+            if param in self.inputs:
+                dtypes.append(get_torch_dtype(self.inputs[param].dtype))
+            else:
+                dtypes.append(get_torch_dtype("float32"))
+        return dtypes
 
     def get_flop(
         self,
@@ -224,10 +266,12 @@ class KernelSpec:
         variant_index: int = 0,
         device: str = "xpu",
     ) -> list:
-        """Create input tensors for a variant."""
+        """Create input tensors for a variant, respecting per-input dtypes."""
         shapes = self.get_input_shapes(variant_type, variant_index)
-        dtype = self.get_dtype(variant_type, variant_index)
-        return [torch.randn(shape, dtype=dtype, device=device) for shape in shapes]
+        dtypes = self.get_input_dtypes(variant_type, variant_index)
+        return [
+            make_rand_tensor(shape, dt, device) for shape, dt in zip(shapes, dtypes, strict=True)
+        ]
 
     def get_init_args(
         self,
@@ -410,6 +454,7 @@ def get_test_config_from_spec(
         "input_shapes": spec.get_input_shapes(variant_type, variant_index),
         "flop": spec.get_flop(variant_type, variant_index),
         "dtype": spec.get_dtype(variant_type, variant_index),
+        "input_dtypes": spec.get_input_dtypes(variant_type, variant_index),
         "rtol": spec.get_rtol(variant_type, variant_index),
         "atol": spec.get_atol(variant_type, variant_index),
     }

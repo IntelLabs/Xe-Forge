@@ -1,0 +1,224 @@
+# UnifiedAttention with mixed-dtype inputs for quantized KV cache serving.
+#
+# Query tensors stay in bfloat16 while KV caches use their native quantized
+# storage type (float8_e4m3fn or int8).  This avoids the bf16→quant cast
+# inside Model.forward() and lets the optimizer see the true memory layout.
+#
+# Requires mixed-dtype support in xe-forge (get_input_dtypes).
+
+# --- FP8 per-tensor KV cache ---
+# query: bfloat16, key/value caches: float8_e4m3fn
+
+inputs:
+  query:
+    shape: [TQ, QH, D]
+    dtype: bfloat16
+  key_cache:
+    shape: [NB, BS, KH, D]
+    dtype: float8_e4m3fn
+  value_cache:
+    shape: [NB, BS, KH, D]
+    dtype: float8_e4m3fn
+
+inits:
+  - dim: QH
+  - dim: KH
+  - dim: D
+  - dim: BS
+  - dim: NS
+  - dim: TQ
+  - dim: MKV
+  - dim: NB
+  - dim: SW
+  - dim: SCAP
+  - dim: KQM
+
+ci:
+  - params: [query, key_cache, value_cache]
+    dims:
+      QH: 8
+      KH: 4
+      D: 64
+      BS: 16
+      NS: 1
+      TQ: 64
+      MKV: 64
+      NB: 32
+      SW: 0
+      SCAP: 0
+      KQM: 1
+    flop: "4*TQ*QH*D*MKV"
+
+# --------------------------------------------------------------------------
+# FP8 per-tensor KV cache benchmarks
+# --------------------------------------------------------------------------
+
+bench-gpu:
+  # DeepSeek-V3 prefill: fp8 KV cache, 128 KV heads compressed from MLA
+  - params: [query, key_cache, value_cache]
+    dims:
+      QH: 128
+      KH: 128
+      D: 128
+      BS: 16
+      NS: 1
+      TQ: 4096
+      MKV: 4096
+      NB: 2048
+      SW: 0
+      SCAP: 0
+      KQM: 1
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu-1:
+  # DeepSeek-V3 decode: fp8 KV, 8 sequences
+  - params: [query, key_cache, value_cache]
+    dims:
+      QH: 128
+      KH: 128
+      D: 128
+      BS: 16
+      NS: 8
+      TQ: 8
+      MKV: 4096
+      NB: 2048
+      SW: 0
+      SCAP: 0
+      KQM: 1
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu-2:
+  # llama3.1-8B prefill: fp8 per-tensor KV cache (GQA 4:1)
+  - params: [query, key_cache, value_cache]
+    dims:
+      QH: 32
+      KH: 8
+      D: 128
+      BS: 16
+      NS: 1
+      TQ: 4096
+      MKV: 4096
+      NB: 2048
+      SW: 0
+      SCAP: 0
+      KQM: 1
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu-3:
+  # llama3.1-8B decode: fp8 per-tensor KV cache (GQA 4:1)
+  - params: [query, key_cache, value_cache]
+    dims:
+      QH: 32
+      KH: 8
+      D: 128
+      BS: 16
+      NS: 8
+      TQ: 8
+      MKV: 4096
+      NB: 2048
+      SW: 0
+      SCAP: 0
+      KQM: 1
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu-4:
+  # llama3.3-70B prefill: fp8 per-tensor KV cache (GQA 8:1)
+  - params: [query, key_cache, value_cache]
+    dims:
+      QH: 64
+      KH: 8
+      D: 128
+      BS: 16
+      NS: 1
+      TQ: 4096
+      MKV: 4096
+      NB: 2048
+      SW: 0
+      SCAP: 0
+      KQM: 1
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu-5:
+  # llama3.3-70B decode: fp8 per-tensor KV cache (GQA 8:1)
+  - params: [query, key_cache, value_cache]
+    dims:
+      QH: 64
+      KH: 8
+      D: 128
+      BS: 16
+      NS: 8
+      TQ: 8
+      MKV: 4096
+      NB: 2048
+      SW: 0
+      SCAP: 0
+      KQM: 1
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu-6:
+  # DeepSeek-V3 long-context prefill: fp8 KV, 16k context
+  - params: [query, key_cache, value_cache]
+    dims:
+      QH: 128
+      KH: 128
+      D: 128
+      BS: 16
+      NS: 1
+      TQ: 16384
+      MKV: 16384
+      NB: 8192
+      SW: 0
+      SCAP: 0
+      KQM: 1
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu-7:
+  # DeepSeek-V3 decode large KV: fp8, 16k cached context, 8 sequences
+  - params: [query, key_cache, value_cache]
+    dims:
+      QH: 128
+      KH: 128
+      D: 128
+      BS: 16
+      NS: 8
+      TQ: 8
+      MKV: 16384
+      NB: 8192
+      SW: 0
+      SCAP: 0
+      KQM: 1
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu-8:
+  # Qwen2.5-72B prefill: fp8 KV cache (GQA 8:1)
+  - params: [query, key_cache, value_cache]
+    dims:
+      QH: 64
+      KH: 8
+      D: 128
+      BS: 16
+      NS: 1
+      TQ: 8192
+      MKV: 8192
+      NB: 4096
+      SW: 0
+      SCAP: 0
+      KQM: 1
+    flop: "4*TQ*QH*D*MKV"
+
+bench-gpu-9:
+  # Qwen2.5-72B decode: fp8 KV cache, 8 sequences
+  - params: [query, key_cache, value_cache]
+    dims:
+      QH: 64
+      KH: 8
+      D: 128
+      BS: 16
+      NS: 8
+      TQ: 8
+      MKV: 8192
+      NB: 4096
+      SW: 0
+      SCAP: 0
+      KQM: 1
+    flop: "4*TQ*QH*D*MKV"

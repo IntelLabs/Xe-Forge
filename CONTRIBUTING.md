@@ -55,3 +55,25 @@ Use your real name (sorry, no pseudonyms or anonymous contributions.)
 
 If you set your `user.name` and `user.email` git configs, you can sign your
 commit automatically with `git commit -s`.
+
+### Run pre-commit locally
+
+This repository uses pre-commit to run Ruff checks before commits.
+
+Set it up once:
+
+```bash
+uv sync --dev
+uv run pre-commit install
+```
+
+Run hooks on all files:
+
+```bash
+uv run pre-commit run --all-files
+```
+
+Current hooks:
+
+- `ruff check --fix`
+- `ruff format`
