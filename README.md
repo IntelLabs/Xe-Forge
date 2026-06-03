@@ -19,6 +19,9 @@ The optimizer analyzes Triton kernels, identifies performance issues, and applie
 ## Table of Contents
 
 - [Results on Intel Arc Pro B70](#results-on-intel-arc-pro-b70)
+  - [FlashAttention Forward](#flashattention-forward)
+  - [vLLM Attention](#vllm-attention)
+  - [GEMM / Matmul Kernels (L2 KernelBench)](#gemm--matmul-kernels-l2-kernelbench)
 - [How It Works](#how-it-works)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
@@ -46,6 +49,14 @@ FlashAttention benchmark optimized across diverse shapes including skinny, non-s
 
 <p align="center">
   <img src="plots/attention_roofline.png" alt="Roofline analysis for FlashAttention Forward" width="500"/>
+</p>
+
+### vLLM Attention
+
+Three attention variants from [vLLM](https://github.com/vllm-project/vllm) — `BatchedMoE`, `FusedMoE`, and `UnifiedAttention` — optimized across 24 real-world attention configurations drawn from production models (Gemma2/3-27B, gpt-oss 20B, Llama3.1-8B, Llama3.3-70B, Llama4 Scout, Qwen2.5/3), covering prefill, decode, chunked prefill, sliding-window, and fp8/int8 KV-cache and weight-quantized setups. Each configuration's original kernel (circle) is lifted to its Xe-Forge–optimized counterpart (star), for a **geometric-mean 2.8x speedup** across the suite. Relative gains are largest on memory-bound configs lifted off near-zero baselines (up to **35x** for Qwen3-30B-A3B-Instruct), while the highest absolute throughput comes from the compute-bound Gemma3-27B prefill kernel, which reaches the **160 TFLOPS** peak on Intel Arc Pro B70. Marker numbers map to the configurations listed in the legend.
+
+<p align="center">
+  <img src="plots/vllm-attention-roofline.png" alt="Roofline analysis for vLLM attention variants" width="900"/>
 </p>
 
 ### GEMM / Matmul Kernels (L2 KernelBench)
