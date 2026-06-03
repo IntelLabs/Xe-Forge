@@ -288,6 +288,9 @@ def plot_roofline(points: list[Point], hw: Hardware, cfg: PlotConfig) -> None:
     # --- the roof itself ---
     xs = np.logspace(np.log10(x_min), np.log10(x_max), 400)
     roof = np.minimum(hw.peak_tflops, xs * hw.peak_bandwidth_gbps / 1000.0)
+    # Shade the region above the roof light gray: no kernel can exceed the
+    # roofline, so everything above it is physically unattainable.
+    ax.fill_between(xs, roof, y_max, color="lightgray", alpha=0.4, zorder=0)
     ax.plot(xs, roof, color="black", linewidth=1.6, zorder=5)
 
     # Roof annotations: compute ceiling (flat) and bandwidth ceiling (slope).
