@@ -151,7 +151,9 @@ class KernelBenchExecutor:
 
             # Create inputs if not provided
             if inputs is None:
-                if input_shapes:
+                if hasattr(model, "get_example_inputs"):
+                    inputs = model.get_example_inputs(input_shapes, self.device)
+                elif input_shapes:
                     inputs = self._create_inputs(input_shapes, dtype=dtype)
                 else:
                     return ExecutionResult(
@@ -297,7 +299,10 @@ class KernelBenchExecutor:
 
             # Shared inputs with deterministic seed
             set_all_seeds(123)
-            inputs = self._create_inputs(input_shapes, dtype=dtype)
+            if hasattr(original_model, "get_example_inputs"):
+                inputs = original_model.get_example_inputs(input_shapes, self.device)
+            else:
+                inputs = self._create_inputs(input_shapes, dtype=dtype)
 
             inputs_orig = [inp.clone() for inp in inputs]
             inputs_opt = [inp.clone() for inp in inputs]
