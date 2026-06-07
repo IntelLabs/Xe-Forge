@@ -34,6 +34,7 @@ The optimizer analyzes Triton kernels, identifies performance issues, and applie
 - [CLI Reference](#cli-reference)
 - [Environment Variables Reference](#environment-variables-reference)
 - [Knowledge Base](#knowledge-base)
+  - [Adding a New DSL](#adding-a-new-dsl)
 - [Examples](#examples)
 - [Roofline Plots](#roofline-plots)
 - [Troubleshooting](#troubleshooting)
@@ -680,6 +681,10 @@ Both variables have these defaults, so if you place the `knowledge_base/` direct
  
 - **Analyzer** receives the critical constraints so it can detect violations (wrong device placement, missing grf_mode declaration, etc.) before flagging issues.
 - **Optimizer** receives the patterns and examples relevant to the current stage — before/after code pairs and real optimized kernels it can learn from.
+
+### Adding a New DSL
+
+Xe Forge is DSL-aware end to end (Triton, Gluon, SYCL, CUDA). To add support for another kernel language — including the knowledge base, executor, and prompt wiring required — see [`DSL.md`](DSL.md).
 
 ---
 
