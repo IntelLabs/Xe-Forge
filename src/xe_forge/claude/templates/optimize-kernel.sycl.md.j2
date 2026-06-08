@@ -1,0 +1,19 @@
+Optimize `$ARGUMENTS` into a high-performance {{ dsl | upper }} (CUTLASS SYCL) kernel.
+
+Resolve the argument to a file in `test_kernels/` — it could be a full filename, partial name, or just a number. Glob to find the match; if ambiguous, ask.
+
+First read `config.yaml` for session settings (max_trials, vtune_enabled).
+Follow the CLAUDE.md workflow exactly — every step, in order:
+
+1. Read the baseline kernel `test_kernels/<name>{{ kernel_ext }}` — note its TileShape, SubgroupLayout, dispatch policy, and the file-IO scaffolding (which you must keep intact).
+2. Read the PyTorch golden reference `test_kernels/<name>_pytorch.py` (if present) to understand the exact math.
+3. Read relevant `knowledge_base/sycl/xpu/` files — especially `cutlass_sycl_framework.yaml` (tile configs) and `sycl_io_contract.yaml` (the harness contract).
+4. Initialize: `xe-forge-skill trial init <kernel_name> test_kernels/<name>{{ kernel_ext }}`
+5. Run ALL max_trials trials (from config.yaml). For EACH trial you MUST:
+   - Validate with `xe-forge-skill validate <file> --dsl {{ dsl }}`
+   - Save with `xe-forge-skill trial save`
+   - Benchmark with `xe-forge-skill benchmark <baseline> <trial> --spec <spec.yaml> --dsl {{ dsl }} --variant bench-xpu` — NEVER create custom test scripts
+   - Record with `xe-forge-skill trial result`
+6. Finalize the best correct trial
+
+CRITICAL: ONLY create kernel `.cpp` files — NO benchmark scripts, NO test scripts, NO helpers. Every kernel must remain a standalone executable honouring the file-IO contract (read A.bin/B0.bin from --input_dir, write D2.bin as f32 to --output_dir, print the TFlop/s line).
