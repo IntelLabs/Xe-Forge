@@ -304,7 +304,7 @@ class Model(torch.nn.Module):
       # If this method is provided, the Xe-Forge will get input tensors by this method.
       # If not, Xe-Forge will generate random inputs based on shapes and dtype.
       # Don't provide this method (remove it) if you don't need it.
-      def get_example_inputs(self, input_shapes: list | None = None):
+      def get_example_inputs(self, input_shapes: list | None = None, device: str = 'xpu'):
         pass
 ```
 

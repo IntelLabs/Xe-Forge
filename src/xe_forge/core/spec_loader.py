@@ -234,8 +234,8 @@ class KernelSpec:
 
         # Substitute dimension values into formula, then evaluate via ai_bench
         formula = str(variant.flop_formula)
-        for dim, value in variant.dims.items():
-            formula = formula.replace(dim, str(value))
+        for key in sorted(variant.dims.keys(), key=len, reverse=True):
+            formula = formula.replace(key, str(variant.dims[key]))
         return eval_eq(formula)
 
     def get_rtol(
