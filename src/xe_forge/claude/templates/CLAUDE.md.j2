@@ -2,6 +2,18 @@
 
 Optimize kernels into high-performance {{ dsl | upper }} implementations for {{ device | upper }}.
 
+{% if dsl == "sycl" %}
+If the reference is PyTorch code, write custom SYCL C++ kernels that implement the same
+computation. The kernel must be wrapped in a Python .py file using torch.utils.cpp_extension
+(inline_extension or load_inline) to compile and call the SYCL kernel from Python. The Model
+class in the .py wrapper must be compatible with the reference model in terms of the state_dict,
+and the __init__() and forward() methods.
+
+Do NOT simply call existing PyTorch operators (torch.mm, F.linear, torch.compile, etc.).
+The goal is to write hand-optimized SYCL C++ code using SYCL*TLA (CUTLASS), DPAS/XMX instructions,
+shared local memory (SLM), and tiling patterns from the knowledge_base.
+{% endif %}
+
 ## CONFIGURATION — Read `config.yaml` first
 
 At the start of every session, read `config.yaml` in the workspace root. It controls:
