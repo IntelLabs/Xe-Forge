@@ -27,6 +27,11 @@ from xe_forge.models import ExecutionResult
 logger = logging.getLogger(__name__)
 
 
+def _has_callable_attr(obj, attr_name):
+    """Check if object has a callable attribute with the given name."""
+    return hasattr(obj, attr_name) and callable(getattr(obj, attr_name))
+
+
 @dataclass
 class ComparisonResult:
     """Result of comparing original vs optimized kernel performance."""
@@ -153,7 +158,7 @@ class KernelBenchExecutor:
 
             # Create inputs if not provided
             if inputs is None:
-                if hasattr(model, "get_example_inputs"):
+                if _has_callable_attr(model, "get_example_inputs"):
                     inputs = model.get_example_inputs(input_shapes, self.device)
                 elif input_shapes:
                     inputs = self._create_inputs(
@@ -304,7 +309,7 @@ class KernelBenchExecutor:
 
             # Shared inputs with deterministic seed
             set_all_seeds(123)
-            if hasattr(original_model, "get_example_inputs"):
+            if _has_callable_attr(original_model, "get_example_inputs"):
                 inputs = original_model.get_example_inputs(input_shapes, self.device)
             else:
                 inputs = self._create_inputs(input_shapes, dtype=dtype, input_dtypes=input_dtypes)

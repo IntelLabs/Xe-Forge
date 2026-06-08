@@ -249,6 +249,7 @@ xe-forge-skill profile kernel.py --spec spec.yaml
 ## Writing the Model Class
 
 Every kernel file must contain a `Model` class that wraps the Triton kernel launch. The optimizer uses this class to execute, benchmark, and verify correctness.
+The `Model` class can include custom initialization and an optional `get_example_inputs` method to provide a complex combination of inputs if they cannot be generated randomly by their shapes and a common dtype.
 
 ### Structure
 
