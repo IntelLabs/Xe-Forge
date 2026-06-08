@@ -269,6 +269,8 @@ class KernelBenchExecutor:
                 return False
 
             if original_model is not None:
+                # Run in eval mode instead of training mode.
+                original_model.eval()
                 original_model = original_model.to(device)
                 if dtype is not None:
                     original_model = original_model.to(dtype)
@@ -289,6 +291,8 @@ class KernelBenchExecutor:
                 return False
 
             if optimized_model is not None:
+                # Run in eval mode instead of training mode.
+                optimized_model.eval()
                 optimized_model = optimized_model.to(device)
                 if dtype is not None:
                     optimized_model = optimized_model.to(dtype)
