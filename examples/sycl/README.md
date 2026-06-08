@@ -48,7 +48,7 @@ xe-forge-skill benchmark examples/sycl/gemm.cpp examples/sycl/gemm_t1.cpp \
 
 ```
 Correctness: PASSED
-Performance: baseline_us=193.80, triton_us=109.90, speedup=1.76x
+Performance: baseline_us=193.80, triton_us=109.90, speedup=1.76x, tflops=19.54, util=12.2%
 ```
 
 t1+ — reuse the cached baseline (no baseline recompile/rerun):
@@ -60,6 +60,10 @@ xe-forge-skill benchmark examples/sycl/gemm.cpp examples/sycl/gemm_t1.cpp \
 
 The `triton_us=` token is kept verbatim across DSLs so the trial tooling parses
 uniformly; for SYCL it carries the optimized kernel's time in microseconds.
+`tflops=` is the achieved throughput and `util=` is its percentage of the
+device's theoretical peak (`peak_tflops`, default 160 TFLOPS bf16 for the B70;
+override with the `PEAK_TFLOPS` env var) — so `util=12.2%` means this trial
+reaches 12.2% of peak.
 
 ## Generate an agentic workspace
 

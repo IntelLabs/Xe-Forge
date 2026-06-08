@@ -18,6 +18,32 @@ def run(args):
     return _run_triton(args)
 
 
+def _perf_line(baseline_us, opt_us, speedup, tflops=None, peak_tflops=None):
+    """Build the uniform Performance: line, appending TFLOPS + utilization.
+
+    ``tflops`` is the optimized kernel's achieved throughput; ``peak_tflops`` is
+    the device's theoretical peak (config.device_config.peak_tflops) used to
+    report utilization as a percentage. Both are optional — the us/speedup part
+    is always emitted, so the line stays parseable when TFLOPS is unavailable.
+    """
+    line = (
+        f"Performance: baseline_us={baseline_us:.2f}, "
+        f"triton_us={opt_us:.2f}, speedup={speedup:.2f}x"
+    )
+    if tflops is not None:
+        line += f", tflops={tflops:.2f}"
+        if peak_tflops:
+            line += f", util={tflops / peak_tflops * 100:.1f}%"
+    return line
+
+
+def _peak_tflops():
+    """Theoretical peak TFLOPS from the active device config (for utilization)."""
+    from xe_forge.config import get_config
+
+    return get_config().device_config.peak_tflops
+
+
 def _run_triton(args):
     from pathlib import Path
 
@@ -36,6 +62,7 @@ def _run_triton(args):
     init_args = spec.get_init_args(variant)
 
     executor = KernelBenchExecutor(device=args.device)
+    peak = _peak_tflops()
 
     if args.baseline_us is not None:
         baseline_us = [float(v) for v in str(args.baseline_us).split(",")]
@@ -55,8 +82,13 @@ def _run_triton(args):
             speedup = baseline_ms / opt_ms if opt_ms > 0 else 0
             print(f"Correctness: {'PASSED' if optimized_result.success else 'FAILED'}")
             print(
-                f"Performance: baseline_us={baseline_ms * 1000:.2f}, "
-                f"triton_us={opt_ms * 1000:.2f}, speedup={speedup:.2f}x"
+                _perf_line(
+                    baseline_ms * 1000,
+                    opt_ms * 1000,
+                    speedup,
+                    tflops=optimized_result.tflops,
+                    peak_tflops=peak,
+                )
             )
         else:
             print("Correctness: FAILED")
@@ -74,8 +106,13 @@ def _run_triton(args):
         print(f"Correctness: {'PASSED' if result.optimized_correct else 'FAILED'}")
         if result.original_time_us and result.optimized_time_us:
             print(
-                f"Performance: baseline_us={result.original_time_us:.2f}, "
-                f"triton_us={result.optimized_time_us:.2f}, speedup={result.speedup:.2f}x"
+                _perf_line(
+                    result.original_time_us,
+                    result.optimized_time_us,
+                    result.speedup,
+                    tflops=result.optimized_tflops,
+                    peak_tflops=peak,
+                )
             )
         if result.feedback_message:
             print(f"Feedback: {result.feedback_message}")
@@ -190,6 +227,7 @@ def _run_sycl(args):
         print(f"No PyTorch golden reference at {reference_path}; correctness will be skipped")
 
     # Correctness + optimized timing vs the golden array.
+    opt_tflops = None
     if golden is not None:
         result = executor.compare_with_reference(
             golden_output=golden,
@@ -200,6 +238,7 @@ def _run_sycl(args):
             input_dir=input_dir,
         )
         opt_ms = result.optimized_time_ms
+        opt_tflops = result.optimized_tflops
         correct = result.optimized_correct
         feedback = result.feedback_message
     else:
@@ -211,6 +250,7 @@ def _run_sycl(args):
             input_dir=input_dir,
         )
         opt_ms = run.execution_time_ms if run.success else None
+        opt_tflops = run.tflops if run.success else None
         correct = run.success
         feedback = run.error_message if not run.success else ""
 
@@ -221,6 +261,7 @@ def _run_sycl(args):
         return
 
     opt_us = opt_ms * 1000.0
+    peak = config.device_config.peak_tflops
 
     # Baseline caching, uniform with Triton: t0 times the baseline .cpp; t1+
     # reuses the cached baseline_us and only computes the speedup.
@@ -240,15 +281,12 @@ def _run_sycl(args):
             print(
                 f"Warning: baseline kernel did not produce a timing: {baseline_run.error_message}"
             )
-            print(f"Performance: baseline_us=0.00, triton_us={opt_us:.2f}, speedup=0.00x")
+            print(_perf_line(0.0, opt_us, 0.0, tflops=opt_tflops, peak_tflops=peak))
             return
         baseline_us = baseline_run.execution_time_ms * 1000.0
 
     speedup = baseline_us / opt_us if opt_us > 0 else 0.0
     print("Correctness: PASSED")
-    print(
-        f"Performance: baseline_us={baseline_us:.2f}, "
-        f"triton_us={opt_us:.2f}, speedup={speedup:.2f}x"
-    )
+    print(_perf_line(baseline_us, opt_us, speedup, tflops=opt_tflops, peak_tflops=peak))
     if feedback:
         print(f"Feedback: {feedback}")

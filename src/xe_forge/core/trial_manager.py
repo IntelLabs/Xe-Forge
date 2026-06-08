@@ -119,6 +119,7 @@ class TrialManager:
             "speedup": None,
             "baseline_us": None,
             "triton_us": None,
+            "tflops": None,
             "status": "saved",
         }
         self._save_state(kernel_name, state)
@@ -135,6 +136,7 @@ class TrialManager:
         speedup: float | None = None,
         baseline_us: float | None = None,
         triton_us: float | None = None,
+        tflops: float | None = None,
     ) -> dict:
         """Record benchmark results for a trial. Returns the trial dict."""
         state = self._load_state(kernel_name)
@@ -155,6 +157,8 @@ class TrialManager:
             trial["baseline_us"] = baseline_us
         if triton_us is not None:
             trial["triton_us"] = triton_us
+        if tflops is not None:
+            trial["tflops"] = tflops
 
         if baseline_us is not None and state.get("baseline_us") is None:
             state["baseline_us"] = [baseline_us]
@@ -223,7 +227,13 @@ class TrialManager:
             speedup_str = f"{trial['speedup']:.2f}x" if trial["speedup"] is not None else "---"
             runtime = ""
             if trial.get("baseline_us") is not None and trial.get("triton_us") is not None:
-                runtime = f" (bl={trial['baseline_us']:.0f}us, tr={trial['triton_us']:.0f}us)"
+                tflops_part = (
+                    f", {trial['tflops']:.1f} TFLOPS" if trial.get("tflops") is not None else ""
+                )
+                runtime = (
+                    f" (bl={trial['baseline_us']:.0f}us, "
+                    f"tr={trial['triton_us']:.0f}us{tflops_part})"
+                )
             best_marker = " <<<< BEST" if tid == state["best_trial"] else ""
             strategy_short = (trial["strategy"] or "")[:60]
             lines.append(

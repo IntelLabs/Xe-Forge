@@ -55,14 +55,14 @@ Full details: `knowledge_base/sycl/xpu/sycl_io_contract.yaml`.
 | **Benchmark** | `xe-forge-skill benchmark <baseline> <optimized> --spec <spec.yaml> --dsl {{ dsl }} --variant bench-xpu [--baseline-us <cached>]` |
 | **Init trials** | `xe-forge-skill trial init <kernel_name> <baseline_file>` |
 | **Save trial** | `xe-forge-skill trial save <kernel_name> <file> [--parent <id>] [--strategy "..."]` |
-| **Record result** | `xe-forge-skill trial result <kernel_name> <trial_id> --correctness <pass\|fail> --speedup <float> --baseline-us <float> --triton-us <float>` |
+| **Record result** | `xe-forge-skill trial result <kernel_name> <trial_id> --correctness <pass\|fail> --speedup <float> --baseline-us <float> --triton-us <float> --tflops <float>` |
 | **Check status** | `xe-forge-skill trial status <kernel_name>` |
 | **Best trial** | `xe-forge-skill trial best <kernel_name>` |
 | **Baseline time** | `xe-forge-skill trial baseline-us <kernel_name>` |
 | **Finalize** | `xe-forge-skill trial finalize <kernel_name> <output_file>` |
 | **Profile** (only when `vtune_enabled: true`) | `xe-forge-skill profile <kernel_file> --spec <spec.yaml>` |
 
-Note: `--triton-us` and `triton_us=` are kept as uniform token names across all DSLs — for SYCL they carry the **optimized kernel's** time in microseconds.
+Note: `--triton-us` and `triton_us=` are kept as uniform token names across all DSLs — for SYCL they carry the **optimized kernel's** time in microseconds. The benchmark `Performance:` line also reports `tflops=` (achieved throughput) and `util=` (percentage of the device's theoretical peak, ~160 TFLOPS bf16 on the B70) — record `tflops` and track utilization across trials.
 
 ## WORKFLOW — Follow these steps in order
 
@@ -84,14 +84,15 @@ For each trial:
 4. **Benchmark** (MANDATORY every trial):
    - **Trial t0:** `xe-forge-skill benchmark test_kernels/{{ kernel_name }}{{ kernel_ext }} <trial_file> --spec test_kernels/{{ kernel_name }}.yaml --dsl {{ dsl }} --variant bench-xpu`
    - **Trials t1+:** Get cached baseline via `xe-forge-skill trial baseline-us {{ kernel_name }}`, then `xe-forge-skill benchmark test_kernels/{{ kernel_name }}{{ kernel_ext }} <trial_file> --spec test_kernels/{{ kernel_name }}.yaml --dsl {{ dsl }} --variant bench-xpu --baseline-us <cached>`
-5. **Record** — `xe-forge-skill trial result {{ kernel_name }} <trial_id> --correctness <pass|fail> --speedup <float> --baseline-us <float> --triton-us <float>`
+5. **Record** — `xe-forge-skill trial result {{ kernel_name }} <trial_id> --correctness <pass|fail> --speedup <float> --baseline-us <float> --triton-us <float> --tflops <float>` (pass the `tflops=` value from the benchmark output)
 6. **Profile** — if `vtune_enabled: true` in `config.yaml` and this is trial t1 or later, run `xe-forge-skill profile <trial_file> --spec <spec.yaml>` and use the output to guide the next trial. If `vtune_enabled: false`, skip this step.
-7. **Decide next action**:
+7. **Decide next action** (reason about `util%` — distance from the ~160 TFLOPS bf16 peak — not just relative speedup):
    - Speedup > 5x -> stop, finalize
    - Speedup improved -> continue on this branch
    - Speedup regressed -> branch back to best trial, try different strategy
    - Correctness failed -> fix on same branch (check accumulate dtype, layouts, D2.bin f32 dump)
    - Plateau -> try fundamentally different approach (tile shape, copy atoms, pipeline stages, stream-K)
+   - Low utilization (util well below peak) -> the kernel is leaving FLOPS on the table; prioritize tile shape / pipeline-stage / copy-atom changes that raise compute throughput
 
 ### Step 4: Finalize
 ```bash

@@ -31,12 +31,14 @@ def run(args):
                 speedup=args.speedup,
                 baseline_us=args.baseline_us,
                 triton_us=args.triton_us,
+                tflops=args.tflops,
             )
             status_icon = {"completed": "+", "failed": "X", "partial": "~", "saved": "?"}
             icon = status_icon.get(trial["status"], "?")
+            tflops_str = f", tflops={trial['tflops']}" if trial.get("tflops") is not None else ""
             print(
                 f"[{icon}] {args.trial_id}: correctness={trial['correctness']}, "
-                f"speedup={trial['speedup']}"
+                f"speedup={trial['speedup']}{tflops_str}"
             )
 
         case "status":

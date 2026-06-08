@@ -150,6 +150,9 @@ def test_sycl_baseline_us_skips_baseline_rerun(tmp_path, monkeypatch, capsys):
     assert "Using cached baseline" in out
     assert "triton_us=" in out
     assert "Correctness: PASSED" in out
+    # SYCL perf line carries optimized TFLOPS + utilization (10/160 = 6.2%).
+    assert "tflops=10.00" in out
+    assert "util=6.2%" in out
 
 
 def test_triton_path_unchanged(tmp_path, monkeypatch, capsys):
@@ -173,6 +176,7 @@ def test_triton_path_unchanged(tmp_path, monkeypatch, capsys):
                 original_time_us=100.0,
                 optimized_time_us=50.0,
                 speedup=2.0,
+                optimized_tflops=80.0,
                 feedback_message="good",
             )
             return r
@@ -192,6 +196,9 @@ def test_triton_path_unchanged(tmp_path, monkeypatch, capsys):
     assert called.get("compared")
     assert "Correctness: PASSED" in out
     assert "triton_us=50.00" in out
+    # TFLOPS + utilization appended; util = 80 / peak(160) * 100 = 50.0%.
+    assert "tflops=80.00" in out
+    assert "util=50.0%" in out
 
 
 if __name__ == "__main__":

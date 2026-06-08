@@ -185,6 +185,16 @@ def test_printed_format_matches_trial_parser(tmp_path, monkeypatch, capsys):
     m = re.search(r"baseline_us=([0-9.]+), triton_us=([0-9.]+), speedup=([0-9.]+)x", out)
     assert m, f"perf line did not match expected format:\n{out}"
     assert "Correctness: PASSED" in out
+    # No gemm_pytorch.py here -> the no-golden execute() path, which carries the
+    # kernel's parsed tflops (5.0; util = 5/160 = 3.1%). Confirms TFLOPS + util
+    # are appended after speedup on that path too.
+    full = re.search(
+        r"baseline_us=[0-9.]+, triton_us=[0-9.]+, speedup=[0-9.]+x, "
+        r"tflops=([0-9.]+), util=([0-9.]+)%",
+        out,
+    )
+    assert full, f"perf line missing tflops/util:\n{out}"
+    assert full.group(1) == "5.00"
 
 
 if __name__ == "__main__":

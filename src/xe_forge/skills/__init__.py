@@ -67,6 +67,7 @@ def main():
     t_result.add_argument("--speedup", type=float)
     t_result.add_argument("--baseline-us", type=float)
     t_result.add_argument("--triton-us", type=float)
+    t_result.add_argument("--tflops", type=float, help="Optimized kernel throughput (TFLOPS)")
     t_result.add_argument("--trials-dir", default="./trials")
 
     t_status = trial_sub.add_parser("status")
