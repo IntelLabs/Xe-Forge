@@ -410,6 +410,45 @@ class KernelValidator:
                 )
             )
 
+        # A standalone runnable kernel must have an entry point.
+        if "int main(" not in code and "int main (" not in code:
+            issues.append(
+                ValidationIssue(
+                    "missing_main",
+                    "error",
+                    "No 'int main(' found. SYCL kernel must be a standalone "
+                    "executable with a main() that parses CLI args.",
+                )
+            )
+
+        # The Xe-Forge file-IO harness contract: read inputs from --input_dir,
+        # write D2.bin to --output_dir. Missing any of these means the kernel
+        # cannot be benchmarked against the golden reference.
+        contract_tokens = ("input_dir", "output_dir", "D2.bin")
+        missing = [t for t in contract_tokens if t not in code]
+        if missing:
+            issues.append(
+                ValidationIssue(
+                    "missing_io_contract",
+                    "warning",
+                    "Missing file-IO contract token(s): "
+                    f"{', '.join(missing)}. Kernel must read A.bin/B0.bin from "
+                    "--input_dir and write D2.bin (f32) to --output_dir.",
+                    suggestion="See knowledge_base/sycl/xpu/sycl_io_contract.yaml",
+                )
+            )
+
+        # Informational: CUTLASS is the recommended GEMM framework on Xe.
+        if "cutlass" not in code.lower():
+            issues.append(
+                ValidationIssue(
+                    "no_cutlass_include",
+                    "info",
+                    "No CUTLASS include detected. CUTLASS SYCL is the recommended "
+                    "framework for high-performance GEMM on Intel Xe.",
+                )
+            )
+
         return issues
 
     # ------------------------------------------------------------------

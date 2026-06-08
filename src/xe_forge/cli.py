@@ -516,16 +516,29 @@ def _run_optimize(parser, args, config: Config) -> int:
     with open(args.input) as f:
         kernel_code = f.read()
 
-    # Read reference implementation (Python DSLs only)
+    # Read reference implementation.
+    #   * Python DSLs: {input_stem}_pytorch.py is the optimization reference.
+    #   * SYCL/CUDA: the golden correctness reference is also PyTorch, located by
+    #     the same {input_stem}_pytorch.py convention. If absent and the input is
+    #     itself a .py, the input *is* the reference (spec/PyTorch-only start).
     reference_code = ""
-    if dsl not in ("sycl", "cuda"):
-        try:
-            with open(f"{os.path.splitext(args.input)[0]}_pytorch.py") as f:
-                reference_code = f.read()
-        except FileNotFoundError:
-            print(
-                f"No PyTorch reference file found at {os.path.splitext(args.input)[0]}_pytorch.py"
-            )
+    input_stem = os.path.splitext(args.input)[0]
+    ref_path = f"{input_stem}_pytorch.py"
+    try:
+        with open(ref_path) as f:
+            reference_code = f.read()
+    except FileNotFoundError:
+        if dsl in ("sycl", "cuda"):
+            if args.input.endswith(".py"):
+                reference_code = kernel_code
+                print(f"Using {args.input} as the PyTorch golden reference")
+            else:
+                print(
+                    f"No PyTorch golden reference at {ref_path}; "
+                    "SYCL correctness will be skipped during benchmarking"
+                )
+        else:
+            print(f"No PyTorch reference file found at {ref_path}")
 
     # Create engine and optimize
     from xe_forge.engines import create_engine
