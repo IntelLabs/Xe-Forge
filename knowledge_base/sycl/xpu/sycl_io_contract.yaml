@@ -1,0 +1,121 @@
+# Xe-Forge SYCL runner harness contract for Intel Xe (Battlemage)
+#
+# This documents the file-IO + CLI contract that every SYCL kernel optimized by
+# the Claude Code engine MUST honour. The contract is enforced by SyclExecutor
+# (src/xe_forge/core/sycl_executor.py): inputs are generated once as .bin files,
+# the kernel reads them, computes, and dumps its output as a .bin file that is
+# compared in Python against a PyTorch/numpy golden reference.
+#
+# A kernel that does not honour this contract cannot be benchmarked — it will be
+# reported as a correctness failure ("no D2.bin produced").
+
+io_contract:
+  - id: sycl_cli_arguments
+    name: "Required command-line arguments"
+    description: |
+      The kernel binary is invoked as:
+
+        ./kernel --m=<M> --n=<N> --k=<K> \
+                 --input_dir=<dir> --output_dir=<dir> \
+                 --iterations=<int> --verify=<int>
+
+      Parse them with cutlass::CommandLine (see cutlass/util/command_line.h):
+
+        cutlass::CommandLine cmd(argc, args);
+        cmd.get_cmd_line_argument("m", m, 5120);
+        cmd.get_cmd_line_argument("n", n, 4096);
+        cmd.get_cmd_line_argument("k", k, 4096);
+        cmd.get_cmd_line_argument("iterations", iterations, 20);
+        cmd.get_cmd_line_argument("verify", verify, 1);
+        std::string input_dir, output_dir;
+        cmd.get_cmd_line_argument("input_dir", input_dir, std::string(""));
+        cmd.get_cmd_line_argument("output_dir", output_dir, std::string(""));
+
+      `--verify` is supplied but should be IGNORED for file-IO runs: the runner
+      sets verify=0 because correctness is checked in Python against the golden
+      reference, not by the kernel's internal reference GEMM.
+    applies_to: [gemm, all_sycl_kernels]
+
+  - id: sycl_input_layout
+    name: "Input tensor .bin layout (read from --input_dir)"
+    description: |
+      The runner writes these files into --input_dir before launching the kernel
+      (generated once, deterministic seed=42, cached across trials):
+
+        A.bin   : shape [M, K], row-major
+        B0.bin  : shape [K, N], row-major
+        B1.bin  : shape [K, N], row-major (dual-GEMM second operand; ignore for
+                  plain GEMM)
+
+      Element encoding by dtype:
+        * bfloat16 : raw 16-bit bf16 bit-pattern (torch stores bf16 as int16
+          bits; cute::bfloat16_t is bit-identical, so a raw byte read into a
+          bfloat16_t* buffer is correct — NO conversion needed).
+        * float16  : raw IEEE half (2 bytes).
+        * float32  : raw IEEE float (4 bytes).
+
+      Read into host memory then copy to a cutlass::DeviceAllocation:
+
+        std::ifstream f(input_dir + "/A.bin", std::ios::binary);
+        std::vector<ElementA> hostA(size_t(M) * K);
+        f.read(reinterpret_cast<char*>(hostA.data()), hostA.size() * sizeof(ElementA));
+        block_A.copy_from_host(hostA.data());
+
+      Matrix A is the left operand [M,K]; B0 is the right operand [K,N]; the GEMM
+      computes D = A * B0 (alpha=1, beta=0 by default).
+    applies_to: [gemm, dual_gemm]
+
+  - id: sycl_output_layout
+    name: "Output tensor .bin layout (write to --output_dir)"
+    description: |
+      After the (untimed) correctness run, dump the result to --output_dir:
+
+        D2.bin  : shape [M, N], row-major, FLOAT32 (raw IEEE float, M*N*4 bytes)
+
+      Always store D2.bin as float32 regardless of the input dtype — the golden
+      reference is compared in float32. Copy device output back to host first:
+
+        std::vector<float> hostD(size_t(M) * N);
+        block_D.copy_to_host(hostD.data());   // ElementOutput must be float
+        std::ofstream o(output_dir + "/D2.bin", std::ios::binary);
+        o.write(reinterpret_cast<const char*>(hostD.data()), hostD.size() * sizeof(float));
+
+      Only write D2.bin when --output_dir is non-empty. The name is literally
+      "D2.bin" (a historical dual-GEMM artifact; it is the single GEMM output D).
+    applies_to: [gemm, dual_gemm]
+
+  - id: sycl_perf_line
+    name: "Performance output line (parsed by SyclExecutor)"
+    description: |
+      Print a timing line in EXACTLY this format so _parse_raw_output matches it
+      (regex: `\[([0-9.]+)\]\s*TFlop/s\s+\(([0-9.]+)\)\s*ms`):
+
+        printf("Cutlass GEMM Performance:     [%4.3f]TFlop/s  (%6.4f)ms\n",
+               tflops / cute_time, cute_time * 1000);
+
+      where tflops = 2*M*N*K*L * 1e-12 and cute_time is seconds per iteration.
+      Also print "Disposition: Passed" — though the Python golden check is
+      authoritative, the parser reads this token.
+
+      Time the kernel over --iterations launches with GPU_Clock + compat::wait(),
+      NOT including the file IO or the correctness run.
+    applies_to: [gemm, all_sycl_kernels]
+
+  - id: sycl_correctness_rules
+    name: "SYCL/CUTLASS correctness constraints (Xe Battlemage)"
+    description: |
+      1. TileShape (e.g. Shape<_256,_256,_32>) and SubgroupLayout (e.g.
+         Shape<_8,_4,_1>) must be consistent with the DPAS MMA atom
+         (XE_DPAS_TT<8, float, bfloat16_t> = 8x16x16). M-per-subgroup =
+         TileM / SgRows, N-per-subgroup = TileN / SgCols must be integers.
+      2. SLM budget on Battlemage is 128 KB/work-group. Double-buffered staging
+         of A+B tiles must fit: 2*(TileM*TileK + TileK*TileN)*sizeof(elem).
+      3. Accumulate in float32 (ElementAccumulator = float) for bf16/f16 inputs.
+      4. bf16 inputs use VNNI-friendly layouts internally; the COLLECTIVE builder
+         handles this — keep LayoutA/B = RowMajor for the A[M,K], B[K,N] contract.
+      5. ElementOutput MUST be float for D2.bin (the golden reference is f32).
+
+      Tolerances: a correct bf16 GEMM matches an f32 PyTorch matmul at
+      rtol=1e-2, atol=1e-2 (empirically max abs diff ~2e-5 at K=512; scales with
+      K). These are spec-driven via the YAML rtol/atol fields.
+    applies_to: [gemm, bf16, correctness]
