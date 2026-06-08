@@ -60,7 +60,7 @@ Full details: `knowledge_base/sycl/xpu/sycl_io_contract.yaml`.
 | **Best trial** | `xe-forge-skill trial best <kernel_name>` |
 | **Baseline time** | `xe-forge-skill trial baseline-us <kernel_name>` |
 | **Finalize** | `xe-forge-skill trial finalize <kernel_name> <output_file>` |
-| **Profile** (only when `vtune_enabled: true`) | `xe-forge-skill profile <kernel_file> --spec <spec.yaml>` |
+| **Profile** (only when `vtune_enabled: true`) | `xe-forge-skill profile <kernel_file> --spec <spec.yaml> --dsl {{ dsl }} --variant bench-xpu` |
 
 Note: `--triton-us` and `triton_us=` are kept as uniform token names across all DSLs — for SYCL they carry the **optimized kernel's** time in microseconds. The benchmark `Performance:` line also reports `tflops=` (achieved throughput) and `util=` (percentage of the device's theoretical peak, ~160 TFLOPS bf16 on the B70) — record `tflops` and track utilization across trials.
 
@@ -85,7 +85,7 @@ For each trial:
    - **Trial t0:** `xe-forge-skill benchmark test_kernels/{{ kernel_name }}{{ kernel_ext }} <trial_file> --spec test_kernels/{{ kernel_name }}.yaml --dsl {{ dsl }} --variant bench-xpu`
    - **Trials t1+:** Get cached baseline via `xe-forge-skill trial baseline-us {{ kernel_name }}`, then `xe-forge-skill benchmark test_kernels/{{ kernel_name }}{{ kernel_ext }} <trial_file> --spec test_kernels/{{ kernel_name }}.yaml --dsl {{ dsl }} --variant bench-xpu --baseline-us <cached>`
 5. **Record** — `xe-forge-skill trial result {{ kernel_name }} <trial_id> --correctness <pass|fail> --speedup <float> --baseline-us <float> --triton-us <float> --tflops <float>` (pass the `tflops=` value from the benchmark output)
-6. **Profile** — if `vtune_enabled: true` in `config.yaml` and this is trial t1 or later, run `xe-forge-skill profile <trial_file> --spec <spec.yaml>` and use the output to guide the next trial. If `vtune_enabled: false`, skip this step.
+6. **Profile** — if `vtune_enabled: true` in `config.yaml` and this is trial t1 or later, run `xe-forge-skill profile <trial_file> --spec <spec.yaml> --dsl {{ dsl }} --variant bench-xpu`. VTune `gpu-hotspots` reports XVE Active/Stalled/Idle, occupancy, XMX (DPAS) utilization, and L3/memory metrics, then maps them to CUTLASS knobs (see `knowledge_base/sycl/xpu/sycl_vtune.yaml`). Use those recommendations to choose the next trial's TileShape / PipelineStages / copy-atom change. If `vtune_enabled: false`, skip this step.
 7. **Decide next action** (reason about `util%` — distance from the ~160 TFLOPS bf16 peak — not just relative speedup):
    - Speedup > 5x -> stop, finalize
    - Speedup improved -> continue on this branch

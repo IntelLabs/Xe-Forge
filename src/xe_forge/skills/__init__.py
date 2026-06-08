@@ -95,6 +95,7 @@ def main():
     p_profile.add_argument("--warmup", type=int, default=5)
     p_profile.add_argument("--iters", type=int, default=20)
     p_profile.add_argument("--vtune-bin", default="vtune")
+    p_profile.add_argument("--dsl", default="triton", choices=["triton", "sycl", "gluon", "cuda"])
 
     args = parser.parse_args()
 

@@ -1,0 +1,123 @@
+# VTune GPU profiling for SYCL/CUTLASS kernels on Intel Xe (Battlemage)
+#
+# How Xe-Forge profiles a compiled SYCL GEMM kernel and how to turn the VTune
+# gpu-hotspots hardware metrics into CUTLASS tuning decisions. Used by
+# core/sycl_profiler.py (SyclProfiler) and surfaced to the agent in the Profile
+# step of CLAUDE.md. Verbs/columns confirmed on VTune 2026.0 + Arc Pro B70.
+
+profiling_harness:
+  - id: sycl_vtune_collect
+    name: "How a SYCL kernel is profiled (gpu-hotspots characterization)"
+    description: |
+      The kernel is compiled (icpx, via SyclExecutor) and run as a standalone
+      binary directly under VTune — there is NO Python runner (unlike the Triton
+      path's gpu-offload). The binary loops --iterations internally; VTune
+      samples GPU hardware metrics over that loop.
+
+      Collect:
+        vtune -collect gpu-hotspots \
+          -knob gpu-profiling-mode=characterization \
+          -knob characterization-mode=overview \
+          -result-dir <dir> \
+          -- <binary> --m=M --n=N --k=K \
+             --input_dir=<in> --output_dir=<out> --iterations=200 --verify=0
+
+      Report (per GPU kernel):
+        vtune -report hotspots -r <dir> -group-by computing-task \
+          -column "<cols>" -format csv -csv-delimiter tab
+
+      Notes / gotchas:
+      - Use a high --iterations (e.g. 200) for stable sampling; correctness is
+        NOT checked here (golden comparison happens during benchmarking).
+      - The CUTLASS kernel appears under its full templated GemmUniversal<...>
+        type name; overhead tasks (zeCommandListAppendMemoryCopy, "[Outside any
+        task]") are filtered out — the primary kernel is the longest-running
+        non-overhead computing task.
+      - Column names containing a literal comma ("GPU Memory Bandwidth,
+        GB/sec:Read") must be requested in a SEPARATE report pass, or the
+        -column comma-list parser mis-splits them.
+      - VTune's vtune-self-checker.sh may FALSELY report GPU profiling as
+        unsupported on this box (its bundled DPC++ test app fails to launch);
+        a real AOT bmg-g31 kernel profiles correctly regardless.
+    applies_to: [gemm, profiling, vtune]
+
+metrics_to_knobs:
+  - id: vtune_memory_bound
+    name: "XVE Stalled > Active -> memory-bound mainloop"
+    description: |
+      When XVE Array:Stalled exceeds XVE Array:Active, execution units are
+      waiting on data rather than computing. For a CUTLASS Xe GEMM this points
+      at the mainloop's global->register/SLM feed.
+
+      Actions (in rough order):
+      - Increase PipelineStages (deeper A/B prefetch ahead of the DPAS).
+        e.g. MainloopXeL1Staged<3> or <4> instead of <2>.
+      - Use explicit 2D-block / VNNI copy atoms (XE_LOAD_2D / XE_LOAD_2D_VNNI)
+        instead of the auto (void) copy.
+      - Reduce TileK so each K-iteration's load is smaller / better overlapped.
+    applies_to: [gemm, memory_bound]
+
+  - id: vtune_low_occupancy
+    name: "Peak occupancy < 50% -> too few threads resident"
+    description: |
+      Low Peak XVE Threads Occupancy means the GPU's 256 XVEs aren't filled.
+      Check the occupancy sub-limiters VTune reports:
+      - Work Size Limit low  -> the grid is too small for the problem (common
+        for small M/N, or an over-large TileShape that yields too few
+        work-groups). Try a SMALLER TileShape (e.g. 256x256 -> 128x128) so more
+        work-groups are launched.
+      - SLM Use Limit / Barriers Use Limit low -> per-work-group SLM or barrier
+        pressure caps residency; shrink staged tiles or stages.
+      Also confirm 256-GRF mode is on (IGC_ExtraOCLOptions). For genuinely small
+      problems, work-size-limited occupancy is expected, not a bug.
+    applies_to: [gemm, occupancy]
+
+  - id: vtune_high_idle
+    name: "XVE Idle > 30% -> work-distribution / tail effects"
+    description: |
+      High XVE Array:Idle means EUs have no work scheduled — usually uneven tile
+      distribution or tail work-groups. Revisit TileShape vs the M/N extents so
+      tiles divide evenly; consider a stream-K or persistent tile scheduler to
+      balance load across EUs.
+    applies_to: [gemm, scheduling]
+
+  - id: vtune_low_xmx
+    name: "XMX (DPAS) active low -> matrix engine underutilized"
+    description: |
+      XVE Pipelines:XMX active is the fraction of time the DPAS/XMX matrix engine
+      is busy — the metric that most directly reflects GEMM efficiency. Low XMX%
+      with high stall/idle means the kernel rarely reaches the matmul. Raise
+      arithmetic intensity per subgroup: larger N-per-subgroup, verify the
+      SubgroupLayout (e.g. Shape<_8,_4,_1>) is consistent with the DPAS atom
+      (XE_DPAS_TT<8, float, bfloat16_t> = 8x16x16), and prefer larger tiles when
+      occupancy allows.
+    applies_to: [gemm, dpas, compute_bound]
+
+  - id: vtune_l3_thrashing
+    name: "L3 miss ratio high -> cache thrashing / poor reuse"
+    description: |
+      High GPU L3:Miss Ratio indicates the working set isn't being reused in L3.
+      Reduce tile sizes or improve K-blocking / data reuse so A and B sub-tiles
+      stay resident across the inner loop.
+    applies_to: [gemm, cache]
+
+  - id: vtune_bandwidth_bound
+    name: "GPU memory bandwidth near peak with low TFLOPS"
+    description: |
+      If GPU Memory Bandwidth (Read+Write) is near the device peak while TFLOPS /
+      XMX% stay low, the kernel is genuinely bandwidth-bound — no tile change will
+      help much. Accept the result for that shape, or change the algorithm
+      (e.g. fuse to cut traffic). Cross-check against the util% from benchmarking
+      (peak ~160 TFLOPS bf16 on the B70).
+    applies_to: [gemm, bandwidth_bound]
+
+reference_reading:
+  description: |
+    Example gpu-hotspots reading for the starter GEMM (TileShape 256x256x32,
+    M=N=K=1024) on the Arc Pro B70: XVE Active 7.3%, Stalled 39.4%, Idle 53.3%,
+    Peak occupancy 25% (work-size-limited), XMX active 5%, L3 miss 0.7%. Diagnosis:
+    memory-bound AND under-occupied — the 256x256 tile produces too few
+    work-groups at 1024^3 to fill 256 XVEs, and the matrix engine is idle most of
+    the time. Consistent with the ~12-16% peak utilization seen in benchmarking;
+    a smaller tile (128x128x32) both raises occupancy and improves measured
+    throughput.
