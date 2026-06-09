@@ -1,46 +1,5 @@
 # SYCL Lessons
 
-## Lesson: Named Kernels for `parallel_for`
-
-### Symptom
-
-Compilation can fail with an error similar to:
-
-```text
-unnamed type '(lambda ...)' is invalid; provide a kernel name, or use '-fsycl-unnamed-lambda'
-```
-
-### Cause
-
-Some SYCL toolchains reject unnamed kernel lambdas in `parallel_for`.
-
-### Fix
-
-Prefer an explicitly named kernel:
-
-```cpp
-h.parallel_for<class ScalarMulKernel>(
-    sycl::nd_range<1>(global_size, WG_SIZE),
-    [=](sycl::nd_item<1> item) {
-        // kernel body
-    }
-);
-```
-
-### Fallback
-
-If a code path cannot be easily updated to named kernels, add this compile flag:
-
-```text
--fsycl-unnamed-lambda
-```
-
-### Practical Note
-
-For portability and future compiler compatibility, named kernels are the safer default.
-
----
-
 ## Lesson: Sub-group Coalesced Memory Access for Intel Xe GPUs
 
 ### Symptom
@@ -169,3 +128,74 @@ q.submit([&](sycl::handler& h) {
 - Section 6: Thread mapping and occupancy (work-group decomposition)
 - Section 7: Memory hierarchy and coalesced access
 - Section 11: Prefer wide/coalesced accesses and remove expensive operations from inner loops
+
+---
+
+## Lesson: Never Use `-fsycl-unnamed-lambda`
+
+### Symptom
+
+Compilation fails with:
+
+```text
+icpx: error: cannot specify '-fsycl-unnamed-lambda' along with '-fsycl-host-compiler'
+```
+
+### Cause
+
+`-fsycl-unnamed-lambda` conflicts with the `-fsycl-host-compiler` flag that the
+PyTorch `load_inline` build system injects automatically. The two flags cannot
+coexist.
+
+### Fix
+
+Always use **named kernel classes** in `parallel_for`:
+
+```cpp
+h.parallel_for<class MyKernelName>(
+    sycl::nd_range<1>(global_size, WG_SIZE),
+    [=](sycl::nd_item<1> item) {
+        // kernel body
+    }
+);
+```
+
+Never add `-fsycl-unnamed-lambda` to `extra_sycl_cflags` in `load_inline`.
+
+### Additional: `constexpr` Captures Cause Kernel Size Mismatch
+
+Capturing `constexpr` float variables from the enclosing host scope causes a
+static assertion failure at compile time:
+
+```text
+error: static assertion failed: Unexpected kernel lambda size.
+  This can be caused by an external host compiler producing a lambda with an
+  unexpected layout. In many cases the difference is related to capturing
+  constexpr variables.
+```
+
+**Fix**: define float constants **inside** the kernel lambda, not outside it:
+
+```cpp
+// WRONG — constexpr captured from host scope
+constexpr float S2PI = 0.7978845608028654f;
+q->submit([&](sycl::handler& h) {
+    h.parallel_for<class K>(range, [=](sycl::nd_item<1> item) {
+        float x = S2PI * val;  // S2PI captured — size mismatch!
+    });
+});
+
+// CORRECT — constant defined inside the lambda
+q->submit([&](sycl::handler& h) {
+    h.parallel_for<class K>(range, [=](sycl::nd_item<1> item) {
+        const float S2PI = 0.7978845608028654f;
+        float x = S2PI * val;  // no capture, no mismatch
+    });
+});
+```
+
+Use `enum` for integer compile-time constants (safe to define in host scope):
+
+```cpp
+enum { WG = 256, ITERS = 16, SG_SZ = 16 };  // safe — integer enums, not floats
+```
