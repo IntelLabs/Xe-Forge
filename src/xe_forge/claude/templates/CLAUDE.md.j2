@@ -57,7 +57,7 @@ All runtime behavior below is gated by these values; re-read `config.yaml` if an
 ### Step 1: Analyze
 - Read the baseline source file `test_kernels/{{ kernel_name }}.py`. Identify shapes, dtypes, operations.
 - Run `xe-forge-skill analyze test_kernels/{{ kernel_name }}.py` to get AST-based analysis.
-- Read relevant knowledge_base/ files for optimization patterns.
+- Read relevant knowledge_base/ files in the workspace for optimization patterns.
 
 ### Step 2: Initialize
 ```bash
