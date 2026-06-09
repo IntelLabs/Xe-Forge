@@ -35,6 +35,8 @@ MKL_INCLUDE = os.environ.get("MKL_INCLUDE", "/swtools/intel/mkl/latest/include")
 _DEVICE_NAME_TO_TARGET: dict[str, str] = {
     "b580": "bmg-g31",
     "b570": "bmg-g31",
+    "b70": "bmg-g31",
+    "arc pro b": "bmg-g31",
     "battlemage": "bmg-g31",
     "bmg": "bmg-g31",
     "a770": "acm-g10",
@@ -655,6 +657,138 @@ class SyclExecutor:
             original_correct=orig_correct,
             optimized_correct=opt_correct,
             is_slower=is_slower,
+            feedback_message=msg,
+        )
+
+    def compare_with_reference(
+        self,
+        golden_output: np.ndarray,
+        optimized_code: str | None = None,
+        optimized_path: str | None = None,
+        m: int = 1024,
+        n: int = 1024,
+        k: int = 1024,
+        dims: dict[str, int | float] | None = None,
+        rtol: float = 1e-2,
+        atol: float = 1e-2,
+        input_dir: str | None = None,
+        seed: int = 42,
+    ) -> SyclComparisonResult:
+        """Compile + run a SYCL kernel and check it against a golden numpy array.
+
+        Mirrors :meth:`compare_kernels`, but instead of comparing the optimized
+        kernel's output to an *original* kernel's ``D2.bin``, it compares against
+        a precomputed **PyTorch/numpy golden reference** (the Claude-engine path).
+        Only the optimized kernel is run; there is no baseline rerun here.
+
+        Data layout (kept identical to ``get_or_create_inputs`` / ``_save_tensor``):
+          * ``A.bin``  : ``[M, K]`` row-major, bf16 stored as raw int16 bits.
+          * ``B0.bin`` : ``[K, N]`` row-major, bf16 stored as raw int16 bits.
+          * ``B1.bin`` : ``[K, N]`` (dual-GEMM second operand; unused by plain GEMM).
+          * ``D2.bin`` : ``[M, N]`` row-major float32 (read back flat, reshaped to
+            ``golden_output.shape``).
+
+        Args:
+            golden_output: Reference output as a numpy array (any shape; the
+                kernel's flat ``D2.bin`` is reshaped to match it).
+            optimized_code/path: Kernel source string or ``.cpp`` path.
+            m, n, k: GEMM dims (backward compat; ``dims`` takes precedence).
+            dims: Generic dimension dict from the spec.
+            rtol, atol: Tolerances for ``numpy.allclose`` (spec-driven; do not
+                rely on ``compare_outputs`` defaults).
+            input_dir: Directory holding the shared input ``.bin`` files. When
+                ``None``, inputs are generated/cached via ``get_or_create_inputs``.
+            seed: Seed used when generating inputs (only when ``input_dir`` is None).
+
+        Returns:
+            SyclComparisonResult carrying ``optimized_time_ms``,
+            ``optimized_tflops``, ``optimized_correct``, and a feedback message.
+            ``original_*`` fields are left at their defaults (no baseline here).
+        """
+        if input_dir is None:
+            effective_dims = dims or {"M": m, "N": n, "K": k}
+            input_dir = self.get_or_create_inputs(effective_dims, seed=seed)
+
+        out_dir = tempfile.mkdtemp(prefix="sycl_golden_")
+        opt_result = self.execute(
+            kernel_code=optimized_code,
+            kernel_path=optimized_path,
+            m=m,
+            n=n,
+            k=k,
+            dims=dims,
+            output_name="optimized_sycl",
+            input_dir=input_dir,
+            output_dir=out_dir,
+        )
+
+        if not opt_result.success:
+            try:
+                shutil.rmtree(out_dir)
+            except Exception:
+                pass
+            return SyclComparisonResult(
+                original_time_ms=float("inf"),
+                optimized_time_ms=float("inf"),
+                speedup=0.0,
+                optimized_correct=False,
+                feedback_message=(
+                    f"FAILURE: Kernel failed: {opt_result.error_message}. "
+                    "Fix compilation or runtime errors."
+                ),
+            )
+
+        opt_ms = opt_result.execution_time_ms or float("inf")
+        opt_tflops = opt_result.tflops
+
+        opt_correct = True
+        correctness_msg = ""
+        d2_path = os.path.join(out_dir, "D2.bin")
+        if os.path.exists(d2_path):
+            opt_flat = self.load_output(d2_path, np.float32)
+            golden = np.asarray(golden_output, dtype=np.float32)
+            if opt_flat.size == golden.size:
+                opt_out = opt_flat.reshape(golden.shape)
+                passed, detail = self.compare_outputs(golden, opt_out, rtol=rtol, atol=atol)
+            else:
+                passed = False
+                detail = (
+                    f"Size mismatch: D2.bin has {opt_flat.size} elems, golden has {golden.size}"
+                )
+            opt_correct = passed
+            correctness_msg = (
+                " Correctness: PASSED." if passed else f" CORRECTNESS FAILED: {detail}."
+            )
+            logger.info(f"Golden comparison (rtol={rtol}, atol={atol}): {detail}")
+        else:
+            opt_correct = False
+            correctness_msg = " (no D2.bin produced — kernel did not honour the IO contract)"
+            logger.warning("D2.bin not found — cannot verify against golden reference")
+
+        try:
+            shutil.rmtree(out_dir)
+        except Exception:
+            pass
+
+        if not opt_correct:
+            msg = (
+                f"CORRECTNESS FAILURE: Kernel produces wrong results vs the golden "
+                f"reference.{correctness_msg} Optimized: {opt_ms:.4f}ms. "
+                "Fix numerical correctness before optimizing for speed."
+            )
+        else:
+            tflops_str = f" ({opt_tflops:.3f} TFlop/s)" if opt_tflops else ""
+            msg = (
+                f"SUCCESS: Correct vs golden reference. "
+                f"Optimized: {opt_ms:.4f}ms{tflops_str}.{correctness_msg}"
+            )
+
+        return SyclComparisonResult(
+            original_time_ms=float("inf"),
+            optimized_time_ms=opt_ms,
+            speedup=0.0,
+            optimized_tflops=opt_tflops,
+            optimized_correct=opt_correct,
             feedback_message=msg,
         )
 

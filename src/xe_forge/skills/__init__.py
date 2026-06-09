@@ -67,6 +67,7 @@ def main():
     t_result.add_argument("--speedup", type=float)
     t_result.add_argument("--baseline-us", type=float)
     t_result.add_argument("--triton-us", type=float)
+    t_result.add_argument("--tflops", type=float, help="Optimized kernel throughput (TFLOPS)")
     t_result.add_argument("--trials-dir", default="./trials")
 
     t_status = trial_sub.add_parser("status")
@@ -94,6 +95,7 @@ def main():
     p_profile.add_argument("--warmup", type=int, default=5)
     p_profile.add_argument("--iters", type=int, default=20)
     p_profile.add_argument("--vtune-bin", default="vtune")
+    p_profile.add_argument("--dsl", default="triton", choices=["triton", "sycl", "gluon", "cuda"])
 
     args = parser.parse_args()
 

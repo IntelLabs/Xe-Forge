@@ -1,6 +1,9 @@
 # VTune GPU Profiling
 
-Hardware-counter profiling for Triton kernels on Intel XPU using Intel VTune Profiler.
+Hardware-counter profiling on Intel XPU using Intel VTune Profiler. Two paths:
+**Triton/PyTorch** kernels (`gpu-offload` around a generated Python runner) and
+**SYCL/CUTLASS** `.cpp` kernels (`gpu-hotspots` characterization on the compiled
+binary). The path is selected by `--dsl`; see [SYCL kernels](#sycl-kernels) below.
 
 ---
 
@@ -122,6 +125,67 @@ When `vtune_enabled`, the generated `CLAUDE.md` workflow adds a "Profile" step a
 ```bash
 xe-forge -i kernel.py -s spec.yaml --vtune --engine claude --workspace ./workspace
 ```
+
+---
+
+## SYCL kernels
+
+SYCL/CUTLASS kernels are compiled `.cpp` binaries, so they are profiled
+differently from Triton: there is no Python runner. `SyclProfiler`
+(`core/sycl_profiler.py`) compiles the kernel via `SyclExecutor`, generates the
+same deterministic file-IO inputs the benchmark uses, and runs the binary
+directly under VTune `gpu-hotspots` in **characterization** mode — which exposes
+richer Intel Xe metrics than `gpu-offload`.
+
+```bash
+# Profile a SYCL kernel (point --vtune-bin at a 2026.x build if needed)
+xe-forge-skill profile examples/sycl/gemm.cpp \
+    --spec examples/sycl/gemm.yaml --dsl sycl --variant bench-xpu \
+    --iters 200 --vtune-bin /data/swtools/intel/vtune/2026.0/bin64/vtune
+```
+
+Under the hood:
+
+```bash
+vtune -collect gpu-hotspots \
+    -knob gpu-profiling-mode=characterization \
+    -knob characterization-mode=overview \
+    -result-dir <dir> \
+    -- <binary> --m=M --n=N --k=K --input_dir=<in> --output_dir=<out> \
+       --iterations=200 --verify=0
+```
+
+### Metrics collected (SYCL)
+
+| Metric | Meaning |
+|--------|---------|
+| XVE Active / Stalled / Idle | Xe Vector Engine execution / stall / idle time |
+| Peak XVE Threads Occupancy | Thread occupancy (with Work-Size / SLM / Barrier sub-limiters) |
+| XMX (DPAS) Active | Fraction of time the matrix engine is busy — the key GEMM-efficiency signal |
+| GPU L3 Miss Ratio | L3 cache miss ratio |
+| GPU Memory Bandwidth Read/Write | GB/s to/from GPU memory |
+
+### Metric → CUTLASS knob (SYCL)
+
+| Condition | Diagnosis | Action | KB |
+|-----------|-----------|--------|----|
+| XVE Stalled > Active | Memory-bound mainloop | ↑ PipelineStages; 2D-block/VNNI copy atoms; ↓ TileK | `sycl_vtune.yaml` |
+| Peak occupancy < 50% | Grid too small / register pressure | Smaller TileShape (256→128); check 256-GRF | `sycl_vtune.yaml` |
+| XVE Idle > 30% | Work-distribution / tail | TileShape vs M/N; stream-K / persistent scheduler | `sycl_vtune.yaml` |
+| XMX active < 20% | Matrix engine underutilized | Larger N-per-subgroup; SubgroupLayout vs DPAS atom | `sycl_vtune.yaml` |
+| L3 miss > 50% | Cache thrashing | Reduce tiles; improve K-blocking/reuse | `sycl_vtune.yaml` |
+| Mem BW ≈ peak, low TFLOPS | Bandwidth-bound | Accept, or change algorithm | `sycl_vtune.yaml` |
+
+### SYCL-specific notes
+
+- **Self-checker false negative**: `vtune-self-checker.sh` may report GPU
+  profiling as unsupported (its bundled DPC++ app fails to launch), yet a real
+  AOT-compiled `bmg-g31` kernel profiles fine. Don't gate on the self-checker.
+- **`xe` kernel driver** (newer than `i915`) is supported by VTune 2026 for
+  `gpu-hotspots`; `perf_event_paranoid=0` helps.
+- **VTune version**: the config default `vtune_bin` may point at an older build;
+  pass `--vtune-bin /data/swtools/intel/vtune/2026.0/bin64/vtune` (or set
+  `VTUNE_BIN`) to use 2026.x.
 
 ---
 

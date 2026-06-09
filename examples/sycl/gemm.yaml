@@ -1,0 +1,18 @@
+inputs:
+  A:
+    shape: [M, K]
+    dtype: bfloat16
+  B0:
+    shape: [K, N]
+    dtype: bfloat16
+
+bench-xpu:
+  - params: [A, B0]
+    dtype: bfloat16
+    dims:
+      M: 1024
+      N: 1024
+      K: 1024
+    flop: "2*M*N*K"
+    rtol: 0.02
+    atol: 0.02

@@ -73,6 +73,9 @@ class DeviceConfig:
     preferred_tile_m: int = 256
     preferred_tile_n: int = 256
     preferred_tile_k: int = 32
+    # Theoretical peak throughput for utilization reporting (TFLOPS). Default is
+    # the Intel Arc Pro B70 fp16/bf16 DPAS peak; override per device/dtype.
+    peak_tflops: float = 160.0
 
 
 @dataclass
@@ -87,6 +90,7 @@ class XPUConfig(DeviceConfig):
     preferred_tile_n: int = 256
     preferred_tile_k: int = 32
     group_size_m: int = 4
+    peak_tflops: float = 160.0
 
 
 @dataclass
@@ -307,6 +311,7 @@ class ConfigManager:
             preferred_tile_n=self._get_env("PREFERRED_TILE_N", 256, int),
             preferred_tile_k=self._get_env("PREFERRED_TILE_K", 32, int),
             group_size_m=self._get_env("GROUP_SIZE_M", 4, int),
+            peak_tflops=self._get_env("PEAK_TFLOPS", 160.0, float),
         )
 
     def override(self, **kwargs) -> "ConfigManager":
