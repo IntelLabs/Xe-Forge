@@ -72,7 +72,7 @@ For each trial:
 4. **Benchmark** (MANDATORY every trial):
    - **Trial t0:** `xe-forge-skill benchmark test_kernels/{{ kernel_name }}.py <{{ dsl }}_file> --spec test_kernels/{{ kernel_name }}.yaml`
    - **Trials t1+:** Get cached baseline via `xe-forge-skill trial baseline-us {{ kernel_name }}`, then `xe-forge-skill benchmark test_kernels/{{ kernel_name }}.py <{{ dsl }}_file> --spec test_kernels/{{ kernel_name }}.yaml --baseline-us <cached>`
-5. **Record** — `xe-forge-skill trial result {{ kernel_name }} <trial_id> --correctness <pass|fail> --speedup <float> --baseline-us <float> --{{ dsl }}-us <float>`
+5. **Record** — `xe-forge-skill trial result {{ kernel_name }} <trial_id> --correctness <pass|fail> --speedup <float> --baseline-us <float> --custom-us <float>`
 6. **Profile** — if `vtune_enabled: true` in `config.yaml` and this is trial t1 or later, run `xe-forge-skill profile <{{ dsl }}_file> --spec <spec.yaml>` and use the output to guide the next trial. If `vtune_enabled: false`, skip this step.
 7. **Decide next action**:
    - Speedup > 5x -> stop, finalize
