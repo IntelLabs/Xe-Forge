@@ -200,7 +200,27 @@ implementation and default variant) and add your DSL where it should follow the
 compiled-flow path instead of the Python/reference path. Device defaults are keyed on
 device type, not DSL, so `config.py` rarely needs changes.
 
-## Step 10 — Claude engine templates (only for the Claude engine)
+## Step 10 — Skills folder
+
+`src/xe_forge/skills/` is a thin CLI wrapper around the core modules (`validate`,
+`benchmark`, `analyze`, `profile`, `trial`). Even though they just call core, their
+DSL knowledge is hardcoded and must be updated:
+
+```python
+# src/xe_forge/skills/__init__.py — add the value to every --dsl choices list
+p_validate.add_argument("--dsl", default="triton",
+                        choices=["triton", "sycl", "gluon", "cuda", "mojo"])
+```
+
+- `skills/benchmark.py` constructs `KernelBenchExecutor` directly — switch it to
+  `create_executor_from_config(...)` (or branch on the DSL) so a compiled DSL gets the
+  right executor.
+- `skills/validate.py` forwards `--dsl` to `KernelValidator.validate(code, dsl=...)`
+  in `src/xe_forge/core/validator.py`, which dispatches `_validate_triton` /
+  `_validate_sycl`. Add a `_validate_<dsl>` branch there (else it falls back to the
+  Triton checks).
+
+## Step 11 — Claude engine templates (only for the Claude engine)
 
 The Claude engine renders `src/xe_forge/claude/templates/*.j2` with the `dsl`
 variable. If you want it to support your DSL, make those templates handle the new
@@ -230,4 +250,5 @@ back into the agent. Mirror the kernel+spec pairs in `test_kernels/`.
 - [ ] Step 7 — `knowledge_base/<dsl>/<device>/` (optional)
 - [ ] Step 8 — issue types (only if needed)
 - [ ] Step 9 — CLI DSL-string checks (`cli.py`)
-- [ ] Step 10 — Claude engine templates (only for the Claude engine)
+- [ ] Step 10 — skills folder: `--dsl` choices, executor, validator (`skills/`, `core/validator.py`)
+- [ ] Step 11 — Claude engine templates (only for the Claude engine)
