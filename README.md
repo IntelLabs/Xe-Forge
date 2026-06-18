@@ -34,6 +34,7 @@ The optimizer analyzes Triton kernels, identifies performance issues, and applie
 - [CLI Reference](#cli-reference)
 - [Environment Variables Reference](#environment-variables-reference)
 - [Knowledge Base](#knowledge-base)
+  - [Adding a New DSL](#adding-a-new-dsl)
 - [Examples](#examples)
 - [Roofline Plots](#roofline-plots)
 - [Troubleshooting](#troubleshooting)
@@ -228,7 +229,7 @@ python -m xe_forge.cli --dsl sycl --tile-tune \
 python -m xe_forge.cli --dsl sycl --tile-tune --tune-config tune.yaml
 ```
 
-LLM-driven tile configuration tuning for CUTLASS SYCL kernels (GEMM, Flash Attention V2, MoE GEMM, Grouped GEMM) on Intel Xe GPUs. Uses a propose-validate-benchmark loop: an LLM proposes tile shapes, a hardware validator checks them against Intel Xe DPAS constraints, and valid configs are compiled and benchmarked on the GPU. Supports batch tuning via YAML configs. See [TILE.md](TILE.md) for the full setup guide, supported kernel types, and YAML config format.
+LLM-driven tile configuration tuning for CUTLASS SYCL kernels (GEMM, Flash Attention V2, MoE GEMM, Grouped GEMM) on Intel Xe GPUs. Uses a propose-validate-benchmark loop: an LLM proposes tile shapes, a hardware validator checks them against Intel Xe DPAS constraints, and valid configs are compiled and benchmarked on the GPU. Supports batch tuning via YAML configs. See [docs/TILE.md](docs/TILE.md) for the full setup guide, supported kernel types, and YAML config format.
 
 ---
 
@@ -589,7 +590,7 @@ xe-forge --input KERNEL --spec SPEC [OPTIONS]
 | `--max-trials` | Max optimization trials (default: 10) |
 | `--trials-dir` | Trial state directory (default: `./trials`) |
 | `--no-trials` | Disable trial tracking |
-| `--vtune` | Enable VTune GPU profiling (see [VTUNE.md](VTUNE.md)) |
+| `--vtune` | Enable VTune GPU profiling (see [docs/VTUNE.md](docs/VTUNE.md)) |
 | `--vtune-bin` | Path to VTune binary |
 | `--workspace` | Workspace directory (Claude engine only) |
 
@@ -689,11 +690,15 @@ Both variables have these defaults, so if you place the `knowledge_base/` direct
 - **Analyzer** receives the critical constraints so it can detect violations (wrong device placement, missing grf_mode declaration, etc.) before flagging issues.
 - **Optimizer** receives the patterns and examples relevant to the current stage — before/after code pairs and real optimized kernels it can learn from.
 
+### Adding a New DSL
+
+Xe Forge is DSL-aware end to end (Triton, Gluon, SYCL, CUDA). To add support for another kernel language — including the knowledge base, executor, and prompt wiring required — see [`docs/DSL.md`](docs/DSL.md).
+
 ---
 
 ## Examples
 
-Curated kernels from [KernelBench](https://github.com/ScalingIntelligence/KernelBench) Level 2 and the [Intel XPU Triton benchmarks](https://github.com/intel/intel-xpu-backend-for-triton/tree/main/benchmarks/triton_kernels_benchmark), organized by category (GEMM, fused ops, reductions, attention, mixed ops). See [`EXAMPLES.md`](EXAMPLES.md) for the full list and usage instructions.
+Curated kernels from [KernelBench](https://github.com/ScalingIntelligence/KernelBench) Level 2 and the [Intel XPU Triton benchmarks](https://github.com/intel/intel-xpu-backend-for-triton/tree/main/benchmarks/triton_kernels_benchmark), organized by category (GEMM, fused ops, reductions, attention, mixed ops). See [`docs/EXAMPLES.md`](docs/EXAMPLES.md) for the full list and usage instructions.
 
 ---
 

@@ -188,7 +188,7 @@ Examples:
     tune_group.add_argument(
         "--tune-config",
         type=str,
-        help="YAML config file for multi-workload tile tuning (see TILE.md)",
+        help="YAML config file for multi-workload tile tuning (see docs/TILE.md)",
     )
     tune_group.add_argument("--m", type=int, default=4096, help="GEMM M dimension")
     tune_group.add_argument("--gemm-n", type=int, default=4096, help="GEMM N dimension")
