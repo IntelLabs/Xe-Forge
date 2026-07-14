@@ -1,5 +1,6 @@
 from xe_forge.agents.analyzer_agent import AnalyzerAgent
 from xe_forge.agents.base import Optimizer
+from xe_forge.agents.coordinator import CoordinatorAgent
 from xe_forge.agents.cover import CoVeR
 from xe_forge.agents.optimizer_agent import (
     SUCCESS_MESSAGE,
@@ -16,6 +17,7 @@ __all__ = [
     "AnalyzerAgent",
     "AutotuneSignature",
     "CoVeR",
+    "CoordinatorAgent",
     "OptimizationReActSignature",
     "OptimizationSignature",
     "Optimizer",

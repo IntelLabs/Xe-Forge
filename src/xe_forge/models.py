@@ -162,6 +162,7 @@ class OptimizationResult(BaseModel):
     optimized_tflops: float | None = None
     original_memory_bw: float | None = None
     optimized_memory_bw: float | None = None
+    token_usage: dict | None = None
 
 
 class KnowledgeEntry(BaseModel):

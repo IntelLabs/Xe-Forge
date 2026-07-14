@@ -8,6 +8,8 @@ import httpx
 import litellm
 
 from xe_forge.agents import AnalyzerAgent, Optimizer, OptimizerAgent, OptimizerReActAgent
+from xe_forge.agents.utils import extract_gemm_dims
+from xe_forge.prompts.device_prompts import PromptLibrary
 from xe_forge.config import Config, get_config
 from xe_forge.core.device_query import get_device_config_for_pipeline
 from xe_forge.knowledge.loader import KnowledgeBase, load_knowledge_base
@@ -22,16 +24,6 @@ from xe_forge.planner import PlannerAgent
 
 logger = logging.getLogger(__name__)
 
-
-def _extract_gemm_dims(
-    input_shapes: list[tuple[int, ...]] | None,
-) -> tuple[int, int, int]:
-    """Extract M, N, K from GEMM input shapes [(M, K), (K, N)]."""
-    if input_shapes and len(input_shapes) >= 2:
-        a, b = input_shapes[0], input_shapes[1]
-        if len(a) >= 2 and len(b) >= 2:
-            return a[-2], b[-1], a[-1]
-    return 1024, 1024, 1024
 
 
 DEFAULT_STAGE_ORDER: list[OptimizationStage] = [
@@ -90,27 +82,73 @@ class XeForgePipeline:
         else:
             logger.info("  Knowledge base: disabled (set KNOWLEDGE_BASE_ENABLED=true to enable)")
 
+        _dsl_str = (
+            self.config.device_config.dsl.value
+            if hasattr(self.config.device_config.dsl, "value")
+            else self.config.device_config.dsl
+        )
+        _prompt_lib = PromptLibrary(
+            dsl=_dsl_str,
+            device_type=self.config.device_config.device,
+        )
+
+        # Render device-specific optimizer guidance from Jinja2 templates.
+        # Falls back to device_context_addendum() if template not found.
+        _dsl = self.config.device_config.dsl
+        _is_sycl_dsl = str(_dsl.value if hasattr(_dsl, "value") else _dsl) == "sycl"
+        _opt_template = "sycl_optimization_signature" if _is_sycl_dsl else "optimization_signature"
+        _react_template = "sycl_optimization_signature" if _is_sycl_dsl else "optimization_react_signature"
+        _opt_instructions = _prompt_lib.render_for_signature(_opt_template)
+        _react_instructions = _prompt_lib.render_for_signature(_react_template)
+
         self.analyzer = AnalyzerAgent(
             knowledge_base=self.knowledge_base,
             dsl=self.config.device_config.dsl,
         )
         self.planner = PlannerAgent()
+        self.coordinator = None
 
         match self.config.agent.strategy:
+            case "coordinator":
+                from xe_forge.agents.coordinator import CoordinatorAgent
+                self.coordinator = CoordinatorAgent(
+                    analyzer=self.analyzer,
+                    executor=executor,
+                    knowledge_base=self.knowledge_base,
+                    profiler=self.profiler,
+                    max_iters=self.config.agent.max_iterations * 4,
+                    extra_instructions=_opt_instructions,
+                    dsl=self.config.device_config.dsl,
+                )
+                self.optimizer = None
             case "cover":
-                Agent = OptimizerAgent
+                self.optimizer = OptimizerAgent(
+                    executor=executor,
+                    validator=validator,
+                    max_iterations=self.config.agent.max_iterations,
+                    knowledge_base=self.knowledge_base,
+                    dsl=self.config.device_config.dsl,
+                    extra_instructions=_opt_instructions,
+                )
             case "react":
-                Agent = OptimizerReActAgent
+                self.optimizer = OptimizerReActAgent(
+                    executor=executor,
+                    validator=validator,
+                    max_iterations=self.config.agent.max_iterations,
+                    knowledge_base=self.knowledge_base,
+                    dsl=self.config.device_config.dsl,
+                    extra_instructions=_react_instructions,
+                )
             case _:
-                Agent = OptimizerAgent
+                self.optimizer = OptimizerAgent(
+                    executor=executor,
+                    validator=validator,
+                    max_iterations=self.config.agent.max_iterations,
+                    knowledge_base=self.knowledge_base,
+                    dsl=self.config.device_config.dsl,
+                    extra_instructions=_opt_instructions,
+                )
 
-        self.optimizer = Agent(
-            executor=executor,
-            validator=validator,
-            max_iterations=self.config.agent.max_iterations,
-            knowledge_base=self.knowledge_base,
-            dsl=self.config.device_config.dsl,
-        )
         self.executor = executor
         self.validator = validator
 
@@ -233,7 +271,7 @@ class XeForgePipeline:
             try:
                 if _is_sycl:
                     _sycl_dims = spec_dims or dict(
-                        zip(("M", "N", "K"), _extract_gemm_dims(input_shapes), strict=False)
+                        zip(("M", "N", "K"), extract_gemm_dims(input_shapes), strict=False)
                     )
                     orig_r = _bench_ex.execute(
                         kernel_code=kernel_code,
@@ -270,8 +308,73 @@ class XeForgePipeline:
             except Exception as e:
                 logger.warning("Could not initialize trial tree: %s", e)
 
+        _usage_ctx = dspy.track_usage()
+        _usage_tracker = _usage_ctx.__enter__()
+
         candidates = []
-        best_k = max(1, self.config.optimization.best_k)
+
+        if self.coordinator is not None:
+            # --- Coordinator (agentic) path ---
+            result = OptimizationResult(
+                kernel_name=display_name, original_code=kernel_code, timestamp=datetime.now()
+            )
+            result.original_tflops, result.original_ms = val_orig_tflops, val_orig_ms
+
+            etd = target_dtype or self.config.optimization.target_dtype
+            if etd is None and dtype is not None:
+                etd = {
+                    torch.float16: "float16",
+                    torch.bfloat16: "bfloat16",
+                    torch.float32: "float32",
+                }.get(dtype)
+
+            device_type = self.config.device_config.device
+            xpu_config = get_device_config_for_pipeline(
+                device_type=device_type,
+                input_shapes=input_shapes,
+                config=self.config,
+                dtype=etd or "float16",
+            )
+            _dsl_str = str(
+                self.config.device_config.dsl.value
+                if hasattr(self.config.device_config.dsl, "value")
+                else self.config.device_config.dsl
+            )
+            kernel_specs = _build_kernel_specs(
+                kernel_name=display_name,
+                input_shapes=input_shapes,
+                flop=flop,
+                dtype=etd,
+                device=device_type,
+                dsl=_dsl_str,
+            )
+
+            logger.info("=" * 60 + "\nSTRATEGY: COORDINATOR (agentic)\n" + "=" * 60)
+            best_code, speedup, summary, stage_results = self.coordinator.run(
+                kernel_code=kernel_code,
+                kernel_specs=kernel_specs,
+                pytorch_code=reference_code or "",
+                kernel_name=kernel_name,
+                input_shapes=input_shapes,
+                flop=flop,
+                dtype=dtype,
+                spec_dims=spec_dims,
+                init_args=init_args,
+                input_dtypes=input_dtypes,
+                xpu_config=xpu_config,
+                spec_path=spec_path,
+                variant_type=variant_type,
+            )
+
+            result.optimized_code = best_code
+            result.stages_applied = stage_results
+            result.success = best_code != kernel_code or speedup > 1.0
+            if speedup > 1.0:
+                result.total_speedup = speedup
+            candidates.append(result)
+
+        # Fixed stage loop runs only when coordinator strategy is not active.
+        best_k = max(1, self.config.optimization.best_k) if self.coordinator is None else 0
 
         for attempt in range(best_k):
             if best_k > 1:
@@ -536,6 +639,7 @@ class XeForgePipeline:
             candidates.append(result)
 
         if not candidates:
+            _usage_ctx.__exit__(None, None, None)
             return OptimizationResult(
                 kernel_name=display_name, original_code=kernel_code, timestamp=datetime.now()
             )
@@ -553,6 +657,13 @@ class XeForgePipeline:
             logger.info(f"Failed: {[s.stage.value for s in fail]}")
         if result.total_speedup:
             logger.info(f"Speedup: {result.total_speedup:.2f}x")
+
+        _usage_ctx.__exit__(None, None, None)
+        token_usage = _usage_tracker.get_total_tokens()
+        if token_usage:
+            logger.info("Token usage this run: %s", token_usage)
+        result.token_usage = token_usage or {}
+
         return result
 
     def optimize_file(
@@ -597,3 +708,32 @@ class XeForgePipeline:
                     f"{comment} Stages: {[s.stage.value for s in result.stages_applied if s.success]}\n\n"
                 )
                 f.write(result.optimized_code)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_kernel_specs(
+    kernel_name: str,
+    input_shapes,
+    flop,
+    dtype,
+    device: str,
+    dsl: str,
+) -> str:
+    """Format a compact kernel specification string for the CoordinatorAgent."""
+    parts = [f"kernel: {kernel_name}", f"device: {device}", f"dsl: {dsl}"]
+    if input_shapes:
+        parts.append(f"input_shapes: {input_shapes}")
+    if dtype:
+        parts.append(f"dtype: {dtype}")
+    if flop:
+        if flop > 1e12:
+            parts.append(f"flop: {flop / 1e12:.2f} TFLOP")
+        elif flop > 1e9:
+            parts.append(f"flop: {flop / 1e9:.2f} GFLOP")
+        else:
+            parts.append(f"flop: {flop:.0f}")
+    return ", ".join(parts)

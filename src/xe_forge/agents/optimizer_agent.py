@@ -12,6 +12,7 @@ import dspy
 
 from xe_forge.agents.base import Optimizer
 from xe_forge.agents.cover import CoVeR
+from xe_forge.agents.utils import SUCCESS_MESSAGE, extract_gemm_dims, verify_sycl
 from xe_forge.knowledge.loader import KnowledgeBase
 from xe_forge.models import (
     DSL,
@@ -22,97 +23,8 @@ from xe_forge.models import (
 logger = logging.getLogger(__name__)
 
 
-def _extract_gemm_dims(
-    input_shapes: list[tuple[int, ...]] | None,
-) -> tuple[int, int, int]:
-    """Extract M, N, K from GEMM input shapes [(M, K), (K, N)]."""
-    if input_shapes and len(input_shapes) >= 2:
-        a, b = input_shapes[0], input_shapes[1]
-        if len(a) >= 2 and len(b) >= 2:
-            return a[-2], b[-1], a[-1]
-    return 1024, 1024, 1024
-
-
-def _verify_sycl(code, original_code, executor, input_shapes, spec_dims=None):
-    """Verify a SYCL C++ kernel: basic structure check + runtime comparison."""
-    if "#include" not in code:
-        return "MISSING: C++ code must contain #include directives."
-    if "sycl" not in code.lower() and "cutlass" not in code.lower():
-        return "MISSING: Code does not appear to be a SYCL/CUTLASS kernel."
-
-    if executor:
-        try:
-            _dims = spec_dims or dict(
-                zip(("M", "N", "K"), _extract_gemm_dims(input_shapes), strict=False)
-            )
-            comparison = executor.compare_kernels(
-                original_code=original_code,
-                optimized_code=code,
-                dims=_dims,
-            )
-            if not comparison.optimized_correct:
-                return comparison.feedback_message or "Optimized kernel failed."
-            if comparison.is_slower:
-                sd = 1.0 / comparison.speedup if comparison.speedup > 0 else float("inf")
-                return (
-                    f"PERFORMANCE REGRESSION: {sd:.2f}x SLOWER.\n"
-                    f"Original: {comparison.original_time_ms:.4f}ms ({comparison.original_tflops or 0:.3f} TFlop/s)\n"
-                    f"Optimized: {comparison.optimized_time_ms:.4f}ms ({comparison.optimized_tflops or 0:.3f} TFlop/s)"
-                )
-            logger.info(
-                f"SYCL optimization verified: {comparison.speedup:.2f}x speedup "
-                f"({comparison.original_tflops or 0:.3f} -> {comparison.optimized_tflops or 0:.3f} TFlop/s)"
-            )
-            return SUCCESS_MESSAGE
-        except Exception as e:
-            return f"RUNTIME ERROR: {e!s}"
-
-    logger.warning("No executor - accepting SYCL code based on static checks only")
-    return SUCCESS_MESSAGE
-
-
-SUCCESS_MESSAGE = "Success! Optimization verified and kernel is faster."
-
-
 class OptimizationSignature(dspy.Signature):
-    """Apply optimization transformation to Triton kernel.
-
-    You are an expert Triton kernel optimizer for Intel XPU with deep knowledge
-    of GPU programming, numerical linear algebra, and high-performance computing.
-
-    Optimize the kernel for maximum performance while producing numerically
-    equivalent outputs. You may change the algorithm if outputs are equivalent.
-    Maintain the same Model class signature including weights shapes and names.
-
-    === STAGE-SPECIFIC GUIDANCE ===
-    ALGORITHMIC: mathematical simplifications, CSE, loop-invariant hoisting,
-      caching intermediates, reorder associative ops, tree reductions,
-      exploit GEMM structure (symmetric, triangular, low-rank).
-    DTYPE_FIX: float64->float32, proper accumulator precision, remove
-      unnecessary type conversions.
-    FUSION: fuse kernel launches, elementwise chains, reduction+elementwise.
-    MEMORY_ACCESS: fix uncoalesced access, remove transposes from inner loops,
-      add boundary checks, reduce register pressure.
-    BLOCK_POINTERS: use tl.make_block_ptr(), boundary_check=(0,1) tuple format,
-      tl.advance() for pointer updates.
-    XPU_SPECIFIC: BLOCK_M=256, BLOCK_N=256, BLOCK_K=32, num_warps=32,
-      GROUP_SIZE_M swizzling.
-      GRF MODE: grf_mode is a compiler option, NOT a triton.Config() kwarg.
-      Declare it as tl.constexpr in the kernel signature:
-        grf_mode: tl.constexpr  (values: "default", "128", "256", "auto")
-      Use "auto" — it automatically selects 256-GRF when register spill > 1000 bytes.
-      256-GRF requires num_warps <= 32 (halved thread occupancy).
-    PERSISTENT_KERNEL: persistent kernel pattern, tune NUM_PROGS.
-    DISCOVERY: apply the open-ended optimization described in the issues field.
-      This is a novel optimization not covered by standard stages. Follow the
-      proposal exactly, preserving all numerical equivalences.
-
-    === CODE REQUIREMENTS ===
-    - Include ALL imports, @triton.jit decorator, kernel function, Model class
-    - num_warps must be power of 2; block sizes must be powers of 2
-    - NEVER replace @triton.jit kernels with torch.matmul, torch.mm, torch.bmm,
-      or any vendor library (oneDNN, cuBLAS, MKL). Keep all original Triton kernels.
-    """
+    """Apply a single optimization stage to a Triton kernel to improve performance."""
 
     original_code: str = dspy.InputField(desc="Original Triton kernel code for reference")
     current_code: str = dspy.InputField(desc="Current Triton kernel code to optimize")
@@ -146,29 +58,7 @@ class OptimizationSignature(dspy.Signature):
 
 
 class AlgorithmicOptimizationSignature(dspy.Signature):
-    """Apply algorithmic / mathematical optimization to a Triton kernel.
-
-    You are an expert in numerical linear algebra, compiler optimizations, and
-    high-performance GPU kernel design.
-
-    Transform the kernel to perform FEWER FLOPs and/or FEWER memory accesses
-    while producing numerically equivalent results.
-
-    Think about:
-    1. Matrix structure exploitation (symmetric, triangular, diagonal, low-rank, sparse)
-    2. Associative / distributive law rewrites to reduce FLOPs
-    3. Common sub-expression elimination
-    4. Loop-invariant code hoisting
-    5. Caching intermediates in registers vs recomputing
-    6. Tree reductions vs serial reductions
-    7. Algebraic simplification of fused computations
-
-    Maintain the Model class signature. Produce equivalent outputs.
-
-    === CODE REQUIREMENTS ===
-    - Include ALL imports, @triton.jit decorator, kernel function, Model class
-    - NEVER replace @triton.jit kernels with torch.matmul, torch.mm, or any vendor library.
-    """
+    """Apply algorithmic/mathematical optimization to reduce FLOPs while preserving output equivalence."""
 
     original_code: str = dspy.InputField(desc="Original Triton kernel code for reference")
     current_code: str = dspy.InputField(desc="Current Triton kernel code to optimize")
@@ -195,50 +85,7 @@ class AlgorithmicOptimizationSignature(dspy.Signature):
 
 
 class AutotuneSignature(dspy.Signature):
-    """Add or improve @triton.autotune configuration for a Triton kernel.
-
-    You are an expert in Triton kernel autotuning for Intel XPU.
-
-    Your task: Add or improve the @triton.autotune decorator so the kernel
-    automatically selects the best configuration at runtime.
-
-    You will receive:
-    - The current kernel code
-    - Hardware information (compute units, memory, capabilities)
-    - Problem shapes (M, N, K dimensions)
-    - A set of suggested autotune configurations generated from hardware analysis
-
-    Your job:
-    1. Add @triton.autotune decorator with a good set of configs to search.
-    2. Use the suggested configs as a starting point but ADD more configs
-       based on your knowledge of what works well for this kernel type.
-    3. Include the key= argument so configs are re-evaluated when shapes change.
-    4. Ensure num_warps and num_stages are included in each config.
-    5. Ensure BLOCK sizes are powers of 2 and appropriate for the hardware.
-    6. For Intel XPU, always include at least one config with num_warps=32
-       and large tile sizes (256x256).
-    7. Remove any hardcoded meta-parameters that are now covered by autotune.
-    8. Keep the kernel functionally equivalent.
-
-    Tips for good autotune configs:
-    - Vary BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K across powers of 2
-    - Include both small tiles (64x64) for small problems and large tiles
-      (256x256) for large problems
-    - Vary num_warps: try 4, 8, 16, 32
-    - Vary num_stages: try 2, 3, 4
-    - Include GROUP_SIZE_M for L2 cache swizzling
-    - Use key= with the shape arguments that affect tiling
-    - Do NOT put grf_mode in triton.Config() — it causes TypeError at runtime.
-      grf_mode is a compiler option: declare it as tl.constexpr in the kernel
-      signature. Use grf_mode="auto" (auto-selects 256-GRF if spill > 1000 bytes)
-      or grf_mode="256" for large register file. Requires num_warps <= 32.
-
-    === CODE REQUIREMENTS ===
-    - Include ALL imports (torch, triton, triton.language as tl)
-    - Include @triton.autotune with configs list and key
-    - Include @triton.jit on the kernel
-    - Include the Model class with forward() method
-    """
+    """Add or improve @triton.autotune configuration so the kernel auto-selects optimal tile/warp parameters."""
 
     original_code: str = dspy.InputField(desc="Original Triton kernel code for reference")
     current_code: str = dspy.InputField(desc="Current Triton kernel code to add autotune to")
@@ -268,43 +115,7 @@ class AutotuneSignature(dspy.Signature):
 
 
 class SyclOptimizationSignature(dspy.Signature):
-    """Optimize a SYCL/CUTLASS C++ kernel for Intel XPU.
-
-    You are an expert in SYCL, CUTLASS/XeTLA, Intel XPU GPU architecture,
-    and high-performance C++ kernel optimization.
-
-    Optimize the kernel for maximum performance while producing numerically
-    equivalent outputs. You may change template parameters, dispatch policies,
-    data types, and memory layouts.
-
-    === SYCL/CUTLASS OPTIMIZATION KNOBS ===
-    - TileShape: Shape<_M, _N, _K> — try 256x256x32, 128x128x64, 128x256x32
-    - PipelineStages: 2, 3, or 4 — more prefetching vs register pressure
-    - MMA Atom: XE_DPAS_TT<SubgroupSize, AccumType, InputType> — SubgroupSize 4 or 8
-    - Dispatch Policy: MainloopXeL1Staged (L1 cached), MainloopXeL0Staged (uncached)
-    - Data types: bfloat16_t/half_t inputs, float/bfloat16_t accumulators
-    - Memory layout: RowMajor vs ColumnMajor for A, B, C, D
-    - Epilogue: LinearCombination, bias, activation via FusionCallbacks
-    - GmemTiledCopy: void (auto) or explicit copy atoms
-
-    === STAGE-SPECIFIC GUIDANCE ===
-    ALGORITHMIC: mathematical simplifications, CSE, loop-invariant hoisting,
-      exploit GEMM structure (symmetric, triangular, low-rank).
-    DTYPE_FIX: use bfloat16_t/half_t inputs, float accumulators, avoid double.
-    FUSION: fuse into CUTLASS epilogue callbacks — LinearCombination, bias, activation.
-    MEMORY_ACCESS: fix layout mismatch (RowMajor vs ColumnMajor), increase PipelineStages
-      for better prefetching, reduce register pressure.
-    DEVICE_SPECIFIC: TileShape 256x256x32 or 128x128x64, PipelineStages=2-3,
-      XE_DPAS_TT<8, float, bfloat16_t>, MainloopXeL1Staged dispatch policy.
-    DISCOVERY: apply the open-ended optimization described in the issues field.
-
-    === CODE REQUIREMENTS ===
-    - Must be complete, valid SYCL C++ with all #include directives
-    - Must use cutlass namespace and CUTLASS template types
-    - Must include ExampleRunner template and main() function
-    - Must compile with icpx -fsycl
-    - Keep the same output format (Cutlass GEMM Performance line)
-    """
+    """Apply a single optimization stage to a SYCL/CUTLASS C++ kernel to improve performance."""
 
     original_code: str = dspy.InputField(desc="Original SYCL/CUTLASS C++ kernel for reference")
     current_code: str = dspy.InputField(desc="Current SYCL C++ kernel code to optimize")
@@ -329,26 +140,7 @@ class SyclOptimizationSignature(dspy.Signature):
 
 
 class SyclAlgorithmicOptimizationSignature(dspy.Signature):
-    """Apply algorithmic / mathematical optimization to a SYCL/CUTLASS C++ kernel.
-
-    You are an expert in numerical linear algebra, compiler optimizations, and
-    high-performance GPU kernel design for Intel XPU.
-
-    Transform the kernel to perform FEWER FLOPs and/or FEWER memory accesses
-    while producing numerically equivalent results.
-
-    Think about:
-    1. Matrix structure exploitation (symmetric, triangular, diagonal, low-rank)
-    2. Associative / distributive law rewrites to reduce FLOPs
-    3. Common sub-expression elimination in template expressions
-    4. Data layout optimization (RowMajor vs ColumnMajor)
-    5. Batch dimension exploitation
-
-    === CODE REQUIREMENTS ===
-    - Must be complete, valid SYCL C++ with all #include directives
-    - Keep CUTLASS GEMM structure (GemmUniversalAdapter, ExampleRunner, main)
-    - Must compile with icpx -fsycl
-    """
+    """Apply algorithmic/mathematical optimization to a SYCL/CUTLASS kernel to reduce FLOPs."""
 
     original_code: str = dspy.InputField(desc="Original SYCL C++ kernel for reference")
     current_code: str = dspy.InputField(desc="Current SYCL C++ kernel to optimize")
@@ -440,12 +232,14 @@ class OptimizerAgent(Optimizer):
         validator=None,
         max_iterations=5,
         dsl: DSL | str = DSL.TRITON,
+        extra_instructions: str = "",
     ):
         self.executor = executor
         self.validator = validator
         self.max_iterations = max_iterations
         self.knowledge_base: KnowledgeBase | None = knowledge_base
         self.dsl = DSL(dsl) if isinstance(dsl, str) else dsl
+        self.extra_instructions = extra_instructions
         if not executor:
             logger.warning("No executor provided - kernels will NOT be verified at runtime!")
 
@@ -477,10 +271,10 @@ class OptimizerAgent(Optimizer):
             )
 
             if dsl == DSL.SYCL:
-                result = _verify_sycl(code, original_code, executor, input_shapes, spec_dims)
+                result = verify_sycl(code, original_code, executor, input_shapes, spec_dims)
                 if result == SUCCESS_MESSAGE and executor:
                     _dims = spec_dims or dict(
-                        zip(("M", "N", "K"), _extract_gemm_dims(input_shapes), strict=False)
+                        zip(("M", "N", "K"), extract_gemm_dims(input_shapes), strict=False)
                     )
                     try:
                         c = executor.compare_kernels(
@@ -785,6 +579,9 @@ class OptimizerAgent(Optimizer):
                 "vtune_report": vtune_report or "",
                 "knowledge_base_context": kb_context,
             }
+
+        if self.extra_instructions:
+            sig = sig.append_instructions(self.extra_instructions)
 
         cover = CoVeR(
             signature=sig,
@@ -1205,7 +1002,7 @@ class OptimizerAgent(Optimizer):
                     c = cached_comparison
                 elif self.dsl == DSL.SYCL:
                     _dims = spec_dims or dict(
-                        zip(("M", "N", "K"), _extract_gemm_dims(shapes), strict=False)
+                        zip(("M", "N", "K"), extract_gemm_dims(shapes), strict=False)
                     )
                     c = self.executor.compare_kernels(
                         original_code=orig,

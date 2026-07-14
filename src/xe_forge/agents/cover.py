@@ -105,13 +105,22 @@ class CoVeR(dspy.Module):
             .append("next_thought", dspy.OutputField(), type_=str)
         )
 
-        fallback_signature = dspy.Signature(
-            {**signature.input_fields, **signature.output_fields},
-            signature.instructions,
-        ).append("trajectory", dspy.InputField(), type_=str)
+        # Add a reasoning field to the fallback signature so the LLM can think through the
+        # final extraction step. Use dspy.Reasoning if available (DSPy >=3.3) — it transparently
+        # routes to native <think> blocks on reasoning models and CoT text on others.
+        # Fall back to a plain str field for older installs where dspy.Reasoning doesn't exist.
+        _ReasoningType = getattr(dspy, "Reasoning", str)
+        fallback_signature = (
+            dspy.Signature(
+                {**signature.input_fields, **signature.output_fields},
+                signature.instructions,
+            )
+            .append("trajectory", dspy.InputField(), type_=str)
+            .append("reasoning", dspy.OutputField(), type_=_ReasoningType)
+        )
 
         self.cover = dspy.Predict(self.cover_signature)
-        self.extract = dspy.ChainOfThought(fallback_signature)
+        self.extract = dspy.Predict(fallback_signature)
 
     def _format_trajectory(self, trajectory: dict[str, Any]):
         """Format trajectory for LLM consumption."""

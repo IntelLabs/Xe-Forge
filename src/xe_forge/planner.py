@@ -58,52 +58,7 @@ _HARD_DEPENDENCIES: list[tuple[OptimizationStage, OptimizationStage]] = [
 
 
 class PlanningSignature(dspy.Signature):
-    """Determine the optimal order to apply optimization stages to a GPU kernel.
-
-    You are an expert in GPU kernel optimization.
-    You have analyzed a kernel and found issues in specific optimization categories.
-    Your task: decide the OPTIMAL ORDER to apply the available stages.
-
-    === ORDERING PRINCIPLES ===
-
-    Mathematical correctness first:
-      - ALGORITHMIC and DISCOVERY before everything else — structural rewrites may
-        eliminate entire categories of lower-level issues. A rewrite that removes
-        a kernel makes BLOCK_POINTERS for that kernel irrelevant.
-
-    Dtype early, but after structure:
-      - DTYPE_FIX after ALGORITHMIC/DISCOVERY — convert to fp16 after the algorithm
-        is settled, not before (avoids converting code that gets rewritten anyway).
-
-    Fusion after dtype:
-      - FUSION after DTYPE_FIX — fuse already-converted kernels. Fusing then
-        converting can produce suboptimal mixed-precision boundaries.
-      - Exception: if FUSION is the dominant issue and DTYPE is minor, move FUSION
-        earlier to reduce the number of kernels before low-level tuning.
-
-    Memory before block pointers:
-      - MEMORY_ACCESS before BLOCK_POINTERS — fix coalescing and layout issues
-        before converting to block pointer API (block pointers assume good layout).
-
-    Low-level tuning last:
-      - DEVICE_SPECIFIC and AUTOTUNING last — tile sizes, warp counts, and autotune
-        configs should be applied to the final kernel structure, not intermediate forms.
-
-    Persistent kernel placement:
-      - PERSISTENT_KERNEL before DEVICE_SPECIFIC — persistence changes the kernel
-        structure; device tuning should happen on the persistent form.
-      - Skip PERSISTENT_KERNEL entirely if grid size is small (< 512 tiles) or
-        if the kernel produces a scalar/[M] output — persistence won't help.
-
-    === RULES ===
-    - Only include stages from the available_stages list (stages with detected issues).
-    - Do NOT add stages that have no detected issues.
-    - Do NOT include ANALYSIS.
-    - Your ordered_stages output must be a JSON array of stage value strings,
-      e.g. ["algorithmic", "dtype_fix", "device_specific"].
-    - Every stage in ordered_stages must appear in available_stages.
-    - Provide clear rationale explaining why you chose this specific order.
-    """
+    """Determine the optimal order to apply optimization stages to a GPU kernel."""
 
     available_stages: str = dspy.InputField(
         desc="JSON object mapping stage_name → [issue_type, ...] for stages with detected issues."
@@ -132,8 +87,23 @@ class PlanningSignature(dspy.Signature):
 class PlannerAgent:
     """LLM-based stage ordering. Falls back to default order on any failure."""
 
-    def __init__(self) -> None:
-        self.predictor = dspy.Predict(PlanningSignature)
+    def __init__(self, extra_instructions: str = "") -> None:
+        sig = PlanningSignature
+        # Inject planning guidance from template
+        try:
+            from xe_forge.prompts import render_signature_instructions
+            from xe_forge.config import get_config
+            cfg = get_config()
+            template_text = render_signature_instructions(
+                "planning_signature",
+                device_description=cfg.device_config.device,
+            )
+            sig = sig.append_instructions(template_text)
+        except Exception as e:
+            logger.debug("Planning template render failed: %s", e)
+        if extra_instructions:
+            sig = sig.append_instructions(extra_instructions)
+        self.predictor = dspy.Predict(sig)
 
     def plan(
         self,

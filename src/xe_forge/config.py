@@ -29,7 +29,7 @@ class AgentConfig:
 
     max_iterations: int = 5
     use_cover: bool = True
-    strategy: str = "cover"  # cover, react, hybrid
+    strategy: str = "cover"  # cover, react, coordinator
 
 
 @dataclass
