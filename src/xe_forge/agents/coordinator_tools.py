@@ -26,7 +26,7 @@ class CoordinatorState:
     original_code: str
     current_code: str
     best_code: str
-    best_speedup: float = 0.0
+    best_speedup: float = 1.0
     stages_tried: list[str] = field(default_factory=list)
     stages_succeeded: list[str] = field(default_factory=list)
     analysis: KernelAnalysis | None = None
