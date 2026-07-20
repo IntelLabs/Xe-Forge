@@ -187,6 +187,7 @@ def make_apply_stage_tool(
         """
         try:
             stage_enum = _parse_stage(stage)
+            stage = stage_enum.value  # normalize to canonical stage name
         except ValueError as e:
             return f"Error: {e}"
 
