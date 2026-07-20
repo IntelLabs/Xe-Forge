@@ -53,7 +53,6 @@ conflicts = [
 ]
 
 [tool.uv.sources]
-dspy = { path = "/data/nfs_home/mspoczy/upstream/dspy" }
 torch = [
   { index = "pytorch-xpu", extra = "intel" },
   { index = "pytorch-cuda", extra = "nvidia" },
