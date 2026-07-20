@@ -20,5 +20,6 @@ __all__ = [
 def __getattr__(name: str):
     if name == "XeForgePipeline":
         from xe_forge.pipeline import XeForgePipeline
+
         return XeForgePipeline
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

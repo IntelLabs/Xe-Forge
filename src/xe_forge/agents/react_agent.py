@@ -304,9 +304,7 @@ class OptimizerReActAgent(Optimizer):
         )
 
         try:
-            logger.info(
-                f"Starting ReActV2 optimization (max {self.max_iterations} iterations)"
-            )
+            logger.info(f"Starting ReActV2 optimization (max {self.max_iterations} iterations)")
 
             result = react_agent(
                 original_code=original_code,

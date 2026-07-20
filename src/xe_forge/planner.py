@@ -93,6 +93,7 @@ class PlannerAgent:
         try:
             from xe_forge.config import get_config
             from xe_forge.prompts import render_signature_instructions
+
             cfg = get_config()
             template_text = render_signature_instructions(
                 "planning_signature",

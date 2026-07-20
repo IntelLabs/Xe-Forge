@@ -121,6 +121,7 @@ class CoordinatorAgent(dspy.Module):
                 _DEVICE_TUNING_DEFAULTS,
                 _DSL_NAMES,
             )
+
             cfg = get_config()
             template_text = render_signature_instructions(
                 "coordinator_signature",
@@ -146,15 +147,18 @@ class CoordinatorAgent(dspy.Module):
             max_iters=self.max_iters,
         )
 
-        logger.info(
-            "CoordinatorAgent: starting ReActV2 (max_iters=%d)", self.max_iters
-        )
+        logger.info("CoordinatorAgent: starting ReActV2 (max_iters=%d)", self.max_iters)
 
         try:
             result = agent(kernel_specs=kernel_specs)
         except Exception as e:
             logger.error("CoordinatorAgent: ReActV2 failed: %s", e)
-            return state.best_code, state.best_speedup, f"Coordinator failed: {e}", state.stage_results
+            return (
+                state.best_code,
+                state.best_speedup,
+                f"Coordinator failed: {e}",
+                state.stage_results,
+            )
 
         termination = getattr(result, "termination_reason", None)
         if termination:
@@ -245,7 +249,11 @@ class CoordinatorAgent(dspy.Module):
             dspy.Tool(make_status_tool(state=state)),
         ]
 
-        if self.profiler is not None and hasattr(self.profiler, "available") and self.profiler.available():
+        if (
+            self.profiler is not None
+            and hasattr(self.profiler, "available")
+            and self.profiler.available()
+        ):
             tools.append(
                 dspy.Tool(
                     make_profile_tool(

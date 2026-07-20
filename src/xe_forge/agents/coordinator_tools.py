@@ -56,14 +56,14 @@ def _format_analysis_for_coordinator(analysis: KernelAnalysis) -> str:
     for stage, issues in sorted(by_stage.items(), key=lambda kv: kv[0].value):
         lines.append(f"\n  Stage: {stage.value}")
         for iss in sorted(issues, key=lambda i: -i.severity):
-            lines.append(
-                f"    [{iss.severity}/5] {iss.issue_type.value}: {iss.description[:120]}"
-            )
+            lines.append(f"    [{iss.severity}/5] {iss.issue_type.value}: {iss.description[:120]}")
             if iss.suggested_fix:
                 lines.append(f"      Fix: {iss.suggested_fix[:100]}")
 
     if analysis.has_algorithmic_opportunity:
-        lines.append("\nNote: algorithmic opportunities detected — apply ALGORITHMIC/DISCOVERY first.")
+        lines.append(
+            "\nNote: algorithmic opportunities detected — apply ALGORITHMIC/DISCOVERY first."
+        )
     return "\n".join(lines)
 
 
@@ -91,9 +91,8 @@ def _summarize_stage_result(stage: str, result: StageResult, prev_speedup: float
     """Single-line summary for coordinator tool return value."""
     if result.success and result.speedup and result.speedup > 1.0:
         delta = result.speedup - prev_speedup
-        return (
-            f"IMPROVED: {stage} → {result.speedup:.3f}x speedup"
-            + (f" (+{delta:.3f}x vs previous best)" if prev_speedup > 0 else "")
+        return f"IMPROVED: {stage} → {result.speedup:.3f}x speedup" + (
+            f" (+{delta:.3f}x vs previous best)" if prev_speedup > 0 else ""
         )
     if result.success:
         return f"APPLIED: {stage} — no measurable speedup (kernel unchanged or within noise)"
@@ -131,7 +130,9 @@ def make_analyze_tool(
             )
             state.analysis = analysis
             summary = _format_analysis_for_coordinator(analysis)
-            logger.info("Coordinator: analyze_kernel returned %d issues", len(analysis.detected_issues))
+            logger.info(
+                "Coordinator: analyze_kernel returned %d issues", len(analysis.detected_issues)
+            )
             return summary
         except Exception as e:
             logger.warning("analyze_kernel failed: %s", e)
@@ -240,7 +241,11 @@ def make_apply_stage_tool(
         state.stage_results.append(stage_result)
         summary = _summarize_stage_result(stage, stage_result, prev_speedup)
 
-        if stage_result.success and stage_result.output_code and stage_result.output_code != state.current_code:
+        if (
+            stage_result.success
+            and stage_result.output_code
+            and stage_result.output_code != state.current_code
+        ):
             state.current_code = stage_result.output_code
             state.stages_succeeded.append(stage)
             spd = stage_result.speedup or 0.0
@@ -270,7 +275,9 @@ def make_profile_tool(
         that static analysis cannot reveal. Requires VTune to be configured.
         """
         if profiler is None or not profiler.available():
-            return "VTune profiler not available. Use static analysis from analyze_kernel() instead."
+            return (
+                "VTune profiler not available. Use static analysis from analyze_kernel() instead."
+            )
         if spec_path is None:
             return "Cannot profile: no spec_path provided (required for VTune benchmark config)."
         try:
@@ -333,7 +340,9 @@ def make_benchmark_tool(
                 )
 
             if not comparison.optimized_correct:
-                return f"INCORRECT: {comparison.feedback_message or 'kernel produces wrong results'}"
+                return (
+                    f"INCORRECT: {comparison.feedback_message or 'kernel produces wrong results'}"
+                )
 
             speedup = comparison.speedup or 1.0
             orig_ms = getattr(comparison, "original_time_us", None)

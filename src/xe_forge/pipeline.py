@@ -25,7 +25,6 @@ from xe_forge.prompts.device_prompts import PromptLibrary
 logger = logging.getLogger(__name__)
 
 
-
 DEFAULT_STAGE_ORDER: list[OptimizationStage] = [
     OptimizationStage.ANALYSIS,
     OptimizationStage.ALGORITHMIC,
@@ -97,7 +96,9 @@ class XeForgePipeline:
         _dsl = self.config.device_config.dsl
         _is_sycl_dsl = str(_dsl.value if hasattr(_dsl, "value") else _dsl) == "sycl"
         _opt_template = "sycl_optimization_signature" if _is_sycl_dsl else "optimization_signature"
-        _react_template = "sycl_optimization_signature" if _is_sycl_dsl else "optimization_react_signature"
+        _react_template = (
+            "sycl_optimization_signature" if _is_sycl_dsl else "optimization_react_signature"
+        )
         _opt_instructions = _prompt_lib.render_for_signature(_opt_template)
         _react_instructions = _prompt_lib.render_for_signature(_react_template)
 
@@ -111,6 +112,7 @@ class XeForgePipeline:
         match self.config.agent.strategy:
             case "coordinator":
                 from xe_forge.agents.coordinator import CoordinatorAgent
+
                 self.coordinator = CoordinatorAgent(
                     analyzer=self.analyzer,
                     executor=executor,

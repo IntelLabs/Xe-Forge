@@ -279,7 +279,9 @@ class SyclAnalysisSignature(dspy.Signature):
 class AnalyzerAgent:
     """LLM-based analyzer for Triton kernels."""
 
-    def __init__(self, knowledge_base=None, dsl: DSL | str = DSL.TRITON, extra_instructions: str = ""):
+    def __init__(
+        self, knowledge_base=None, dsl: DSL | str = DSL.TRITON, extra_instructions: str = ""
+    ):
         self.knowledge_base = knowledge_base
         self.dsl = DSL(dsl) if isinstance(dsl, str) else dsl
         sig = SyclAnalysisSignature if self.dsl == DSL.SYCL else AnalysisSignature
@@ -290,11 +292,15 @@ class AnalyzerAgent:
 
         try:
             cfg = get_config()
-            issue_block = _SYCL_ISSUE_CATEGORIES_BLOCK if self.dsl == DSL.SYCL else _ISSUE_CATEGORIES_BLOCK
+            issue_block = (
+                _SYCL_ISSUE_CATEGORIES_BLOCK if self.dsl == DSL.SYCL else _ISSUE_CATEGORIES_BLOCK
+            )
             template_instructions = render_signature_instructions(
                 "analysis_signature",
                 dsl=cfg.device_config.dsl,
-                dsl_name=_DSL_NAMES.get(str(self.dsl.value if hasattr(self.dsl, "value") else self.dsl), "Triton"),
+                dsl_name=_DSL_NAMES.get(
+                    str(self.dsl.value if hasattr(self.dsl, "value") else self.dsl), "Triton"
+                ),
                 device_type=cfg.device_config.device,
                 device_description=_DEVICE_DESCS.get(cfg.device_config.device, "Intel XPU"),
                 defaults={},
@@ -302,7 +308,9 @@ class AnalyzerAgent:
             )
             sig = sig.append_instructions(template_instructions)
         except Exception as e:
-            logger.debug("Analysis template render failed, falling back to extra_instructions: %s", e)
+            logger.debug(
+                "Analysis template render failed, falling back to extra_instructions: %s", e
+            )
 
         if extra_instructions:
             sig = sig.append_instructions(extra_instructions)
