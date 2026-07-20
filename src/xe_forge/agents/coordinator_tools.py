@@ -384,15 +384,17 @@ def make_status_tool(state: CoordinatorState) -> Callable:
             f"Stages succeeded ({len(state.stages_succeeded)}): {', '.join(state.stages_succeeded) or 'none'}"
         )
         if state.analysis:
-            remaining = [
-                iss.issue_type.value
-                for iss in state.analysis.detected_issues
-                if iss.issue_type.value not in state.stages_tried
-            ]
+            from xe_forge.knowledge.patterns import get_stage_for_issue
+
+            tried = {s.strip().lower() for s in state.stages_tried}
+            remaining = sorted(
+                {get_stage_for_issue(iss.issue_type).value for iss in state.analysis.detected_issues}
+                - tried
+            )
             if remaining:
-                lines.append(f"Remaining issues to address: {', '.join(remaining[:8])}")
+                lines.append(f"Remaining stages to attempt: {', '.join(remaining[:8])}")
             else:
-                lines.append("All detected issues have been attempted.")
+                lines.append("All detected stages have been attempted.")
         if state.attempt_log:
             lines.append("\nAttempt history:")
             for entry in state.attempt_log[-5:]:
