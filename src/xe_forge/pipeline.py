@@ -312,75 +312,74 @@ class XeForgePipeline:
 
         _usage_ctx = dspy.track_usage()
         _usage_tracker = _usage_ctx.__enter__()
+        result_out: OptimizationResult | None = None
+        try:
+            candidates = []
 
-        candidates = []
+            if self.coordinator is not None:
+                # --- Coordinator (agentic) path ---
+                result = OptimizationResult(
+                    kernel_name=display_name, original_code=kernel_code, timestamp=datetime.now()
+                )
+                result.original_tflops, result.original_ms = val_orig_tflops, val_orig_ms
 
-        if self.coordinator is not None:
-            # --- Coordinator (agentic) path ---
-            result = OptimizationResult(
-                kernel_name=display_name, original_code=kernel_code, timestamp=datetime.now()
-            )
-            result.original_tflops, result.original_ms = val_orig_tflops, val_orig_ms
+                etd = target_dtype or self.config.optimization.target_dtype
+                if etd is None and dtype is not None:
+                    etd = {
+                        torch.float16: "float16",
+                        torch.bfloat16: "bfloat16",
+                        torch.float32: "float32",
+                    }.get(dtype)
 
-            etd = target_dtype or self.config.optimization.target_dtype
-            if etd is None and dtype is not None:
-                etd = {
-                    torch.float16: "float16",
-                    torch.bfloat16: "bfloat16",
-                    torch.float32: "float32",
-                }.get(dtype)
+                device_type = self.config.device_config.device
+                xpu_config = get_device_config_for_pipeline(
+                    device_type=device_type,
+                    input_shapes=input_shapes,
+                    config=self.config,
+                    dtype=etd or "float16",
+                )
+                _dsl_str = str(
+                    self.config.device_config.dsl.value
+                    if hasattr(self.config.device_config.dsl, "value")
+                    else self.config.device_config.dsl
+                )
+                kernel_specs = _build_kernel_specs(
+                    kernel_name=display_name,
+                    input_shapes=input_shapes,
+                    flop=flop,
+                    dtype=etd,
+                    device=device_type,
+                    dsl=_dsl_str,
+                )
 
-            device_type = self.config.device_config.device
-            xpu_config = get_device_config_for_pipeline(
-                device_type=device_type,
-                input_shapes=input_shapes,
-                config=self.config,
-                dtype=etd or "float16",
-            )
-            _dsl_str = str(
-                self.config.device_config.dsl.value
-                if hasattr(self.config.device_config.dsl, "value")
-                else self.config.device_config.dsl
-            )
-            kernel_specs = _build_kernel_specs(
-                kernel_name=display_name,
-                input_shapes=input_shapes,
-                flop=flop,
-                dtype=etd,
-                device=device_type,
-                dsl=_dsl_str,
-            )
+                logger.info("=" * 60 + "\nSTRATEGY: COORDINATOR (agentic)\n" + "=" * 60)
+                best_code, speedup, _summary, stage_results = self.coordinator.run(
+                    kernel_code=kernel_code,
+                    kernel_specs=kernel_specs,
+                    pytorch_code=reference_code or "",
+                    kernel_name=kernel_name,
+                    input_shapes=input_shapes,
+                    flop=flop,
+                    dtype=dtype,
+                    spec_dims=spec_dims,
+                    init_args=init_args,
+                    input_dtypes=input_dtypes,
+                    xpu_config=xpu_config,
+                    spec_path=spec_path,
+                    variant_type=variant_type,
+                )
 
-            logger.info("=" * 60 + "\nSTRATEGY: COORDINATOR (agentic)\n" + "=" * 60)
-            best_code, speedup, _summary, stage_results = self.coordinator.run(
-                kernel_code=kernel_code,
-                kernel_specs=kernel_specs,
-                pytorch_code=reference_code or "",
-                kernel_name=kernel_name,
-                input_shapes=input_shapes,
-                flop=flop,
-                dtype=dtype,
-                spec_dims=spec_dims,
-                init_args=init_args,
-                input_dtypes=input_dtypes,
-                xpu_config=xpu_config,
-                spec_path=spec_path,
-                variant_type=variant_type,
-            )
+                result.optimized_code = best_code
+                result.stages_applied = stage_results
+                result.success = best_code != kernel_code or speedup > 1.0
+                if speedup > 1.0:
+                    result.total_speedup = speedup
+                candidates.append(result)
 
-            result.optimized_code = best_code
-            result.stages_applied = stage_results
-            result.success = best_code != kernel_code or speedup > 1.0
-            if speedup > 1.0:
-                result.total_speedup = speedup
-            candidates.append(result)
-
-        # Fixed stage loop runs only when coordinator strategy is not active.
-        best_k = max(1, self.config.optimization.best_k) if self.coordinator is None else 0
-
-        for attempt in range(best_k):
+            # Fixed stage loop runs only when coordinator strategy is not active.
+            best_k = max(1, self.config.optimization.best_k) if self.coordinator is None else 0
             if best_k > 1:
-                logger.info(f"Attempt {attempt + 1}/{best_k}")
+                logger.info("Attempt 1/%d", best_k)
 
             result = OptimizationResult(
                 kernel_name=display_name, original_code=kernel_code, timestamp=datetime.now()
@@ -421,7 +420,6 @@ class XeForgePipeline:
             if not analysis.detected_issues:
                 result.success, result.optimized_code = True, kernel_code
                 candidates.append(result)
-                continue
 
             logger.info("=" * 60 + "\nSTAGE: PLANNING\n" + "=" * 60)
             from xe_forge.knowledge.patterns import get_stage_for_issue
@@ -467,7 +465,6 @@ class XeForgePipeline:
             if not stages_to_apply:
                 result.success, result.optimized_code = True, kernel_code
                 candidates.append(result)
-                continue
 
             current_code = kernel_code
             current_ms: float | None = val_orig_ms
@@ -640,33 +637,37 @@ class XeForgePipeline:
             result.optimized_code, result.success = current_code, True
             candidates.append(result)
 
-        if not candidates:
-            _usage_ctx.__exit__(None, None, None)
-            return OptimizationResult(
-                kernel_name=display_name, original_code=kernel_code, timestamp=datetime.now()
+            if not candidates:
+                result_out = OptimizationResult(
+                    kernel_name=display_name, original_code=kernel_code, timestamp=datetime.now()
+                )
+                return result_out
+
+            result = max(
+                candidates, key=lambda r: r.total_speedup if r.total_speedup is not None else -1.0
             )
+            self._save_results(result)
 
-        result = max(
-            candidates, key=lambda r: r.total_speedup if r.total_speedup is not None else -1.0
-        )
-        self._save_results(result)
+            logger.info("=" * 60 + "\nOPTIMIZATION COMPLETE\n" + "=" * 60)
+            ok = [s for s in result.stages_applied if s.success]
+            fail = [s for s in result.stages_applied if not s.success]
+            logger.info(f"Stages: {len(ok)}/{len(result.stages_applied)} succeeded")
+            if fail:
+                logger.info(f"Failed: {[s.stage.value for s in fail]}")
+            if result.total_speedup:
+                logger.info(f"Speedup: {result.total_speedup:.2f}x")
 
-        logger.info("=" * 60 + "\nOPTIMIZATION COMPLETE\n" + "=" * 60)
-        ok = [s for s in result.stages_applied if s.success]
-        fail = [s for s in result.stages_applied if not s.success]
-        logger.info(f"Stages: {len(ok)}/{len(result.stages_applied)} succeeded")
-        if fail:
-            logger.info(f"Failed: {[s.stage.value for s in fail]}")
-        if result.total_speedup:
-            logger.info(f"Speedup: {result.total_speedup:.2f}x")
+            result_out = result
+            return result_out
+        finally:
+            import sys
 
-        _usage_ctx.__exit__(None, None, None)
-        token_usage = _usage_tracker.get_total_tokens()
-        if token_usage:
-            logger.info("Token usage this run: %s", token_usage)
-        result.token_usage = token_usage or {}
-
-        return result
+            _usage_ctx.__exit__(*sys.exc_info())
+            if result_out is not None:
+                token_usage = _usage_tracker.get_total_tokens()
+                if token_usage:
+                    logger.info("Token usage this run: %s", token_usage)
+                result_out.token_usage = token_usage or {}
 
     def optimize_file(
         self,

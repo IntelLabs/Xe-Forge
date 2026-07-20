@@ -388,7 +388,10 @@ def make_status_tool(state: CoordinatorState) -> Callable:
 
             tried = {s.strip().lower() for s in state.stages_tried}
             remaining = sorted(
-                {get_stage_for_issue(iss.issue_type).value for iss in state.analysis.detected_issues}
+                {
+                    get_stage_for_issue(iss.issue_type).value
+                    for iss in state.analysis.detected_issues
+                }
                 - tried
             )
             if remaining:
