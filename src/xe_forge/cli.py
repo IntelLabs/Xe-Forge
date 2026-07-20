@@ -32,9 +32,9 @@ def _setup_dspy(config: Config) -> None:
     if config.llm.api_key:
         os.environ["OPENAI_API_KEY"] = config.llm.api_key
 
-    litellm.client_session = httpx.Client(verify=False)
-    litellm.aclient_session = httpx.AsyncClient(verify=False)
-    litellm.ssl_verify = False
+    litellm.client_session = httpx.Client()
+    litellm.aclient_session = httpx.AsyncClient()
+    litellm.ssl_verify = True
     lm = dspy.LM(
         model=config.llm.model,
         api_base=config.llm.api_base,
