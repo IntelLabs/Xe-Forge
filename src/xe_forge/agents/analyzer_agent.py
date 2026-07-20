@@ -285,8 +285,8 @@ class AnalyzerAgent:
         sig = SyclAnalysisSignature if self.dsl == DSL.SYCL else AnalysisSignature
 
         # Inject the full analysis guidance from template, including the dynamic issue categories block
-        from xe_forge.prompts import render_signature_instructions
         from xe_forge.config import get_config
+        from xe_forge.prompts import render_signature_instructions
 
         try:
             cfg = get_config()

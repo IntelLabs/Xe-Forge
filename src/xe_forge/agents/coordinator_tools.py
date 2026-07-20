@@ -207,7 +207,6 @@ def make_apply_stage_tool(
                 "original_ms": None,
                 "speedup_so_far": prev_speedup if prev_speedup > 0 else None,
             }
-            extra_hint = hints.strip() if hints else ""
 
             stage_result = optimizer.optimize_stage(
                 code=state.current_code,
@@ -313,8 +312,6 @@ def make_benchmark_tool(
         if not input_shapes and spec_dims is None:
             return "No input shapes or spec_dims — cannot benchmark."
         try:
-            from xe_forge.models import DSL
-
             is_sycl = spec_dims is not None and not input_shapes
 
             if is_sycl:

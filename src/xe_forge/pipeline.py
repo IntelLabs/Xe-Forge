@@ -9,7 +9,6 @@ import litellm
 
 from xe_forge.agents import AnalyzerAgent, Optimizer, OptimizerAgent, OptimizerReActAgent
 from xe_forge.agents.utils import extract_gemm_dims
-from xe_forge.prompts.device_prompts import PromptLibrary
 from xe_forge.config import Config, get_config
 from xe_forge.core.device_query import get_device_config_for_pipeline
 from xe_forge.knowledge.loader import KnowledgeBase, load_knowledge_base
@@ -21,6 +20,7 @@ from xe_forge.models import (
 )
 from xe_forge.planner import DEFAULT_STAGE_ORDER as PLANNER_DEFAULT_STAGE_ORDER
 from xe_forge.planner import PlannerAgent
+from xe_forge.prompts.device_prompts import PromptLibrary
 
 logger = logging.getLogger(__name__)
 
@@ -350,7 +350,7 @@ class XeForgePipeline:
             )
 
             logger.info("=" * 60 + "\nSTRATEGY: COORDINATOR (agentic)\n" + "=" * 60)
-            best_code, speedup, summary, stage_results = self.coordinator.run(
+            best_code, speedup, _summary, stage_results = self.coordinator.run(
                 kernel_code=kernel_code,
                 kernel_specs=kernel_specs,
                 pytorch_code=reference_code or "",

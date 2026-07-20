@@ -114,8 +114,8 @@ class CoordinatorAgent(dspy.Module):
         sig = CoordinatorSignature
         # Inject coordinator guidance from template
         try:
-            from xe_forge.prompts import render_signature_instructions
             from xe_forge.config import get_config
+            from xe_forge.prompts import render_signature_instructions
             from xe_forge.prompts.device_prompts import (
                 _DEVICE_DESCRIPTIONS,
                 _DEVICE_TUNING_DEFAULTS,
