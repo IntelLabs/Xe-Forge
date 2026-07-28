@@ -47,7 +47,7 @@ The optimizer analyzes Triton kernels, identifies performance issues, and applie
 
 ### FlashAttention Forward
 
-FlashAttention benchmark optimized across diverse shapes including skinny, non-square, and irregular configurations (varying head counts, sequence lengths, and head dimensions). Up to **10.6x** speedup over unoptimized Triton kernels, with optimized kernels reaching over **80 TFLOPS** on Intel Arc Pro B70.
+FlashAttention benchmark optimized across diverse shapes including skinny, non-square, and irregular configurations (varying head counts, sequence lengths, and head dimensions). Up to **13.3x** speedup over unoptimized Triton kernels, with optimized kernels reaching over **80 TFLOPS** on Intel Arc Pro B70.
 
 <p align="center">
   <img src="plots/attention_roofline.png" alt="Roofline analysis for FlashAttention Forward" width="500"/>
