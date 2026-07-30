@@ -22,27 +22,14 @@ logger = logging.getLogger(__name__)
 
 
 def _setup_dspy(config: Config) -> None:
-    """Configure DSPy LM from the shared config. Used by all LLM-driven paths."""
-    import dspy
-    import httpx
-    import litellm
+    """Configure DSPy LM from the shared config. Used by all LLM-driven paths.
 
-    if config.llm.api_base:
-        os.environ["OPENAI_API_BASE"] = config.llm.api_base
-    if config.llm.api_key:
-        os.environ["OPENAI_API_KEY"] = config.llm.api_key
+    Supports OpenAI-compatible endpoints and AWS Bedrock (model ids prefixed
+    with ``bedrock/``). See :mod:`xe_forge.llm_setup`.
+    """
+    from xe_forge.llm_setup import configure_dspy
 
-    litellm.client_session = httpx.Client(verify=False)
-    lm = dspy.LM(
-        model=config.llm.model,
-        api_base=config.llm.api_base,
-        model_type="responses",
-        api_key=config.llm.api_key or "",
-        temperature=config.llm.temperature,
-        max_tokens=config.llm.max_tokens,
-        cache=False,
-    )
-    dspy.configure(lm=lm, warn_on_type_mismatch=False)
+    configure_dspy(config.llm)
 
 
 def _parse_args():
