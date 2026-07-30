@@ -32,14 +32,14 @@ def run(args):
             init_args=init_args,
             input_dtypes=input_dtypes,
         )
-        if optimized_result.success:
+        if optimized_result.success and optimized_result.execution_time_ms is not None:
             baseline_ms = sum(baseline_us) / len(baseline_us) / 1000.0
             opt_ms = optimized_result.execution_time_ms
             speedup = baseline_ms / opt_ms if opt_ms > 0 else 0
             print(f"Correctness: {'PASSED' if optimized_result.success else 'FAILED'}")
             print(
                 f"Performance: baseline_us={baseline_ms * 1000:.2f}, "
-                f"triton_us={opt_ms * 1000:.2f}, speedup={speedup:.2f}x"
+                f"custom_us={opt_ms * 1000:.2f}, speedup={speedup:.2f}x"
             )
         else:
             print("Correctness: FAILED")
@@ -58,7 +58,7 @@ def run(args):
         if result.original_time_us and result.optimized_time_us:
             print(
                 f"Performance: baseline_us={result.original_time_us:.2f}, "
-                f"triton_us={result.optimized_time_us:.2f}, speedup={result.speedup:.2f}x"
+                f"custom_us={result.optimized_time_us:.2f}, speedup={result.speedup:.2f}x"
             )
         if result.feedback_message:
             print(f"Feedback: {result.feedback_message}")

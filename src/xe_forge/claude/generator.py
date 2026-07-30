@@ -1,8 +1,9 @@
 """Generate a Claude Code workspace for kernel optimization.
 
-Creates CLAUDE.md, config.yaml, .claude/commands/, .claude/agents/,
-and copies kernel files into the workspace. All text artifacts are
-rendered from Jinja templates under ``templates/``.
+Creates CLAUDE.md, config.yaml, .claude/settings.local.json,
+.claude/commands/, .claude/agents/, and copies kernel files into
+the workspace. All text artifacts are rendered from Jinja templates
+under ``templates/``.
 """
 
 from __future__ import annotations
@@ -70,10 +71,11 @@ def generate_workspace(
 
     agent_dir = workspace / ".claude" / "agents"
     agent_dir.mkdir(parents=True, exist_ok=True)
-    (agent_dir / "tool-runner.md").write_text(_render("tool-runner.md.j2"))
+    (agent_dir / "tool-runner.md").write_text(_render("tool-runner.md.j2", dsl=dsl))
+    (workspace / ".claude" / "settings.json").write_text(_render("settings.json.j2"))
 
     _write_kernel_files(workspace, kernel_name, kernel_code, reference_code, spec_path)
-    _symlink_knowledge_base(workspace)
+    _copy_knowledge_base(workspace, dsl, device)
 
     if config.engine.git_init:
         _git_init(workspace)
@@ -96,11 +98,10 @@ def _write_kernel_files(
         shutil.copy2(spec_path, tk_dir / f"{kernel_name}.yaml")
 
 
-def _symlink_knowledge_base(workspace: Path) -> None:
-    """Create a symlink to the installed knowledge_base directory."""
-    kb_link = workspace / "knowledge_base"
-    if kb_link.exists() or kb_link.is_symlink():
-        return
+def _copy_knowledge_base(workspace: Path, dsl: str, device: str) -> None:
+    """Copy common and DSL/device-specific knowledge base subdirectories."""
+    kb_root = workspace / "knowledge_base"
+    kb_root.mkdir(parents=True, exist_ok=True)
 
     import xe_forge
 
@@ -112,7 +113,23 @@ def _symlink_knowledge_base(workspace: Path) -> None:
     ]
     for candidate in candidates:
         if candidate.is_dir():
-            kb_link.symlink_to(candidate.resolve())
+            src_root = candidate.resolve()
+
+            common_src = src_root / "common"
+            dsl_device_src = src_root / dsl / device
+            common_dst = kb_root / "common"
+            dsl_device_dst = kb_root / dsl / device
+
+            if common_dst.is_symlink():
+                common_dst.unlink()
+            if common_src.is_dir():
+                shutil.copytree(common_src, common_dst, dirs_exist_ok=True)
+
+            dsl_device_dst.parent.mkdir(parents=True, exist_ok=True)
+            if dsl_device_dst.is_symlink():
+                dsl_device_dst.unlink()
+            if dsl_device_src.is_dir():
+                shutil.copytree(dsl_device_src, dsl_device_dst, dirs_exist_ok=True)
             return
 
 

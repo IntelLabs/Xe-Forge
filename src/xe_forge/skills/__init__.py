@@ -66,7 +66,7 @@ def main():
     t_result.add_argument("--correctness", choices=["pass", "fail"])
     t_result.add_argument("--speedup", type=float)
     t_result.add_argument("--baseline-us", type=float)
-    t_result.add_argument("--triton-us", type=float)
+    t_result.add_argument("--custom-us", "--triton-us", dest="custom_us", type=float)
     t_result.add_argument("--trials-dir", default="./trials")
 
     t_status = trial_sub.add_parser("status")
