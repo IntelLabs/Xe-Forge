@@ -28,38 +28,34 @@ _OVERHEAD_KERNEL_PATTERNS = [
     re.compile(r"\[Outside any task\]"),
 ]
 
-_HOTSPOTS_COLUMNS_PASS1 = ",".join(
-    [
-        "Computing Task:Total Time",
-        "Computing Task:Average Time",
-        "Computing Task:Instance Count",
-        "Computing Task:SIMD Width",
-        "XVE Array:Active",
-        "XVE Array:Stalled",
-        "XVE Array:Idle",
-        "Peak XVE Threads Occupancy",
-        "GPU Memory Bandwidth, GB/sec:Read",
-        "GPU Memory Bandwidth, GB/sec:Write",
-        "GPU L3:Busy",
-        "GPU L3:Stalled",
-        "GPU L3:Miss Ratio",
-        "GPU L3:Average Bandwidth, GB/s:Read",
-        "GPU L3:Average Bandwidth, GB/s:Write",
-        "GPU Load Store Cache:Miss Ratio",
-        "GPU Load Store Cache:L3 Miss Ratio",
-        "GPU Shared Local Memory:Bank Conflicts",
-        "TLB Misses",
-    ]
-)
+_HOTSPOTS_COLUMNS_PASS1 = ",".join([
+    "Computing Task:Total Time",
+    "Computing Task:Average Time",
+    "Computing Task:Instance Count",
+    "Computing Task:SIMD Width",
+    "XVE Array:Active",
+    "XVE Array:Stalled",
+    "XVE Array:Idle",
+    "Peak XVE Threads Occupancy",
+    "GPU Memory Bandwidth, GB/sec:Read",
+    "GPU Memory Bandwidth, GB/sec:Write",
+    "GPU L3:Busy",
+    "GPU L3:Stalled",
+    "GPU L3:Miss Ratio",
+    "GPU L3:Average Bandwidth, GB/s:Read",
+    "GPU L3:Average Bandwidth, GB/s:Write",
+    "GPU Load Store Cache:Miss Ratio",
+    "GPU Load Store Cache:L3 Miss Ratio",
+    "GPU Shared Local Memory:Bank Conflicts",
+    "TLB Misses",
+])
 
-_HOTSPOTS_COLUMNS_PASS2 = ",".join(
-    [
-        "Computing Task:Total Time",
-        "XVE Threads Occupancy",
-        "GPU Load Store Cache:Average Bandwidth, GB/s:Read",
-        "GPU Load Store Cache:Average Bandwidth, GB/s:Write",
-    ]
-)
+_HOTSPOTS_COLUMNS_PASS2 = ",".join([
+    "Computing Task:Total Time",
+    "XVE Threads Occupancy",
+    "GPU Load Store Cache:Average Bandwidth, GB/s:Read",
+    "GPU Load Store Cache:Average Bandwidth, GB/s:Write",
+])
 
 
 def _is_overhead_kernel(name: str) -> bool:

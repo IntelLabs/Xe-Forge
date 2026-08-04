@@ -381,14 +381,12 @@ def _load_yaml_file(kb: KnowledgeBase, path: Path) -> None:
         if entry:
             kb.add_entry(entry)
         else:
-            kb.skipped.append(
-                {
-                    "file": fname,
-                    "id": raw.get("id", "?"),
-                    "name": raw.get("name", "?"),
-                    "stage": raw.get("stage", "?"),
-                }
-            )
+            kb.skipped.append({
+                "file": fname,
+                "id": raw.get("id", "?"),
+                "name": raw.get("name", "?"),
+                "stage": raw.get("stage", "?"),
+            })
 
 
 def _parse_constraint(data: dict, source: str) -> KnowledgeConstraint | None:
@@ -586,13 +584,11 @@ def _infer_example_stages(meta: dict) -> list[OptimizationStage]:
         elif isinstance(item, dict):
             opts.extend(str(v) for v in item.values())
 
-    text = " ".join(
-        [
-            meta.get("description", ""),
-            " ".join(opts),
-            meta.get("name", ""),
-        ]
-    ).lower()
+    text = " ".join([
+        meta.get("description", ""),
+        " ".join(opts),
+        meta.get("name", ""),
+    ]).lower()
 
     seen: set[OptimizationStage] = set()
     result: list[OptimizationStage] = []

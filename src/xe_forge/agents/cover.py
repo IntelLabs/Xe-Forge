@@ -65,15 +65,13 @@ class CoVeR(dspy.Module):
         outputs = ", ".join([f"`{k}`" for k in signature.output_fields.keys()])
 
         instr = [f"{signature.instructions}\n"] if signature.instructions else []
-        instr.extend(
-            [
-                f"You are an Agent. In each episode, you will be given the fields {inputs} as input. And you can see your past trajectory so far.",
-                f"Your goal is to use the supplied tools to collect any necessary information for producing {outputs}.\n",
-                "After each tool call, you receive a resulting observation, which gets appended to your trajectory.\n",
-                "When writing next_thought, you may reason about the current situation and plan for future steps.",
-                "The tools are:\n",
-            ]
-        )
+        instr.extend([
+            f"You are an Agent. In each episode, you will be given the fields {inputs} as input. And you can see your past trajectory so far.",
+            f"Your goal is to use the supplied tools to collect any necessary information for producing {outputs}.\n",
+            "After each tool call, you receive a resulting observation, which gets appended to your trajectory.\n",
+            "When writing next_thought, you may reason about the current situation and plan for future steps.",
+            "The tools are:\n",
+        ])
         for idx, tool in enumerate(tool_dict.values()):
             instr.append(f"({idx + 1}) {tool}")
 
@@ -97,7 +95,8 @@ class CoVeR(dspy.Module):
                 )
 
         self.cover_signature = (
-            dspy.Signature(
+            dspy
+            .Signature(
                 {**signature.input_fields, **signature.output_fields},
                 "\n".join(instr),
             )
@@ -111,7 +110,8 @@ class CoVeR(dspy.Module):
         # Fall back to a plain str field for older installs where dspy.Reasoning doesn't exist.
         _ReasoningType = getattr(dspy, "Reasoning", str)
         fallback_signature = (
-            dspy.Signature(
+            dspy
+            .Signature(
                 {**signature.input_fields, **signature.output_fields},
                 signature.instructions,
             )

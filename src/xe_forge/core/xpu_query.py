@@ -514,16 +514,14 @@ def get_autotune_configs(
 
     # Base config from shape analysis
     base = get_optimal_params(M, N, K, device_id)
-    configs.append(
-        {
-            "BLOCK_SIZE_M": base["BLOCK_SIZE_M"],
-            "BLOCK_SIZE_N": base["BLOCK_SIZE_N"],
-            "BLOCK_SIZE_K": base["BLOCK_SIZE_K"],
-            "GROUP_SIZE_M": base["GROUP_SIZE_M"],
-            "num_warps": base["num_warps"],
-            "num_stages": base["num_stages"],
-        }
-    )
+    configs.append({
+        "BLOCK_SIZE_M": base["BLOCK_SIZE_M"],
+        "BLOCK_SIZE_N": base["BLOCK_SIZE_N"],
+        "BLOCK_SIZE_K": base["BLOCK_SIZE_K"],
+        "GROUP_SIZE_M": base["GROUP_SIZE_M"],
+        "num_warps": base["num_warps"],
+        "num_stages": base["num_stages"],
+    })
 
     # Generate variations
     block_m_options = [b for b in [64, 128, 256] if b <= M]
@@ -773,26 +771,20 @@ def get_xpu_config_for_pipeline(
     # Override with config values if provided
     if config and hasattr(config, "xpu"):
         xpu_cfg = config.xpu
-        hw_config.update(
-            {
-                "device": getattr(xpu_cfg, "device", hw_config.get("device", "xpu")),
-                "grf_mode": getattr(xpu_cfg, "grf_mode", hw_config.get("grf_mode", "large")),
-                "num_warps": getattr(xpu_cfg, "default_num_warps", hw_config.get("num_warps", 32)),
-                "num_stages": getattr(
-                    xpu_cfg, "default_num_stages", hw_config.get("num_stages", 2)
-                ),
-                "BLOCK_SIZE_M": getattr(
-                    xpu_cfg, "preferred_tile_m", hw_config.get("BLOCK_SIZE_M", 256)
-                ),
-                "BLOCK_SIZE_N": getattr(
-                    xpu_cfg, "preferred_tile_n", hw_config.get("BLOCK_SIZE_N", 256)
-                ),
-                "BLOCK_SIZE_K": getattr(
-                    xpu_cfg, "preferred_tile_k", hw_config.get("BLOCK_SIZE_K", 32)
-                ),
-                "GROUP_SIZE_M": getattr(xpu_cfg, "group_size_m", hw_config.get("GROUP_SIZE_M", 4)),
-            }
-        )
+        hw_config.update({
+            "device": getattr(xpu_cfg, "device", hw_config.get("device", "xpu")),
+            "grf_mode": getattr(xpu_cfg, "grf_mode", hw_config.get("grf_mode", "large")),
+            "num_warps": getattr(xpu_cfg, "default_num_warps", hw_config.get("num_warps", 32)),
+            "num_stages": getattr(xpu_cfg, "default_num_stages", hw_config.get("num_stages", 2)),
+            "BLOCK_SIZE_M": getattr(
+                xpu_cfg, "preferred_tile_m", hw_config.get("BLOCK_SIZE_M", 256)
+            ),
+            "BLOCK_SIZE_N": getattr(
+                xpu_cfg, "preferred_tile_n", hw_config.get("BLOCK_SIZE_N", 256)
+            ),
+            "BLOCK_SIZE_K": getattr(xpu_cfg, "preferred_tile_k", hw_config.get("BLOCK_SIZE_K", 32)),
+            "GROUP_SIZE_M": getattr(xpu_cfg, "group_size_m", hw_config.get("GROUP_SIZE_M", 4)),
+        })
 
     return hw_config
 

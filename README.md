@@ -326,7 +326,7 @@ If your kernel needs configuration values (head dimension, scale factor, etc.), 
 class Model(torch.nn.Module):
     def __init__(self, D_HEAD: int):
         super().__init__()
-        self.sm_scale = 1.0 / (D_HEAD ** 0.5)
+        self.sm_scale = 1.0 / (D_HEAD**0.5)
         self.D_HEAD = D_HEAD
 
     def forward(self, Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor) -> torch.Tensor:

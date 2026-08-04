@@ -462,17 +462,15 @@ class OptimizerAgent(Optimizer):
                 changes_made=["No changes needed"],
             )
 
-        issues_text = "\n".join(
-            [
-                f"- {i.issue_type.value}: {i.description}\n  Fix: {i.suggested_fix}\n  Speedup: {i.estimated_speedup or 'Unknown'}"
-                + (
-                    f"\n  Proposal: {i.open_ended_proposal}"
-                    if hasattr(i, "open_ended_proposal") and i.open_ended_proposal
-                    else ""
-                )
-                for i in stage_issues
-            ]
-        )
+        issues_text = "\n".join([
+            f"- {i.issue_type.value}: {i.description}\n  Fix: {i.suggested_fix}\n  Speedup: {i.estimated_speedup or 'Unknown'}"
+            + (
+                f"\n  Proposal: {i.open_ended_proposal}"
+                if hasattr(i, "open_ended_proposal") and i.open_ended_proposal
+                else ""
+            )
+            for i in stage_issues
+        ])
 
         from xe_forge.config import get_config
         from xe_forge.core.device_query import format_device_config_for_llm

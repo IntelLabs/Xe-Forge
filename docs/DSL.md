@@ -28,11 +28,11 @@ class DSL(StrEnum):
     GLUON = "gluon"
     SYCL = "sycl"
     CUDA = "cuda"
-    MOJO = "mojo"          # new
+    MOJO = "mojo"  # new
 
     @property
     def code_language(self) -> str:
-        if self in (DSL.SYCL, DSL.CUDA):   # add MOJO here if it is C++-like
+        if self in (DSL.SYCL, DSL.CUDA):  # add MOJO here if it is C++-like
             return "cpp"
         return "python"
 ```
@@ -92,7 +92,7 @@ Two spots pick the executor. Add a branch or let it fall through to
 if config.device_config.dsl == DSL.SYCL:
     executor = SyclExecutor(...)
 else:
-    executor = KernelBenchExecutor(...)   # triton/gluon/cuda/mojo
+    executor = KernelBenchExecutor(...)  # triton/gluon/cuda/mojo
 ```
 
 If your DSL runs from M/N/K dims instead of `input_shapes`, follow the `_is_sycl`
@@ -106,7 +106,7 @@ branches in `pipeline.py`.
 _DSL_NAMES = {
     "triton": "Triton",
     "sycl": "SYCL/XeTLA",
-    "mojo": "Mojo",          # new
+    "mojo": "Mojo",  # new
 }
 ```
 
@@ -208,8 +208,9 @@ DSL knowledge is hardcoded and must be updated:
 
 ```python
 # src/xe_forge/skills/__init__.py — add the value to every --dsl choices list
-p_validate.add_argument("--dsl", default="triton",
-                        choices=["triton", "sycl", "gluon", "cuda", "mojo"])
+p_validate.add_argument(
+    "--dsl", default="triton", choices=["triton", "sycl", "gluon", "cuda", "mojo"]
+)
 ```
 
 - `skills/benchmark.py` constructs `KernelBenchExecutor` directly — switch it to
