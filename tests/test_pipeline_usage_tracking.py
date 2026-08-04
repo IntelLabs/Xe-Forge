@@ -57,7 +57,7 @@ class StubOptimizer:
 def _make_pipeline():
     pipeline = object.__new__(XeForgePipeline)
     pipeline.config = SimpleNamespace(
-        optimization=SimpleNamespace(target_dtype=None, best_k=1),
+        optimization=SimpleNamespace(target_dtype=None),
         device_config=SimpleNamespace(device="xpu", dsl=DSL.TRITON),
         logging=SimpleNamespace(save_intermediate=False),
     )

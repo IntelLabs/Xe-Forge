@@ -376,266 +376,292 @@ class XeForgePipeline:
                     result.total_speedup = speedup
                 candidates.append(result)
 
-            # Fixed stage loop runs only when coordinator strategy is not active.
-            best_k = max(1, self.config.optimization.best_k) if self.coordinator is None else 0
-            if best_k > 1:
-                logger.info("Attempt 1/%d", best_k)
-
-            result = OptimizationResult(
-                kernel_name=display_name, original_code=kernel_code, timestamp=datetime.now()
-            )
-            result.original_tflops, result.original_ms = val_orig_tflops, val_orig_ms
-
-            etd = target_dtype or self.config.optimization.target_dtype
-            if etd is None and dtype is not None:
-                etd = {
-                    torch.float16: "float16",
-                    torch.bfloat16: "bfloat16",
-                    torch.float32: "float32",
-                }.get(dtype)
-
-            device_type = self.config.device_config.device
-            xpu_config = get_device_config_for_pipeline(
-                device_type=device_type,
-                input_shapes=input_shapes,
-                config=self.config,
-                dtype=etd or "float16",
-            )
-
-            logger.info("=" * 60 + "\nSTAGE: ANALYSIS\n" + "=" * 60)
-            analysis = self.analyzer.analyze(
-                kernel_code,
-                reference_code,
-                display_name,
-                input_shapes,
-                flop,
-                target_dtype=etd,
-            )
-            result.analysis = analysis
-
-            logger.info(f"Detected {len(analysis.detected_issues)} issues:")
-            for iss in analysis.detected_issues:
-                logger.info(f"  [{iss.severity}] {iss.issue_type.value}: {iss.description}")
-
-            if not analysis.detected_issues:
-                result.success, result.optimized_code = True, kernel_code
-                candidates.append(result)
-
-            logger.info("=" * 60 + "\nSTAGE: PLANNING\n" + "=" * 60)
-            from xe_forge.knowledge.patterns import get_stage_for_issue
-
-            stages_needed: dict[OptimizationStage, list[str]] = {}
-            for iss in analysis.detected_issues:
-                st = get_stage_for_issue(iss.issue_type)
-                stages_needed.setdefault(st, []).append(iss.issue_type.value)
-
-            from xe_forge.dsl_registry import get_stages_for_dsl
-
-            _supported = set(get_stages_for_dsl(self.config.device_config.dsl))
-            stages_needed = {s: v for s, v in stages_needed.items() if s in _supported}
-
-            if stages:
-                stages_to_apply = [
-                    s for s in stages if s in stages_needed and s != OptimizationStage.ANALYSIS
-                ]
-                logger.info("Stage order: manual override")
             else:
-                stages_to_apply = self.planner.plan(
-                    stages_needed=stages_needed,
-                    analysis=analysis,
+                result = OptimizationResult(
+                    kernel_name=display_name, original_code=kernel_code, timestamp=datetime.now()
+                )
+                result.original_tflops, result.original_ms = val_orig_tflops, val_orig_ms
+
+                etd = target_dtype or self.config.optimization.target_dtype
+                if etd is None and dtype is not None:
+                    etd = {
+                        torch.float16: "float16",
+                        torch.bfloat16: "bfloat16",
+                        torch.float32: "float32",
+                    }.get(dtype)
+
+                device_type = self.config.device_config.device
+                xpu_config = get_device_config_for_pipeline(
+                    device_type=device_type,
                     input_shapes=input_shapes,
-                    flop=flop,
+                    config=self.config,
+                    dtype=etd or "float16",
                 )
 
-            logger.info("Optimization plan:")
-            for s in PLANNER_DEFAULT_STAGE_ORDER:
-                if s == OptimizationStage.ANALYSIS:
-                    continue
-                if s in stages_needed:
-                    if s in stages_to_apply:
-                        pos = stages_to_apply.index(s) + 1
-                        issues_str = ", ".join(stages_needed[s])
-                        logger.info(f"  + {s.value} [#{pos}]: {issues_str}")
-                    else:
-                        issues_str = ", ".join(stages_needed[s])
-                        logger.info(f"  ~ {s.value} (deferred): {issues_str}")
-                else:
-                    logger.info(f"  - {s.value}: skipped")
-
-            if not stages_to_apply:
-                result.success, result.optimized_code = True, kernel_code
-                candidates.append(result)
-
-            current_code = kernel_code
-            current_ms: float | None = val_orig_ms
-            vtune_report = ""
-            last_trial_id: str | None = None
-
-            for stage_idx, stage in enumerate(stages_to_apply):
-                logger.info("=" * 60 + f"\nSTAGE: {stage.value.upper()}\n" + "=" * 60)
-                logger.info(f"Issues: {', '.join(stages_needed.get(stage, []))}")
-
-                stage_result = self.optimizer.optimize_stage(
-                    code=current_code,
-                    stage=stage,
-                    analysis=analysis,
-                    xpu_config=xpu_config,
-                    kernel_name=kernel_name,
-                    input_shapes=input_shapes,
-                    spec_dims=spec_dims,
-                    flop=flop,
-                    dtype=dtype,
-                    pytorch_code=reference_code,
-                    init_args=init_args,
-                    vtune_report=vtune_report,
-                    perf_context={
-                        "original_ms": val_orig_ms,
-                        "original_tflops": val_orig_tflops,
-                        "current_ms": current_ms,
-                        "speedup_so_far": (
-                            round(val_orig_ms / current_ms, 3)
-                            if val_orig_ms and current_ms and current_ms > 0
-                            else None
-                        ),
-                    },
-                    input_dtypes=input_dtypes,
-                )
-                result.stages_applied.append(stage_result)
-
-                if (
-                    stage_result.success
-                    and stage_result.output_code
-                    and stage_result.output_code != current_code
-                ):
-                    current_code = stage_result.output_code
-                    if stage_result.speedup and val_orig_ms:
-                        current_ms = val_orig_ms / stage_result.speedup
-                    elif (
-                        stage_result.metrics_after
-                        and "execution_time_ms" in stage_result.metrics_after
-                    ):
-                        current_ms = stage_result.metrics_after["execution_time_ms"]
-                    logger.info(
-                        f"Stage {stage.value} OK"
-                        + (f" ({stage_result.speedup:.2f}x)" if stage_result.speedup else "")
-                    )
-                elif not stage_result.success:
-                    logger.warning(f"Stage {stage.value} failed: {stage_result.error_message}")
-
-                if self.trial_manager and kernel_name and stage_result.output_code:
-                    try:
-                        import tempfile
-
-                        tmp = Path(tempfile.mkdtemp()) / f"{kernel_name}_stage_{stage.value}.py"
-                        tmp.write_text(stage_result.output_code)
-                        trial_id = self.trial_manager.save_trial(
-                            kernel_name,
-                            str(tmp),
-                            parent=last_trial_id,
-                            strategy=f"stage:{stage.value}",
-                        )
-                        speedup = (
-                            val_orig_ms / current_ms
-                            if val_orig_ms and current_ms and current_ms > 0
-                            else None
-                        )
-                        self.trial_manager.record_result(
-                            kernel_name,
-                            trial_id,
-                            correctness="pass" if stage_result.success else "fail",
-                            speedup=speedup,
-                            baseline_us=(val_orig_ms or 0) * 1000,
-                            triton_us=(current_ms or 0) * 1000,
-                        )
-                        if stage_result.success:
-                            last_trial_id = trial_id
-                        logger.info("Trial %s recorded for stage %s", trial_id, stage.value)
-                    except Exception as e:
-                        logger.warning("Could not record trial for stage %s: %s", stage.value, e)
-
-                if (
-                    self.profiler
-                    and stage_idx > 0
-                    and stage_result.success
-                    and stage_result.output_code
-                    and spec_path
-                ):
-                    try:
-                        import tempfile
-
-                        tmp = Path(tempfile.mkdtemp()) / f"{kernel_name}_profile.py"
-                        tmp.write_text(stage_result.output_code)
-                        profile_result = self.profiler.profile(
-                            str(tmp),
-                            spec_path=spec_path,
-                            variant=variant_type,
-                        )
-                        if not profile_result.error:
-                            vtune_report = profile_result.format_for_llm()
-                            logger.info("VTune profile updated after stage %s", stage.value)
-                        else:
-                            logger.warning("VTune profiling error: %s", profile_result.error)
-                    except Exception as e:
-                        logger.warning("VTune profiling failed after stage %s: %s", stage.value, e)
-
-                if stage == OptimizationStage.DISCOVERY and stage_result.success:
-                    open_ended_issues = [
-                        i
-                        for i in analysis.detected_issues
-                        if i.issue_type == IssueType.OPEN_ENDED and i.open_ended_proposal
-                    ]
-                    for oi in open_ended_issues:
-                        logger.info(
-                            "DISCOVERY succeeded — promote to named IssueType:\n%s",
-                            oi.open_ended_proposal,
-                        )
-
+                logger.info("=" * 60 + "\nSTAGE: ANALYSIS\n" + "=" * 60)
                 analysis = self.analyzer.analyze(
-                    current_code,
+                    kernel_code,
                     reference_code,
                     display_name,
                     input_shapes,
                     flop,
                     target_dtype=etd,
                 )
+                result.analysis = analysis
 
-            if self.executor and (_is_sycl or input_shapes) and current_code != kernel_code:
-                try:
-                    if _is_sycl:
-                        opt_r = _bench_ex.execute(
-                            kernel_code=current_code,
-                            dims=_sycl_dims,
-                        )
+                logger.info(f"Detected {len(analysis.detected_issues)} issues:")
+                for iss in analysis.detected_issues:
+                    logger.info(f"  [{iss.severity}] {iss.issue_type.value}: {iss.description}")
+
+                if not analysis.detected_issues:
+                    result.success, result.optimized_code = True, kernel_code
+                    candidates.append(result)
+                else:
+                    logger.info("=" * 60 + "\nSTAGE: PLANNING\n" + "=" * 60)
+                    from xe_forge.knowledge.patterns import get_stage_for_issue
+
+                    stages_needed: dict[OptimizationStage, list[str]] = {}
+                    for iss in analysis.detected_issues:
+                        st = get_stage_for_issue(iss.issue_type)
+                        stages_needed.setdefault(st, []).append(iss.issue_type.value)
+
+                    from xe_forge.dsl_registry import get_stages_for_dsl
+
+                    _supported = set(get_stages_for_dsl(self.config.device_config.dsl))
+                    stages_needed = {s: v for s, v in stages_needed.items() if s in _supported}
+
+                    if stages:
+                        stages_to_apply = [
+                            s
+                            for s in stages
+                            if s in stages_needed and s != OptimizationStage.ANALYSIS
+                        ]
+                        logger.info("Stage order: manual override")
                     else:
-                        opt_r = _bench_ex.execute(
-                            current_code,
-                            kernel_name,
-                            input_shapes,
+                        stages_to_apply = self.planner.plan(
+                            stages_needed=stages_needed,
+                            analysis=analysis,
+                            input_shapes=input_shapes,
                             flop=flop,
-                            dtype=dtype,
-                            init_args=init_args,
-                            input_dtypes=input_dtypes,
                         )
-                    if opt_r.success:
-                        result.optimized_tflops, result.optimized_ms = (
-                            opt_r.tflops,
-                            opt_r.execution_time_ms,
-                        )
-                        if result.original_ms and result.optimized_ms:
-                            result.total_speedup = result.original_ms / result.optimized_ms
-                            logger.info(f"Total speedup: {result.total_speedup:.2f}x")
-                except Exception as e:
-                    logger.warning(f"Failed to measure optimized: {e}")
-                    if current_ms and current_ms != val_orig_ms:
-                        result.optimized_ms = current_ms
-                        if result.original_ms and result.optimized_ms:
-                            result.total_speedup = result.original_ms / result.optimized_ms
-                            logger.info(
-                                f"Total speedup (from stage measurements): {result.total_speedup:.2f}x"
+
+                    logger.info("Optimization plan:")
+                    for s in PLANNER_DEFAULT_STAGE_ORDER:
+                        if s == OptimizationStage.ANALYSIS:
+                            continue
+                        if s in stages_needed:
+                            if s in stages_to_apply:
+                                pos = stages_to_apply.index(s) + 1
+                                issues_str = ", ".join(stages_needed[s])
+                                logger.info(f"  + {s.value} [#{pos}]: {issues_str}")
+                            else:
+                                issues_str = ", ".join(stages_needed[s])
+                                logger.info(f"  ~ {s.value} (deferred): {issues_str}")
+                        else:
+                            logger.info(f"  - {s.value}: skipped")
+
+                    if not stages_to_apply:
+                        result.success, result.optimized_code = True, kernel_code
+                        candidates.append(result)
+                    else:
+                        current_code = kernel_code
+                        current_ms: float | None = val_orig_ms
+                        vtune_report = ""
+                        last_trial_id: str | None = None
+
+                        for stage_idx, stage in enumerate(stages_to_apply):
+                            logger.info("=" * 60 + f"\nSTAGE: {stage.value.upper()}\n" + "=" * 60)
+                            logger.info(f"Issues: {', '.join(stages_needed.get(stage, []))}")
+
+                            stage_result = self.optimizer.optimize_stage(
+                                code=current_code,
+                                stage=stage,
+                                analysis=analysis,
+                                xpu_config=xpu_config,
+                                kernel_name=kernel_name,
+                                input_shapes=input_shapes,
+                                spec_dims=spec_dims,
+                                flop=flop,
+                                dtype=dtype,
+                                pytorch_code=reference_code,
+                                init_args=init_args,
+                                vtune_report=vtune_report,
+                                perf_context={
+                                    "original_ms": val_orig_ms,
+                                    "original_tflops": val_orig_tflops,
+                                    "current_ms": current_ms,
+                                    "speedup_so_far": (
+                                        round(val_orig_ms / current_ms, 3)
+                                        if val_orig_ms and current_ms and current_ms > 0
+                                        else None
+                                    ),
+                                },
+                                input_dtypes=input_dtypes,
+                            )
+                            result.stages_applied.append(stage_result)
+
+                            if (
+                                stage_result.success
+                                and stage_result.output_code
+                                and stage_result.output_code != current_code
+                            ):
+                                current_code = stage_result.output_code
+                                if stage_result.speedup and val_orig_ms:
+                                    current_ms = val_orig_ms / stage_result.speedup
+                                elif (
+                                    stage_result.metrics_after
+                                    and "execution_time_ms" in stage_result.metrics_after
+                                ):
+                                    current_ms = stage_result.metrics_after["execution_time_ms"]
+                                logger.info(
+                                    f"Stage {stage.value} OK"
+                                    + (
+                                        f" ({stage_result.speedup:.2f}x)"
+                                        if stage_result.speedup
+                                        else ""
+                                    )
+                                )
+                            elif not stage_result.success:
+                                logger.warning(
+                                    f"Stage {stage.value} failed: {stage_result.error_message}"
+                                )
+
+                            if self.trial_manager and kernel_name and stage_result.output_code:
+                                try:
+                                    import tempfile
+
+                                    tmp = (
+                                        Path(tempfile.mkdtemp())
+                                        / f"{kernel_name}_stage_{stage.value}.py"
+                                    )
+                                    tmp.write_text(stage_result.output_code)
+                                    trial_id = self.trial_manager.save_trial(
+                                        kernel_name,
+                                        str(tmp),
+                                        parent=last_trial_id,
+                                        strategy=f"stage:{stage.value}",
+                                    )
+                                    speedup = (
+                                        val_orig_ms / current_ms
+                                        if val_orig_ms and current_ms and current_ms > 0
+                                        else None
+                                    )
+                                    self.trial_manager.record_result(
+                                        kernel_name,
+                                        trial_id,
+                                        correctness="pass" if stage_result.success else "fail",
+                                        speedup=speedup,
+                                        baseline_us=(val_orig_ms or 0) * 1000,
+                                        triton_us=(current_ms or 0) * 1000,
+                                    )
+                                    if stage_result.success:
+                                        last_trial_id = trial_id
+                                    logger.info(
+                                        "Trial %s recorded for stage %s", trial_id, stage.value
+                                    )
+                                except Exception as e:
+                                    logger.warning(
+                                        "Could not record trial for stage %s: %s", stage.value, e
+                                    )
+
+                            if (
+                                self.profiler
+                                and stage_idx > 0
+                                and stage_result.success
+                                and stage_result.output_code
+                                and spec_path
+                            ):
+                                try:
+                                    import tempfile
+
+                                    tmp = Path(tempfile.mkdtemp()) / f"{kernel_name}_profile.py"
+                                    tmp.write_text(stage_result.output_code)
+                                    profile_result = self.profiler.profile(
+                                        str(tmp),
+                                        spec_path=spec_path,
+                                        variant=variant_type,
+                                    )
+                                    if not profile_result.error:
+                                        vtune_report = profile_result.format_for_llm()
+                                        logger.info(
+                                            "VTune profile updated after stage %s", stage.value
+                                        )
+                                    else:
+                                        logger.warning(
+                                            "VTune profiling error: %s", profile_result.error
+                                        )
+                                except Exception as e:
+                                    logger.warning(
+                                        "VTune profiling failed after stage %s: %s", stage.value, e
+                                    )
+
+                            if stage == OptimizationStage.DISCOVERY and stage_result.success:
+                                open_ended_issues = [
+                                    i
+                                    for i in analysis.detected_issues
+                                    if i.issue_type == IssueType.OPEN_ENDED
+                                    and i.open_ended_proposal
+                                ]
+                                for oi in open_ended_issues:
+                                    logger.info(
+                                        "DISCOVERY succeeded — promote to named IssueType:\n%s",
+                                        oi.open_ended_proposal,
+                                    )
+
+                            analysis = self.analyzer.analyze(
+                                current_code,
+                                reference_code,
+                                display_name,
+                                input_shapes,
+                                flop,
+                                target_dtype=etd,
                             )
 
-            result.optimized_code, result.success = current_code, True
-            candidates.append(result)
+                        if (
+                            self.executor
+                            and (_is_sycl or input_shapes)
+                            and current_code != kernel_code
+                        ):
+                            try:
+                                if _is_sycl:
+                                    opt_r = _bench_ex.execute(
+                                        kernel_code=current_code,
+                                        dims=_sycl_dims,
+                                    )
+                                else:
+                                    opt_r = _bench_ex.execute(
+                                        current_code,
+                                        kernel_name,
+                                        input_shapes,
+                                        flop=flop,
+                                        dtype=dtype,
+                                        init_args=init_args,
+                                        input_dtypes=input_dtypes,
+                                    )
+                                if opt_r.success:
+                                    result.optimized_tflops, result.optimized_ms = (
+                                        opt_r.tflops,
+                                        opt_r.execution_time_ms,
+                                    )
+                                    if result.original_ms and result.optimized_ms:
+                                        result.total_speedup = (
+                                            result.original_ms / result.optimized_ms
+                                        )
+                                        logger.info(f"Total speedup: {result.total_speedup:.2f}x")
+                            except Exception as e:
+                                logger.warning(f"Failed to measure optimized: {e}")
+                                if current_ms and current_ms != val_orig_ms:
+                                    result.optimized_ms = current_ms
+                                    if result.original_ms and result.optimized_ms:
+                                        result.total_speedup = (
+                                            result.original_ms / result.optimized_ms
+                                        )
+                                        logger.info(
+                                            f"Total speedup (from stage measurements): {result.total_speedup:.2f}x"
+                                        )
+
+                        result.optimized_code, result.success = current_code, True
+                        candidates.append(result)
 
             if not candidates:
                 result_out = OptimizationResult(
