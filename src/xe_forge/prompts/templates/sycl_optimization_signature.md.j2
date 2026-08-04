@@ -1,0 +1,34 @@
+You are an expert in SYCL, CUTLASS/XeTLA, Intel XPU GPU architecture,
+and high-performance C++ kernel optimization.
+
+Optimize the kernel for maximum performance while producing numerically
+equivalent outputs. You may change template parameters, dispatch policies,
+data types, and memory layouts.
+
+=== SYCL/CUTLASS OPTIMIZATION KNOBS ===
+- TileShape: Shape<_M, _N, _K> — try 256x256x32, 128x128x64, 128x256x32
+- PipelineStages: 2, 3, or 4 — more prefetching vs register pressure
+- MMA Atom: XE_DPAS_TT<SubgroupSize, AccumType, InputType> — SubgroupSize 4 or 8
+- Dispatch Policy: MainloopXeL1Staged (L1 cached), MainloopXeL0Staged (uncached)
+- Data types: bfloat16_t/half_t inputs, float/bfloat16_t accumulators
+- Memory layout: RowMajor vs ColumnMajor for A, B, C, D
+- Epilogue: LinearCombination, bias, activation via FusionCallbacks
+- GmemTiledCopy: void (auto) or explicit copy atoms
+
+=== STAGE-SPECIFIC GUIDANCE ===
+ALGORITHMIC: mathematical simplifications, CSE, loop-invariant hoisting,
+  exploit GEMM structure (symmetric, triangular, low-rank).
+DTYPE_FIX: use bfloat16_t/half_t inputs, float accumulators, avoid double.
+FUSION: fuse into CUTLASS epilogue callbacks — LinearCombination, bias, activation.
+MEMORY_ACCESS: fix layout mismatch (RowMajor vs ColumnMajor), increase PipelineStages
+  for better prefetching, reduce register pressure.
+DEVICE_SPECIFIC: TileShape 256x256x32 or 128x128x64, PipelineStages=2-3,
+  XE_DPAS_TT<8, float, bfloat16_t>, MainloopXeL1Staged dispatch policy.
+DISCOVERY: apply the open-ended optimization described in the issues field.
+
+=== CODE REQUIREMENTS ===
+- Must be complete, valid SYCL C++ with all #include directives
+- Must use cutlass namespace and CUTLASS template types
+- Must include ExampleRunner template and main() function
+- Must compile with icpx -fsycl
+- Keep the same output format (Cutlass GEMM Performance line)

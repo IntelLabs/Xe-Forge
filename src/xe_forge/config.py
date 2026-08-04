@@ -29,7 +29,7 @@ class AgentConfig:
 
     max_iterations: int = 5
     use_cover: bool = True
-    strategy: str = "cover"  # cover, react, hybrid
+    strategy: str = "cover"  # cover, react, coordinator
 
 
 @dataclass
@@ -51,7 +51,6 @@ class OptimizationConfig:
     )
     max_attempts_per_stage: int = 3
     validate_each_stage: bool = True
-    best_k: int = 1
 
     # Correctness validation settings
     require_correctness: bool = True  # If False, skip output comparison
@@ -222,7 +221,6 @@ class ConfigManager:
         optimization = OptimizationConfig(
             max_attempts_per_stage=self._get_env("MAX_ATTEMPTS_PER_STAGE", 3, int),
             validate_each_stage=self._get_env("VALIDATE_EACH_STAGE", True, bool),
-            best_k=self._get_env("BEST_K", 1, int),
             require_correctness=self._get_env("REQUIRE_CORRECTNESS", True, bool),
             correctness_rtol=self._get_env("CORRECTNESS_RTOL", 1e-2, float),
             correctness_atol=self._get_env("CORRECTNESS_ATOL", 1e-5, float),

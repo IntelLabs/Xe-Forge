@@ -32,7 +32,9 @@ def _setup_dspy(config: Config) -> None:
     if config.llm.api_key:
         os.environ["OPENAI_API_KEY"] = config.llm.api_key
 
-    litellm.client_session = httpx.Client(verify=False)
+    litellm.client_session = httpx.Client()
+    litellm.aclient_session = httpx.AsyncClient()
+    litellm.ssl_verify = True
     lm = dspy.LM(
         model=config.llm.model,
         api_base=config.llm.api_base,
@@ -125,12 +127,6 @@ Examples:
         choices=["float16", "bfloat16", "float32"],
         default=None,
         help="Target dtype for kernel optimization (e.g., float16, bfloat16)",
-    )
-
-    parser.add_argument(
-        "--best-k",
-        type=int,
-        help="Number of candidates to evaluate (default: 1)",
     )
 
     # Correctness options
@@ -229,8 +225,6 @@ def _load_config(args) -> Config:
         overrides["device_config_preferred_tile_n"] = args.tile_size
     if args.target_dtype:
         overrides["optimization_target_dtype"] = args.target_dtype
-    if args.best_k:
-        overrides["optimization_best_k"] = args.best_k
     if args.debug:
         overrides["logging_level"] = "DEBUG"
     if args.no_correctness:
@@ -457,7 +451,6 @@ def _run_optimize(parser, args, config: Config) -> int:
     if args.target_dtype:
         print(f"Target dtype: {args.target_dtype}")
     print(f"Stages: {[s.value for s in stages] if stages else 'all'}")
-    print(f"Best@k: {config.optimization.best_k}")
 
     # Print correctness settings
     if config.optimization.require_correctness:

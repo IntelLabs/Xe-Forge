@@ -26,7 +26,8 @@ import triton.language as tl
 
 # Constants
 kAlpha = tl.constexpr(math.sqrt(2.0 / math.pi))  # For GeLU
-kInvLn2 = tl.constexpr(1.4426950408889634)       # For exp2-based ops
+kInvLn2 = tl.constexpr(1.4426950408889634)  # For exp2-based ops
+
 
 @triton.jit
 def swizzle_tile(tile_id, M, N, K, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, GROUP_SIZE_M):
@@ -40,48 +41,62 @@ def swizzle_tile(tile_id, M, N, K, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, GRO
     pid_n = (tile_id % width) // group_size
     return pid_m, pid_n
 
+
 @triton.autotune(
     configs=[
         # Large tiles for square GEMMs
         triton.Config(
-            {'BLOCK_M': 256, 'BLOCK_N': 256, 'BLOCK_K': 32, 'GROUP_SIZE_M': 4, 'grf_mode': '256'},
-            num_warps=32, num_stages=2
+            {"BLOCK_M": 256, "BLOCK_N": 256, "BLOCK_K": 32, "GROUP_SIZE_M": 4, "grf_mode": "256"},
+            num_warps=32,
+            num_stages=2,
         ),
         triton.Config(
-            {'BLOCK_M': 256, 'BLOCK_N': 256, 'BLOCK_K': 64, 'GROUP_SIZE_M': 4, 'grf_mode': '256'},
-            num_warps=16, num_stages=3
+            {"BLOCK_M": 256, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_SIZE_M": 4, "grf_mode": "256"},
+            num_warps=16,
+            num_stages=3,
         ),
         # Medium tiles
         triton.Config(
-            {'BLOCK_M': 128, 'BLOCK_N': 256, 'BLOCK_K': 64, 'GROUP_SIZE_M': 4, 'grf_mode': '256'},
-            num_warps=8, num_stages=4
+            {"BLOCK_M": 128, "BLOCK_N": 256, "BLOCK_K": 64, "GROUP_SIZE_M": 4, "grf_mode": "256"},
+            num_warps=8,
+            num_stages=4,
         ),
         triton.Config(
-            {'BLOCK_M': 128, 'BLOCK_N': 128, 'BLOCK_K': 64, 'GROUP_SIZE_M': 4, 'grf_mode': '256'},
-            num_warps=16, num_stages=3
+            {"BLOCK_M": 128, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_SIZE_M": 4, "grf_mode": "256"},
+            num_warps=16,
+            num_stages=3,
         ),
         # Skinny-M configs (for M < 256)
         triton.Config(
-            {'BLOCK_M': 64, 'BLOCK_N': 128, 'BLOCK_K': 64, 'GROUP_SIZE_M': 2, 'grf_mode': '256'},
-            num_warps=8, num_stages=4
+            {"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_SIZE_M": 2, "grf_mode": "256"},
+            num_warps=8,
+            num_stages=4,
         ),
         triton.Config(
-            {'BLOCK_M': 32, 'BLOCK_N': 128, 'BLOCK_K': 64, 'GROUP_SIZE_M': 2, 'grf_mode': '256'},
-            num_warps=4, num_stages=5
+            {"BLOCK_M": 32, "BLOCK_N": 128, "BLOCK_K": 64, "GROUP_SIZE_M": 2, "grf_mode": "256"},
+            num_warps=4,
+            num_stages=5,
         ),
     ],
-    key=['M', 'N', 'K'],
+    key=["M", "N", "K"],
 )
 @triton.jit
 def kernel(
     # Pointers
-    a_ptr, b_ptr, c_ptr,
+    a_ptr,
+    b_ptr,
+    c_ptr,
     # Shapes (as constexpr for better codegen)
-    M: tl.constexpr, N: tl.constexpr, K: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    K: tl.constexpr,
     # Strides
-    stride_am: tl.constexpr, stride_ak: tl.constexpr,
-    stride_bk: tl.constexpr, stride_bn: tl.constexpr,
-    stride_cm: tl.constexpr, stride_cn: tl.constexpr,
+    stride_am: tl.constexpr,
+    stride_ak: tl.constexpr,
+    stride_bk: tl.constexpr,
+    stride_bn: tl.constexpr,
+    stride_cm: tl.constexpr,
+    stride_cn: tl.constexpr,
     # Meta-parameters (NO defaults!)
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -95,11 +110,15 @@ def kernel(
 
     # Tensor descriptors (preferred on XPU — better codegen than block pointers)
     a_desc = tl.make_tensor_descriptor(
-        base=a_ptr, shape=[M, K], strides=[stride_am, stride_ak],
+        base=a_ptr,
+        shape=[M, K],
+        strides=[stride_am, stride_ak],
         block_shape=[BLOCK_M, BLOCK_K],
     )
     b_desc = tl.make_tensor_descriptor(
-        base=b_ptr, shape=[K, N], strides=[stride_bk, stride_bn],
+        base=b_ptr,
+        shape=[K, N],
+        strides=[stride_bk, stride_bn],
         block_shape=[BLOCK_K, BLOCK_N],
     )
 
@@ -118,7 +137,9 @@ def kernel(
 
     # Store result
     c_desc = tl.make_tensor_descriptor(
-        base=c_ptr, shape=[M, N], strides=[stride_cm, stride_cn],
+        base=c_ptr,
+        shape=[M, N],
+        strides=[stride_cm, stride_cn],
         block_shape=[BLOCK_M, BLOCK_N],
     )
     c_desc.store([off_m, off_n], acc)
@@ -157,17 +178,23 @@ class Model(nn.Module):
         N = self.weight_t.shape[1]
         output = torch.empty((M, N), device=device, dtype=torch.float32)
 
-        grid = lambda META: (
-            triton.cdiv(M, META['BLOCK_M']) * triton.cdiv(N, META['BLOCK_N']),
-        )
+        grid = lambda META: (triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(N, META["BLOCK_N"]),)
         kernel[grid](
-            x, self.weight_t, output,
-            M, N, K,
-            x.stride(0), x.stride(1),
-            self.weight_t.stride(0), self.weight_t.stride(1),
-            output.stride(0), output.stride(1),
+            x,
+            self.weight_t,
+            output,
+            M,
+            N,
+            K,
+            x.stride(0),
+            x.stride(1),
+            self.weight_t.stride(0),
+            self.weight_t.stride(1),
+            output.stride(0),
+            output.stride(1),
         )
         return output
+
 
 # ============================================================================
 # Benchmark harness interface (must match *_pytorch.py)
@@ -177,8 +204,10 @@ input_size = 8192
 hidden_size = 8192
 scaling_factor = 2.0
 
+
 def get_inputs():
     return [torch.rand(batch_size, input_size)]
+
 
 def get_init_inputs():
     return [input_size, hidden_size, scaling_factor]

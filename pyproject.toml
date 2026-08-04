@@ -1,13 +1,13 @@
 [project]
 name = "xe-forge"
-version = "0.2.0"
+version = "0.3.0"
 description = "Multi-stage kernel optimization for GPU computing"
 authors = [{ name = "Intel Labs" }]
 requires-python = ">=3.11"
 dependencies = [
   "numpy>=1.24.0",
   "pydantic>=2.0.0",
-  "dspy-ai>=3.1.3",
+  "dspy>=3.3.0b1",
   "litellm>=1.0.0",
   "python-dotenv>=1.0.0",
   "PyYAML>=6.0.0",

@@ -313,7 +313,11 @@ class GEMMStrategy:
         for cfg in raw_configs:
             if isinstance(cfg, dict) and "wg_M" in cfg and "wg_N" in cfg and "wg_K" in cfg:
                 valid.append(
-                    {"wg_M": int(cfg["wg_M"]), "wg_N": int(cfg["wg_N"]), "wg_K": int(cfg["wg_K"])}
+                    {
+                        "wg_M": int(cfg["wg_M"]),
+                        "wg_N": int(cfg["wg_N"]),
+                        "wg_K": int(cfg["wg_K"]),
+                    }
                 )
             else:
                 logger.warning("Skipping malformed GEMM config: %s", cfg)
@@ -642,7 +646,11 @@ class GroupedGEMMStrategy:
         for cfg in raw_configs:
             if isinstance(cfg, dict) and "wg_M" in cfg and "wg_N" in cfg and "wg_K" in cfg:
                 valid.append(
-                    {"wg_M": int(cfg["wg_M"]), "wg_N": int(cfg["wg_N"]), "wg_K": int(cfg["wg_K"])}
+                    {
+                        "wg_M": int(cfg["wg_M"]),
+                        "wg_N": int(cfg["wg_N"]),
+                        "wg_K": int(cfg["wg_K"]),
+                    }
                 )
             else:
                 logger.warning("Skipping malformed Grouped GEMM config: %s", cfg)
@@ -767,7 +775,11 @@ class MoEGEMMStrategy:
         for cfg in raw_configs:
             if isinstance(cfg, dict) and "wg_M" in cfg and "wg_N" in cfg and "wg_K" in cfg:
                 valid.append(
-                    {"wg_M": int(cfg["wg_M"]), "wg_N": int(cfg["wg_N"]), "wg_K": int(cfg["wg_K"])}
+                    {
+                        "wg_M": int(cfg["wg_M"]),
+                        "wg_N": int(cfg["wg_N"]),
+                        "wg_K": int(cfg["wg_K"]),
+                    }
                 )
             else:
                 logger.warning("Skipping malformed MoE GEMM config: %s", cfg)

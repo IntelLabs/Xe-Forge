@@ -167,9 +167,6 @@ xe-forge -i kernel.py -s spec.yaml --target-dtype float16
 # Use a different LLM model
 xe-forge -i kernel.py -s spec.yaml --model openai/gpt-4-turbo
 
-# Multiple candidates (pick best)
-xe-forge -i kernel.py -s spec.yaml --best-k 3
-
 # Debug mode
 xe-forge -i kernel.py -s spec.yaml --debug
 
@@ -329,7 +326,7 @@ If your kernel needs configuration values (head dimension, scale factor, etc.), 
 class Model(torch.nn.Module):
     def __init__(self, D_HEAD: int):
         super().__init__()
-        self.sm_scale = 1.0 / (D_HEAD ** 0.5)
+        self.sm_scale = 1.0 / (D_HEAD**0.5)
         self.D_HEAD = D_HEAD
 
     def forward(self, Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor) -> torch.Tensor:
@@ -599,7 +596,6 @@ xe-forge --input KERNEL --spec SPEC [OPTIONS]
 | Flag | Description |
 |------|-------------|
 | `--variant` | Spec variant: `ci`, `bench-cpu`, `bench-gpu`, `bench-xpu` (default: `bench-gpu`) |
-| `--best-k` | Number of candidate solutions to evaluate |
 | `--debug` | Enable debug logging |
 
 ### Tolerance Priority
@@ -629,7 +625,6 @@ All settings can be controlled via environment variables or a `.env` file.
 | `AGENT_MAX_ITERATIONS` | `5` | CoVeR iterations per stage |
 | `AGENT_STRATEGY` | `cover` | Agent strategy: cover, react |
 | `USE_COVER` | `true` | Enable Chain of Verification |
-| `BEST_K` | `1` | Candidate solutions per run |
 | `REQUIRE_CORRECTNESS` | `true` | Validate output correctness |
 | `CORRECTNESS_RTOL` | `0.01` | Relative tolerance |
 | `CORRECTNESS_ATOL` | `1e-5` | Absolute tolerance |

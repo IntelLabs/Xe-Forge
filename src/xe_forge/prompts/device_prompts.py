@@ -194,3 +194,54 @@ class PromptLibrary:
             f"You are an expert in GPU kernel optimization for {self.device_description()}.\n"
             "Determine the optimal order to apply optimization stages."
         )
+
+    def render_for_signature(self, sig_name: str, **extra_context) -> str:
+        """Render the Jinja2 template for a given Signature class name.
+
+        Returns the rendered instruction text to be injected via append_instructions().
+        Falls back to device_context_addendum() if the template is not found.
+        """
+        from xe_forge.prompts import render_signature_instructions
+
+        context = {
+            "dsl": self.dsl,
+            "dsl_name": self.dsl_name(),
+            "device_type": self.device_type,
+            "device_description": self.device_description(),
+            "defaults": self.tuning_defaults(),
+            **extra_context,
+        }
+        try:
+            return render_signature_instructions(sig_name, **context)
+        except Exception:
+            return self.device_context_addendum()
+
+    def device_context_addendum(self) -> str:
+        """Return a short addendum to append to any Signature for the current device/DSL.
+
+        Returns an empty string for the default XPU/Triton target (already hardcoded in
+        Signature docstrings). For other device targets, returns a correction block so the
+        LLM uses the right tile sizes and hardware constraints.
+        """
+        defaults = self.tuning_defaults()
+
+        if self.device_type == "xpu":
+            return ""
+
+        lines = [
+            f"=== TARGET DEVICE OVERRIDE: {self.device_description()} ===",
+            f"DSL: {self.dsl_name()}",
+            "Use the following hardware-specific defaults (override any XPU values above):",
+        ]
+        for k, v in defaults.items():
+            lines.append(f"  {k}: {v}")
+
+        if self.device_type == "cuda" and self.dsl == "triton":
+            lines.append("Use shared memory for reductions. Consider warp-level primitives.")
+            lines.append(
+                "Do NOT use tl.extra.intel.libdevice — use standard math intrinsics instead."
+            )
+        elif self.dsl == "sycl":
+            lines.append("Use SYCL/CUTLASS C++ with icpx -fsycl compilation.")
+
+        return "\n".join(lines)

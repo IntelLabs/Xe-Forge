@@ -357,6 +357,7 @@ def plot_roofline(points: list[Point], hw: Hardware, cfg: PlotConfig) -> None:
 
         def point_marker(p: Point) -> str:
             return marker_of[p.series]
+
     else:
         style = {s: (cmap(i % 10), markers[i % len(markers)]) for i, s in enumerate(series_seen)}
 

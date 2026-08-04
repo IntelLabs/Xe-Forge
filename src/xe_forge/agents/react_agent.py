@@ -12,6 +12,7 @@ from collections.abc import Callable
 import dspy
 
 from xe_forge.agents.base import Optimizer
+from xe_forge.agents.utils import SUCCESS_MESSAGE, extract_gemm_dims, verify_sycl
 from xe_forge.knowledge.patterns import get_stage_for_issue
 
 try:
@@ -29,88 +30,8 @@ from xe_forge.models import (
 logger = logging.getLogger(__name__)
 
 
-SUCCESS_MESSAGE = "Success! Optimization verified and kernel is faster."
-
-
-def _extract_gemm_dims(
-    input_shapes: list[tuple[int, ...]] | None,
-) -> tuple[int, int, int]:
-    """Extract M, N, K from GEMM input shapes [(M, K), (K, N)]."""
-    if input_shapes and len(input_shapes) >= 2:
-        a, b = input_shapes[0], input_shapes[1]
-        if len(a) >= 2 and len(b) >= 2:
-            return a[-2], b[-1], a[-1]
-    return 1024, 1024, 1024
-
-
-def _verify_sycl(code, original_code, executor, input_shapes, spec_dims=None):
-    """Verify a SYCL C++ kernel: basic structure check + runtime comparison."""
-    if "#include" not in code:
-        return "MISSING: C++ code must contain #include directives."
-    if "sycl" not in code.lower() and "cutlass" not in code.lower():
-        return "MISSING: Code does not appear to be a SYCL/CUTLASS kernel."
-
-    if executor:
-        try:
-            _dims = spec_dims or dict(
-                zip(("M", "N", "K"), _extract_gemm_dims(input_shapes), strict=False)
-            )
-            comparison = executor.compare_kernels(
-                original_code=original_code,
-                optimized_code=code,
-                dims=_dims,
-            )
-            if not comparison.optimized_correct:
-                return comparison.feedback_message or "Optimized kernel failed."
-            if comparison.is_slower:
-                sd = 1.0 / comparison.speedup if comparison.speedup > 0 else float("inf")
-                return (
-                    f"PERFORMANCE REGRESSION: {sd:.2f}x SLOWER.\n"
-                    f"Original: {comparison.original_time_ms:.4f}ms ({comparison.original_tflops or 0:.3f} TFlop/s)\n"
-                    f"Optimized: {comparison.optimized_time_ms:.4f}ms ({comparison.optimized_tflops or 0:.3f} TFlop/s)"
-                )
-            logger.info(
-                f"SYCL optimization verified: {comparison.speedup:.2f}x speedup "
-                f"({comparison.original_tflops or 0:.3f} -> {comparison.optimized_tflops or 0:.3f} TFlop/s)"
-            )
-            return SUCCESS_MESSAGE
-        except Exception as e:
-            return f"RUNTIME ERROR: {e!s}"
-
-    logger.warning("No executor - accepting SYCL code based on static checks only")
-    return SUCCESS_MESSAGE
-
-
 class OptimizationReActSignature(dspy.Signature):
-    """Apply optimization transformation to Triton kernel.
-
-    You are an expert Triton kernel optimizer for Intel XPU.
-
-    Your task: Optimize the kernel for maximum performance.
-    You may change the algorithm/computation approach if it produces equivalent outputs.
-    Maintain the same model signature, including the weights' shapes and names. This is necessary for having identical initialization process for formal verification which is done by a correctness tool.
-
-    === OPTIMIZATION PRIORITIES ===
-    1. Apply the specific optimization patterns from knowledge_patterns
-    2. Use block pointers with tl.make_block_ptr() for better memory access
-    3. Use optimal tile sizes: BLOCK_M=256, BLOCK_N=256, BLOCK_K=32 for XPU
-    4. Set num_warps=32 for Intel XPU
-    5. Add GROUP_SIZE_M swizzling for better L2 cache utilization
-    6. Use boundary_check=(0, 1) tuple format, NOT booleans
-
-    === CODE REQUIREMENTS ===
-    - Include ALL imports (torch, triton, triton.language as tl)
-    - Include the @triton.jit decorator and kernel function
-    - Include the Model class with forward() method
-    - num_warps MUST be a power of 2 (1, 2, 4, 8, 16, 32)
-    - num_stages MUST be a positive integer
-    - Block sizes (BLOCK_M, BLOCK_N, BLOCK_K) MUST be powers of 2
-    - Block sizes should not exceed 256 for most cases
-
-    === WHAT TO CHANGE ===
-    Focus on the issues listed and apply the patterns from knowledge_patterns.
-    Be aggressive with optimizations - the verification tool will check correctness.
-    """
+    """Apply an optimization transformation to a Triton kernel; a verification tool checks correctness."""
 
     original_code: dspy.Code["python"] = dspy.InputField(  # noqa: UP037
         desc="Original Triton kernel code for reference"
@@ -133,28 +54,7 @@ class OptimizationReActSignature(dspy.Signature):
 
 
 class SyclOptimizationReActSignature(dspy.Signature):
-    """Optimize a SYCL/CUTLASS C++ kernel for Intel XPU.
-
-    You are an expert SYCL/CUTLASS kernel optimizer for Intel XPU.
-
-    Your task: Optimize the C++ kernel for maximum performance.
-    You may change template parameters, dispatch policies, and data types
-    if the outputs remain numerically equivalent.
-
-    === OPTIMIZATION PRIORITIES ===
-    1. TileShape: try Shape<_256,_256,_32> or Shape<_128,_128,_64> for BMG
-    2. PipelineStages: 2-4 (balance prefetching vs register pressure)
-    3. MMA Atom: XE_DPAS_TT<8, float, bfloat16_t> for BMG
-    4. Dispatch Policy: MainloopXeL1Staged for L1 caching
-    5. Data types: bfloat16_t inputs, float accumulators
-    6. Memory layout: match RowMajor/ColumnMajor to access patterns
-
-    === CODE REQUIREMENTS ===
-    - Complete, valid SYCL C++ with all #include directives
-    - CUTLASS template types, ExampleRunner, and main()
-    - Must compile with icpx -fsycl
-    - Keep the Cutlass GEMM Performance output format
-    """
+    """Apply an optimization transformation to a SYCL/CUTLASS C++ kernel; a verification tool checks correctness."""
 
     original_code: dspy.Code[cpp] = dspy.InputField(
         desc="Original SYCL C++ kernel code for reference"
@@ -184,12 +84,14 @@ class OptimizerReActAgent(Optimizer):
         validator: Callable | None = None,
         max_iterations: int = 5,
         dsl: DSL | str = DSL.TRITON,
+        extra_instructions: str = "",
     ):
         self.knowledge_base = knowledge_base
         self.executor = executor
         self.validator = validator
         self.max_iterations = max_iterations
         self.dsl = DSL(dsl) if isinstance(dsl, str) else dsl
+        self.extra_instructions = extra_instructions
 
         if not executor:
             logger.warning("No executor provided - kernels will NOT be verified at runtime!")
@@ -218,7 +120,7 @@ class OptimizerReActAgent(Optimizer):
             code: str = optimized_code.code
 
             if dsl == DSL.SYCL:
-                return _verify_sycl(
+                return verify_sycl(
                     code,
                     original_code,
                     executor,
@@ -391,16 +293,18 @@ class OptimizerReActAgent(Optimizer):
             input_dtypes=input_dtypes,
         )
 
-        # Create ReAct agent for this optimization
         sig = SyclOptimizationReActSignature if self.dsl == DSL.SYCL else OptimizationReActSignature
-        react_agent = dspy.ReAct(
+        if self.extra_instructions:
+            sig = sig.append_instructions(self.extra_instructions)
+
+        react_agent = dspy.ReActV2(
             signature=sig,
             tools=[verify_tool],
             max_iters=self.max_iterations,
         )
 
         try:
-            logger.info(f"Starting ReAct optimization (max {self.max_iterations} iterations)")
+            logger.info(f"Starting ReActV2 optimization (max {self.max_iterations} iterations)")
 
             result = react_agent(
                 original_code=original_code,
@@ -410,6 +314,15 @@ class OptimizerReActAgent(Optimizer):
                 knowledge_patterns=knowledge_patterns,
                 xpu_config=xpu_config_text,
             )
+
+            # Log termination reason when using ReActV2
+            termination_reason = getattr(result, "termination_reason", None)
+            if termination_reason:
+                logger.info(f"ReActV2 termination_reason: {termination_reason}")
+                if termination_reason in ("max_iters", "context_window_exceeded"):
+                    logger.warning(
+                        f"Agent stopped due to {termination_reason} — final output may be incomplete"
+                    )
 
             # Extract optimized code from result
             if not hasattr(result, "optimized_code") or result.optimized_code is None:
@@ -424,7 +337,13 @@ class OptimizerReActAgent(Optimizer):
 
             optimized_code: str = result.optimized_code.code
 
-            trajectory = result.trajectory if hasattr(result, "trajectory") else {}
+            # ReActV2 uses result.history (list of turn dicts); classic ReAct uses result.trajectory (dict)
+            trajectory = {}
+            if hasattr(result, "history") and isinstance(result.history, list):
+                for idx, turn in enumerate(result.history):
+                    trajectory[f"thought_{idx}"] = str(turn.get("thought", ""))
+            elif hasattr(result, "trajectory"):
+                trajectory = result.trajectory or {}
 
             # Verify the final code directly (don't rely on trajectory)
 
@@ -444,7 +363,7 @@ class OptimizerReActAgent(Optimizer):
                 try:
                     if self.dsl == DSL.SYCL:
                         _dims = spec_dims or dict(
-                            zip(("M", "N", "K"), _extract_gemm_dims(input_shapes), strict=False)
+                            zip(("M", "N", "K"), extract_gemm_dims(input_shapes), strict=False)
                         )
                         comparison = self.executor.compare_kernels(
                             original_code=original_code,

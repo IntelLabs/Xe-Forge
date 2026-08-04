@@ -11,6 +11,19 @@ from xe_forge.models import DSL, DetectedIssue, IssueType, KernelAnalysis, Optim
 
 logger = logging.getLogger(__name__)
 
+_DSL_NAMES: dict[str, str] = {
+    "triton": "Triton",
+    "gluon": "Gluon",
+    "sycl": "SYCL/XeTLA",
+    "cuda": "CUDA C++",
+}
+
+_DEVICE_DESCS: dict[str, str] = {
+    "xpu": "Intel XPU (Data Center GPU Max / Ponte Vecchio)",
+    "cuda": "NVIDIA CUDA GPU",
+    "cpu": "CPU",
+}
+
 
 # ---------------------------------------------------------------------------
 # Build the issue category section of the prompt dynamically from the enum
@@ -216,47 +229,7 @@ _SYCL_ISSUE_CATEGORIES_BLOCK = _build_issue_categories(DSL.SYCL)
 
 
 class AnalysisSignature(dspy.Signature):
-    # The docstring is dynamically constructed so the issue list
-    # always matches the live IssueType enum.
-    __doc__ = f"""Analyze Triton kernel for optimization opportunities.
-
-You are a world-class expert in Triton GPU/XPU kernel optimization,
-numerical linear algebra, and high-performance computing.
-
-Analyze the given Triton kernel code and, if available, the original PyTorch
-implementation for higher-level algorithmic context.
-
-You must identify ALL applicable optimizations across every category below.
-Use your deep knowledge of GPU programming, Triton internals, Intel XPU
-architecture, and mathematical optimization.
-
-{_ISSUE_CATEGORIES_BLOCK}
-IMPORTANT:
-- Return issues as a JSON array of DetectedIssue objects.
-- Each issue MUST have: issue_type (exact string from the list above),
-  severity (1-5), description, suggested_fix, estimated_speedup.
-- issue_type MUST be one of the exact strings listed above (e.g. "dtype_float64",
-  "missing_grf_mode"). Do NOT invent new type names.
-- For fused kernels, pay special attention to ALGORITHMIC issues.
-- Return empty array [] ONLY if the kernel is already optimal.
-
-OPEN-ENDED DISCOVERY (issue_type="open_ended"):
-After checking all categories above, ask yourself: is there a high-value
-optimization that does not fit any existing type? If yes, use issue_type="open_ended"
-and populate open_ended_proposal with the full proposal. Requirements:
-  - Concrete and implementable — not a vague observation
-  - Mathematically or logically justified
-  - Includes a before/after code sketch in open_ended_proposal
-  - Includes estimated speedup with reasoning
-Examples that qualify as open_ended:
-  * sum(x @ W.T, dim=1) rewritten as x @ W.sum(dim=0) — eliminates O(M*N*K) GEMM
-  * Weight statistic (colsum, norm) recomputed every forward() — cache in __init__
-  * Two-kernel pipeline where the HBM intermediate can be eliminated algebraically
-Examples that do NOT qualify (use the named type instead):
-  * "use better tile sizes" → use suboptimal_tile_size
-  * "add autotuning" → use missing_autotune
-  * "fuse these kernels" → use unfused_kernels
-"""
+    """Analyze a Triton kernel for optimization opportunities across all categories."""
 
     kernel_code: dspy.Code["python"] = dspy.InputField(desc="Triton kernel source code to analyze.")
     reference_code: str = dspy.InputField(
@@ -278,30 +251,7 @@ Examples that do NOT qualify (use the named type instead):
 
 
 class SyclAnalysisSignature(dspy.Signature):
-    __doc__ = f"""Analyze SYCL/CUTLASS C++ kernel for optimization opportunities on Intel XPU.
-
-You are a world-class expert in SYCL, CUTLASS/XeTLA, and Intel XPU GPU kernel optimization.
-
-Analyze the given SYCL C++ kernel code and identify ALL applicable optimizations.
-
-=== SYCL/CUTLASS OPTIMIZATION KNOBS ===
-- TileShape: Shape<_M, _N, _K> (e.g. 256x256x32, 128x128x64, 128x256x32)
-- PipelineStages: 2, 3, or 4 (more = more prefetching, but more register pressure)
-- MMA Atom: XE_DPAS_TT<SubgroupSize, AccumType, InputType> — SubgroupSize 4 or 8
-- Dispatch Policy: MainloopXeL1Staged (L1 cached), MainloopXeL0Staged
-- Data types: bfloat16_t/half_t inputs, float/bfloat16_t accumulators
-- Memory layout: RowMajor vs ColumnMajor for A, B, C, D matrices
-- Epilogue fusion: LinearCombination, bias addition, activation functions via FusionCallbacks
-- GmemTiledCopy: void (auto) or explicit copy atoms for fine-grained control
-
-{_SYCL_ISSUE_CATEGORIES_BLOCK}
-IMPORTANT:
-- Return issues as a JSON array of DetectedIssue objects.
-- Each issue MUST have: issue_type (exact string from the list above),
-  severity (1-5), description, suggested_fix, estimated_speedup.
-- issue_type MUST be one of the exact strings listed above.
-- Return empty array [] ONLY if the kernel is already optimal.
-"""
+    """Analyze a SYCL/CUTLASS C++ kernel for optimization opportunities on Intel XPU."""
 
     kernel_code: dspy.Code["cpp"] = dspy.InputField(
         desc="SYCL/CUTLASS C++ kernel source code to analyze."
@@ -329,10 +279,41 @@ IMPORTANT:
 class AnalyzerAgent:
     """LLM-based analyzer for Triton kernels."""
 
-    def __init__(self, knowledge_base=None, dsl: DSL | str = DSL.TRITON):
+    def __init__(
+        self, knowledge_base=None, dsl: DSL | str = DSL.TRITON, extra_instructions: str = ""
+    ):
         self.knowledge_base = knowledge_base
         self.dsl = DSL(dsl) if isinstance(dsl, str) else dsl
         sig = SyclAnalysisSignature if self.dsl == DSL.SYCL else AnalysisSignature
+
+        # Inject the full analysis guidance from template, including the dynamic issue categories block
+        from xe_forge.config import get_config
+        from xe_forge.prompts import render_signature_instructions
+
+        try:
+            cfg = get_config()
+            issue_block = (
+                _SYCL_ISSUE_CATEGORIES_BLOCK if self.dsl == DSL.SYCL else _ISSUE_CATEGORIES_BLOCK
+            )
+            template_instructions = render_signature_instructions(
+                "analysis_signature",
+                dsl=cfg.device_config.dsl,
+                dsl_name=_DSL_NAMES.get(
+                    str(self.dsl.value if hasattr(self.dsl, "value") else self.dsl), "Triton"
+                ),
+                device_type=cfg.device_config.device,
+                device_description=_DEVICE_DESCS.get(cfg.device_config.device, "Intel XPU"),
+                defaults={},
+                issue_categories_block=issue_block,
+            )
+            sig = sig.append_instructions(template_instructions)
+        except Exception as e:
+            logger.debug(
+                "Analysis template render failed, falling back to extra_instructions: %s", e
+            )
+
+        if extra_instructions:
+            sig = sig.append_instructions(extra_instructions)
         self.predictor = dspy.Predict(sig)
 
     def analyze(
