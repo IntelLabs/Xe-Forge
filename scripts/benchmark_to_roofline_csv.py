@@ -216,22 +216,26 @@ def main(argv: list[str] | None = None) -> int:
             label = comments.get(key, key)
             pair = f"{fam}:{key}"
             family = FAMILY_NAME.get(fam, fam)
-            rows.append({
-                "series": "Original",
-                "family": family,
-                "label": label,
-                "pair": pair,
-                "arithmetic_intensity": f"{ai:.2f}",
-                "tflops": f"{base_tflops:.3f}",
-            })
-            rows.append({
-                "series": "Optimized",
-                "family": family,
-                "label": label,
-                "pair": pair,
-                "arithmetic_intensity": f"{ai:.2f}",
-                "tflops": f"{opt_tflops:.3f}",
-            })
+            rows.append(
+                {
+                    "series": "Original",
+                    "family": family,
+                    "label": label,
+                    "pair": pair,
+                    "arithmetic_intensity": f"{ai:.2f}",
+                    "tflops": f"{base_tflops:.3f}",
+                }
+            )
+            rows.append(
+                {
+                    "series": "Optimized",
+                    "family": family,
+                    "label": label,
+                    "pair": pair,
+                    "arithmetic_intensity": f"{ai:.2f}",
+                    "tflops": f"{opt_tflops:.3f}",
+                }
+            )
 
     if not rows:
         raise SystemExit(f"error: no usable rows in {args.csv}")

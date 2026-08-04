@@ -158,19 +158,23 @@ class PromptLibrary:
         ]
 
         if self.device_type == "xpu" and self.dsl == "triton":
-            lines.extend([
-                "",
-                f"DEVICE_SPECIFIC: BLOCK_M={defaults['BLOCK_M']}, BLOCK_N={defaults['BLOCK_N']}, "
-                f"BLOCK_K={defaults['BLOCK_K']}, num_warps={defaults['num_warps']},",
-                f"grf_mode={defaults.get('grf_mode', 'large')}, "
-                "tl.extra.intel.libdevice for exp2/sigmoid.",
-            ])
+            lines.extend(
+                [
+                    "",
+                    f"DEVICE_SPECIFIC: BLOCK_M={defaults['BLOCK_M']}, BLOCK_N={defaults['BLOCK_N']}, "
+                    f"BLOCK_K={defaults['BLOCK_K']}, num_warps={defaults['num_warps']},",
+                    f"grf_mode={defaults.get('grf_mode', 'large')}, "
+                    "tl.extra.intel.libdevice for exp2/sigmoid.",
+                ]
+            )
         elif self.device_type == "cuda" and self.dsl == "triton":
-            lines.extend([
-                "",
-                f"DEVICE_SPECIFIC: BLOCK_M={defaults['BLOCK_M']}, BLOCK_N={defaults['BLOCK_N']}, "
-                f"BLOCK_K={defaults['BLOCK_K']}, num_warps={defaults['num_warps']}.",
-            ])
+            lines.extend(
+                [
+                    "",
+                    f"DEVICE_SPECIFIC: BLOCK_M={defaults['BLOCK_M']}, BLOCK_N={defaults['BLOCK_N']}, "
+                    f"BLOCK_K={defaults['BLOCK_K']}, num_warps={defaults['num_warps']}.",
+                ]
+            )
 
         return "\n".join(lines)
 

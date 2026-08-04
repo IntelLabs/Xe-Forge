@@ -159,13 +159,15 @@ def main(argv: list[str] | None = None) -> int:
         model = comments.get(key, key)
         # compact shape tag for the annotation
         shape = f"M{dims['M']} N{dims['N']} K{dims['K']} E{dims['E']} t{dims['TOPK']}"
-        rows.append({
-            "series": qlabel,
-            "label": f"{model} [{shape}]",
-            "arithmetic_intensity": f"{ai:.2f}",
-            "flop": f"{flop:.0f}",
-            "bytes": f"{nbytes:.0f}",
-        })
+        rows.append(
+            {
+                "series": qlabel,
+                "label": f"{model} [{shape}]",
+                "arithmetic_intensity": f"{ai:.2f}",
+                "flop": f"{flop:.0f}",
+                "bytes": f"{nbytes:.0f}",
+            }
+        )
 
     if not rows:
         raise SystemExit(f"error: no '{args.variant_prefix}*' variants found in {args.spec}")
