@@ -322,7 +322,7 @@ Delivery is as an installable skill driven from Claude Code, Cursor or Codex, in
 | Magpie (measurement + benchmarking backbone) | `orbit/bench/` | Partial (v10) — a library, not standalone; see §5.4 and gap in §24 Tier C |
 | IntelliKit (low-level profiling toolbox) | `orbit/profiling/` (unitrace, VTune, interception) over `core/profiler.py` | Built (v10), packaged inside Orbit |
 | Orchestrator skill | Orbit CLI + agent layer | Built (v10) — 22 subcommands; `optimize --apply` runs the closed loop (G1, closed §24) |
-| AgentKernelArena (agent A/B) | **nothing** | **Gap** — post-v0.1 by decision, see §5.4 |
+| AgentKernelArena (agent A/B) | `orbit/arena.py` + `xe-orbit arena` | Built (v10) — isolated per-pair workspaces, resumable, held-out gap honest about unmeasured |
 
 ### 5.3 Three structural lessons worth adopting
 
@@ -2225,7 +2225,11 @@ the failure §4.1 exists to prevent.
   failed repetition; `decision_grade: false` under 5 repetitions) and `compare`
   (`stats.compare`, exit codes 0/1/2/3 for the four verdicts, 4 for refused inputs).
   Stdlib + orbit-internal imports only — proven to run without torch installed.
-- **Arena** — stays post-v0.1 by decision; recorded so its absence reads as one.
+- **Arena** — *closed:* `orbit/arena.py` + `xe-orbit arena` — same task format the
+  pipeline emits, isolated workspace per (contestant, task) pair, resumable with
+  an identity check on persisted results, crash-contained, and a leaderboard that
+  ranks only commensurable numbers: unmeasured held-out columns say so, and a
+  contestant without a measured train mean is listed unranked rather than placed.
 
 **Tier D — hygiene.** Root `AGENTS.md`/`CLAUDE.md` (§26); the `SGLangAdapter` (v0.2, the
 portability test — its knowledge file already exists); `orbit/README.md`'s layout block
