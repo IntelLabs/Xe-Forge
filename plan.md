@@ -1371,9 +1371,22 @@ The cutlass adapter's `run()` accepts a `sycl::queue*`, so round two launches bo
 ops on torch's in-order XPU stream with no waits — numerics unchanged — and the
 fresh two-arm A/B returned **ACCEPT: +0.56% end-to-end, 95% CI [0.21%, 0.91%]
 excluding zero, MDE 0.46%**. That is §25's primary criterion met for the first
-time, with the honest scope attached: one session, one serving profile; §25's
-three-session reproducibility and §14.3's profile matrix are what turn it into the
-full claim. The REJECT→cause→fix→ACCEPT sequence is also the strongest evidence yet
+time, with the honest scope attached — and the reproduction campaign then ran the
+same day: at batch 16, **two independent ACCEPTs** (+0.56% CI [0.21, 0.91]; +2.12%
+CI [1.25, 2.99]) and two INCONCLUSIVEs with positive point estimates (+1.02% under a
+3.19% MDE; +0.47% under 2.13%) — four-of-four positive, mean +1.04%, with desktop
+noise the limiter on the other two; batch 32 is unproven (−0.77% under a 4.94% MDE,
+consistent with the thinner kernel-level margin there). Session count was fixed
+before the reruns rather than extended until a third ACCEPT appeared, because
+running-until-significant is choosing the result (§17.5.1). §25's full
+three-clean-sessions claim therefore remains open pending quiet-machine reruns —
+stated as such, not rounded up. The path is now fully automated in both directions:
+`xe-orbit optimize --apply --rounds N` feeds each round's verdicts and reasons back
+to the proposer in-process with a shared stall ledger, and `xe-orbit fuse <region>`
+runs pattern → preset → trace-derived shapes → deterministic tile sweep (§11.7),
+demonstrated live on r0. The four Xe-Fuse findings are fixed on the sibling
+checkout's `orbit-findings` branch, including a real `--verify` — once merged, the
+fuse command's timing-only caveat lifts. The REJECT→cause→fix→ACCEPT sequence is also the strongest evidence yet
 for §17's design: a loop that had collapsed the REJECT into a bare failure would
 have discarded a real win one wait-removal away. Reproduction kit:
 `examples/fused_mlp_experiment/`.
