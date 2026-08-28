@@ -1282,6 +1282,127 @@ def cmd_regions(args: argparse.Namespace) -> int:
     return 0
 
 
+def _region_gemm_shapes(region, kernels) -> tuple[int, int, int] | None:
+    """Derive (m, n, k) from the region's GEMM member, or None when ambiguous.
+
+    Only the clean case is derived — two 2-D inputs sharing exactly one dimension,
+    read from the dominant observed shape. Anything else returns None and the caller
+    asks for --shapes: a guessed problem size would autotune a kernel the workload
+    never runs, which is §12.10's wrong-specialization failure by another road.
+    """
+    by_id = {kernel.id: kernel for kernel in kernels}
+    for kernel_id in region.kernel_ids:
+        record = by_id.get(kernel_id)
+        if record is None or "gemm" not in record.runtime_name.lower():
+            continue
+        if not record.shapes:
+            return None
+        dims = record.shapes[0].dims
+        a = [value for key, value in sorted(dims.items()) if key.startswith("a0_")]
+        b = [value for key, value in sorted(dims.items()) if key.startswith("a1_")]
+        if len(a) != 2 or len(b) != 2:
+            return None
+        m, k = a
+        if k == b[0] and b[1] != k:
+            return m, b[1], k
+        if k == b[1] and b[0] != k:
+            return m, b[0], k
+        return None
+    return None
+
+
+def cmd_fuse(args: argparse.Namespace) -> int:
+    """Autotune a region's fused kernel through Xe-Fuse (§13.4, §11.7).
+
+    Fully automated and deterministic: pattern → preset, shapes from the trace (or
+    --shapes), a tile sweep with every result kept, the winner named. The output is
+    a timing table, not an acceptance — correctness stays gated by the differential
+    check before any comparison built on these numbers is believed.
+    """
+    from xe_forge.orbit.models import KernelCatalog
+    from xe_forge.orbit.optimize.fusion import task_from_region
+    from xe_forge.orbit.optimize.xe_fuse_executor import (
+        autotune_region,
+        checkout_available,
+    )
+
+    store = _resolve_store(args)
+    catalog = store.load(KERNEL_CATALOG, KernelCatalog)
+    region = next((r for r in catalog.regions if r.id == args.region_id), None)
+    if region is None:
+        print(f"no region {args.region_id!r} in run {store.run_id}; run `xe-orbit regions` first")
+        return 1
+
+    if not checkout_available():
+        print(
+            "Xe-Fuse / sycl-tla checkouts not found; clone them under a source root "
+            "or set ORBIT_XE_FUSE_DIR / SYCL_TLA_DIR"
+        )
+        return 1
+
+    if args.shapes:
+        try:
+            m, n, k = (int(part) for part in args.shapes.lower().split("x"))
+        except ValueError:
+            print(f"--shapes must be MxNxK, got {args.shapes!r}")
+            return 2
+    else:
+        derived = _region_gemm_shapes(region, catalog.kernels)
+        if derived is None:
+            print(
+                "could not derive (m, n, k) unambiguously from the region's recorded "
+                "shapes; pass --shapes MxNxK (a guessed size would tune a kernel the "
+                "workload never runs)"
+            )
+            return 1
+        m, n, k = derived
+
+    task = task_from_region(region, catalog.kernels)
+    print(
+        f"autotuning {task.pattern} at {m}x{n}x{k} "
+        f"(region {region.id}, {region.gpu_time_share * 100:.1f}% of GPU time)"
+    )
+    out_dir = store.subdir("experiments", region.id) / "xe_fuse"
+    sweep = autotune_region(
+        task,
+        (m, n, k),
+        out_dir,
+        tiles=args.tiles.split(",") if args.tiles else None,
+        iterations=args.iterations,
+    )
+    store.save_json(
+        f"experiments/{region.id}/xe_fuse_sweep.json",
+        {
+            "region": region.id,
+            "pattern": task.pattern,
+            "preset": sweep.preset,
+            "shapes": [m, n, k],
+            "results": [
+                {
+                    "tile": r.tile,
+                    "us": r.per_iteration_us,
+                    "tflops": r.tflops,
+                    "error": r.error,
+                }
+                for r in sweep.results
+            ],
+            "best_tile": sweep.best.tile if sweep.best else None,
+        },
+    )
+    store.record_stage("fuse")
+
+    print()
+    print(sweep.format())
+    if sweep.best is not None:
+        print()
+        print(
+            "timing only: gate correctness (the differential check) before comparing "
+            "this against the unfused chain — the Xe-Fuse binary's own --verify is "
+            "inert upstream."
+        )
+    return 0 if sweep.best is not None else 1
+
+
 def cmd_pipeline(args: argparse.Namespace) -> int:
     """Run the full loop over a run's artifacts (§24, PR 13)."""
     from xe_forge.orbit.pipeline import run_pipeline
@@ -1543,6 +1664,15 @@ Examples:
     p.add_argument("--replay", help="alias for --run")
     p.add_argument("--limit", type=int, default=20)
     p.set_defaults(func=cmd_regions)
+
+    p = sub.add_parser("fuse", help="autotune a region's fused kernel via Xe-Fuse (§13.4, §11.7)")
+    p.add_argument("region_id")
+    p.add_argument("--run", help="run id (default: most recent)")
+    p.add_argument("--replay", help="alias for --run")
+    p.add_argument("--shapes", help="problem size MxNxK; default: derived from the trace")
+    p.add_argument("--tiles", help="comma-separated tiles (default: candidates tracking M)")
+    p.add_argument("--iterations", type=int, default=300, help="benchmark iterations per tile")
+    p.set_defaults(func=cmd_fuse)
 
     p = sub.add_parser("pipeline", help="run the full loop over a run's artifacts")
     p.add_argument("kernel_id", nargs="?", default=None, help="target a specific kernel")

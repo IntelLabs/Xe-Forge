@@ -172,8 +172,8 @@ def tile_aware_compiler(tmp_path):
         "out=''; prev=''\n"
         'for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done\n'
         'case "$out" in\n'
-        '  *16_256_32*) ms=0.300 ;;\n'
-        '  *auto*) ms=0.360 ;;\n'
+        "  *16_256_32*) ms=0.300 ;;\n"
+        "  *auto*) ms=0.360 ;;\n"
         "  *) ms=0.500 ;;\n"
         "esac\n"
         'printf "#!/bin/sh\\necho \\"K2: [1.0]TFlop/s  (%s)ms\\"\\n" "$ms" > "$out"\n'
@@ -201,7 +201,11 @@ class TestAutotune:
         from xe_forge.orbit.optimize.xe_fuse_executor import autotune_preset
 
         sweep = autotune_preset(
-            "k2", 16, 9728, 896, tmp_path / "out",
+            "k2",
+            16,
+            9728,
+            896,
+            tmp_path / "out",
             tiles=["auto", "16x256x32", "32x256x32"],
             compiler=tile_aware_compiler,
         )
@@ -216,20 +220,30 @@ class TestAutotune:
         from xe_forge.orbit.optimize.xe_fuse_executor import autotune_preset
 
         sweep = autotune_preset(
-            "k2", 16, 9728, 896, tmp_path / "out",
-            tiles=["16x256x32"], compiler="/bin/false",
+            "k2",
+            16,
+            9728,
+            896,
+            tmp_path / "out",
+            tiles=["16x256x32"],
+            compiler="/bin/false",
         )
         assert sweep.best is None
         assert "compile failed" in sweep.format()
         assert "nothing to choose" in sweep.format()
 
-    def test_region_autotune_maps_pattern_first(self, fake_checkouts, tile_aware_compiler, tmp_path):
+    def test_region_autotune_maps_pattern_first(
+        self, fake_checkouts, tile_aware_compiler, tmp_path
+    ):
         from xe_forge.orbit.optimize.xe_fuse_executor import autotune_region
 
         task = FusionTask(region_id="r0", pattern="gemm+activation", gpu_share=0.4)
         sweep = autotune_region(
-            task, (16, 9728, 896), tmp_path / "out",
-            tiles=["auto", "16x256x32"], compiler=tile_aware_compiler,
+            task,
+            (16, 9728, 896),
+            tmp_path / "out",
+            tiles=["auto", "16x256x32"],
+            compiler=tile_aware_compiler,
         )
         assert sweep.preset == "k2" and sweep.best.tile == "16x256x32"
 
@@ -239,3 +253,116 @@ class TestAutotune:
         task = FusionTask(region_id="r9", pattern="gemm+mystery", gpu_share=0.1)
         sweep = autotune_region(task, (16, 9728, 896), tmp_path / "out")
         assert sweep.best is None and "gemm+mystery" in sweep.results[0].error
+
+
+class TestCmdFuse:
+    """The `xe-orbit fuse` seam: catalog in, sweep out, honesty throughout."""
+
+    def _store_with_region(self, tmp_path, dims):
+        from xe_forge.orbit.artifacts import KERNEL_CATALOG, RunStore
+        from xe_forge.orbit.models import (
+            KernelCatalog,
+            KernelRecord,
+            RegionRecord,
+            ShapeObservation,
+        )
+
+        store = RunStore.create(base=tmp_path / ".orbit")
+        catalog = KernelCatalog(
+            run_id=store.run_id,
+            kernels=[
+                KernelRecord(
+                    id="k0",
+                    runtime_name="gemm_kernel_onednn",
+                    shapes=[ShapeObservation(dims=dims, count=10)],
+                )
+            ],
+            regions=[
+                RegionRecord(
+                    id="r0",
+                    kernel_ids=["k0"],
+                    fusion_pattern="gemm+activation",
+                    gpu_time_share=0.4,
+                )
+            ],
+        )
+        store.save(KERNEL_CATALOG, catalog)
+        return store
+
+    def _args(self, store, **over):
+        import argparse
+
+        base = {
+            "orbit_dir": str(store.root),
+            "run": store.run_id,
+            "replay": None,
+            "region_id": "r0",
+            "shapes": None,
+            "tiles": None,
+            "iterations": 300,
+        }
+        base.update(over)
+        return argparse.Namespace(**base)
+
+    def _stub_sweep(self, monkeypatch, record):
+        import xe_forge.orbit.optimize.xe_fuse_executor as mod
+
+        def fake_run_preset(preset, m, n, k, output_dir, *, tile="auto", **kw):
+            record.append((preset, m, n, k, tile))
+            result = mod.XeFuseResult(preset=preset, tile=tile, m=m, n=n, k=k)
+            result.ms = 0.35 if tile != "auto" else 0.36
+            return result
+
+        monkeypatch.setattr(mod, "run_preset", fake_run_preset)
+
+    def test_shapes_derived_from_the_gemm_member(self, fake_checkouts, monkeypatch, tmp_path):
+        from xe_forge.orbit.cli import cmd_fuse
+
+        calls = []
+        self._stub_sweep(monkeypatch, calls)
+        store = self._store_with_region(
+            tmp_path, {"a0_d0": 16, "a0_d1": 896, "a1_d0": 9728, "a1_d1": 896}
+        )
+        code = cmd_fuse(self._args(store, tiles="auto,16x256x32"))
+        assert code == 0
+        assert calls and calls[0][1:4] == (16, 9728, 896)
+        sweep_file = store.run_dir / "experiments" / "r0" / "xe_fuse_sweep.json"
+        assert sweep_file.is_file()
+
+    def test_shapes_flag_overrides_derivation(self, fake_checkouts, monkeypatch, tmp_path):
+        from xe_forge.orbit.cli import cmd_fuse
+
+        calls = []
+        self._stub_sweep(monkeypatch, calls)
+        store = self._store_with_region(tmp_path, {})
+        assert cmd_fuse(self._args(store, shapes="8x512x256", tiles="auto")) == 0
+        assert calls[0][1:4] == (8, 512, 256)
+
+    def test_ambiguous_shapes_ask_rather_than_guess(
+        self, fake_checkouts, monkeypatch, tmp_path, capsys
+    ):
+        from xe_forge.orbit.cli import cmd_fuse
+
+        self._stub_sweep(monkeypatch, [])
+        # Square: both weight dims equal K — M/N/K assignment is undecidable.
+        store = self._store_with_region(
+            tmp_path, {"a0_d0": 896, "a0_d1": 896, "a1_d0": 896, "a1_d1": 896}
+        )
+        assert cmd_fuse(self._args(store)) == 1
+        assert "--shapes" in capsys.readouterr().out
+
+    def test_unknown_region_is_a_named_miss(self, fake_checkouts, tmp_path, capsys):
+        from xe_forge.orbit.cli import cmd_fuse
+
+        store = self._store_with_region(tmp_path, {})
+        assert cmd_fuse(self._args(store, region_id="r9")) == 1
+        assert "r9" in capsys.readouterr().out
+
+    def test_missing_checkouts_refuse_before_any_work(self, monkeypatch, tmp_path, capsys):
+        from xe_forge.orbit.cli import cmd_fuse
+
+        monkeypatch.setenv("ORBIT_XE_FUSE_DIR", str(tmp_path / "nope"))
+        monkeypatch.setenv("SYCL_TLA_DIR", str(tmp_path / "nope"))
+        store = self._store_with_region(tmp_path, {})
+        assert cmd_fuse(self._args(store)) == 1
+        assert "checkout" in capsys.readouterr().out.lower()
