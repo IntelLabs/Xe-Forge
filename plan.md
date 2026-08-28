@@ -1385,8 +1385,22 @@ stated as such, not rounded up. The path is now fully automated in both directio
 to the proposer in-process with a shared stall ledger, and `xe-orbit fuse <region>`
 runs pattern → preset → trace-derived shapes → deterministic tile sweep (§11.7),
 demonstrated live on r0. The four Xe-Fuse findings are fixed on the sibling
-checkout's `orbit-findings` branch, including a real `--verify` — once merged, the
-fuse command's timing-only caveat lifts. The REJECT→cause→fix→ACCEPT sequence is also the strongest evidence yet
+checkout's `orbit-findings` branch, including a real `--verify` — validated on the
+device (Disposition: Passed, max rel 3.9e-03), and the fixed selector's M=128 pick
+beat even the manual sweep's best (526.6 vs 612 µs).
+
+**The full crossover map (v10), fused best-tile vs vLLM's real oneDNN chain, one
+device:** at 0.5B shapes (N=9728, K=896) fusion wins the decode regime — +1.5% at
+M=16 (the e2e-ACCEPTed candidate), +1.4% at 32, +3.5% at 64 — and loses prefill
+badly (−7% at 128, −28% at 1024, −24% at 2048): oneDNN's skinny-K GEMMs at large M
+are strong. At qwen25_7b shapes (N=37888, K=3584) — the model class Xe-Fuse's
+presets are actually tuned for — the picture inverts with M: −5.4% at M=1024 but
+**+4.4% at M=2048 (86.3 vs 90.3 ms)**, single-run measurements. So fusion wins at
+the *extremes* — small-M decode on small models, big-M prefill on big models — and
+the vendor library owns the middle, on this iGPU. Every big-M sweep also found
+256×256×32 beating the fixed selector's auto by 28–32%, the fifth selector data
+point for upstream. §14.4's specialization set is not an edge case; it is the
+shape of the answer everywhere we have measured. The REJECT→cause→fix→ACCEPT sequence is also the strongest evidence yet
 for §17's design: a loop that had collapsed the REJECT into a bare failure would
 have discarded a real win one wait-removal away. Reproduction kit:
 `examples/fused_mlp_experiment/`.
