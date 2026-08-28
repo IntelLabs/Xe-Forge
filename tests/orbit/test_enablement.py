@@ -52,14 +52,19 @@ class TestDiagnosis:
         assert gaps[0].rung is Rung.SOURCE_PATCH
         assert "override" in gaps[0].suggestion
 
-    def test_missing_package_is_honest_about_the_deferred_rung(self):
+    def test_missing_package_points_at_the_scoped_runtime_climb(self):
         gaps = diagnose(1, "", "ModuleNotFoundError: No module named 'vllm'")
         assert gaps[0].kind == "missing_package"
         assert gaps[0].rung is Rung.SCOPED_RUNTIME
-        # The rung is not built in v0.1, and the gap must say so rather than
-        # presenting an unimplemented climb as an available move.
-        assert gaps[0].deferred
-        assert "deferred to v0.2" in gaps[0].format()
+        # Rung 3 is built now: the gap is actionable and its suggestion points at
+        # the climb instead of apologising for an unimplemented rung.
+        assert not gaps[0].deferred
+        assert "actionable now" in gaps[0].format()
+        assert "climb_missing_package" in gaps[0].suggestion
+        # The old honesty still holds one rung up: 4 and 5 remain deferred, and a
+        # gap that lands there must still say so.
+        assert Rung.SOURCE_LOCALIZE not in IMPLEMENTED_RUNGS
+        assert Rung.COMPILED_BUILD not in IMPLEMENTED_RUNGS
 
     def test_config_error_blames_the_command_not_the_workload(self):
         gaps = diagnose(2, "", "error: unrecognized arguments: --frobnicate")
@@ -90,7 +95,12 @@ class TestDiagnosis:
 
 class TestLadderShape:
     def test_implemented_rungs_are_the_bottom_of_the_ladder(self):
-        assert IMPLEMENTED_RUNGS == {Rung.DIAGNOSE, Rung.SERVE_FLAG, Rung.SOURCE_PATCH}
+        assert IMPLEMENTED_RUNGS == {
+            Rung.DIAGNOSE,
+            Rung.SERVE_FLAG,
+            Rung.SOURCE_PATCH,
+            Rung.SCOPED_RUNTIME,
+        }
 
     def test_deferred_is_derived_from_the_rung_not_declared(self):
         gap = CapabilityGap(kind="x", evidence="e", rung=Rung.COMPILED_BUILD, suggestion="s")
