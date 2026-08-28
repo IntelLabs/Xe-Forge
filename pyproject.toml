@@ -38,6 +38,7 @@ orbit-bench = "xe_forge.orbit.bench.cli:main"
 [project.entry-points."xe_orbit.frameworks"]
 generic_torch = "xe_forge.orbit.adapters.generic_torch:GenericTorchAdapter"
 vllm = "xe_forge.orbit.adapters.vllm:VLLMAdapter"
+sglang = "xe_forge.orbit.adapters.sglang:SGLangAdapter"
 
 [dependency-groups]
 dev = [

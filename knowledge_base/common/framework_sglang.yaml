@@ -2,38 +2,304 @@
 #
 # §10.9 schedules the SGLang adapter for v0.2 as the deliberate portability test: its
 # cost in lines changed outside `adapters/` is the evidence that the §10 boundary works.
-# This file exists ahead of that adapter because extraction does not need one — a kernel
-# from sgl-kernel-xpu resolves through the same source registry as any other, which is
-# the point of treating framework knowledge as data.
+# This file predates that adapter — extraction never needed one, because a kernel from
+# sgl-kernel-xpu resolves through the same source registry as any other, which is the
+# point of treating framework knowledge as data.
 #
-# There is no Tier 1 adapter yet, so an SGLang workload correctly degrades to Tier 0
-# (§10.2) rather than being claimed by an adapter that cannot deliver serving metrics.
+# The Tier 1 adapter now exists (`xe_forge.orbit.adapters.sglang:SGLangAdapter`) and
+# carries these defaults in code as well, so it works from a wheel with no knowledge
+# base on disk. This file is the authority a site edits: axes added here appear in the
+# action space, and metric patterns added here are used by the parser, without a code
+# change. Anything already declared in code is not overridden — divergence is caught
+# by tests/orbit/test_sglang_adapter.py, which asserts the two agree.
+#
+# Facts that could not be verified against a live SGLang install carry a
+# `confidence: unverified` note rather than invented precision — a wrong parse rule
+# that runs cleanly is this codebase's documented recurring bug class.
 framework: sglang
-tier: 0
-adapter: generic_torch
+tier: 1
+adapter: xe_forge.orbit.adapters.sglang:SGLangAdapter
 schema_version: "1.0"
 
 version_compatibility:
   sglang: ">=0.4"
+  torch: ">=2.5.0"
   note: >
     sgl-kernel-xpu is not published on PyPI and sglang ships no XPU extra; the XPU
-    kernels are a source-tree build. Pin both together.
+    kernels are a source-tree build. Pin both together. SGLang's scheduler, radix
+    cache policy and attention-backend names move between minor versions; artifacts
+    collected under one version are not comparable with another.
 
+# --------------------------------------------------------------------------
+# Dispatch roots and kernel module globs (§7.2, §12.4)
+# --------------------------------------------------------------------------
 dispatch_roots:
+  - aten
+  - torch.ops
+  - torch.ops.sgl_kernel   # sgl-kernel native ops: attention, norms, activations, MoE
   - sgl_kernel
-  - torch.ops.sgl_kernel
+  - sglang.srt.layers
 
 kernel_module_globs:
   - "sgl_kernel/**"
+  - "sglang/srt/layers/**/*.py"                       # Triton attention/MoE, norms
+  - "sglang/srt/layers/moe/fused_moe_triton/configs/*.json"  # tuned configs: data (§12.8)
 
 backend_selection_env:
   - name: SGLANG_ATTENTION_BACKEND
     why: Selects the attention implementation, which changes which kernels dispatch.
+    confidence: unverified
+    note: >
+      The authoritative selector is the --attention-backend server argument; this
+      environment variable is recorded as observed but has not been verified against
+      a live install, which is why the adapter's attention_backend config axis is the
+      CLI flag, never this variable — an env pin the engine ignores would run cleanly
+      and pin nothing.
+  - name: SGLANG_TORCH_PROFILER_DIR
+    why: >
+      Where the engine writes torch-profiler traces; the profile hook for a framework
+      whose scheduler runs out-of-process (capabilities.profile_hook).
 
 opaque_providers:
-  - name: oneDNN
+  - name: onednn
+    match: ["dnnl", "onednn", "brgemm", "jit_gemm"]
+    actions: [region_fusion, backend_change, layout_change, library_config]
+    reproducer: "DNNL_VERBOSE=1 primitive descriptors (E4)"
     why: Reached through torch; no source in the distribution.
+  - name: onemkl
+    match: ["mkl_", "cblas_", "gemm_batch"]
+    actions: [backend_change, layout_change, library_config]
+  - name: flashinfer
+    match: ["flashinfer", "BatchPrefillWithPagedKVCache"]
+    actions: [backend_change, library_config]
+    reproducer: "Prebuilt AOT module: substitute the backend, do not patch the kernel"
 
+# --------------------------------------------------------------------------
+# Config axes and legal values (§10.3 `config_axes`, §7.6 CONFIG_CHANGE)
+# Every axis is a real SGLang server argument. `presence: true` marks argparse
+# store_true flags (there is no `--no-` spelling to emit). There are deliberately no
+# environment-variable axes: SGLang steers its engine through ServerArgs, and an env
+# knob the engine does not read would be a pin that runs cleanly and pins nothing.
+# --------------------------------------------------------------------------
+config_axes:
+  - name: attention_backend
+    cli_flag: --attention-backend
+    values: [flashinfer, triton, torch_native, fa3]
+    description: >
+      Attention backend selection (--attention-backend). The legal set is version-
+      and platform-bound (an XPU build accepts fewer); the knowledge file carries
+      the per-version list
+    action_type: backend_change
+    confidence: unverified
+    note: >
+      The flag itself is certain; the value list is version-bound and has not been
+      checked against every release line (newer versions add e.g. flashmla, aiter).
+
+  - name: disable_radix_cache
+    cli_flag: --disable-radix-cache
+    presence: true
+    values: [true, false]
+    description: >
+      Turn off RadixAttention prefix/KV reuse across requests — the largest single
+      source of run-to-run nondeterminism in a serving benchmark (§10.5)
+    action_type: config_change
+
+  - name: max_running_requests
+    cli_flag: --max-running-requests
+    values: [1, 8, 32, 64, 128, 256]
+    description: >
+      Scheduler batch width. 1 pins continuous-batching order at the cost of
+      measuring a batch size the deployment does not run
+    action_type: config_change
+
+  - name: chunked_prefill_size
+    cli_flag: --chunked-prefill-size
+    values: [-1, 512, 2048, 8192]
+    description: >
+      Chunked-prefill budget per batch; -1 disables chunking entirely, a fixed value
+      pins where prefill splits instead of letting the scheduler choose
+    action_type: config_change
+
+  - name: schedule_policy
+    cli_flag: --schedule-policy
+    values: [fcfs, lpm, random, dfs-weight]
+    description: >
+      Request scheduling policy. fcfs pins queue order; lpm (the default) reorders
+      by prefix match, which couples ordering to cache state
+    action_type: config_change
+
+  - name: mem_fraction_static
+    cli_flag: --mem-fraction-static
+    values: [0.7, 0.8, 0.88]
+    description: >
+      Fraction of GPU memory for weights plus KV cache. Changes how many tokens fit
+      and therefore when retraction/recompute occurs
+    action_type: config_change
+
+  - name: tp_size
+    cli_flag: --tp-size
+    values: [1, 2, 4, 8]
+    description: "Tensor-parallel width. Changes the kernel mix and the collectives"
+    action_type: config_change
+
+  - name: disable_cuda_graph
+    cli_flag: --disable-cuda-graph
+    presence: true
+    values: [true, false]
+    description: >
+      Skip graph capture. Removes capture/warmup state from the measurement, and
+      removes graph replay from the kernel mix — a different workload, honestly named
+    action_type: graph_capture
+
+  - name: random_seed
+    cli_flag: --random-seed
+    values: []
+    description: >
+      Engine seed (--random-seed). SGLang draws a fresh seed per launch when it is
+      unset, so pin it before comparing anything
+    action_type: config_change
+
+# --------------------------------------------------------------------------
+# Metrics parsing rules (§10.3 `benchmark`)
+# The adapter parses stdout and stderr of the benchmark process. Preference order is
+# first-match-wins per metric: a mean from SGLang's own result table beats a median,
+# and a decode-side token rate beats a total token rate, which moves with input
+# length and is therefore useless for an A/B on a decode kernel.
+# --------------------------------------------------------------------------
+metrics:
+  declared: [wall_time, throughput, ttft, tpot]
+  sources:
+    - "python -m sglang.bench_serving  (Serving Benchmark Result table, derived from vLLM's)"
+    - "python -m sglang.bench_offline_throughput  (Offline Throughput Benchmark Result table)"
+    - "scheduler decode-batch log lines (gen throughput (token/s))"
+  patterns:
+    ttft_ms:
+      - '^\s*Mean TTFT \(ms\):\s*([0-9.]+)'
+      - '^\s*Median TTFT \(ms\):\s*([0-9.]+)'
+    tpot_ms:
+      - '^\s*Mean TPOT \(ms\):\s*([0-9.]+)'
+      - '^\s*Median TPOT \(ms\):\s*([0-9.]+)'
+      - '^\s*Mean ITL \(ms\):\s*([0-9.]+)'
+    throughput:
+      - '^\s*Output token throughput \(tok/s\):\s*([0-9.]+)'
+      - '^\s*Total token throughput \(tok/s\):\s*([0-9.]+)'
+      - 'gen throughput \(token/s\):\s*([0-9.]+)'
+  # Site-local additions. Each entry is {metric, pattern} with one capturing group and
+  # a metric name of ttft_ms, tpot_ms or throughput; they are appended after the
+  # built-ins, so they act as further fallbacks and never shadow the table.
+  extra_patterns: []
+  unverified:
+    - source: "python -m sglang.bench_one_batch"
+      confidence: unverified
+      note: >
+        Prints per-phase lines of roughly the shape "Prefill. latency: ... s,
+        throughput: ... token/s" / "Decode. ..." / "Total. ...". The exact format
+        has not been verified against a live install, so no parse rule is shipped
+        for it — a wrong rule that runs cleanly would report a confident wrong
+        number. Add a checked pattern to extra_patterns when the format is pinned.
+  fallback: >
+    When no serving metric parses, the adapter reports wall_time alone and records
+    why on the handle. It never substitutes one metric for another (§10.4).
+
+# --------------------------------------------------------------------------
+# Determinism knobs (§10.5)
+# The source names are shared across adapters so a report can compare what Tier 1
+# pins against what Tier 0 cannot pin at all.
+# --------------------------------------------------------------------------
+determinism:
+  pinnable:
+    prefix_cache_reuse:
+      knob: "--disable-radix-cache"
+      note: >
+        Turns off RadixAttention reuse. Also resettable at run time: POST
+        /flush_cache against a live server, or Engine.flush_cache() in-process.
+    continuous_batching_order:
+      knob: "--max-running-requests 1"
+      note: >
+        Serialises the scheduler; --schedule-policy fcfs pins the queue order (the
+        default, lpm, reorders by prefix match, coupling order to cache state).
+        Changes the operating point; report it.
+    chunked_prefill_boundaries:
+      knob: "--chunked-prefill-size -1"
+      note: "-1 disables chunking; a fixed value pins the split point instead."
+    graph_capture_warmup:
+      knob: "--disable-cuda-graph"
+      note: "Or keep capture and discard warmup repetitions; do not mix the two across arms."
+  non_pinnable:
+    speculative_decoding:
+      why: >
+        The accept rate is a property of draft/target agreement at run time (EAGLE
+        and friends). It can be removed (no speculative config) but not pinned, and
+        removing it measures a different workload.
+      active_markers:
+        - "--speculative-algorithm"
+        - "--speculative-draft-model-path"
+        - "--speculative-num-draft-tokens"
+        - "--speculative-num-steps"
+    request_arrival_jitter:
+      why: >
+        Arrival times come from the load generator, not the engine. A fixed
+        --request-rate narrows the distribution; the OS scheduler still moves batch
+        boundaries.
+      active_markers: ["--request-rate", "--num-prompts", "bench_serving"]
+  rule: >
+    When a non-pinnable source is active and observed variance exceeds the MDE, §17
+    emits INCONCLUSIVE with the source named. It never emits ACCEPT.
+
+# --------------------------------------------------------------------------
+# Candidate patch points (§13)
+# Always take the highest rung that works: it touches less and reverts cleanly.
+# Verification is mandatory and is a dispatch assertion, not an inspection — after
+# applying, the new kernel must appear in the re-profile and the old one must not.
+# SGLang has no CustomOp registry like vLLM's: norms and activations dispatch
+# straight through torch.ops.sgl_kernel.*, which is exactly the P1 case.
+# --------------------------------------------------------------------------
+patch_points:
+  - rung: P1
+    layer: dispatcher_op
+    match: ["sgl_kernel::", "aten::"]
+    mechanism: "torch.library operator override on the XPU dispatch key"
+    revert: "do not import the extension module"
+    note: >
+      sgl-kernel registers its native ops through TORCH_LIBRARY, so an optimized SYCL
+      or Triton kernel ships as a small out-of-tree extension. No fork, no rebuild of
+      SGLang, and the same override works under plain PyTorch and vLLM when they
+      dispatch through the same op (§11.8).
+
+  - rung: P3
+    layer: attention_backend
+    match: ["radix_attention", "decode_attention", "extend_attention", "flashinfer", "flash_attn", "reshape_and_cache"]
+    mechanism: "register an attention backend in sglang.srt.layers.attention and select it with --attention-backend"
+    revert: "restore the server argument"
+
+  - rung: P3
+    layer: fused_moe
+    match: ["fused_moe", "moe_align", "topk_softmax", "moe_sum", "grouped_gemm", "ep_moe"]
+    mechanism: "substitute the fused MoE implementation in sglang.srt.layers.moe, or override the sgl_kernel op it dispatches to"
+    revert: "restore the implementation / unregister the op"
+    note: "The tuned-config JSON is data and must be copied, never regenerated (§12.8)."
+
+# --------------------------------------------------------------------------
+# Quality gate (§19 L3)
+# --------------------------------------------------------------------------
+quality_gate:
+  level: L3
+  decode: greedy
+  temperature: 0.0
+  seed: 0
+  min_prompts: 32
+  max_tokens: 64
+  comparison: token_exact
+  note: >
+    Requires an in-process engine on the handle. Without sglang the adapter raises
+    rather than returning a failure: an unavailable gate and a failed gate are
+    different facts, and §19 forbids weakening a correctness test to make one look
+    like the other. Token ids come from the generate output's output_ids field, or
+    from meta_info.output_token_logprobs when logprobs were requested; when neither
+    is present the gate refuses rather than comparing decoded text, because
+    retokenization can round-trip differing ids to identical strings.
+
+# Where this framework's kernels actually live in source form (plan §11.2, §12.5).
 kernel_sources:
   - name: sgl-kernel-xpu
     repo: https://github.com/sgl-project/sgl-kernel-xpu

@@ -25,6 +25,7 @@ from xe_forge.orbit.adapters.base import (
     PreparedWorkload,
 )
 from xe_forge.orbit.adapters.generic_torch import GenericTorchAdapter
+from xe_forge.orbit.adapters.sglang import SGLangAdapter
 from xe_forge.orbit.adapters.vllm import VLLMAdapter
 from xe_forge.orbit.models import WorkloadSpec
 
@@ -34,10 +35,12 @@ ENTRY_POINT_GROUP = "xe_orbit.frameworks"
 
 # Built-in adapters. v0.1 ships Tier 0 alongside the first Tier 1 adapter on purpose
 # (§10.9): building the generic path at the same time keeps one framework's shape from
-# becoming the core's shape.
+# becoming the core's shape. SGLang is the scheduled v0.2 portability test — the
+# second Tier 1 adapter, whose cost outside `adapters/` is a reported metric (§10.8).
 _BUILTIN: dict[str, type] = {
     "generic_torch": GenericTorchAdapter,
     "vllm": VLLMAdapter,
+    "sglang": SGLangAdapter,
 }
 
 
@@ -130,6 +133,7 @@ __all__ = [
     "LoadSpec",
     "MetricSpec",
     "PreparedWorkload",
+    "SGLangAdapter",
     "VLLMAdapter",
     "available_adapters",
     "describe_adapters",
