@@ -1352,7 +1352,22 @@ the session, worth fixing there: the generated benchmark parses `--verify` and n
 uses it; `initialize_block` zero-fills float scale buffers, so an output-vs-reference
 check would pass trivially on D == 0 (caught only because the margin check refused a
 too-perfect match); and the tile auto-selector chooses well at M=16 and poorly at
-M=128 (32×128×32 where 128×256×32 is 26% faster).
+every larger M measured (32, 64, 128 — M-matched tiles beat its picks by 3-26%).
+
+**And then the full loop closed on it — with an honest REJECT (v10).** The fused
+chain was integrated into live serving: a torch extension wrapping k2 (two tile
+instantiations, M-dispatched; a tiny `add_rms_scale` kernel eliminating the
+normalize write; γ folded into the packed weight — numerics verified *closer* to
+fp64 truth than the unfused path), applied to `Qwen2DecoderLayer.forward` through
+the §13.2 journalled patcher, and A/B'd end to end: **REJECT, −2.52%, 95% CI
+[−2.81%, −2.22%], against a 0.19% MDE** from a baseline spread of 0.1%. The
+kernel-level win did not convert because the extension launches on cutlass-sycl's
+compat queue rather than torch's stream — two `wait()` serializations per layer,
+24 layers per decode step, exceeding the fused margin. The revert restored the tree
+byte-for-byte. This is §1's founding question — do kernel wins convert to
+tokens/s? — answered *no, and instrumented to the microsecond why not* for this
+candidate; sharing torch's in-order stream is the named follow-up with the verified
+kernel margin waiting behind it. Reproduction kit: `examples/fused_mlp_experiment/`.
 
 ### 13.5 The agentic loop: the agent proposes, Orbit decides (v9)
 
