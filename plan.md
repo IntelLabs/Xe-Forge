@@ -1421,7 +1421,29 @@ the recorded verdict is that the gate was underpowered as designed — a strict 
 n=32 breaks on a single coin-flip answer — and **deployment acceptance is withheld**
 pending a larger pre-declared eval (hundreds of prompts, an equivalence margin
 rather than strict dominance). The performance case stands; the quality case is
-unproven-not-disproven, stated as exactly that. (Precision, stated plainly: the kernel
+unproven-not-disproven, stated as exactly that.
+
+**Quantized workloads and the SGLang kernels, measured (v10).** Two more workloads
+went through the pipeline, per the two-workload check. GPTQ-Int8: **not runnable on
+this stack** — vLLM-XPU routes it to a Marlin path supporting only 4-bit
+(`does not support weight_bits = uint8b128`), now a named `quant_capability`
+diagnosis in the enablement classifier rather than an `unknown`. AWQ-Int4: runs,
+traces, and catalogs cleanly — the AWQ path dequantizes into fp16 oneDNN GEMMs, so
+the GEMM still owns 81.4% of GPU time and the same two fusable regions cover 44.9%,
+now auto-routed to Xe-Fuse by the availability upgrade; the sampler's share grew 7×
+to 4.9% as the GEMMs sped up, Amdahl reshaping the catalog exactly as §18 predicts.
+Point-and-start landed alongside: `xe-orbit trace --wrap -- <command>` runs any
+single-process torch workload under a shipped profiler wrapper (no workload-side
+code; subprocess engines are told to use their framework hook instead of being
+handed an empty trace), and a failed workload in the trace stage now carries the
+enablement diagnosis. SGLang: the rung-3 scoped-runtime climb ran live and reported
+honestly (pip sglang pulls the CUDA dependency stack and ships no XPU extra —
+install failed, environment discarded, nothing kept), and the sgl-kernel-xpu source
+build failed 14 translation units under parallel icpx on this 13.8 GB shared-memory
+machine (~8 GB per compile, §13.3's own budget) — placing SGLang-XPU kernel
+measurement at **rung 5, the off-loop build lane**, by the ladder's own taxonomy.
+The adapter, knowledge file and source registry (172 indexed symbols) are ready the
+day that lane exists; a serial overnight build is the named next attempt. (Precision, stated plainly: the kernel
 computes at the standard bf16-data/fp32-accumulate; fp64 exists only as the host
 referee, which must out-precision both contestants to rank them.) *Served A/B:*
 a real `vllm serve` per arm with `xe-orbit run --framework vllm` driving
