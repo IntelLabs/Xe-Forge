@@ -1,0 +1,141 @@
+{
+  "$defs": {
+    "Decision": {
+      "description": "Accept/reject arithmetic outcomes (\u00a717). INCONCLUSIVE is not REJECT.",
+      "enum": [
+        "ACCEPT",
+        "REJECT",
+        "INCONCLUSIVE",
+        "INVALID"
+      ],
+      "title": "Decision",
+      "type": "string"
+    },
+    "MetricEstimate": {
+      "description": "A measured quantity with an interval. Never a bare float (\u00a717).",
+      "properties": {
+        "ci95_high": {
+          "default": 0.0,
+          "title": "Ci95 High",
+          "type": "number"
+        },
+        "ci95_low": {
+          "default": 0.0,
+          "title": "Ci95 Low",
+          "type": "number"
+        },
+        "mean": {
+          "title": "Mean",
+          "type": "number"
+        },
+        "n": {
+          "default": 1,
+          "title": "N",
+          "type": "integer"
+        },
+        "samples": {
+          "items": {
+            "type": "number"
+          },
+          "title": "Samples",
+          "type": "array"
+        },
+        "stdev": {
+          "default": 0.0,
+          "title": "Stdev",
+          "type": "number"
+        },
+        "unit": {
+          "default": "",
+          "title": "Unit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mean"
+      ],
+      "title": "MetricEstimate",
+      "type": "object"
+    }
+  },
+  "description": "The result of comparing a candidate against a baseline (\u00a717).",
+  "properties": {
+    "baseline": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MetricEstimate"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "candidate": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MetricEstimate"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "decision": {
+      "$ref": "#/$defs/Decision",
+      "default": "INCONCLUSIVE"
+    },
+    "delta_ci95_high": {
+      "default": 0.0,
+      "title": "Delta Ci95 High",
+      "type": "number"
+    },
+    "delta_ci95_low": {
+      "default": 0.0,
+      "title": "Delta Ci95 Low",
+      "type": "number"
+    },
+    "delta_percent": {
+      "default": 0.0,
+      "title": "Delta Percent",
+      "type": "number"
+    },
+    "metric": {
+      "default": "wall_time",
+      "title": "Metric",
+      "type": "string"
+    },
+    "minimum_detectable_effect": {
+      "default": 0.0,
+      "title": "Minimum Detectable Effect",
+      "type": "number"
+    },
+    "per_profile": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Per Profile",
+      "type": "object"
+    },
+    "reason": {
+      "default": "",
+      "title": "Reason",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.1",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "title": "ComparisonOutcome",
+  "type": "object",
+  "x-orbit-artifact": "decision",
+  "x-orbit-schema-version": "1.1"
+}

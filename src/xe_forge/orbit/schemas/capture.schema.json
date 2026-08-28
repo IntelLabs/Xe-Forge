@@ -1,0 +1,96 @@
+{
+  "description": "Real tensors captured from the running workload (\u00a77.5).",
+  "properties": {
+    "call_index": {
+      "default": 0,
+      "title": "Call Index",
+      "type": "integer"
+    },
+    "contiguous_map": {
+      "additionalProperties": {
+        "type": "boolean"
+      },
+      "title": "Contiguous Map",
+      "type": "object"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "data_deps": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Data Deps",
+      "type": "array"
+    },
+    "dtype_map": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Dtype Map",
+      "type": "object"
+    },
+    "kernel_id": {
+      "title": "Kernel Id",
+      "type": "string"
+    },
+    "output_reference": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Output Reference"
+    },
+    "scalars": {
+      "additionalProperties": true,
+      "title": "Scalars",
+      "type": "object"
+    },
+    "schema_version": {
+      "default": "1.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "shape_map": {
+      "additionalProperties": {
+        "items": {
+          "type": "integer"
+        },
+        "type": "array"
+      },
+      "title": "Shape Map",
+      "type": "object"
+    },
+    "stride_map": {
+      "additionalProperties": {
+        "items": {
+          "type": "integer"
+        },
+        "type": "array"
+      },
+      "title": "Stride Map",
+      "type": "object"
+    },
+    "tensors": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Tensors",
+      "type": "array"
+    }
+  },
+  "required": [
+    "kernel_id"
+  ],
+  "title": "CapturedInvocation",
+  "type": "object",
+  "x-orbit-artifact": "capture",
+  "x-orbit-schema-version": "1.1"
+}

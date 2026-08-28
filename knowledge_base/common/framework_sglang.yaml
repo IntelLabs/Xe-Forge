@@ -1,0 +1,49 @@
+# SGLang — framework knowledge (plan §10.6, §10.9).
+#
+# §10.9 schedules the SGLang adapter for v0.2 as the deliberate portability test: its
+# cost in lines changed outside `adapters/` is the evidence that the §10 boundary works.
+# This file exists ahead of that adapter because extraction does not need one — a kernel
+# from sgl-kernel-xpu resolves through the same source registry as any other, which is
+# the point of treating framework knowledge as data.
+#
+# There is no Tier 1 adapter yet, so an SGLang workload correctly degrades to Tier 0
+# (§10.2) rather than being claimed by an adapter that cannot deliver serving metrics.
+framework: sglang
+tier: 0
+adapter: generic_torch
+schema_version: "1.0"
+
+version_compatibility:
+  sglang: ">=0.4"
+  note: >
+    sgl-kernel-xpu is not published on PyPI and sglang ships no XPU extra; the XPU
+    kernels are a source-tree build. Pin both together.
+
+dispatch_roots:
+  - sgl_kernel
+  - torch.ops.sgl_kernel
+
+kernel_module_globs:
+  - "sgl_kernel/**"
+
+backend_selection_env:
+  - name: SGLANG_ATTENTION_BACKEND
+    why: Selects the attention implementation, which changes which kernels dispatch.
+
+opaque_providers:
+  - name: oneDNN
+    why: Reached through torch; no source in the distribution.
+
+kernel_sources:
+  - name: sgl-kernel-xpu
+    repo: https://github.com/sgl-project/sgl-kernel-xpu
+    # No pin yet: set to the revision the installed `sgl_kernel` wheel was built from.
+    # Empty is reported as `unpinned` by `xe-orbit sources`, never silently treated as
+    # matching (§12.10).
+    revision: ""
+    subdir: src
+    provider: custom
+    language: sycl
+    registers: torch.ops.sgl_kernel.*
+    namespaces: ["sgl_kernel", "gdn", "decode"]
+    symbol_globs: ["*.cpp", "*.h", "*.hpp"]

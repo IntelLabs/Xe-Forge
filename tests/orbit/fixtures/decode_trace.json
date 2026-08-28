@@ -1,0 +1,20 @@
+{
+  "_comment": "Committed golden fixture: a GPU-bound decode step exercising every provenance class at once — an opaque oneDNN GEMM that owns the most time, an Inductor-generated Triton kernel, a hand-written vLLM SYCL attention kernel with a templated mangled name, and one kernel with no attributable provenance. Used by the catalog, provenance and ranking tests so they run with no GPU and no profiler (plan §16.3).",
+  "traceEvents": [
+    {"ph": "X", "name": "aten::mm", "cat": "cpu_op", "ts": 1000, "dur": 120, "args": {"correlation": 1}},
+    {"ph": "X", "name": "gemm_kernel_onednn_jit_bf16", "cat": "kernel", "ts": 1010, "dur": 4100, "args": {"correlation": 1, "stream": "0", "device": 0, "Input Dims": [[4096, 8192], [8192, 8192]], "Input type": ["bfloat16", "bfloat16"]}},
+
+    {"ph": "X", "name": "aten::rms_norm", "cat": "cpu_op", "ts": 5200, "dur": 40, "args": {"correlation": 2}},
+    {"ph": "X", "name": "triton_poi_fused_rms_norm_mul_0", "cat": "kernel", "ts": 5220, "dur": 2480, "args": {"correlation": 2, "stream": "0", "device": 0, "Input Dims": [[4096, 8192]], "Input type": ["bfloat16"]}},
+
+    {"ph": "X", "name": "vllm::unified_attention", "cat": "cpu_op", "ts": 7800, "dur": 60, "args": {"correlation": 3}},
+    {"ph": "X", "name": "_ZTSN4sycl3_V16detail18RoundedRangeKernelIN2at6native3xpu16UnifiedAttentionIfLi128ELi64EEEEE", "cat": "kernel", "ts": 7820, "dur": 1610, "args": {"correlation": 3, "stream": "0", "device": 0, "Input Dims": [[1, 40, 1, 128]], "Input type": ["bfloat16"]}},
+
+    {"ph": "X", "name": "triton_poi_fused_silu_mul_1", "cat": "kernel", "ts": 9500, "dur": 900, "args": {"correlation": 4, "stream": "0", "device": 0, "Input Dims": [[4096, 8192]], "Input type": ["bfloat16"]}},
+
+    {"ph": "X", "name": "unknown_opaque_kernel_7f3a", "cat": "kernel", "ts": 10450, "dur": 940, "args": {"correlation": 5, "stream": "0", "device": 0}},
+
+    {"ph": "X", "name": "aten::copy_", "cat": "cpu_op", "ts": 11400, "dur": 25, "args": {"correlation": 6}},
+    {"ph": "X", "name": "Memcpy DtoD", "cat": "gpu_memcpy", "ts": 11410, "dur": 30, "args": {"correlation": 6}}
+  ]
+}

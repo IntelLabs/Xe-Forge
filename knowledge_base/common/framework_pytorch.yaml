@@ -1,0 +1,71 @@
+# PyTorch Intel XPU — framework knowledge (plan §10.6).
+#
+# Not a serving framework, so there is no Tier 1 adapter here: torch workloads are
+# reached through the Tier 0 `generic_torch` adapter. What this file carries is the part
+# extraction needs — where the ATen XPU kernels live in source form.
+#
+# This matters more than it looks on Intel. §11.1 corrects a Triton bias in the original
+# plan: Triton is what Inductor *generates*, while most of the hand-written Intel kernel
+# surface is SYCL C++. A profiled decode on Intel hardware puts the bulk of device time
+# in oneDNN and in `at::native::xpu::` SYCL kernels, with Triton in the tail.
+framework: pytorch-xpu
+tier: 0
+adapter: generic_torch
+schema_version: "1.0"
+
+version_compatibility:
+  torch: ">=2.8"
+  note: >
+    oneDNN is statically linked into libtorch_xpu.so and cannot be upgraded
+    independently, so its version is an implicit part of the torch version (§12.9).
+
+dispatch_roots:
+  - aten
+  - torch.ops.aten
+
+kernel_module_globs:
+  - "torch/_inductor/**"        # generated Triton
+  - "torch/lib/libtorch_xpu.so" # compiled SYCL, no source in the wheel
+
+opaque_providers:
+  - name: oneDNN
+    why: >
+      Statically linked, no source in the distribution. Actions are region fusion,
+      backend change, layout change and library config — never a source rewrite.
+  - name: oneMKL
+    why: Vendor library primitive; same restriction as oneDNN.
+
+kernel_sources:
+  - name: torch-xpu-ops
+    repo: https://github.com/intel/torch-xpu-ops
+    # §12.10: a tree is identified by URL *and* revision. This is the pin PyTorch's own
+    # third_party/xpu.txt records for torch 2.13.0+xpu — the wheel this stack was
+    # measured against. A fresh clone lands on HEAD, three months and one new
+    # ScalarType later; skew was the single largest source of unverified bundles.
+    # Update alongside version_compatibility when the torch pin moves.
+    revision: bc294243
+    subdir: src
+    provider: sycl
+    language: sycl
+    registers: "aten::* on the XPU dispatch key"
+    # C++ namespaces this tree owns. Several trees define the same identifier —
+    # `rms_norm_kernel` exists in both torch-xpu-ops and vllm-xpu-kernels — so the
+    # namespace on the demangled symbol is what says which one actually ran.
+    namespaces: ["at::native::xpu", "at::xpu", "c10d"]
+    symbol_globs: ["*.cpp", "*.h"]
+    note: >
+      ATen XPU operators. Kernel names reach the profiler as templated functors such as
+      VectorizedElementwiseKernel<4, GeluErfFunctor<float>, ...>; the identifier that
+      names the source is the functor inside the template arguments, not the wrapper.
+
+  - name: intel-extension-for-pytorch
+    repo: https://github.com/intel/intel-extension-for-pytorch
+    # No pin yet: set to the tag matching the installed IPEX wheel (e.g. the release
+    # tag of `intel_extension_for_pytorch.__version__`). Empty is reported as
+    # `unpinned` by `xe-orbit sources`, never silently treated as matching (§12.10).
+    revision: ""
+    subdir: csrc
+    provider: ipex
+    language: sycl
+    registers: torch.ops.torch_ipex.*
+    symbol_globs: ["*.cpp", "*.h", "*.hpp"]

@@ -1,0 +1,108 @@
+{
+  "description": "Everything needed to decide whether two runs are comparable (\u00a712.9, \u00a720).",
+  "properties": {
+    "clock_samples": {
+      "items": {
+        "type": "number"
+      },
+      "title": "Clock Samples",
+      "type": "array"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "device_count": {
+      "default": 0,
+      "title": "Device Count",
+      "type": "integer"
+    },
+    "device_name": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Device Name"
+    },
+    "driver_version": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Driver Version"
+    },
+    "env_pins": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Env Pins",
+      "type": "object"
+    },
+    "frequency_locked": {
+      "default": false,
+      "title": "Frequency Locked",
+      "type": "boolean"
+    },
+    "git_commit": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Git Commit"
+    },
+    "git_dirty": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Git Dirty"
+    },
+    "packages": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Packages",
+      "type": "object"
+    },
+    "platform": {
+      "default": "",
+      "title": "Platform",
+      "type": "string"
+    },
+    "python_version": {
+      "default": "",
+      "title": "Python Version",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.1",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "title": "EnvironmentInfo",
+  "type": "object",
+  "x-orbit-artifact": "environment",
+  "x-orbit-schema-version": "1.1"
+}

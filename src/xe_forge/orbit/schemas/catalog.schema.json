@@ -1,0 +1,553 @@
+{
+  "$defs": {
+    "ActionType": {
+      "description": "What can be done about a kernel or region (\u00a77.6).\n\nReplaces v1's `editable: bool`: an opaque library GEMM has no editable source\nbut still supports fusion, backend and layout actions.",
+      "enum": [
+        "kernel_rewrite",
+        "kernel_autotune",
+        "kernel_tile_search",
+        "region_fusion",
+        "layout_change",
+        "backend_change",
+        "library_config",
+        "config_change",
+        "compiler_option",
+        "host_optimization",
+        "graph_capture",
+        "profile_more",
+        "no_action"
+      ],
+      "title": "ActionType",
+      "type": "string"
+    },
+    "ExtractionLevel": {
+      "description": "The extraction ladder (\u00a712.3). E0 is in-place, E4 is opaque.",
+      "enum": [
+        "E0",
+        "E1",
+        "E2",
+        "E3",
+        "E4"
+      ],
+      "title": "ExtractionLevel",
+      "type": "string"
+    },
+    "KernelLanguage": {
+      "description": "Source language, a dimension rather than a special case (\u00a711.3).",
+      "enum": [
+        "triton",
+        "sycl",
+        "sycl_tla",
+        "cpp",
+        "opaque"
+      ],
+      "title": "KernelLanguage",
+      "type": "string"
+    },
+    "KernelRecord": {
+      "properties": {
+        "actions_available": {
+          "items": {
+            "$ref": "#/$defs/ActionType"
+          },
+          "title": "Actions Available",
+          "type": "array"
+        },
+        "aot": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Aot"
+        },
+        "avg_time_us": {
+          "default": 0.0,
+          "title": "Avg Time Us",
+          "type": "number"
+        },
+        "build_system": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Build System"
+        },
+        "bundle": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bundle"
+        },
+        "calls": {
+          "default": 0,
+          "title": "Calls",
+          "type": "integer"
+        },
+        "captured_inputs": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Captured Inputs"
+        },
+        "demangled_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Demangled Name"
+        },
+        "dispatch_chain": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Dispatch Chain",
+          "type": "array"
+        },
+        "extraction_level": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExtractionLevel"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "extraction_tractability": {
+          "default": 0.0,
+          "title": "Extraction Tractability",
+          "type": "number"
+        },
+        "framework_op": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Framework Op"
+        },
+        "gpu_time_share": {
+          "default": 0.0,
+          "title": "Gpu Time Share",
+          "type": "number"
+        },
+        "graph_node": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Graph Node"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "language": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KernelLanguage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "max_e2e_gain": {
+          "default": 0.0,
+          "title": "Max E2E Gain",
+          "type": "number"
+        },
+        "priority": {
+          "default": 0.0,
+          "title": "Priority",
+          "type": "number"
+        },
+        "provenance_confidence": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provenance Confidence"
+        },
+        "provider": {
+          "$ref": "#/$defs/Provider",
+          "default": "unknown"
+        },
+        "resolution_method": {
+          "$ref": "#/$defs/ResolutionMethod",
+          "default": "unresolved"
+        },
+        "roofline_headroom": {
+          "default": 1.0,
+          "title": "Roofline Headroom",
+          "type": "number"
+        },
+        "runtime_name": {
+          "title": "Runtime Name",
+          "type": "string"
+        },
+        "shapes": {
+          "items": {
+            "$ref": "#/$defs/ShapeObservation"
+          },
+          "title": "Shapes",
+          "type": "array"
+        },
+        "skip_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Skip Reason"
+        },
+        "source_file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source File"
+        },
+        "source_symbol": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Symbol"
+        },
+        "total_time_us": {
+          "default": 0.0,
+          "title": "Total Time Us",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "runtime_name"
+      ],
+      "title": "KernelRecord",
+      "type": "object"
+    },
+    "Provider": {
+      "description": "Who produced the kernel that ran.",
+      "enum": [
+        "inductor",
+        "triton",
+        "onednn",
+        "onemkl",
+        "sycl",
+        "ipex",
+        "custom",
+        "runtime",
+        "unknown"
+      ],
+      "title": "Provider",
+      "type": "string"
+    },
+    "RegionRecord": {
+      "description": "A multi-kernel optimization unit (\u00a77.3). Xe-Fuse's input.",
+      "properties": {
+        "actions_available": {
+          "items": {
+            "$ref": "#/$defs/ActionType"
+          },
+          "title": "Actions Available",
+          "type": "array"
+        },
+        "aten_ops": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Aten Ops",
+          "type": "array"
+        },
+        "combined_time_us": {
+          "default": 0.0,
+          "title": "Combined Time Us",
+          "type": "number"
+        },
+        "fusion_pattern": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fusion Pattern"
+        },
+        "gpu_time_share": {
+          "default": 0.0,
+          "title": "Gpu Time Share",
+          "type": "number"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "intermediate_tensors": {
+          "items": {
+            "$ref": "#/$defs/TensorInfo"
+          },
+          "title": "Intermediate Tensors",
+          "type": "array"
+        },
+        "kernel_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Kernel Ids",
+          "type": "array"
+        },
+        "producer_consumer_edges": {
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "type": "array"
+          },
+          "title": "Producer Consumer Edges",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "RegionRecord",
+      "type": "object"
+    },
+    "ResolutionMethod": {
+      "description": "How a kernel's source location was decided, best evidence first (\u00a711.4).\n\nRecording this is what makes a resolution auditable. A path alone cannot be\nreviewed: \"we found `Indexing.cpp`\" is a different claim depending on whether the\nbuild database said so, a symbol index matched exactly, or a model read the code\nand formed an opinion. Without the method, all three render identically.",
+      "enum": [
+        "build_graph",
+        "symbol_index",
+        "name_match",
+        "agent",
+        "unresolved"
+      ],
+      "title": "ResolutionMethod",
+      "type": "string"
+    },
+    "ShapeObservation": {
+      "description": "One observed invocation shape and how often it occurred.",
+      "properties": {
+        "count": {
+          "default": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "dims": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Dims",
+          "type": "object"
+        },
+        "dtypes": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Dtypes",
+          "type": "object"
+        },
+        "profile_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Profile Id"
+        }
+      },
+      "title": "ShapeObservation",
+      "type": "object"
+    },
+    "TensorInfo": {
+      "properties": {
+        "bytes": {
+          "default": 0,
+          "title": "Bytes",
+          "type": "integer"
+        },
+        "dtype": {
+          "default": "",
+          "title": "Dtype",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "shape": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Shape",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "TensorInfo",
+      "type": "object"
+    }
+  },
+  "description": "Output of the `kernels` stage: ranked kernels plus the gating verdict.",
+  "properties": {
+    "considered_but_not_attempted": {
+      "items": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": "object"
+      },
+      "title": "Considered But Not Attempted",
+      "type": "array"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "gating_action": {
+      "$ref": "#/$defs/ActionType",
+      "default": "no_action"
+    },
+    "gating_reason": {
+      "default": "",
+      "title": "Gating Reason",
+      "type": "string"
+    },
+    "gpu_busy_percent": {
+      "default": 0.0,
+      "title": "Gpu Busy Percent",
+      "type": "number"
+    },
+    "host_bound_fraction": {
+      "default": 0.0,
+      "title": "Host Bound Fraction",
+      "type": "number"
+    },
+    "kernels": {
+      "items": {
+        "$ref": "#/$defs/KernelRecord"
+      },
+      "title": "Kernels",
+      "type": "array"
+    },
+    "launch_gap_total_us": {
+      "default": 0.0,
+      "title": "Launch Gap Total Us",
+      "type": "number"
+    },
+    "minimum_detectable_effect": {
+      "default": 0.0,
+      "title": "Minimum Detectable Effect",
+      "type": "number"
+    },
+    "regions": {
+      "items": {
+        "$ref": "#/$defs/RegionRecord"
+      },
+      "title": "Regions",
+      "type": "array"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "total_gpu_time_us": {
+      "default": 0.0,
+      "title": "Total Gpu Time Us",
+      "type": "number"
+    },
+    "total_wall_time_us": {
+      "default": 0.0,
+      "title": "Total Wall Time Us",
+      "type": "number"
+    }
+  },
+  "required": [
+    "run_id"
+  ],
+  "title": "KernelCatalog",
+  "type": "object",
+  "x-orbit-artifact": "catalog",
+  "x-orbit-schema-version": "1.1"
+}

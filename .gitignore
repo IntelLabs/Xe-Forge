@@ -20,3 +20,6 @@ sycl_build/
 # Output
 /trials
 /output
+
+# Xe-Orbit run artifacts (.orbit/runs/<run-id>/...)
+.orbit/

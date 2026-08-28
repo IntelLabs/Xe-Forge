@@ -1,0 +1,499 @@
+{
+  "$defs": {
+    "BuildRecipe": {
+      "description": "How to rebuild a compiled-language kernel standalone (\u00a711.5).",
+      "properties": {
+        "aot_target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Aot Target"
+        },
+        "compiler": {
+          "title": "Compiler",
+          "type": "string"
+        },
+        "defines": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Defines",
+          "type": "object"
+        },
+        "entry_symbol": {
+          "default": "",
+          "title": "Entry Symbol",
+          "type": "string"
+        },
+        "flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Flags",
+          "type": "array"
+        },
+        "includes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Includes",
+          "type": "array"
+        },
+        "instantiation": {
+          "default": "",
+          "title": "Instantiation",
+          "type": "string"
+        },
+        "link": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Link",
+          "type": "array"
+        }
+      },
+      "required": [
+        "compiler"
+      ],
+      "title": "BuildRecipe",
+      "type": "object"
+    },
+    "CapturedInvocation": {
+      "description": "Real tensors captured from the running workload (\u00a77.5).",
+      "properties": {
+        "call_index": {
+          "default": 0,
+          "title": "Call Index",
+          "type": "integer"
+        },
+        "contiguous_map": {
+          "additionalProperties": {
+            "type": "boolean"
+          },
+          "title": "Contiguous Map",
+          "type": "object"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "data_deps": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Data Deps",
+          "type": "array"
+        },
+        "dtype_map": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Dtype Map",
+          "type": "object"
+        },
+        "kernel_id": {
+          "title": "Kernel Id",
+          "type": "string"
+        },
+        "output_reference": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Reference"
+        },
+        "scalars": {
+          "additionalProperties": true,
+          "title": "Scalars",
+          "type": "object"
+        },
+        "schema_version": {
+          "default": "1.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "shape_map": {
+          "additionalProperties": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "title": "Shape Map",
+          "type": "object"
+        },
+        "stride_map": {
+          "additionalProperties": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "title": "Stride Map",
+          "type": "object"
+        },
+        "tensors": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Tensors",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kernel_id"
+      ],
+      "title": "CapturedInvocation",
+      "type": "object"
+    },
+    "ExtractionCheck": {
+      "description": "Result of proving a bundle is the kernel that actually ran (\u00a712.10).",
+      "properties": {
+        "failures": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Failures",
+          "type": "array"
+        },
+        "identity_match": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Identity Match"
+        },
+        "isolated_import": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Isolated Import"
+        },
+        "launch_match": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Launch Match"
+        },
+        "mutation_detected": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mutation Detected"
+        },
+        "output_match": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Match"
+        },
+        "verified": {
+          "default": false,
+          "title": "Verified",
+          "type": "boolean"
+        }
+      },
+      "title": "ExtractionCheck",
+      "type": "object"
+    },
+    "ExtractionLevel": {
+      "description": "The extraction ladder (\u00a712.3). E0 is in-place, E4 is opaque.",
+      "enum": [
+        "E0",
+        "E1",
+        "E2",
+        "E3",
+        "E4"
+      ],
+      "title": "ExtractionLevel",
+      "type": "string"
+    },
+    "KernelLanguage": {
+      "description": "Source language, a dimension rather than a special case (\u00a711.3).",
+      "enum": [
+        "triton",
+        "sycl",
+        "sycl_tla",
+        "cpp",
+        "opaque"
+      ],
+      "title": "KernelLanguage",
+      "type": "string"
+    },
+    "LaunchRecord": {
+      "description": "One intercepted launch (\u00a712.4). The ground truth extraction is built from.",
+      "properties": {
+        "arg_order": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Arg Order",
+          "type": "array"
+        },
+        "call_index": {
+          "default": 0,
+          "title": "Call Index",
+          "type": "integer"
+        },
+        "compiled_metadata": {
+          "additionalProperties": true,
+          "title": "Compiled Metadata",
+          "type": "object"
+        },
+        "constexprs": {
+          "additionalProperties": true,
+          "title": "Constexprs",
+          "type": "object"
+        },
+        "fq_name": {
+          "title": "Fq Name",
+          "type": "string"
+        },
+        "grid": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Grid",
+          "type": "array"
+        },
+        "num_stages": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Num Stages"
+        },
+        "num_warps": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Num Warps"
+        },
+        "selected_autotune_config": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Selected Autotune Config"
+        },
+        "source_file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source File"
+        },
+        "source_line": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Line"
+        },
+        "specialization": {
+          "additionalProperties": true,
+          "title": "Specialization",
+          "type": "object"
+        }
+      },
+      "required": [
+        "fq_name"
+      ],
+      "title": "LaunchRecord",
+      "type": "object"
+    }
+  },
+  "description": "Everything extraction produces, regardless of source or language (\u00a712.2).",
+  "properties": {
+    "build": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BuildRecipe"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "closure": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Closure",
+      "type": "array"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "data_deps": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Data Deps",
+      "type": "array"
+    },
+    "dispatch_chain": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Dispatch Chain",
+      "type": "array"
+    },
+    "downgrade_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Downgrade Reason"
+    },
+    "entrypoint": {
+      "default": "",
+      "title": "Entrypoint",
+      "type": "string"
+    },
+    "env_pins": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Env Pins",
+      "type": "object"
+    },
+    "extraction_level": {
+      "$ref": "#/$defs/ExtractionLevel",
+      "default": "E0"
+    },
+    "inputs": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CapturedInvocation"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "kernel_id": {
+      "title": "Kernel Id",
+      "type": "string"
+    },
+    "language": {
+      "$ref": "#/$defs/KernelLanguage",
+      "default": "opaque"
+    },
+    "launch": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LaunchRecord"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "primary_source": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Primary Source"
+    },
+    "schema_version": {
+      "default": "1.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "verification": {
+      "$ref": "#/$defs/ExtractionCheck"
+    }
+  },
+  "required": [
+    "kernel_id"
+  ],
+  "title": "KernelBundle",
+  "type": "object",
+  "x-orbit-artifact": "bundle",
+  "x-orbit-schema-version": "1.1"
+}

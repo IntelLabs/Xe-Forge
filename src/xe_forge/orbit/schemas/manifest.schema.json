@@ -1,0 +1,264 @@
+{
+  "$defs": {
+    "EnvironmentInfo": {
+      "description": "Everything needed to decide whether two runs are comparable (\u00a712.9, \u00a720).",
+      "properties": {
+        "clock_samples": {
+          "items": {
+            "type": "number"
+          },
+          "title": "Clock Samples",
+          "type": "array"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "device_count": {
+          "default": 0,
+          "title": "Device Count",
+          "type": "integer"
+        },
+        "device_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Device Name"
+        },
+        "driver_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Driver Version"
+        },
+        "env_pins": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Env Pins",
+          "type": "object"
+        },
+        "frequency_locked": {
+          "default": false,
+          "title": "Frequency Locked",
+          "type": "boolean"
+        },
+        "git_commit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Git Commit"
+        },
+        "git_dirty": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Git Dirty"
+        },
+        "packages": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Packages",
+          "type": "object"
+        },
+        "platform": {
+          "default": "",
+          "title": "Platform",
+          "type": "string"
+        },
+        "python_version": {
+          "default": "",
+          "title": "Python Version",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.1",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "title": "EnvironmentInfo",
+      "type": "object"
+    },
+    "WorkloadSpec": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Command",
+          "type": "array"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "cwd": {
+          "format": "path",
+          "title": "Cwd",
+          "type": "string"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Env",
+          "type": "object"
+        },
+        "framework": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Framework"
+        },
+        "repetitions": {
+          "default": 5,
+          "title": "Repetitions",
+          "type": "integer"
+        },
+        "schema_version": {
+          "default": "1.1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "timeout_s": {
+          "default": 1800.0,
+          "title": "Timeout S",
+          "type": "number"
+        },
+        "warmup_iterations": {
+          "default": 1,
+          "title": "Warmup Iterations",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "title": "WorkloadSpec",
+      "type": "object"
+    }
+  },
+  "description": "Identity of one Orbit run (\u00a723).",
+  "properties": {
+    "adapter": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Adapter"
+    },
+    "adapter_tier": {
+      "default": 0,
+      "title": "Adapter Tier",
+      "type": "integer"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "environment": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EnvironmentInfo"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "framework": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Framework"
+    },
+    "notes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Notes",
+      "type": "array"
+    },
+    "run_id": {
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "stages_completed": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Stages Completed",
+      "type": "array"
+    },
+    "workload": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkloadSpec"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "run_id"
+  ],
+  "title": "RunManifest",
+  "type": "object",
+  "x-orbit-artifact": "manifest",
+  "x-orbit-schema-version": "1.1"
+}

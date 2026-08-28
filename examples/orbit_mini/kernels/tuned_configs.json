@@ -1,0 +1,61 @@
+{
+  "schema": "orbit_mini.tuned_configs/1",
+  "_comment": [
+    "Genuine data dependency (plan §12.8, §15.2). The launch wrappers in",
+    "kernels/rmsnorm.py and kernels/swiglu.py read this file at run time and",
+    "there is no in-code default: delete it and the workload fails loudly.",
+    "That is what makes the §12.12 step-5 data-dependency check meaningful -",
+    "a data dep that can be removed without effect was never a dependency.",
+    "Keyed by device name, exactly like vLLM's fused-MoE tuned configs."
+  ],
+  "devices": {
+    "default": {
+      "block_n": 128,
+      "num_warps": 4,
+      "num_stages": 2,
+      "rms_eps": 1e-06,
+      "clamp_limit": 30.0,
+      "prefer_sycl_op": false
+    },
+    "cpu": {
+      "block_n": 64,
+      "num_warps": 1,
+      "num_stages": 1,
+      "rms_eps": 1e-06,
+      "clamp_limit": 30.0,
+      "prefer_sycl_op": false
+    },
+    "Intel(R) Data Center GPU Max 1550": {
+      "block_n": 512,
+      "num_warps": 8,
+      "num_stages": 4,
+      "rms_eps": 1e-06,
+      "clamp_limit": 30.0,
+      "prefer_sycl_op": true
+    },
+    "Intel(R) Data Center GPU Max 1100": {
+      "block_n": 256,
+      "num_warps": 8,
+      "num_stages": 3,
+      "rms_eps": 1e-06,
+      "clamp_limit": 30.0,
+      "prefer_sycl_op": true
+    },
+    "Intel(R) Arc(TM) A770 Graphics": {
+      "block_n": 256,
+      "num_warps": 4,
+      "num_stages": 2,
+      "rms_eps": 1e-06,
+      "clamp_limit": 30.0,
+      "prefer_sycl_op": false
+    },
+    "NVIDIA A100-SXM4-80GB": {
+      "block_n": 256,
+      "num_warps": 8,
+      "num_stages": 3,
+      "rms_eps": 1e-06,
+      "clamp_limit": 30.0,
+      "prefer_sycl_op": false
+    }
+  }
+}

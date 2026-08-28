@@ -1,0 +1,219 @@
+{
+  "$defs": {
+    "HostEvent": {
+      "description": "One host-side operator span, used to attribute kernels to framework ops.",
+      "properties": {
+        "category": {
+          "default": "cpu_op",
+          "title": "Category",
+          "type": "string"
+        },
+        "correlation_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Correlation Id"
+        },
+        "duration_us": {
+          "default": 0.0,
+          "title": "Duration Us",
+          "type": "number"
+        },
+        "input_dtypes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Input Dtypes",
+          "type": "array"
+        },
+        "input_shapes": {
+          "items": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "title": "Input Shapes",
+          "type": "array"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "start_us": {
+          "default": 0.0,
+          "title": "Start Us",
+          "type": "number"
+        },
+        "thread_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Thread Id"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "HostEvent",
+      "type": "object"
+    },
+    "RuntimeKernelEvent": {
+      "description": "One device-side execution, normalized away from its source format.",
+      "properties": {
+        "args": {
+          "additionalProperties": true,
+          "title": "Args",
+          "type": "object"
+        },
+        "category": {
+          "default": "kernel",
+          "title": "Category",
+          "type": "string"
+        },
+        "correlation_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Correlation Id"
+        },
+        "device": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Device"
+        },
+        "duration_us": {
+          "default": 0.0,
+          "title": "Duration Us",
+          "type": "number"
+        },
+        "input_dtypes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Input Dtypes",
+          "type": "array"
+        },
+        "input_shapes": {
+          "items": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "title": "Input Shapes",
+          "type": "array"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "start_us": {
+          "default": 0.0,
+          "title": "Start Us",
+          "type": "number"
+        },
+        "stream": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stream"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "RuntimeKernelEvent",
+      "type": "object"
+    }
+  },
+  "description": "Normalized trace: what ran on the device, what ran on the host, and when.",
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "device_type": {
+      "default": "cpu",
+      "title": "Device Type",
+      "type": "string"
+    },
+    "host_ops": {
+      "items": {
+        "$ref": "#/$defs/HostEvent"
+      },
+      "title": "Host Ops",
+      "type": "array"
+    },
+    "kernels": {
+      "items": {
+        "$ref": "#/$defs/RuntimeKernelEvent"
+      },
+      "title": "Kernels",
+      "type": "array"
+    },
+    "schema_version": {
+      "default": "1.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source": {
+      "default": "torch.profiler",
+      "title": "Source",
+      "type": "string"
+    },
+    "trace_end_us": {
+      "default": 0.0,
+      "title": "Trace End Us",
+      "type": "number"
+    },
+    "trace_start_us": {
+      "default": 0.0,
+      "title": "Trace Start Us",
+      "type": "number"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
+    }
+  },
+  "title": "TraceEvents",
+  "type": "object",
+  "x-orbit-artifact": "events",
+  "x-orbit-schema-version": "1.1"
+}

@@ -1,0 +1,67 @@
+{
+  "properties": {
+    "command": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Command",
+      "type": "array"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "cwd": {
+      "format": "path",
+      "title": "Cwd",
+      "type": "string"
+    },
+    "env": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Env",
+      "type": "object"
+    },
+    "framework": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Framework"
+    },
+    "repetitions": {
+      "default": 5,
+      "title": "Repetitions",
+      "type": "integer"
+    },
+    "schema_version": {
+      "default": "1.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "timeout_s": {
+      "default": 1800.0,
+      "title": "Timeout S",
+      "type": "number"
+    },
+    "warmup_iterations": {
+      "default": 1,
+      "title": "Warmup Iterations",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "command"
+  ],
+  "title": "WorkloadSpec",
+  "type": "object",
+  "x-orbit-artifact": "workload",
+  "x-orbit-schema-version": "1.1"
+}

@@ -1,0 +1,128 @@
+{
+  "$defs": {
+    "ServingProfile": {
+      "properties": {
+        "attention_backend": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Attention Backend"
+        },
+        "concurrency": {
+          "default": 1,
+          "title": "Concurrency",
+          "type": "integer"
+        },
+        "dtype": {
+          "default": "bf16",
+          "title": "Dtype",
+          "type": "string"
+        },
+        "ep": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ep"
+        },
+        "extra": {
+          "additionalProperties": true,
+          "title": "Extra",
+          "type": "object"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "isl": {
+          "default": 1024,
+          "title": "Isl",
+          "type": "integer"
+        },
+        "model": {
+          "default": "",
+          "title": "Model",
+          "type": "string"
+        },
+        "osl": {
+          "default": 256,
+          "title": "Osl",
+          "type": "integer"
+        },
+        "prefill_decode_ratio": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prefill Decode Ratio"
+        },
+        "quantization": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Quantization"
+        },
+        "tp": {
+          "default": 1,
+          "title": "Tp",
+          "type": "integer"
+        },
+        "weight": {
+          "default": 1.0,
+          "title": "Weight",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "ServingProfile",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "profiles": {
+      "items": {
+        "$ref": "#/$defs/ServingProfile"
+      },
+      "title": "Profiles",
+      "type": "array"
+    },
+    "schema_version": {
+      "default": "1.1",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "title": "WorkloadMatrix",
+  "type": "object",
+  "x-orbit-artifact": "matrix",
+  "x-orbit-schema-version": "1.1"
+}

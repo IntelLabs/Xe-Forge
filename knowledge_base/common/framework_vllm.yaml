@@ -1,0 +1,319 @@
+# vLLM framework knowledge (plan §10.6).
+#
+# Per-framework knowledge is data, not code: one file per framework, identical schema.
+# The target shape is that most of a new framework is this file, with the adapter
+# class supplying only what genuinely needs code — process lifecycle, harness
+# construction, quality gating.
+#
+# Location matters. The knowledge loader collects `common/` -> `<dsl>/common/` ->
+# `<dsl>/<device>/`, so a flat file at the knowledge-base root would never be read.
+#
+# The adapter (`xe_forge.orbit.adapters.vllm:VLLMAdapter`) carries these defaults in
+# code as well, so it works from a wheel with no knowledge base on disk. This file is
+# the authority a site edits: axes added here appear in the action space, and metric
+# patterns added here are used by the parser, without a code change. Anything already
+# declared in code is not overridden — divergence is caught by
+# tests/orbit/test_vllm_adapter.py, which asserts the two agree.
+
+framework: vllm
+tier: 1
+adapter: xe_forge.orbit.adapters.vllm:VLLMAdapter
+schema_version: "1.0"
+
+# --------------------------------------------------------------------------
+# Version compatibility (§12.9, §13)
+# A version change invalidates every stored bundle and every accepted candidate and
+# triggers re-validation, never silent reuse.
+# --------------------------------------------------------------------------
+version_compatibility:
+  vllm: ">=0.6.0,<0.12.0"
+  torch: ">=2.5.0"
+  intel-extension-for-pytorch: ">=2.5.0"
+  notes: >
+    The V0/V1 engine split is the sharpest break: the scheduler, the chunked-prefill
+    policy, the attention backend names and the kernel mix all differ. Artifacts
+    collected under one engine version are not comparable with the other.
+
+# --------------------------------------------------------------------------
+# Dispatch roots and kernel module globs (§7.2, §12.4)
+# --------------------------------------------------------------------------
+dispatch_roots:
+  - aten
+  - torch.ops
+  - torch.ops._C            # vLLM native ops: attention, norms, activations, rotary
+  - torch.ops._C_cache_ops  # KV-cache copy/reshape ops
+  - torch.ops._moe_C        # MoE: topk_softmax, moe_align_block_size, grouped GEMM
+  - vllm.attention.ops
+  - vllm.model_executor.layers
+
+kernel_module_globs:
+  - "vllm/attention/ops/**/*.py"           # Triton paged/prefix attention
+  - "vllm/model_executor/layers/**/*.py"   # norms, activations, rotary, MoE
+  - "vllm/model_executor/layers/fused_moe/configs/*.json"  # tuned configs: data (§12.8)
+  - "csrc/**/*.cu"
+  - "csrc/**/*.cpp"
+  - "csrc/**/*.sycl"        # vLLM-XPU native kernels
+  - "csrc/xpu/**/*"
+
+# --------------------------------------------------------------------------
+# Backend-selection environment variables (§10.6)
+# Every one of these steers dispatch, so all of them must be pinned in the manifest
+# before two runs are called comparable.
+# --------------------------------------------------------------------------
+backend_selection_env:
+  - VLLM_ATTENTION_BACKEND
+  - VLLM_USE_V1
+  - VLLM_CUSTOM_OPS
+  - VLLM_USE_TRITON_FLASH_ATTN
+  - VLLM_WORKER_MULTIPROC_METHOD
+  - VLLM_ENABLE_V1_MULTIPROCESSING
+
+# --------------------------------------------------------------------------
+# Config axes and legal values (§10.3 `config_axes`, §7.6 CONFIG_CHANGE)
+# `env_var` axes apply to any vLLM process; `cli_flag` axes are engine arguments and
+# are only applied to a command that is recognisably a vLLM entrypoint — a pin that
+# was requested and silently dropped is worse than no pin (§10.5).
+# --------------------------------------------------------------------------
+config_axes:
+  - name: attention_backend
+    env_var: VLLM_ATTENTION_BACKEND
+    values: [FLASH_ATTN, FLASHINFER, TRITON_ATTN, FLEX_ATTENTION, XFORMERS, TORCH_SDPA, IPEX]
+    description: >
+      Attention backend selection. The legal set is version- and platform-bound: an
+      XPU build typically offers IPEX and the Triton backend only, and an unsupported
+      value makes the engine fall back rather than fail, which shows up as an
+      unexplained kernel mix rather than an error.
+    action_type: backend_change
+
+  - name: use_v1
+    env_var: VLLM_USE_V1
+    values: ["0", "1"]
+    description: >
+      V0 vs V1 engine. Changes scheduler, chunked-prefill policy and kernel mix. Pin
+      it explicitly; leaving it to the default makes a comparison across a vLLM
+      upgrade meaningless.
+    action_type: config_change
+
+  - name: custom_ops
+    env_var: VLLM_CUSTOM_OPS
+    values: []
+    description: >
+      Enable or disable individual CustomOp implementations, e.g. '+rms_norm' or
+      '-silu_and_mul'. Also the revert path for a P3 CustomOp substitution.
+    action_type: config_change
+
+  - name: enable_prefix_caching
+    cli_flag: --enable-prefix-caching
+    negatable: true
+    values: [true, false]
+    description: >
+      Prefix/radix KV reuse across requests. The largest single source of run-to-run
+      nondeterminism in a serving benchmark: identical request sets hit different
+      cache states depending on what ran before them.
+    action_type: config_change
+
+  - name: max_num_seqs
+    cli_flag: --max-num-seqs
+    values: [1, 8, 32, 64, 128, 256]
+    description: >
+      Scheduler batch width. 1 pins continuous-batching order, at the cost of
+      measuring a batch size the deployment does not run — a pin that changes the
+      workload must be reported as such.
+    action_type: config_change
+
+  - name: max_num_batched_tokens
+    cli_flag: --max-num-batched-tokens
+    values: [512, 2048, 8192, 32768]
+    description: >
+      Chunked-prefill boundary. At or above max_model_len the split point is fixed
+      instead of being chosen per scheduler step.
+    action_type: config_change
+
+  - name: enforce_eager
+    cli_flag: --enforce-eager
+    negatable: true
+    values: [true, false]
+    description: >
+      Skip graph capture. Removes capture and warmup state from the measurement, and
+      removes graph replay from the kernel mix.
+    action_type: graph_capture
+
+  - name: gpu_memory_utilization
+    cli_flag: --gpu-memory-utilization
+    values: [0.8, 0.9, 0.95]
+    description: >
+      KV-cache size. Changes how many blocks exist and therefore when preemption and
+      recompute occur, which moves the kernel mix as well as the latency.
+    action_type: config_change
+
+# --------------------------------------------------------------------------
+# Metrics parsing rules (§10.3 `benchmark`)
+# The adapter parses stdout and stderr of the benchmark process. Preference order is
+# first-match-wins per metric: a mean from vLLM's own result table beats a median, and
+# a decode-side token rate beats a total token rate, which moves with input length and
+# is therefore useless for an A/B on a decode kernel.
+# --------------------------------------------------------------------------
+metrics:
+  declared: [wall_time, throughput, ttft, tpot]
+  sources:
+    - "vllm bench serve  (Serving Benchmark Result table)"
+    - "vllm bench throughput  (single Throughput: line)"
+    - "engine INFO metrics lines (Avg generation throughput)"
+  patterns:
+    ttft_ms:
+      - '^\s*Mean TTFT \(ms\):\s*([0-9.]+)'
+      - '^\s*Median TTFT \(ms\):\s*([0-9.]+)'
+    tpot_ms:
+      - '^\s*Mean TPOT \(ms\):\s*([0-9.]+)'
+      - '^\s*Median TPOT \(ms\):\s*([0-9.]+)'
+      - '^\s*Mean ITL \(ms\):\s*([0-9.]+)'
+    throughput:
+      - '^\s*Output token throughput \(tok/s\):\s*([0-9.]+)'
+      - '^\s*Total Token throughput \(tok/s\):\s*([0-9.]+)'
+      - 'Throughput:\s*[0-9.]+\s*requests/s,\s*[0-9.]+\s*total tokens/s,\s*([0-9.]+)\s*output tokens/s'
+      - 'Throughput:\s*[0-9.]+\s*requests/s,\s*([0-9.]+)\s*total tokens/s'
+      - 'Avg generation throughput:\s*([0-9.]+)\s*tokens/s'
+  # Site-local additions. Each entry is {metric, pattern} with one capturing group and
+  # a metric name of ttft_ms, tpot_ms or throughput; they are appended after the
+  # built-ins, so they act as further fallbacks and never shadow the table.
+  extra_patterns: []
+  fallback: >
+    When no serving metric parses, the adapter reports wall_time alone and records
+    why on the handle. It never substitutes one metric for another (§10.4).
+
+# --------------------------------------------------------------------------
+# Determinism knobs (§10.5)
+# The source names are shared across adapters so a report can compare what Tier 1 pins
+# against what Tier 0 cannot pin at all.
+# --------------------------------------------------------------------------
+determinism:
+  pinnable:
+    prefix_cache_reuse:
+      knob: "--no-enable-prefix-caching (V1) / omit --enable-prefix-caching (V0)"
+      note: "Also resettable at run time: POST /reset_prefix_cache, or llm_engine.reset_prefix_cache()."
+    continuous_batching_order:
+      knob: "--max-num-seqs 1"
+      note: "Serialises the scheduler. Changes the operating point; report it."
+    chunked_prefill_boundaries:
+      knob: "--max-num-batched-tokens >= max_model_len"
+      note: "V1 always chunks, so the boundary is pinned rather than removed."
+    graph_capture_warmup:
+      knob: "--enforce-eager"
+      note: "Or keep capture and discard warmup repetitions; do not mix the two across arms."
+  non_pinnable:
+    speculative_decoding:
+      why: >
+        The accept rate is a property of draft/target agreement at run time. It can be
+        removed (no speculative config) but not pinned, and removing it measures a
+        different workload.
+      active_markers: ["--speculative", "--num-speculative-tokens", "speculative_config", "--ngram"]
+    request_arrival_jitter:
+      why: >
+        Arrival times come from the load generator, not the engine. A fixed
+        --request-rate narrows the distribution; the OS scheduler still moves batch
+        boundaries.
+      active_markers: ["--request-rate", "--num-prompts", "benchmark_serving"]
+  rule: >
+    When a non-pinnable source is active and observed variance exceeds the MDE, §17
+    emits INCONCLUSIVE with the source named. It never emits ACCEPT.
+
+# --------------------------------------------------------------------------
+# Known opaque providers (§7.2, §12.3 E4)
+# No editable source, but far from unactionable: fusion, backend, layout and
+# library-config actions all still apply.
+# --------------------------------------------------------------------------
+opaque_providers:
+  - name: onednn
+    match: ["dnnl", "onednn", "brgemm", "jit_gemm"]
+    actions: [region_fusion, backend_change, layout_change, library_config]
+    reproducer: "DNNL_VERBOSE=1 primitive descriptors (E4)"
+  - name: onemkl
+    match: ["mkl_", "cblas_", "gemm_batch"]
+    actions: [backend_change, layout_change, library_config]
+  - name: flashinfer
+    match: ["flashinfer", "BatchPrefillWithPagedKVCache"]
+    actions: [backend_change, library_config]
+    reproducer: "Prebuilt AOT module: substitute the backend, do not patch the kernel"
+  - name: cutlass_sycl_tla
+    match: ["cutlass", "sycl_tla", "CollectiveMma", "gemm_universal"]
+    actions: [kernel_tile_search, compiler_option, layout_change]
+
+# --------------------------------------------------------------------------
+# Candidate patch points (§13)
+# Always take the highest rung that works: it touches less and reverts cleanly.
+# Verification is mandatory and is a dispatch assertion, not an inspection — after
+# applying, the new kernel must appear in the re-profile and the old one must not.
+# --------------------------------------------------------------------------
+patch_points:
+  - rung: P1
+    layer: dispatcher_op
+    match: ["_C::", "_moe_C::", "vllm::", "aten::"]
+    mechanism: "torch.library operator override on the XPU dispatch key"
+    revert: "do not import the extension module"
+    note: >
+      vLLM's native ops are registered through TORCH_LIBRARY, so an optimized SYCL or
+      Triton kernel ships as a small out-of-tree extension. No fork, no rebuild of
+      vLLM, and the same override works under plain PyTorch and SGLang when they
+      dispatch through the same op (§11.8).
+
+  - rung: P3
+    layer: attention_backend
+    match: ["paged_attention", "unified_attention", "flash_attn", "chunked_prefill", "reshape_and_cache"]
+    mechanism: "register an AttentionBackend and select it with VLLM_ATTENTION_BACKEND, or the platform's get_attn_backend_cls hook"
+    revert: "restore the environment variable"
+
+  - rung: P3
+    layer: fused_moe
+    match: ["fused_moe", "moe_align", "topk_softmax", "moe_sum", "grouped_gemm"]
+    mechanism: "substitute the FusedMoE method in vllm.model_executor.layers.fused_moe, or override the fused_moe custom op"
+    revert: "restore the method object / unregister the op"
+    note: "The tuned-config JSON is data and must be copied, never regenerated (§12.8)."
+
+  - rung: P3
+    layer: custom_op
+    match: ["rms_norm", "silu_and_mul", "gelu_and_mul", "act_and_mul", "rotary_embedding"]
+    mechanism: "CustomOp.register(<name>) substitution in vllm.model_executor.custom_op"
+    revert: "clear VLLM_CUSTOM_OPS / restore the registry entry"
+
+# --------------------------------------------------------------------------
+# Quality gate (§19 L3)
+# --------------------------------------------------------------------------
+quality_gate:
+  level: L3
+  decode: greedy
+  temperature: 0.0
+  seed: 0
+  min_prompts: 32
+  max_tokens: 64
+  comparison: token_exact
+  note: >
+    Requires an in-process engine on the handle. Without vLLM the adapter raises
+    rather than returning a failure: an unavailable gate and a failed gate are
+    different facts, and §19 forbids weakening a correctness test to make one look
+    like the other.
+
+# Where this framework's kernels actually live in source form (plan §11.2, §12.5).
+#
+# Every Intel kernel package installs as a wheel containing a compiled shared object;
+# the sources are in a separate repository. Extraction therefore needs to be told where
+# to look, and that is knowledge about the framework — data, not code (§10.6). Without
+# it a kernel resolves to nothing and lands at E3 for want of a checkout, which says
+# nothing about the kernel itself.
+kernel_sources:
+  - name: vllm-xpu-kernels
+    repo: https://github.com/vllm-project/vllm-xpu-kernels
+    # No pin yet: set to the revision the installed `vllm_xpu_kernels` wheel was built
+    # from. Empty is reported as `unpinned` by `xe-orbit sources`, never silently
+    # treated as matching (§12.10).
+    revision: ""
+    subdir: src
+    provider: custom
+    language: sycl
+    registers: torch.ops._C.* / _moe_C.*
+    # `vllm::rms_norm_kernel` resolved to torch-xpu-ops' LayerNormKernels.cpp until
+    # this was declared: both trees define the identifier, and registry order decided
+    # it. The namespace is the evidence that settles it.
+    namespaces: ["vllm", "moe"]
+    # Symbols in this tree are named after the op, so an index over struct/class and
+    # `*_kernel` definitions resolves most of them without a build database.
+    symbol_globs: ["*.cpp", "*.h", "*.hpp"]

@@ -1,0 +1,156 @@
+{
+  "$defs": {
+    "MetricEstimate": {
+      "description": "A measured quantity with an interval. Never a bare float (\u00a717).",
+      "properties": {
+        "ci95_high": {
+          "default": 0.0,
+          "title": "Ci95 High",
+          "type": "number"
+        },
+        "ci95_low": {
+          "default": 0.0,
+          "title": "Ci95 Low",
+          "type": "number"
+        },
+        "mean": {
+          "title": "Mean",
+          "type": "number"
+        },
+        "n": {
+          "default": 1,
+          "title": "N",
+          "type": "integer"
+        },
+        "samples": {
+          "items": {
+            "type": "number"
+          },
+          "title": "Samples",
+          "type": "array"
+        },
+        "stdev": {
+          "default": 0.0,
+          "title": "Stdev",
+          "type": "number"
+        },
+        "unit": {
+          "default": "",
+          "title": "Unit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mean"
+      ],
+      "title": "MetricEstimate",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "clock_samples": {
+      "items": {
+        "type": "number"
+      },
+      "title": "Clock Samples",
+      "type": "array"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "frequency_locked": {
+      "default": false,
+      "title": "Frequency Locked",
+      "type": "boolean"
+    },
+    "gpu_busy_percent": {
+      "default": 0.0,
+      "title": "Gpu Busy Percent",
+      "type": "number"
+    },
+    "host_bound_fraction": {
+      "default": 0.0,
+      "title": "Host Bound Fraction",
+      "type": "number"
+    },
+    "launch_gap_total_us": {
+      "default": 0.0,
+      "title": "Launch Gap Total Us",
+      "type": "number"
+    },
+    "metrics_available": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Metrics Available",
+      "type": "array"
+    },
+    "minimum_detectable_effect": {
+      "default": 0.0,
+      "title": "Minimum Detectable Effect",
+      "type": "number"
+    },
+    "profile_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Profile Id"
+    },
+    "schema_version": {
+      "default": "1.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "throughput": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MetricEstimate"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "tpot_ms": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MetricEstimate"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "ttft_ms": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MetricEstimate"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "wall_time": {
+      "$ref": "#/$defs/MetricEstimate"
+    }
+  },
+  "required": [
+    "wall_time"
+  ],
+  "title": "WorkloadMeasurement",
+  "type": "object",
+  "x-orbit-artifact": "measurement",
+  "x-orbit-schema-version": "1.1"
+}

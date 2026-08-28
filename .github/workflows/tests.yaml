@@ -1,0 +1,110 @@
+name: Tests
+
+# T0 of the CI tier model (plan §16.6): every pull request, CPU only, minutes.
+#
+# Everything here runs from committed fixtures with no GPU and no profiler — schemas,
+# contract tests, replay of stored artifacts, golden diffs and the stub decision
+# logic. That is deliberate: the stages most likely to produce a plausible-looking
+# wrong number (provenance, gating, ranking, accept/reject arithmetic) are exactly the
+# ones that need no silicon to test.
+#
+# T1 (xe-orbit selftest on orbit_mini with an XPU present), T2 (adapter conformance
+# and the chaos suite) and T3 (the full vLLM matrix) need hardware and are not wired
+# up here yet.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  t0:
+    name: T0 — CPU only
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install test dependencies
+        # Deliberately minimal. The Orbit core is stdlib + pydantic by design, so a
+        # heavyweight install here would hide an accidental dependency on torch or a
+        # serving framework leaking into the analysis path.
+        # python-dotenv is here because `xe_forge/__init__.py` eagerly imports
+        # `xe_forge.config`, which imports dotenv — without it every test fails at
+        # collection. It is a dependency of the tracked core, not of Orbit.
+        run: |
+          uv venv
+          uv pip install pydantic pyyaml pytest torch python-dotenv --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+
+      - name: Run the Orbit test suite
+        run: uv run --no-project pytest tests/orbit -q
+
+      - name: Run xe-orbit selftest
+        # The full-loop invariants on stub data: no LLM, no GPU, no tokens.
+        run: PYTHONPATH=src uv run --no-project python -m xe_forge.orbit.cli selftest --chaos
+
+      - name: Adapter conformance
+        # Every registered adapter passes the same suite, including the null test and
+        # the positive control (§10.7). This is the one-to-one guarantee that adding a
+        # framework stays a bounded unit of work rather than a negotiation with the core.
+        run: |
+          PYTHONPATH=src uv run --no-project python -m xe_forge.orbit.cli conformance generic_torch
+          PYTHONPATH=src uv run --no-project python -m xe_forge.orbit.cli conformance vllm
+
+      - name: Full loop on the committed trace fixture
+        # Exercises trace -> kernels -> gate -> select -> extract -> bundle test end to
+        # end with no GPU. The fixture is a GPU-bound decode step whose hottest kernel is
+        # an opaque oneDNN GEMM, so the loop must stop and route to a non-source action.
+        env:
+          PYTHONPATH: src
+          ORBIT_DIR: ${{ runner.temp }}/.orbit
+        run: |
+          ORBIT="uv run --no-project python -m xe_forge.orbit.cli --orbit-dir $ORBIT_DIR"
+          $ORBIT trace --from-trace tests/orbit/fixtures/decode_trace.json
+          $ORBIT kernels
+          $ORBIT regions
+          $ORBIT pipeline
+
+      - name: Check committed schemas are up to date
+        # A schema change must show up as a reviewable diff, not as silent drift
+        # between the models and what stored artifacts were validated against.
+        run: |
+          PYTHONPATH=src uv run --no-project python -m xe_forge.orbit.cli schemas --export -
+          git diff --exit-code -- src/xe_forge/orbit/schemas \
+            || (echo "::error::Committed schemas are stale. Run: xe-orbit schemas --export -" && exit 1)
+
+  core:
+    # The three root-level test files cover the tracked core (spec loader, validator,
+    # usage tracking), which genuinely needs dspy, litellm and ai_bench — so they run
+    # in their own job with the full project installed, keeping the T0 job's
+    # deliberately minimal install as the proof that Orbit's analysis path has not
+    # grown a heavyweight dependency.
+    name: Core — root tests, full deps
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install the project (CPU torch)
+        run: |
+          uv venv
+          uv pip install -e . pytest --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+
+      - name: Run the core test suite
+        # Everything at the tests root; tests/orbit is the T0 job's, under the
+        # deliberately minimal install.
+        run: uv run --no-project pytest tests --ignore=tests/orbit -q

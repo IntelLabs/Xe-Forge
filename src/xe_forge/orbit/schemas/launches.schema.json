@@ -1,0 +1,162 @@
+{
+  "$defs": {
+    "LaunchRecord": {
+      "description": "One intercepted launch (\u00a712.4). The ground truth extraction is built from.",
+      "properties": {
+        "arg_order": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Arg Order",
+          "type": "array"
+        },
+        "call_index": {
+          "default": 0,
+          "title": "Call Index",
+          "type": "integer"
+        },
+        "compiled_metadata": {
+          "additionalProperties": true,
+          "title": "Compiled Metadata",
+          "type": "object"
+        },
+        "constexprs": {
+          "additionalProperties": true,
+          "title": "Constexprs",
+          "type": "object"
+        },
+        "fq_name": {
+          "title": "Fq Name",
+          "type": "string"
+        },
+        "grid": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Grid",
+          "type": "array"
+        },
+        "num_stages": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Num Stages"
+        },
+        "num_warps": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Num Warps"
+        },
+        "selected_autotune_config": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Selected Autotune Config"
+        },
+        "source_file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source File"
+        },
+        "source_line": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Line"
+        },
+        "specialization": {
+          "additionalProperties": true,
+          "title": "Specialization",
+          "type": "object"
+        }
+      },
+      "required": [
+        "fq_name"
+      ],
+      "title": "LaunchRecord",
+      "type": "object"
+    }
+  },
+  "description": "All launches intercepted during one trace run.",
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "dispatch_ops": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Dispatch Ops",
+      "type": "array"
+    },
+    "limitations": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Limitations",
+      "type": "array"
+    },
+    "records": {
+      "items": {
+        "$ref": "#/$defs/LaunchRecord"
+      },
+      "title": "Records",
+      "type": "array"
+    },
+    "schema_version": {
+      "default": "1.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "torch_available": {
+      "default": false,
+      "title": "Torch Available",
+      "type": "boolean"
+    },
+    "triton_available": {
+      "default": false,
+      "title": "Triton Available",
+      "type": "boolean"
+    }
+  },
+  "title": "LaunchLog",
+  "type": "object",
+  "x-orbit-artifact": "launches",
+  "x-orbit-schema-version": "1.1"
+}

@@ -30,6 +30,14 @@ wandb = ["weave>=0.52.24"]
 [project.scripts]
 xe-forge = "xe_forge.cli:main"
 xe-forge-skill = "xe_forge.skills:main"
+xe-orbit = "xe_forge.orbit.cli:main"
+orbit-bench = "xe_forge.orbit.bench.cli:main"
+
+# Framework adapters are discovered through this group, so an internal or proprietary
+# serving framework can plug in without forking the repository (plan §10.3).
+[project.entry-points."xe_orbit.frameworks"]
+generic_torch = "xe_forge.orbit.adapters.generic_torch:GenericTorchAdapter"
+vllm = "xe_forge.orbit.adapters.vllm:VLLMAdapter"
 
 [dependency-groups]
 dev = [
@@ -74,6 +82,15 @@ packages = ["src/xe_forge"]
 
 [tool.hatch.metadata]
 allow-direct-references = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The Orbit suite runs from a checkout with src/ on the path (see tests/orbit/conftest.py),
+# so T0 CI needs no editable install and no GPU.
+addopts = "-q"
+markers = [
+  "xpu: requires a working Intel GPU runtime (Level Zero + compute runtime)",
+]
 
 [tool.ruff]
 line-length = 100
