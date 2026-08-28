@@ -128,16 +128,23 @@ uv pip install --python $P -v . --extra-index-url https://download.pytorch.org/w
 
 cd ~/.cache/orbit-dev/sgl-kernel-xpu
 source /opt/intel/oneapi/setvars.sh --force
-MAX_JOBS=1 USE_SYCL_JIT=ON uv pip install --python $P --no-build-isolation -v .
+CMAKE_BUILD_PARALLEL_LEVEL=2 \
+  SKBUILD_CMAKE_DEFINE="USE_SYCL_JIT=ON;SGL_BUILD_MEM_FILE_LIMIT_GIB=12" \
+  uv pip install --python $P --no-build-isolation -v .
 ```
 
 - `USE_SYCL_JIT=ON` (env or cmake define): FMHA/MLA/MoE/GDN kernels compile **on
   demand** at first use instead of ahead-of-time — this is what makes the build
   survivable on ≤16 GB machines. First call into a JIT kernel blocks for seconds
   to minutes while icpx runs.
-- **LoRA kernels stay AOT** even with JIT on. The repo's own build guard kills
-  any TU over 4 GiB RSS (`SGL_BUILD_MEM_FILE_LIMIT_GIB`); raise it on a big-swap
-  box: `SKBUILD_CMAKE_DEFINE="USE_SYCL_JIT=ON;SGL_BUILD_MEM_FILE_LIMIT_GIB=12"`.
+- **LoRA kernels stay AOT** even with JIT on. The repo's own build guards: a
+  per-TU RSS limit (`SGL_BUILD_MEM_FILE_LIMIT_GIB`, default 4 — raise via the
+  define above on a big-swap box) and a system floor (stops the build when
+  MemAvailable < 0.5 GiB; `FORCE`-cached, not overridable — control parallelism
+  instead).
+- **Trap (measured):** `MAX_JOBS` does nothing here (torch convention);
+  scikit-build-core's ninja runs `nproc`-wide by default and three ~4 GiB TUs in
+  flight exhaust a 16 GB box. The knob is `CMAKE_BUILD_PARALLEL_LEVEL=2`.
 - Serving flag on XPU: `--attention-backend intel_xpu` (SYCL) — Triton is used
   for MoE per Intel's roadmap.
 
