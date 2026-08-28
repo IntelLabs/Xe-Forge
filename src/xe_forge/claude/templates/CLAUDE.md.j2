@@ -1,3 +1,9 @@
+{%- if kb_materialized %}
+@knowledge_base/constraints.md
+@knowledge_base/patterns.md
+@knowledge_base/examples.md
+{%- endif %}
+
 # Xe-Forge Kernel Optimizer
 
 Optimize kernels into high-performance {{ dsl | upper }} implementations for {{ device | upper }}.
@@ -15,7 +21,7 @@ All runtime behavior below is gated by these values; re-read `config.yaml` if an
 
 1. **ONLY create** kernel files (trial files `t<N>.py` or output files).
 2. **NEVER create** benchmark scripts, test scripts, helper utilities, or any other files.
-3. **NEVER write custom scripts** to measure performance — ONLY use `xe-forge-skill benchmark`.
+3. **NEVER write custom scripts** to measure performance — ONLY use `xe-forge-skill benchmark` or the `run_benchmark` MCP tool.
 4. If a tool fails, **STOP and report the error**. Do NOT work around it with custom scripts.
 5. Generated kernels must be **self-contained** — all helper functions inline.
 6. You **MUST run all `max_trials` trials** (as set in `config.yaml`). Do NOT stop early due to plateau. Only stop early if speedup > 5x.
@@ -24,7 +30,7 @@ All runtime behavior below is gated by these values; re-read `config.yaml` if an
 
 **Delegate all tool execution** to the `tool-runner` agent to keep the main context clean.
 
-**CRITICAL — Single-XPU serialization**: There is only ONE XPU. NEVER dispatch multiple tool-runner agents in parallel if any runs `benchmark` or `profile`. These GPU workloads must execute strictly one at a time.
+**CRITICAL — Single-XPU serialization**: There is only ONE XPU. NEVER dispatch multiple tool-runner agents in parallel if any runs `benchmark`, `profile`, or an MCP GPU tool. These GPU workloads must execute strictly one at a time.
 
 | Task | Command |
 |------|---------|
@@ -38,14 +44,37 @@ All runtime behavior below is gated by these values; re-read `config.yaml` if an
 | **Best trial** | `xe-forge-skill trial best <kernel_name>` |
 | **Baseline time** | `xe-forge-skill trial baseline-us <kernel_name>` |
 | **Finalize** | `xe-forge-skill trial finalize <kernel_name> <output_file>` |
-| **Profile** (only when `vtune_enabled: true`) | `xe-forge-skill profile <triton_file> --spec <spec.yaml>` |
+| **Profile** (CLI fallback) | `xe-forge-skill profile <triton_file> --spec <spec.yaml>` |
+
+## MCP TOOLS — Intel Performance Tooling
+
+Pre-configured in `.claude/settings.json` (server: `intel-perf`). Available at session start — no manual setup needed.
+
+| MCP Tool | Purpose | Key Output |
+|---|---|---|
+| `find_hotspots` | VTune GPU hotspot profile | `dominant`, `bottleneck`, `eu_active_pct` |
+| `run_benchmark` | AI-bench kernel benchmark | `tflops`, `time_us`, `mem_bw_gbps`, `run_id` |
+| `compare_performance` | Delta between two run IDs | `delta_pct`, `regression` |
+| `check_regression` | Boolean regression check | `regression` (bool), `delta_pct` |
+| `trace_kernel` | unitrace per-dispatch timeline | `kernels`, `total_gpu_ms`, `timeline_uri` |
+| `compile_kernel` | icpx SYCL AOT/JIT compilation | `output_uri`, `compile_ms` |
+| `disassemble_kernel` | Gen ISA disassembly | `dpas_count`, `alu_count`, `grf_spills` |
+| `query_device_caps` | EU count, GRF, SPIR-V extensions | `eu_count`, `max_grf` |
+
+**MCP Prompts** (guided workflows): `profile_workload`, `compare_candidates`, `triage_regression`, `prepare_optimization_report`.
+
+**Single-XPU rule applies to MCP tools**: `find_hotspots`, `run_benchmark`, `trace_kernel` all use the GPU. Delegate them to `tool-runner` one at a time, never concurrently.
 
 ## WORKFLOW — Follow these steps in order
 
 ### Step 1: Analyze
 - Read the baseline source file `test_kernels/{{ kernel_name }}.py`. Identify shapes, dtypes, operations.
 - Run `xe-forge-skill analyze test_kernels/{{ kernel_name }}.py` to get AST-based analysis.
-- Read relevant knowledge_base/ files for optimization patterns.
+{%- if kb_materialized %}
+- KB patterns and constraints are pre-loaded above via @imports. Consult `knowledge_base/patterns.md` for stage-specific patterns and `knowledge_base/constraints.md` for correctness rules.
+{%- else %}
+- Read relevant `knowledge_base/` files for optimization patterns.
+{%- endif %}
 
 ### Step 2: Initialize
 ```bash
@@ -61,7 +90,10 @@ For each trial:
    - **Trial t0:** `xe-forge-skill benchmark test_kernels/{{ kernel_name }}.py <triton_file> --spec test_kernels/{{ kernel_name }}.yaml`
    - **Trials t1+:** Get cached baseline via `xe-forge-skill trial baseline-us {{ kernel_name }}`, then `xe-forge-skill benchmark test_kernels/{{ kernel_name }}.py <triton_file> --spec test_kernels/{{ kernel_name }}.yaml --baseline-us <cached>`
 5. **Record** — `xe-forge-skill trial result {{ kernel_name }} <trial_id> --correctness <pass|fail> --speedup <float> --baseline-us <float> --triton-us <float>`
-6. **Profile** — if `vtune_enabled: true` in `config.yaml` and this is trial t1 or later, run `xe-forge-skill profile <triton_file> --spec <spec.yaml>` and use the output to guide the next trial. If `vtune_enabled: false`, skip this step.
+6. **Profile** — if `vtune_enabled: true` in `config.yaml` and this is trial t1 or later:
+   - **MCP (preferred)**: delegate `find_hotspots(workload_ref="test_kernels/{{ kernel_name }}.py", device="{{ device }}", top=10)` to tool-runner. Also run `trace_kernel` for per-dispatch timing. Use the `profile_workload` MCP prompt for a guided workflow.
+   - **CLI fallback**: `xe-forge-skill profile <triton_file> --spec <spec.yaml>` if `vtune_enabled: true` and MCP unavailable.
+   - Use profile output to guide the next trial's strategy.
 7. **Decide next action**:
    - Speedup > 5x -> stop, finalize
    - Speedup improved -> continue on this branch
@@ -73,6 +105,8 @@ For each trial:
 ```bash
 xe-forge-skill trial finalize {{ kernel_name }} output/{{ kernel_name }}_optimized.py
 ```
+
+After finalizing, run `compare_performance(baseline_run_id, candidate_run_id)` and `check_regression` via MCP to confirm the improvement is real and within tolerance.
 
 ## CRITICAL CORRECTNESS CONSTRAINTS
 

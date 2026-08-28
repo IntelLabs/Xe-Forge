@@ -26,6 +26,10 @@ nvidia = [
   "pytorch-triton",
 ]
 wandb = ["weave>=0.52.24"]
+intel-tools = [
+  "intel-kernel-kb>=0.1.0",
+  "intel-perf>=0.1.0",
+]
 
 [project.scripts]
 xe-forge = "xe_forge.cli:main"
@@ -53,6 +57,8 @@ conflicts = [
 ]
 
 [tool.uv.sources]
+intel-kernel-kb = { path = "/data/nfs_home/mspoczy/upstream/frameworks.ai.gpu.knowledgebase_generator" }
+intel-perf       = { path = "/data/nfs_home/mspoczy/il/Tools" }
 torch = [
   { index = "pytorch-xpu", extra = "intel" },
   { index = "pytorch-cuda", extra = "nvidia" },

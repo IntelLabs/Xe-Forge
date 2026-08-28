@@ -114,6 +114,8 @@ class KnowledgeConfig:
     knowledge_dir: str = "./knowledge_base"
     # auto_load kept for backward compatibility; ignored when enabled=False
     auto_load: bool = True
+    use_intel_kb: bool = True
+    materialize_markdown: bool = True
 
 
 @dataclass
@@ -134,6 +136,7 @@ class EngineConfig:
     auto_launch: bool = False  # Claude engine: auto-launch claude CLI
     workspace: str = "./"  # Claude engine: workspace directory
     git_init: bool = False  # Claude engine: initialize workspace as git repo
+    claude_bin: str = ""  # Explicit path to claude binary (empty = auto-discover)
 
 
 @dataclass
@@ -153,6 +156,16 @@ class ProfilerConfig:
     vtune_bin: str = "vtune"
     warmup_iters: int = 5
     profile_iters: int = 20
+    use_intel_perf: bool = False
+
+
+@dataclass
+class MCPConfig:
+    """MCP servers to register in the generated Claude Code workspace."""
+
+    intel_perf_enabled: bool = True
+    intel_profiler_mcp_enabled: bool = False
+    extra_servers: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -168,6 +181,7 @@ class Config:
     engine: EngineConfig = field(default_factory=EngineConfig)
     trial: TrialConfig = field(default_factory=TrialConfig)
     profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
+    mcp: MCPConfig = field(default_factory=MCPConfig)
 
     @property
     def xpu(self) -> XPUConfig:
@@ -238,6 +252,8 @@ class ConfigManager:
             enabled=self._get_env("KNOWLEDGE_BASE_ENABLED", False, bool),
             knowledge_dir=self._get_env("KNOWLEDGE_DIR", "./knowledge_base"),
             auto_load=self._get_env("AUTO_LOAD_KNOWLEDGE", True, bool),
+            use_intel_kb=self._get_env("USE_INTEL_KB", True, bool),
+            materialize_markdown=self._get_env("KB_MATERIALIZE_MARKDOWN", True, bool),
         )
 
         # Logging Configuration
@@ -254,6 +270,7 @@ class ConfigManager:
             auto_launch=self._get_env("AUTO_LAUNCH", False, bool),
             workspace=self._get_env("WORKSPACE", "./"),
             git_init=self._get_env("WORKSPACE_GIT_INIT", False, bool),
+            claude_bin=self._get_env("CLAUDE_BIN", ""),
         )
 
         # Trial Configuration
@@ -269,6 +286,13 @@ class ConfigManager:
             vtune_bin=self._get_env("VTUNE_BIN", "vtune"),
             warmup_iters=self._get_env("VTUNE_WARMUP", 5, int),
             profile_iters=self._get_env("VTUNE_ITERS", 20, int),
+            use_intel_perf=self._get_env("USE_INTEL_PERF", False, bool),
+        )
+
+        # MCP Configuration
+        mcp_cfg = MCPConfig(
+            intel_perf_enabled=self._get_env("MCP_INTEL_PERF_ENABLED", True, bool),
+            intel_profiler_mcp_enabled=self._get_env("MCP_INTEL_PROFILER_ENABLED", False, bool),
         )
 
         return Config(
@@ -281,6 +305,7 @@ class ConfigManager:
             engine=engine_cfg,
             trial=trial_cfg,
             profiler=profiler_cfg,
+            mcp=mcp_cfg,
         )
 
     def _build_device_config(self, device_type: str, dsl: str) -> DeviceConfig:

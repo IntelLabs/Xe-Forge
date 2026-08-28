@@ -27,10 +27,25 @@ class DSPyEngine(BaseEngine):
 
         self.profiler: XPUProfiler | None = None
         if config.profiler.vtune_enabled:
-            self.profiler = XPUProfiler(config.profiler.vtune_bin)
-            if not self.profiler.available():
+            if config.profiler.use_intel_perf:
+                try:
+                    from xe_forge.core.profiler import IntelPerfProfiler
+
+                    self.profiler = IntelPerfProfiler()
+                    logger.info("Using intel_perf.Performance for profiling")
+                except ImportError:
+                    logger.warning(
+                        "USE_INTEL_PERF=true but intel_perf not installed — "
+                        "falling back to XPUProfiler"
+                    )
+                    self.profiler = XPUProfiler(config.profiler.vtune_bin)
+            else:
+                self.profiler = XPUProfiler(config.profiler.vtune_bin)
+
+            if self.profiler and not self.profiler.available():
                 logger.warning(
-                    "VTune not found at '%s', profiling disabled.", config.profiler.vtune_bin
+                    "Profiler not available at '%s', profiling disabled.",
+                    config.profiler.vtune_bin,
                 )
                 self.profiler = None
 

@@ -463,3 +463,66 @@ subprocess.run([vtune_bin, "-command", "pause", "-r", result_dir],
             )
 
         return recs
+
+
+class IntelPerfProfiler:
+    """intel_perf.Performance-based profiler with the XPUProfiler duck-type interface.
+
+    Uses the intel-perf SDK (VTune via MCP adapter) instead of shelling out
+    to vtune directly. Selected when USE_INTEL_PERF=true in the environment.
+    """
+
+    def __init__(self) -> None:
+        from intel_perf import Performance
+
+        self._perf = Performance()
+
+    def available(self) -> bool:
+        return True
+
+    def profile(
+        self,
+        kernel_file: str | Path,
+        spec_path: str | Path | None = None,
+        variant: str = "bench-gpu",
+        warmup: int = 5,
+        iters: int = 20,
+    ) -> ProfileResult:
+        """Profile via the intel_perf SDK and return a ProfileResult."""
+        kernel_file = Path(kernel_file)
+        if not kernel_file.exists():
+            return ProfileResult(error=f"Kernel file not found: {kernel_file}")
+        try:
+            hotspot = self._perf.find_hotspots(
+                workload_ref=str(kernel_file),
+                device="xpu",
+                top=10,
+            )
+            return self._map_result(hotspot)
+        except Exception as exc:
+            logger.exception("intel_perf profiling failed")
+            return ProfileResult(error=str(exc))
+
+    def _map_result(self, hotspot) -> ProfileResult:
+        """Map intel_perf HotspotResult to ProfileResult."""
+        gpu = getattr(hotspot, "gpu_summary", None)
+        metrics = ProfileMetrics(
+            xve_active_pct=getattr(gpu, "eu_active_pct", None) if gpu else None,
+            xve_stalled_pct=getattr(gpu, "eu_stalled_pct", None) if gpu else None,
+            xve_idle_pct=getattr(gpu, "eu_idle_pct", None) if gpu else None,
+            peak_occupancy_pct=getattr(gpu, "occupancy_pct", None) if gpu else None,
+            gpu_memory_bw_read_gbps=getattr(gpu, "hbm_read_gbps", None) if gpu else None,
+            gpu_memory_bw_write_gbps=getattr(gpu, "hbm_write_gbps", None) if gpu else None,
+        )
+        dominant = getattr(hotspot, "dominant", [])
+        primary_kernel = dominant[0][0] if dominant else ""
+        recs = []
+        for step in getattr(hotspot, "next_steps", []):
+            recs.append(Recommendation(category="intel_perf", message=str(step)))
+        explain = hotspot.explain() if callable(getattr(hotspot, "explain", None)) else ""
+        return ProfileResult(
+            primary_kernel=primary_kernel,
+            metrics=metrics,
+            recommendations=recs,
+            raw_counters={"explain": explain},
+        )
