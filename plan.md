@@ -1391,7 +1391,27 @@ consistent with the thinner kernel-level margin there). Session count was fixed
 before the reruns rather than extended until a third ACCEPT appeared, because
 running-until-significant is choosing the result (§17.5.1). §25's full
 three-clean-sessions claim therefore remains open pending quiet-machine reruns —
-stated as such, not rounded up. The path is now fully automated in both directions:
+stated as such, not rounded up.
+
+**The served and token-level completions (v10, next day).** The candidate then went
+through the two gates the offline campaign had not run. *L3 token gate:* greedy
+decode is token-exact on 10 of 16 prompts, with the six divergences starting deep
+in generation (tokens 11–38, never at position 0) — the signature of near-tie logit
+flips from the declared rounding differences of a path proven *closer* to fp64
+truth than the baseline, chaos-amplified by argmax; per §19's own ladder,
+acceptance for deployment moves to the bounded-logit-deviation + small-task-eval
+branch, which is the named remaining step. (Precision, stated plainly: the kernel
+computes at the standard bf16-data/fp32-accumulate; fp64 exists only as the host
+referee, which must out-precision both contestants to rank them.) *Served A/B:*
+a real `vllm serve` per arm with `xe-orbit run --framework vllm` driving
+`vllm bench serve` clients — the Tier-1 adapter parsed all four declared metrics,
+TPOT tight at 25.88 ms CI [25.63, 26.14] — returned INCONCLUSIVE on every metric at
+n=5 (TPOT +0.46% under a 1.57% MDE; TTFT's MDE 163.9%, the §17.5 first-request
+effect in its full glory). The honest reading: a ~+0.5% effect at this batch is
+below what a five-rep served benchmark resolves, the offline A/B was the correct
+instrument for this candidate's size — and the served machinery is now proven end
+to end for the day a bigger candidate needs it. Everything framework-generic: the
+same adapter path serves SGLang unchanged when an install exists. The path is now fully automated in both directions:
 `xe-orbit optimize --apply --rounds N` feeds each round's verdicts and reasons back
 to the proposer in-process with a shared stall ledger, and `xe-orbit fuse <region>`
 runs pattern → preset → trace-derived shapes → deterministic tile sweep (§11.7),
