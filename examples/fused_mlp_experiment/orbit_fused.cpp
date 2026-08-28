@@ -17,10 +17,10 @@
 // one — both measured better than the generator's auto pick at their M (plan §13.4).
 // The layer patch gates usage at M <= 32, where the fused kernel beats the chain.
 //
-// Launch-queue note: cutlass-sycl launches on the compat layer's queue, not torch's
-// stream, so the op waits on completion before returning. That serialization is a
-// measured cost the A/B carries; sharing torch's stream is the follow-up if the
-// verdict warrants it.
+// Launch-queue note: both ops launch on torch's current in-order XPU stream (the
+// cutlass adapter accepts a queue*), with no explicit waits. The first version
+// launched on the compat queue with a wait per op — two serializations per layer,
+// which converted a kernel-level +3.1% into a measured -2.52% e2e REJECT.
 
 #include "xe-fuse/builder/epilogue_builder.hpp"
 
@@ -76,7 +76,6 @@ at::Tensor add_rms_scale(at::Tensor& hidden, at::Tensor& residual, double epsilo
           }
         });
   });
-  queue.wait();
   return scale;
 }
 
@@ -88,7 +87,7 @@ struct K2 {
   using Config = b::MakeGemm<EVT, bf16, bf16, bf16, float, float, TileShape>;
   using Gemm = typename Config::Gemm;
 
-  static void run(const at::Tensor& x, const at::Tensor& b_packed,
+  static void run(sycl::queue& queue, const at::Tensor& x, const at::Tensor& b_packed,
                   const at::Tensor& scale, at::Tensor& out) {
     const int M = static_cast<int>(x.size(0));
     const int K = static_cast<int>(x.size(1));
@@ -139,8 +138,11 @@ struct K2 {
     TORCH_CHECK(op.can_implement(arguments) == cutlass::Status::kSuccess,
                 "k2 cannot run at M=", M, " N=", N, " K=", K);
     CUTLASS_CHECK(op.initialize(arguments, ws_bytes ? workspace.data_ptr() : nullptr));
-    CUTLASS_CHECK(op.run());
-    compat::wait();
+    // Launch on torch's in-order XPU stream (the adapter takes a queue*), so
+    // downstream torch ops serialize correctly with NO explicit wait — the two
+    // per-layer waits were what turned a kernel-level win into the measured
+    // -2.52% e2e REJECT.
+    CUTLASS_CHECK(op.run(&queue));
   }
 };
 
@@ -152,10 +154,11 @@ at::Tensor gate_up_swiglu(const at::Tensor& x, const at::Tensor& b_packed,
   TORCH_CHECK(x.scalar_type() == at::kBFloat16, "bf16 only");
 
   auto out = at::empty({x.size(0), b_packed.size(1)}, x.options());
+  auto& queue = c10::xpu::getCurrentXPUStream().queue();
   if (x.size(0) <= 16) {
-    K2<Shape<_16, _256, _32>>::run(x, b_packed, scale, out);
+    K2<Shape<_16, _256, _32>>::run(queue, x, b_packed, scale, out);
   } else {
-    K2<Shape<_32, _256, _32>>::run(x, b_packed, scale, out);
+    K2<Shape<_32, _256, _32>>::run(queue, x, b_packed, scale, out);
   }
   return out;
 }

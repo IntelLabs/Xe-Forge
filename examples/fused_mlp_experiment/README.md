@@ -1,4 +1,4 @@
-# The fused-MLP experiment: the first full end-to-end loop, and its honest REJECT
+# The fused-MLP experiment: the first full end-to-end loop — REJECT, then the fix, then ACCEPT
 
 The complete §25 chain, run 2026-08-27 on Wildcat Lake against live vLLM
 (Qwen2.5-0.5B, batch-16 decode, temperature 0.8 seeded):
@@ -28,3 +28,23 @@ byte-for-byte (journal empty, `git status` clean).
 This directory is the reproduction kit, not shipped code: compile per the flags in
 plan.md §13.4's measured notes (icpx, sycl-tla + Xe-Fuse includes,
 `--spirv-ext=+SPV_INTEL_split_barrier`).
+
+
+## Round 2: the fix, and the ACCEPT (same day)
+
+The REJECT's instrumented cause pointed at one line: the cutlass adapter's `run()`
+accepts a `sycl::queue*` (`gemm_universal_adapter.h:551`), so both ops now launch on
+torch's current in-order XPU stream and **both waits are gone**. Numerics unchanged
+(identical fp64-truth distances). Fresh two-arm A/B, six replicates each:
+
+    pristine: 615.0 611.2 610.6 611.3 611.3 611.6  tok/s
+    fused:    619.0 617.3 616.1 613.1 613.0 613.3  tok/s
+    verdict:  ACCEPT  +0.56%  95% CI [0.21%, 0.91%]  MDE 0.46%
+
+Plan §25's primary criterion, first met: a validated candidate, patched into live
+serving through the journalled mechanism, with an end-to-end throughput improvement
+whose 95% CI excludes zero. Honest scope: one session, one serving configuration
+(Qwen2.5-0.5B bf16, batch 16, temperature 0.8 seeded, enforce_eager, pinned KV);
+§25 asks for reproducibility across three independent sessions before the full
+claim, and §14.3 for the profile matrix. The tree is reverted; redeploy with
+`apply_patch.py apply` + `ORBIT_FUSED_MLP=1 ORBIT_FUSED_LIB=<liborbit_fused.so>`.
