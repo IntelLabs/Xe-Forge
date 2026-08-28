@@ -279,3 +279,113 @@ def run_region(task, shapes: tuple[int, int, int], output_dir: Path, **kwargs) -
         return result
     m, n, k = shapes
     return run_preset(preset, m, n, k, output_dir, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Automated tile autotuning (§11.7): the deterministic sweep before any agent
+# ---------------------------------------------------------------------------
+
+# Measured on Wildcat Lake (k2, N=9728, K=896): the generator's auto pick lost at
+# every M >= 32, and the winning tile's M dimension tracked the problem M
+# (16→16x256x32, 32→32x256x32, 64→64x256x32, 128→128x256x32). Candidate tiles are
+# built from that pattern plus near neighbours, with the generator's own "auto" kept
+# in the field so an upstream fix shows up as auto winning again.
+_TILE_NK_VARIANTS = ((256, 32), (512, 32), (256, 64), (128, 32))
+_MAX_TILE_M = 256
+
+
+def candidate_tiles(m: int) -> list[str]:
+    """Tiles worth trying at this problem M, most promising first."""
+    pow2 = 1 << max(3, (max(1, m) - 1).bit_length())  # smallest power of two >= m, floor 8
+    tile_ms = []
+    for tm in (pow2, pow2 // 2, pow2 * 2):
+        tm = min(max(8, tm), _MAX_TILE_M)
+        if tm not in tile_ms:
+            tile_ms.append(tm)
+    tiles = ["auto"]
+    for tm in tile_ms:
+        for tn, tk in _TILE_NK_VARIANTS:
+            tiles.append(f"{tm}x{tn}x{tk}")
+    return tiles
+
+
+@dataclass
+class XeFuseSweep:
+    """A full tile sweep: every result kept, the winner named, failures visible."""
+
+    preset: str
+    m: int
+    n: int
+    k: int
+    results: list[XeFuseResult] = field(default_factory=list)
+
+    @property
+    def best(self) -> XeFuseResult | None:
+        ran = [r for r in self.results if r.ok]
+        return min(ran, key=lambda r: r.ms) if ran else None
+
+    def format(self) -> str:
+        lines = [
+            f"tile sweep: {self.preset} at {self.m}x{self.n}x{self.k} "
+            f"({len(self.results)} candidate(s))",
+            f"{'TILE':<14} {'us/iter':>10}  NOTE",
+            "-" * 48,
+        ]
+        best = self.best
+        for r in sorted(self.results, key=lambda r: (not r.ok, r.ms or 0.0)):
+            if r.ok:
+                note = "BEST" if r is best else ""
+                lines.append(f"{r.tile:<14} {r.per_iteration_us:>10.1f}  {note}")
+            else:
+                lines.append(f"{r.tile:<14} {'-':>10}  {r.error[:60]}")
+        if best is None:
+            lines.append("no tile produced a measurement; nothing to choose")
+        elif best.tile != "auto":
+            auto = next((r for r in self.results if r.tile == "auto" and r.ok), None)
+            if auto is not None and auto.ms and best.ms:
+                gain = (auto.ms - best.ms) / auto.ms * 100
+                lines.append(
+                    f"sweep beat the generator's auto pick by {gain:.1f}% — "
+                    f"worth reporting upstream (the selector is knowledge, not code)"
+                )
+        return "\n".join(lines)
+
+
+def autotune_preset(
+    preset: str,
+    m: int,
+    n: int,
+    k: int,
+    output_dir: Path,
+    *,
+    tiles: list[str] | None = None,
+    **kwargs,
+) -> XeFuseSweep:
+    """Sweep tile shapes for one preset and keep everything (§11.7).
+
+    Deterministic and exhaustive over its candidate list — no model in the loop,
+    because a tile choice has a measurable answer. A failed tile stays in the table
+    with its named stage failure rather than vanishing: silent truncation reads as
+    "covered everything" when it did not. The same caveat as `run_preset` applies to
+    every number here: timing only, correctness gated by the caller.
+    """
+    sweep = XeFuseSweep(preset=preset, m=m, n=n, k=k)
+    for tile in tiles if tiles is not None else candidate_tiles(m):
+        sweep.results.append(run_preset(preset, m, n, k, output_dir, tile=tile, **kwargs))
+    return sweep
+
+
+def autotune_region(task, shapes: tuple[int, int, int], output_dir: Path, **kwargs) -> XeFuseSweep:
+    """Autotune the preset matching a region's pattern at (m, n, k)."""
+    preset = PRESET_FOR_PATTERN.get(task.pattern)
+    if preset is None:
+        sweep = XeFuseSweep(preset="?", m=0, n=0, k=0)
+        failed = XeFuseResult(preset="?", tile="-", m=0, n=0, k=0)
+        failed.error = (
+            f"no Xe-Fuse preset maps to pattern {task.pattern!r}; known: "
+            f"{sorted(PRESET_FOR_PATTERN)}"
+        )
+        sweep.results.append(failed)
+        return sweep
+    m, n, k = shapes
+    return autotune_preset(preset, m, n, k, output_dir, **kwargs)

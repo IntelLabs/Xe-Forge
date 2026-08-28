@@ -157,3 +157,85 @@ class TestAvailabilityFeedsTheRoute:
                 fusion_pattern = "gemm+activation"
 
             assert default_executor(Region()) is FusionExecutor.AUTHOR
+
+
+@pytest.fixture
+def tile_aware_compiler(tmp_path):
+    """A 'compiler' whose binary reports a timing keyed to the tile in its name.
+
+    16x256x32 is scripted fastest, auto middling, everything else slow — so the
+    sweep's selection logic is observable without hardware.
+    """
+    compiler = tmp_path / "tile-icpx"
+    compiler.write_text(
+        "#!/bin/sh\n"
+        "out=''; prev=''\n"
+        'for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done\n'
+        'case "$out" in\n'
+        '  *16_256_32*) ms=0.300 ;;\n'
+        '  *auto*) ms=0.360 ;;\n'
+        "  *) ms=0.500 ;;\n"
+        "esac\n"
+        'printf "#!/bin/sh\\necho \\"K2: [1.0]TFlop/s  (%s)ms\\"\\n" "$ms" > "$out"\n'
+        'chmod +x "$out"\n'
+    )
+    compiler.chmod(compiler.stat().st_mode | stat.S_IEXEC)
+    return str(compiler)
+
+
+class TestAutotune:
+    def test_candidate_tiles_track_problem_m(self):
+        from xe_forge.orbit.optimize.xe_fuse_executor import candidate_tiles
+
+        # The measured Wildcat Lake pattern: tile_m follows M, auto always included.
+        assert candidate_tiles(16)[0] == "auto"
+        assert any(t.startswith("16x") for t in candidate_tiles(16))
+        assert any(t.startswith("32x") for t in candidate_tiles(32))
+        assert any(t.startswith("128x") for t in candidate_tiles(128))
+        # Bounded above: absurd M does not produce an absurd tile.
+        assert all(int(t.split("x")[0]) <= 256 for t in candidate_tiles(4096) if t != "auto")
+
+    def test_sweep_picks_the_measured_best_and_keeps_the_rest(
+        self, fake_checkouts, tile_aware_compiler, tmp_path
+    ):
+        from xe_forge.orbit.optimize.xe_fuse_executor import autotune_preset
+
+        sweep = autotune_preset(
+            "k2", 16, 9728, 896, tmp_path / "out",
+            tiles=["auto", "16x256x32", "32x256x32"],
+            compiler=tile_aware_compiler,
+        )
+        assert sweep.best is not None and sweep.best.tile == "16x256x32"
+        assert len(sweep.results) == 3  # nothing silently dropped
+        rendered = sweep.format()
+        assert "BEST" in rendered and "auto" in rendered
+        # The sweep beating auto is itself a finding, and the table says so.
+        assert "beat the generator's auto pick" in rendered
+
+    def test_failed_tiles_stay_in_the_table(self, fake_checkouts, tmp_path):
+        from xe_forge.orbit.optimize.xe_fuse_executor import autotune_preset
+
+        sweep = autotune_preset(
+            "k2", 16, 9728, 896, tmp_path / "out",
+            tiles=["16x256x32"], compiler="/bin/false",
+        )
+        assert sweep.best is None
+        assert "compile failed" in sweep.format()
+        assert "nothing to choose" in sweep.format()
+
+    def test_region_autotune_maps_pattern_first(self, fake_checkouts, tile_aware_compiler, tmp_path):
+        from xe_forge.orbit.optimize.xe_fuse_executor import autotune_region
+
+        task = FusionTask(region_id="r0", pattern="gemm+activation", gpu_share=0.4)
+        sweep = autotune_region(
+            task, (16, 9728, 896), tmp_path / "out",
+            tiles=["auto", "16x256x32"], compiler=tile_aware_compiler,
+        )
+        assert sweep.preset == "k2" and sweep.best.tile == "16x256x32"
+
+    def test_unknown_pattern_sweep_is_an_honest_refusal(self, tmp_path):
+        from xe_forge.orbit.optimize.xe_fuse_executor import autotune_region
+
+        task = FusionTask(region_id="r9", pattern="gemm+mystery", gpu_share=0.1)
+        sweep = autotune_region(task, (16, 9728, 896), tmp_path / "out")
+        assert sweep.best is None and "gemm+mystery" in sweep.results[0].error
