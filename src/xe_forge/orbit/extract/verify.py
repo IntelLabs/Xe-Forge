@@ -1,50 +1,7 @@
-"""
-The bundle test rig (plan §12.10, §12.12).
-
-Extraction is a correctness problem, so the pipeline tests its own bundles. An
-extracted bundle is **not trusted until it is proven to be the same kernel the
-workload ran** — not merely a kernel that compiles and produces plausible numbers.
-
-Five checks, in order:
-
-1. **Isolated import** — build under a restricted `sys.path` with the source package
-   removed. A `ModuleNotFoundError` here means the closure is incomplete; it is the
-   single most common extraction bug and it is otherwise silent.
-2. **Launch-record match** — grid, warps, stages, every `constexpr`, specialization
-   hints and the compiled binary identity match what was intercepted. For a C++ bundle
-   none of those exist, and the same question — is this the specialization that ran? —
-   is answered by the **instantiation match** instead, from the template arguments in
-   the demangled name.
-3. **Output match** — the bundle's output equals the captured reference within the
-   tightened tolerance.
-4. **Mutation check** — perturb the extracted kernel and confirm the output changes.
-   If it does not, the bundle is silently executing the *installed* package rather
-   than the extracted source, and every measurement taken from it is meaningless.
-5. **Data-dependency check** — remove each declared data file in turn; each removal
-   must produce a failure. A data dep that can be deleted without effect was never a
-   dependency, and one that was missed shows up as a pass that should have failed.
-
-Checks 1 and 4 are the pair that make multi-file extraction trustworthy. Neither is
-expensive; both belong in CI for every bundle the reference workload produces.
-
-Checks 1 and 4 are also the two that depend on the bundle's language, and the first
-version of this module ran the Python mechanism against every bundle. For a SYCL
-bundle carrying `Indexing.cpp` that produced `ModuleNotFoundError: No module named
-'Indexing'`, reported as "closure is incomplete" — a verdict about Python module
-resolution delivered on a C++ translation unit. The C++ analogues ask the same two
-questions with the tool that can actually answer them: compile the translation unit
-standalone (an unresolved `#include` is a hard error, not something an ambient import
-might satisfy), and inject `#error` to confirm the compile reads the bundle's own copy.
-
-The specific failure all of this catches — common with autotune plus specialization —
-is optimizing a *different specialization* of the right kernel, producing a real
-speedup on a variant the workload never executes. The C++ path found a second route to
-the same outcome: **version skew**. A kernel tree cloned at HEAD against an installed
-release compiles a source that is not the source the running binary was built from, so
-the bundle is a different kernel by a different mechanism. That is reported as skew
-rather than as a broken closure, because the remedy is checking out the matching
-revision, not carrying more files.
-"""
+"""The bundle test rig: a bundle is not trusted until proven to be the same kernel
+the workload ran. Checks: isolated import/compile, launch-record or instantiation
+match, output match, mutation check, data-dependency check — with C++ analogues for
+native bundles. Design rationale: docs/DESIGN.md."""
 
 from __future__ import annotations
 
@@ -60,11 +17,8 @@ from xe_forge.orbit.models import ExtractionCheck, ExtractionLevel, KernelBundle
 
 _NATIVE_SUFFIXES = {".cpp", ".cc", ".cxx", ".cu", ".h", ".hpp", ".sycl"}
 
-# torch-xpu-ops uses C++20 (`requires` clauses in `comm/SYCLHelpers.h`), while much of
-# the surrounding torch tree is C++17. Guessing 17 produced a wall of errors inside
-# framework headers that read like a broken closure and were nothing of the kind. This
-# is the fallback when the build database — which would state the standard outright —
-# is not available (§11.5).
+# torch-xpu-ops needs C++20; this is the fallback when no build database states the
+# standard outright.
 _DEFAULT_NATIVE_STD = "c++20"
 
 # A syntax-only compile is enough for both native checks: it resolves every include and
@@ -89,12 +43,8 @@ class BundleReport:
     level: ExtractionLevel
     checks: list[BundleCheck] = field(default_factory=list)
 
-    # At E1/E2 the bundle's whole claim is "this stands alone with its closure". That
-    # claim is the closure check, so a *skipped* closure check cannot count toward a
-    # pass there the way an inapplicable check can elsewhere. Ten of fourteen bundles
-    # reported verified at E2 on a skipped closure — their primary source was a header,
-    # which is not a translation unit and cannot be compiled alone — and each of those
-    # was claiming to be standalone on the strength of a check that never ran.
+    # At E1/E2 the bundle's whole claim is "this stands alone with its closure", so
+    # a skipped closure check cannot count toward a pass there.
     _REQUIRED_BY_LEVEL: ClassVar[dict[ExtractionLevel, tuple[str, ...]]] = {
         ExtractionLevel.E1: ("isolated import", "isolated compile"),
         ExtractionLevel.E2: ("isolated import", "isolated compile"),
@@ -157,9 +107,7 @@ def verify_bundle(bundle: KernelBundle, tolerance: float = 1e-5) -> BundleReport
     report = BundleReport(kernel_id=bundle.kernel_id, level=bundle.extraction_level)
 
     if bundle.extraction_level is ExtractionLevel.E4:
-        # An opaque bundle has no source to import, mutate or diff. Saying "skipped"
-        # here is the honest answer; reporting PASS would imply a verification that
-        # never happened.
+        # An opaque bundle has no source to import, mutate or diff.
         report.add(
             "isolated import",
             True,
@@ -172,11 +120,8 @@ def verify_bundle(bundle: KernelBundle, tolerance: float = 1e-5) -> BundleReport
         return report
 
     if _is_native(bundle):
-        # A C++ bundle has no module to import and no Python file to perturb. Running
-        # the Python checks against one produced `ModuleNotFoundError: No module named
-        # 'Indexing'` for `Indexing.cpp` and reported it as "closure is incomplete" —
-        # a failure whose stated reason was about a language the bundle is not written
-        # in. The compiler answers the same two questions properly.
+        # A C++ bundle has no module to import and no Python file to perturb; the
+        # compiler answers the same two questions instead.
         _check_isolated_compile(bundle, report)
         _check_instantiation(bundle, report)
         _check_data_dependencies(bundle, report)
@@ -211,9 +156,8 @@ def _bundle_root(bundle: KernelBundle) -> Path | None:
 def _check_isolated_import(bundle: KernelBundle, report: BundleReport) -> None:
     """Import the bundle with the original package removed from the path.
 
-    This is run in a subprocess with a controlled `sys.path` rather than in-process,
-    because a module already imported in this interpreter would satisfy the import and
-    hide exactly the incompleteness we are looking for.
+    Run in a subprocess with a controlled `sys.path`: a module already imported in
+    this interpreter would satisfy the import and hide the incompleteness.
     """
     if bundle.extraction_level is ExtractionLevel.E3:
         report.add(
@@ -257,14 +201,8 @@ def _check_isolated_import(bundle: KernelBundle, report: BundleReport) -> None:
 
 
 def _native_compile_command(bundle: KernelBundle, source: Path) -> list[str] | None:
-    """The compile line for a syntax-only check, from the manifest where possible.
-
-    §11.5 wants the build system's own command verbatim, because it is authoritative
-    about include paths, defines and the language standard. When the tree was cloned
-    rather than built there is no `compile_commands.json`, so this reconstructs a
-    minimal line — and the reconstruction is exactly why a failure here is reported as
-    "could not prove" rather than "the bundle is wrong".
-    """
+    """The compile line for a syntax-only check, from the manifest where possible,
+    else a minimal reconstructed line."""
     from xe_forge.orbit.patch.sycl_override import available_compiler
 
     compiler = available_compiler()
@@ -284,12 +222,8 @@ def _native_compile_command(bundle: KernelBundle, source: Path) -> list[str] | N
 
 
 def _framework_include_paths() -> list[str]:
-    """Installed framework headers, plus any indexed kernel source tree.
-
-    §11.6 is explicit that a single-TU check builds "against the installed headers,
-    not the whole repository", so torch's own include tree is expected to come from
-    outside the bundle. What the bundle must carry is the *project's* headers.
-    """
+    """Installed framework headers, plus any indexed kernel source tree. The bundle
+    must carry the project's own headers; torch's come from outside it."""
     paths: list[str] = []
     try:
         from torch.utils.cpp_extension import include_paths
@@ -310,18 +244,9 @@ def _framework_include_paths() -> list[str]:
 
 
 def _classify_compile_failure(stderr: str) -> tuple[str, str]:
-    """Say *why* a bundle failed to compile, because the reasons are not equivalent.
-
-    Three outcomes need to be told apart, and the current failure mode of lumping them
-    together is what made the E2 numbers untrustworthy:
-
-    * a missing header is a genuinely incomplete closure — the bundle's own defect;
-    * an identifier the installed headers do not define is **version skew** between the
-      checked-out source and the binary that actually ran. That is the §12.10 failure
-      exactly: the bundle would build a *different* kernel from the one profiled, and
-      any speedup measured on it describes code the workload never executed;
-    * anything else is a compile error we should quote rather than characterize.
-    """
+    """Classify a compile failure: "closure" (missing header — the bundle's own
+    defect), "skew" (an identifier the installed headers do not define — wrong
+    revision), or "other" (quoted verbatim)."""
     lowered = stderr.lower()
     if any(marker in lowered for marker in _MISSING_INCLUDE):
         for line in stderr.splitlines():
@@ -346,12 +271,8 @@ def _run_compile(argv: list[str], cwd: Path | None = None) -> subprocess.Complet
 
 
 def _check_isolated_compile(bundle: KernelBundle, report: BundleReport) -> None:
-    """Compile the translation unit on its own — the C++ analogue of isolated import.
-
-    The question is the same one §12.12 item 1 asks: does the bundle carry everything
-    it needs? For C++ the compiler answers it exactly, because an unresolved `#include`
-    is a hard error rather than something that might be satisfied by an ambient import.
-    """
+    """Compile the translation unit on its own — the C++ analogue of isolated
+    import: an unresolved `#include` is a hard error."""
     if bundle.extraction_level is ExtractionLevel.E3:
         report.add(
             "isolated compile",
@@ -366,10 +287,8 @@ def _check_isolated_compile(bundle: KernelBundle, report: BundleReport) -> None:
         report.add("isolated compile", False, "bundle has no primary source to compile")
         return
 
-    # A header is not a translation unit, but its closure is still a real question and
-    # the compiler can still answer it: wrap it in a minimal TU that includes it. This
-    # started as a skip, and the skip was worse than useless — it counted toward
-    # "verified", so ten bundles claimed to be standalone on a check that never ran.
+    # A header is not a translation unit, but its closure is still a real question:
+    # wrap it in a minimal TU that includes it rather than skipping.
     with tempfile.TemporaryDirectory() as tmp:
         if source.suffix in {".h", ".hpp"}:
             unit = Path(tmp) / f"{source.stem}_tu.cpp"
@@ -414,7 +333,7 @@ def _run_isolated_compile(argv: list[str] | None, note: str, report: BundleRepor
             f"version skew: the resolved source uses an identifier the installed "
             f"headers do not define ({detail}). The checked-out tree is not the "
             f"revision that built the binary which ran, so this bundle would optimize "
-            f"a different kernel than the one profiled (§12.10).",
+            f"a different kernel than the one profiled.",
         )
         return
     if kind == "closure":
@@ -428,13 +347,9 @@ def _run_isolated_compile(argv: list[str] | None, note: str, report: BundleRepor
 
 
 def _check_native_mutation(bundle: KernelBundle, report: BundleReport) -> None:
-    """Perturb the extracted C++ and confirm the compiler sees the perturbation.
-
-    Same purpose as the Python mutation check (§12.12 item 4): prove the build is
-    reading the bundle's copy of the source rather than the installed tree. `#error` is
-    the unambiguous probe — if the compile still succeeds, or fails for some other
-    reason, the file under test was not the file we edited.
-    """
+    """Perturb the extracted C++ with an injected `#error` and confirm the compiler
+    sees it, proving the build reads the bundle's copy rather than the installed
+    tree."""
     if bundle.extraction_level is ExtractionLevel.E3:
         report.add(
             "mutation check",
@@ -496,20 +411,9 @@ def _check_native_mutation(bundle: KernelBundle, report: BundleReport) -> None:
 
 
 def _check_instantiation(bundle: KernelBundle, report: BundleReport) -> None:
-    """The C++ answer to "is this the specialization that ran?" (§11.5 item 4).
-
-    The Triton version of this question asks about grid, warps, stages and constexprs.
-    None of those exist for a SYCL kernel, so asking them of one produced a blanket
-    "no launch record" failure on every native bundle — true, uninformative, and hiding
-    the fact that the answer was available all along.
-
-    It is available in the demangled name. `IndexFunctor<OpaqueType<8>>` and
-    `IndexFunctor<OpaqueType<4>>` are separate kernels in the same trace that share an
-    entry symbol; the template arguments are what tell them apart. A bundle that
-    records them can be rebuilt as the kernel that ran, and one that does not cannot —
-    which is the §12.10 failure of optimizing a different specialization, arrived at
-    through the type system rather than through autotuning.
-    """
+    """The C++ answer to "is this the specialization that ran?": the template
+    arguments from the demangled name, which distinguish kernels sharing an entry
+    symbol."""
     build = bundle.build
     entry = (build.entry_symbol if build else "") or bundle.entrypoint or ""
     recorded = (build.instantiation if build else "") or ""
@@ -573,7 +477,7 @@ def _check_launch_record(bundle: KernelBundle, report: BundleReport) -> None:
 
 
 def _check_data_dependencies(bundle: KernelBundle, report: BundleReport) -> None:
-    """Each declared data dependency must actually matter (§12.12 item 5)."""
+    """Each declared data dependency must be present in the bundle."""
     if not bundle.data_deps:
         report.add(
             "data-dependency check",
@@ -600,15 +504,8 @@ def _check_data_dependencies(bundle: KernelBundle, report: BundleReport) -> None
 
 
 def _check_mutation(bundle: KernelBundle, report: BundleReport) -> None:
-    """Perturb the extracted source and confirm the change is observable.
-
-    This is the check that catches a bundle silently executing the installed package.
-    We do it structurally rather than numerically: copy the bundle, inject a syntax
-    error into the extracted primary source, and confirm the isolated import now
-    *fails*. If it still imports cleanly, the import was never resolving to the
-    extracted file, and every number produced from that bundle would be a measurement
-    of something else.
-    """
+    """Perturb the extracted source and confirm the change is observable — the
+    check that catches a bundle silently executing the installed package."""
     if bundle.extraction_level is ExtractionLevel.E3:
         report.add(
             "mutation check",

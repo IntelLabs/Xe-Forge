@@ -1,27 +1,7 @@
 """
-Kernel catalog, gating and ranking (plan §18, §PR 4).
-
-Two jobs, in this order, and the order is the point:
-
-1. **Gate.** Ask whether the workload is GPU-bound *before* ranking any kernel. A
-   decode workload where launch overhead and scheduler work dominate does not need a
-   faster kernel, and spending an optimization budget there is the single easiest way
-   to waste a week. If no kernel's Amdahl ceiling clears the minimum detectable
-   effect, the correct answer is `NO_ACTION` with the arithmetic shown.
-
-2. **Rank.** Deterministically, with no LLM involved:
-
-       priority(k) = max_e2e_gain(k, s_est)
-                   * roofline_headroom(k)
-                   * action_availability(k)
-                   * provenance_confidence(k)
-                   * min(extraction_tractability(k), TRACTABILITY_CAP)
-
-Two guards against language bias (§11.10) are built in rather than left to judgement:
-the tractability term is capped so it breaks ties instead of overturning an
-order-of-magnitude difference in headroom, and every run emits a "considered but not
-attempted" list. If the top kernels by GPU time were all skipped, the headline number
-is not the story, and the report says so.
+Kernel catalog, gating and ranking: gate on whether the workload is GPU-bound first,
+then rank deterministically (Amdahl ceiling x roofline headroom x action availability
+x confidence x capped tractability). Design rationale: docs/DESIGN.md.
 """
 
 from __future__ import annotations
@@ -45,14 +25,8 @@ from xe_forge.orbit.profiling.trace import TraceEvents
 from xe_forge.orbit.provenance import resolvers
 
 # Bounds the tractability term so a cheap-to-extract kernel breaks ties but never
-# outranks a kernel with materially more headroom (§11.10, §18).
-#
-# The width of this band is the whole guard. Tractability spans at most CAP/FLOOR =
-# 1.43x, so it can reorder kernels whose Amdahl ceilings are within ~40% of each
-# other and nothing further. Widening it re-introduces exactly the bias the plan
-# warns about: a 40%-of-GPU-time SYCL or oneDNN kernel losing to a 5% Triton
-# elementwise kernel because the latter extracts cleanly, and the report calling that
-# optimization.
+# outranks a kernel with materially more headroom: the CAP/FLOOR band spans at most
+# 1.43x, so widening it would let extraction ease overturn real headroom.
 TRACTABILITY_CAP = 1.0
 TRACTABILITY_FLOOR = 0.7
 
@@ -98,11 +72,11 @@ def build_catalog(
     catalog records that the estimate is weaker — it cannot see time lost *between*
     launches, which is exactly the signal that identifies a host-bound workload.
 
-    `device_name` and `kernel_costs` feed the roofline term of the ranking (§18).
+    `device_name` and `kernel_costs` feed the roofline term of the ranking.
     `kernel_costs` maps a runtime kernel name to its measured per-call FLOP and byte
     counts; a `torch.profiler` trace carries neither, so the common case is that it is
-    absent and every kernel gets neutral headroom — recorded as unmeasured rather than
-    filled in with an estimate, which is precisely what §18 removed.
+    absent and every kernel gets neutral headroom, recorded as unmeasured rather than
+    filled in with an estimate.
     """
     aggregated: dict[str, dict] = {}
     for event in events.kernels:
@@ -179,10 +153,9 @@ def build_catalog(
             priority=0.0,
         )
 
-        # Roofline headroom (§18): measured achieved-vs-ceiling where FLOP and byte
-        # counts exist, neutral-and-flagged where they do not. >= 1.0 always, where 1.0
-        # means "already at the roof, no room" — see analysis/roofline.py for why the
-        # direction is that way round.
+        # Roofline headroom: measured achieved-vs-ceiling where FLOP and byte counts
+        # exist, neutral-and-flagged where they do not. >= 1.0 always; 1.0 means
+        # "already at the roof" (see analysis/roofline.py for the direction).
         headroom = headroom_estimate_for(record, device_name, (kernel_costs or {}).get(name))
         record.roofline_headroom = headroom.value
         record.priority = (
@@ -213,8 +186,7 @@ def build_catalog(
         estimated_busy=estimated_busy,
     )
 
-    # Regions are the other optimization unit (§7.3): the largest inference wins come
-    # from eliminating kernels, not speeding them up, and only a region can express a
+    # Regions are the other optimization unit: only a region can express a
     # many-to-one replacement.
     regions = (
         detect_regions(events, records, total_gpu_time_us=total_gpu_us) if with_regions else []
@@ -245,7 +217,7 @@ def _gate(
     minimum_detectable_effect: float,
     estimated_busy: bool,
 ) -> tuple[ActionType, str]:
-    """Decide whether kernel optimization is the right activity at all (§18)."""
+    """Decide whether kernel optimization is the right activity at all."""
     if not records:
         return (
             ActionType.PROFILE_MORE,
@@ -288,7 +260,7 @@ def _gate(
 
 
 def _skip_reason(record: KernelRecord, mde: float) -> str | None:
-    """Why this kernel will not be attempted, if it will not be (§11.10)."""
+    """Why this kernel will not be attempted, if it will not be."""
     if not _has_productive_action(record.actions_available):
         if ActionType.PROFILE_MORE in record.actions_available:
             return "no provenance; needs more profiling before any action"
@@ -353,7 +325,7 @@ def _rebuild_shapes(counts: dict[str, int]) -> list[ShapeObservation]:
 
 
 def format_catalog(catalog: KernelCatalog, limit: int = 20) -> str:
-    """Render the catalog as the table the CLI prints (§21)."""
+    """Render the catalog as the table the CLI prints."""
     lines = [
         f"{'ID':<5} {'GPU%':>6} {'Calls':>8}  {'Operator':<18} {'Provider':<12} "
         f"{'Extract':<8} {'Actions':<26} {'Conf':>5}",
@@ -377,9 +349,8 @@ def format_catalog(catalog: KernelCatalog, limit: int = 20) -> str:
     )
     lines.append(f"Gate: {catalog.gating_action.value} — {catalog.gating_reason}")
 
-    # Say whether the roofline term did any work. A reader who sees a ranking has no
-    # way to tell a measured headroom from a neutral one, and §18 replaced a fudge
-    # factor precisely so that difference stays visible.
+    # Say whether the roofline term did any work: a reader cannot otherwise tell a
+    # measured headroom from a neutral one.
     if catalog.kernels:
         measured = sum(1 for k in catalog.kernels if k.roofline_headroom != NEUTRAL_HEADROOM)
         if measured:
@@ -389,7 +360,7 @@ def format_catalog(catalog: KernelCatalog, limit: int = 20) -> str:
         else:
             lines.append(
                 "Roofline: headroom unmeasured for every kernel (the trace carries no FLOP "
-                "or byte counts); neutral 1.0 applied rather than an estimate (§18)."
+                "or byte counts); neutral 1.0 applied rather than an estimate."
             )
 
     if catalog.considered_but_not_attempted:

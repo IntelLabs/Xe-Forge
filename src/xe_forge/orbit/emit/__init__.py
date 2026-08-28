@@ -1,4 +1,4 @@
-"""Emission: the Model + spec contract Xe-Forge already consumes (plan §8)."""
+"""Emission: the Model + spec contract Xe-Forge already consumes."""
 
 from xe_forge.orbit.emit.spec import (
     build_spec,

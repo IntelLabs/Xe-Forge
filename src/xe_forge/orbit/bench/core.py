@@ -1,16 +1,7 @@
 """
-The measurement backbone (plan §5.4, §17).
-
-`orbit-bench` is a standalone component: it runs a workload, times it properly, and
-emits structured JSON. Everything downstream consumes that output rather than
-re-deriving a measurement of its own. It is deliberately usable on its own by someone
-who wants nothing else from Orbit.
-
-Two rules are enforced here rather than left to callers:
-
-* No point values. A measurement is samples plus an interval, always.
-* Comparisons interleave. Baseline and candidate alternate A,B,A,B so thermal drift
-  and clock drift hit both arms equally instead of confounding the result.
+The measurement backbone: runs a workload, times it properly, and emits structured
+JSON. Enforces two rules — no point values (samples plus an interval, always) and
+interleaved comparisons. Design rationale: docs/DESIGN.md.
 """
 
 from __future__ import annotations
@@ -40,8 +31,7 @@ class BenchResult:
     failures: list[str] = field(default_factory=list)
     warmup_discarded: int = 0
     # The last failed run, kept whole so a workload that never produced a sample can
-    # be *diagnosed* (§5.6's enablement rung 0) instead of merely reported dead —
-    # the failure strings above are for humans, this is for the classifier.
+    # be diagnosed by the enablement classifier instead of merely reported dead.
     last_failure: RunResult | None = None
 
     def add(self, result: RunResult, extracted: dict[str, float]) -> None:
@@ -107,10 +97,8 @@ class BenchRunner:
         raw = self.run(spec, repetitions=repetitions)
         if not raw.wall_times:
             detail = "; ".join(raw.failures) or "no successful runs"
-            # A workload that never ran is an *enablement* finding, not only a
-            # measurement failure: classify the capability gap and name the ladder
-            # rung that would address it (§5.6), so the error tells the operator
-            # what to do next rather than only what did not happen.
+            # A workload that never ran is an enablement finding: classify the
+            # capability gap so the error says what to do next.
             if raw.last_failure is not None:
                 from xe_forge.orbit.enablement import diagnose
 
@@ -123,7 +111,7 @@ class BenchRunner:
                     diagnosis = "\n".join(gap.format() for gap in gaps)
                     raise RuntimeError(
                         f"workload produced no usable samples: {detail}\n"
-                        f"enablement diagnosis (§5.6):\n{diagnosis}"
+                        f"enablement diagnosis:\n{diagnosis}"
                     )
             raise RuntimeError(f"workload produced no usable samples: {detail}")
 
@@ -154,18 +142,10 @@ class BenchRunner:
     ) -> tuple[list[float], list[float]]:
         """Interleave baseline and candidate runs, returning paired sample lists.
 
-        Never all-baselines-then-all-candidates: that confounds the comparison with
-        thermal drift (§17). Both arms are warmed up before the first pair so the first
-        sample is not a cold outlier for whichever arm happens to go first.
-
-        The ordering is ABBA rather than strict ABAB, and that detail is load-bearing.
-        Under strict alternation the baseline always runs first within each pair, so any
-        systematic first-position effect — scheduler placement, cache warmth, a
-        neighbouring process waking up — lands entirely on one arm and becomes a bias
-        that paired statistics will faithfully report as a significant difference.
-        Counterbalancing the order cancels both that position effect and linear drift,
-        which is what lets the null test (§10.7) mean something: a workload compared
-        against itself must come back INCONCLUSIVE, and with ABAB it sometimes will not.
+        Both arms are warmed up before the first pair. The ordering is ABBA rather
+        than strict ABAB: counterbalancing cancels first-position effects and linear
+        drift, which is what lets the null test come back INCONCLUSIVE on a workload
+        compared against itself.
         """
         for spec in (baseline, candidate):
             for _ in range(max(0, spec.warmup_iterations)):

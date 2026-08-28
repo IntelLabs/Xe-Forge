@@ -1,27 +1,6 @@
-"""
-Driving Xe-Fuse as a fusion executor (plan §13.4, §9.6).
-
-Xe-Fuse is a checkout, not a pip package: a kernel generator
-(`autotune/generate_kernel.py`), a header-only builder library, and sycl-tla headers,
-compiled per-shape with icpx and benchmarked by the binary it emits. This module is
-the seam that lets Orbit — and, through `FusionTask.executor`, an agent proposing a
-region action — run that flow programmatically: locate the checkouts, map the
-region's pattern to a preset, generate, compile, run, and parse the measurement.
-
-Measured on Wildcat Lake at the traced Qwen2.5-0.5B decode shapes (M=16, N=9728,
-K=896), the k2 preset (GEMM+RMSNorm+SwiGLU in one kernel) beat vLLM's unfused chain
-by +3.1% (95% CI [0.24%, 5.94%]) with numerics verified to 0.14% median relative
-error — and lost by ~25% at M=128, where oneDNN's GEMM efficiency dominates. A
-fusion result is therefore per-shape, never global (§14.3): the caller decides per
-regime, and §14.4's specialization set is the deployment shape.
-
-Three upstream findings from that session, encoded here as workarounds until fixed:
-the generated benchmark parses `--verify` and never uses it (a skipped check wearing
-a flag); `initialize_block` zero-fills float scale buffers, so any future
-output-vs-reference check would pass trivially on D == 0; and the tile
-auto-selector picks well at small M but poorly at M=128. Verification here is
-therefore the caller's job (the differential harness), not the binary's claim.
-"""
+"""Drives Xe-Fuse as a fusion executor: locate the checkouts, map a region's pattern
+to a preset, generate, compile, run, and parse the measurement. Timing only —
+correctness is the caller's differential check. Design rationale: docs/DESIGN.md."""
 
 from __future__ import annotations
 
@@ -32,11 +11,9 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# The generator's presets, keyed by the region patterns the detector emits (§13.4).
-# Knowledge-shaped on purpose: where a pattern maps is a fact about Xe-Fuse, and a
-# new preset should be one entry here, not a code change elsewhere.
+# The generator's presets, keyed by the region patterns the detector emits.
 PRESET_FOR_PATTERN = {
-    "gemm+activation": "k2",  # RMSNorm row-scale commutes through the GEMM (§13.4)
+    "gemm+activation": "k2",  # RMSNorm row-scale commutes through the GEMM
     "gemm+rmsnorm+swiglu": "k2",
     "gemm+rmsnorm": "k1",
     "gemm+geglu": "k2_geglu",
@@ -46,7 +23,7 @@ XE_FUSE_DIR_ENV = "ORBIT_XE_FUSE_DIR"
 SYCL_TLA_DIR_ENV = "SYCL_TLA_DIR"
 
 # The SPIR-V translator refuses sycl-tla's split barriers unless the extension is
-# named explicitly; found the hard way on the first compile (JIT spir64 path).
+# named explicitly.
 _SPIRV_EXT_FLAGS = ("-Xspirv-translator", "--spirv-ext=+SPV_INTEL_split_barrier")
 
 
@@ -68,7 +45,7 @@ _TFLOPS_RE = re.compile(r"\[([0-9.]+)\]TFlop/s")
 
 
 def _search_roots() -> list[Path]:
-    """The same roots the SYCL source registry searches (§11.2)."""
+    """The same roots the SYCL source registry searches."""
     from xe_forge.orbit.languages.sources import candidate_roots
 
     return candidate_roots()
@@ -77,11 +54,8 @@ def _search_roots() -> list[Path]:
 def find_xe_fuse() -> Path | None:
     """Locate an Xe-Fuse checkout: env override, else the source roots.
 
-    An explicit override is authoritative in both directions: when it names a valid
-    checkout it wins, and when it names something else the answer is None — falling
-    through to a search would turn "use exactly this" into "use whatever is lying
-    around", which is how a test or a pinned experiment silently picks up a
-    different tree than the one it declared.
+    The override is authoritative in both directions: an invalid override yields
+    None rather than falling through to a search.
     """
     override = os.environ.get(XE_FUSE_DIR_ENV)
     if override:
@@ -153,14 +127,10 @@ def run_preset(
 ) -> XeFuseResult:
     """Generate, compile and benchmark one Xe-Fuse preset at these shapes.
 
-    Every stage failure is a named error, never an exception: which stage failed
-    (generate, compile, run, parse) decides what the operator does next, and
-    collapsing them loses that (§12.12's rule about saying which failure it is).
-
-    The returned timing is the binary's own whole-kernel wall clock. Numerical
-    correctness is NOT established here — the binary's `--verify` flag is inert
-    upstream — so the caller must gate with its own check before believing any
-    comparison built on this number.
+    Every stage failure (generate, compile, run, parse) is a named error, never an
+    exception. The returned timing is the binary's own wall clock; correctness is
+    NOT established here — the binary's `--verify` flag is inert upstream — so the
+    caller must gate with its own check.
     """
     result = XeFuseResult(preset=preset, tile=tile, m=m, n=n, k=k)
 
@@ -234,11 +204,8 @@ def run_preset(
         str(binary),
         str(cpp),
     ]
-    # A compiler resolved from a oneAPI root needs that root's environment too:
-    # icpx-by-absolute-path finds the binary but not MKL's headers (CPATH), so the
-    # compile would succeed or fail depending on the *caller's* shell — measured
-    # live: the same sweep passed from a setvars'd shell and failed from a clean
-    # one with `oneapi/mkl/rng/device.hpp not found`. Source setvars ourselves.
+    # icpx-by-absolute-path finds the binary but not MKL's headers (CPATH), so
+    # source the owning setvars.sh rather than depending on the caller's shell.
     setvars = _setvars_for(compiler)
     if setvars is not None:
         quoted = " ".join(shlex.quote(part) for part in compile_cmd)
@@ -312,14 +279,12 @@ def run_region(task, shapes: tuple[int, int, int], output_dir: Path, **kwargs) -
 
 
 # ---------------------------------------------------------------------------
-# Automated tile autotuning (§11.7): the deterministic sweep before any agent
+# Automated tile autotuning: the deterministic sweep before any agent
 # ---------------------------------------------------------------------------
 
-# Measured on Wildcat Lake (k2, N=9728, K=896): the generator's auto pick lost at
-# every M >= 32, and the winning tile's M dimension tracked the problem M
-# (16→16x256x32, 32→32x256x32, 64→64x256x32, 128→128x256x32). Candidate tiles are
-# built from that pattern plus near neighbours, with the generator's own "auto" kept
-# in the field so an upstream fix shows up as auto winning again.
+# The winning tile's M dimension tracks the problem M; candidates are built from
+# that pattern plus near neighbours, with the generator's own "auto" kept in the
+# field so an upstream fix shows up as auto winning again.
 _TILE_NK_VARIANTS = ((256, 32), (512, 32), (256, 64), (128, 32))
 _MAX_TILE_M = 256
 
@@ -391,14 +356,8 @@ def autotune_preset(
     tiles: list[str] | None = None,
     **kwargs,
 ) -> XeFuseSweep:
-    """Sweep tile shapes for one preset and keep everything (§11.7).
-
-    Deterministic and exhaustive over its candidate list — no model in the loop,
-    because a tile choice has a measurable answer. A failed tile stays in the table
-    with its named stage failure rather than vanishing: silent truncation reads as
-    "covered everything" when it did not. The same caveat as `run_preset` applies to
-    every number here: timing only, correctness gated by the caller.
-    """
+    """Sweep tile shapes for one preset, keeping every result including named
+    failures. Timing only; correctness gated by the caller, as in `run_preset`."""
     sweep = XeFuseSweep(preset=preset, m=m, n=n, k=k)
     for tile in tiles if tiles is not None else candidate_tiles(m):
         sweep.results.append(run_preset(preset, m, n, k, output_dir, tile=tile, **kwargs))

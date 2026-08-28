@@ -1,29 +1,6 @@
-"""
-Asking Claude what to try, and letting it try (plan §13.7, §6).
-
-Two agent calls with different jobs, because they are different questions:
-
-* **PLAN** — one cheap call: given the kernel and everything Orbit measured about it,
-  list N *specific, bounded* transformations worth trying, ranked. Asking for a ranked
-  list rather than a rewrite is deliberate. A model asked to "make this faster" produces
-  one answer it is committed to; asked for candidates it produces a spread, and a spread
-  is what a search wants. It also costs one call instead of N.
-* **IMPLEMENT** — one Claude Code workspace per proposal, where the agent edits the
-  kernel and runs the correctness harness itself until its own check passes.
-
-The workspace matters for a reason that is easy to miss: without it, a syntax error or a
-wrong tensor shape costs a full Orbit round trip to discover and report back. With it,
-the agent sees its own traceback and fixes it before Orbit ever looks. That is the
-difference between an agent that can implement a change and one that can only suggest it.
-
-**And its result is never the verdict.** The workspace's own harness run is advisory —
-Orbit re-runs the check in a fresh process against the real tree, and believes only
-that. An agent grading its own homework is not a gate, however good the agent is.
-
-Xe-Forge already knows how to build such a workspace (`xe_forge.claude.generator`
-writes `CLAUDE.md`, a `/optimize-kernel` command and a tool-runner subagent), and it is
-importable without dspy or ai_bench. Reuse it rather than growing a second one.
-"""
+"""Claude-driven proposer: PLAN asks for a ranked list of bounded transformations;
+IMPLEMENT runs each proposal in its own workspace, whose harness run is advisory —
+Orbit re-runs the check itself. Design rationale: docs/DESIGN.md."""
 
 from __future__ import annotations
 
@@ -37,27 +14,18 @@ from pathlib import Path
 
 from xe_forge.orbit.optimize.loop import Proposal
 
-# A planning call reads one file and answers. Beyond this something is wrong with the
-# prompt, not with the model's speed.
+# A planning call reads one file and answers; beyond this the prompt is the problem.
 PLAN_TIMEOUT_S = 300.0
 
-# An implementation session edits, runs a harness, and iterates. It gets longer, but not
-# unbounded — an agent that has not converged in this time is not about to.
+# An implementation session edits, runs a harness, and iterates; longer but bounded.
 IMPLEMENT_TIMEOUT_S = 1800.0
 
 DEFAULT_PROPOSALS = 3
 
 
-# An implementation session must be allowed to edit files and run its harness, or it
-# cannot implement anything. In print mode a permission prompt has nobody to answer it
-# and auto-denies, which is not obvious from the outside: the first live run produced two
-# perfectly good proposals, opened two workspaces, and returned "no edit produced" for
-# both, because every Edit call was silently refused.
-#
-# The grant is bounded by construction rather than by trust. The session's cwd is a
-# throwaway directory holding a *copy* of one file plus the harness, and Orbit reads back
-# only `workspace/<filename>` and applies it through `InPlacePatcher`, which enforces the
-# sandbox root (§13.6). An agent that wrote somewhere else would not reach the loop.
+# In print mode a permission prompt auto-denies, so implementation sessions need
+# acceptEdits. The grant is bounded: the cwd is a throwaway copy, and only
+# `workspace/<filename>` is read back, applied through the sandboxed InPlacePatcher.
 IMPLEMENT_PERMISSION_MODE = "acceptEdits"
 
 
@@ -67,8 +35,7 @@ class ProposerConfig:
     plan_timeout_s: float = PLAN_TIMEOUT_S
     implement_timeout_s: float = IMPLEMENT_TIMEOUT_S
     extra_args: tuple[str, ...] = ()
-    # Set to "" to run implementation sessions read-only, which is useful for confirming
-    # that the loop refuses a proposal carrying no source.
+    # Set to "" to run implementation sessions read-only.
     permission_mode: str = IMPLEMENT_PERMISSION_MODE
 
 
@@ -92,10 +59,8 @@ class ClaudeProposer:
     ) -> list[Proposal]:
         """Ask for a ranked list of bounded transformations.
 
-        `knowledge` is Orbit's measured context (§9.5) — GPU share, Amdahl ceiling,
-        observed shapes, the instantiation that ran. Without it the model optimizes a
-        kernel in the abstract; with it, it knows a 0.2% ceiling means "propose something
-        cheap" rather than "propose an algorithm".
+        `knowledge` is Orbit's measured context — GPU share, Amdahl ceiling,
+        observed shapes, the instantiation that ran.
         """
         prompt = _plan_prompt(source, knowledge, count, kernel_label)
         output = self._run([self.config.binary, "-p", prompt], timeout=self.config.plan_timeout_s)
@@ -156,8 +121,7 @@ class ClaudeProposer:
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired):
-            # An unreachable or slow provider is a fact about the run, not a proposal.
-            # Returning empty lets the caller report "no candidates" honestly.
+            # Empty output lets the caller report "no candidates" honestly.
             return ""
         return result.stdout or ""
 
@@ -255,13 +219,8 @@ def _parse_proposals(text: str) -> list[Proposal]:
     if not text.strip():
         return []
 
-    # Ordered by how much we trust them: the whole response if it is already JSON, then
-    # a fenced block, then the first balanced array anywhere in the prose.
-    #
-    # A regex anchored on `[{` was the first attempt and it silently dropped a valid
-    # array that did not happen to open with an object. A parser that returns nothing on
-    # a formatting variation turns "the agent had three ideas" into "the agent had none",
-    # and the run then reports no candidates for a reason unrelated to the kernel.
+    # Ordered by trust: the whole response if it is already JSON, then a fenced
+    # block, then the first balanced array anywhere in the prose.
     candidates: list[str] = [text.strip()]
     candidates.extend(re.findall(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL))
     balanced = _first_balanced_array(text)
@@ -298,9 +257,7 @@ def _parse_proposals(text: str) -> list[Proposal]:
 def _first_balanced_array(text: str) -> str | None:
     """The first bracket-balanced JSON array in a blob of prose, if there is one.
 
-    Bracket counting rather than a regex, because a regex cannot balance nesting: a
-    proposal whose `parameters` contains a list would truncate at the inner `]`.
-    Strings are tracked so a bracket inside a rationale does not confuse the count.
+    Bracket counting with string tracking, because a regex cannot balance nesting.
     """
     start = text.find("[")
     while start != -1:

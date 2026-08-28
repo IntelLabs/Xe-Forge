@@ -1,25 +1,7 @@
 """
-Spec and Model emission (plan §8, §PR 9).
-
-Orbit hands work to Xe-Forge through the file contract Xe-Forge already consumes: a
-kernel `.py`, a YAML spec, and a `*_pytorch.py` reference. Nothing new is invented
-here — the point of §8 is that the contract exists, so extraction only has to fill a
-template whose shape is already defined.
-
-Two details of the real repository shape this:
-
-* The PyTorch reference **is** resolved by name substitution (`<stem>_pytorch.py`), so
-  emitting `kernel_pytorch.py` next to `kernel.py` is load-bearing, not decorative.
-* The spec is passed explicitly via `--spec`, so the filename is free; the in-tree
-  convention is a sibling `<KernelName>.yaml`. We emit `spec.yaml` and pass it
-  explicitly, which works with the loader as it stands today.
-
-The observed shape distribution maps onto Xe-Forge's existing variant mechanism, which
-already supports arbitrary `bench-gpu-N` families. The one addition the plan asks for
-is `weight:` on each variant (§9.1) — and because Xe-Forge's spec loader currently
-drops unknown keys silently, an emitted weight neither works nor errors until that
-lands. We emit it anyway, and say so in the file, so the spec is correct ahead of the
-loader rather than needing a second pass.
+Spec and Model emission: fills the file contract Xe-Forge already consumes — a kernel
+`.py`, a `spec.yaml` with weighted bench variants, and a `kernel_pytorch.py`
+reference resolved by name substitution. Design rationale: docs/DESIGN.md.
 """
 
 from __future__ import annotations
@@ -52,8 +34,7 @@ def weighted_variants(
 
     Weights are normalized over the variants actually emitted, so they sum to 1 even
     after the tail is dropped. The dropped mass is reported by `emit_spec` rather than
-    silently vanishing — a candidate tuned on 60% of the distribution while the report
-    implies 100% is the kind of quiet dishonesty §11.10 warns about.
+    silently vanishing.
     """
     if not shapes:
         return []
@@ -96,8 +77,7 @@ def build_spec(
     """Build the spec document for one kernel.
 
     Per-variant `rtol`/`atol` already exist in Xe-Forge's `VariantSpec` and are
-    resolved spec-over-config, so tightened tolerances (§9.3) work today — Orbit only
-    has to emit them.
+    resolved spec-over-config, so Orbit only has to emit the tightened tolerances.
     """
     variants = weighted_variants(kernel.shapes)
     spec: dict[str, Any] = {}
@@ -124,9 +104,8 @@ def build_spec(
         entry: dict[str, Any] = {
             "params": params,
             "dims": variant["dims"],
-            # `weight:` is the §9.1 addition: the observed share of this shape in the
-            # trace. Xe-Forge's spec loader parses it, and `--objective weighted`
-            # scores a candidate across the whole family with it.
+            # `weight:` is the observed share of this shape in the trace;
+            # `--objective weighted` scores a candidate across the family with it.
             "weight": variant["weight"],
             "rtol": rtol,
             "atol": atol,
@@ -163,7 +142,7 @@ def emit_spec(
         f"# Shape coverage: {covered * 100:.1f}% of observed calls across "
         f"{len(variants)} variant(s).\n"
         "#\n"
-        "# 'weight:' expresses the observed shape distribution (plan §9.1). Run with\n"
+        "# 'weight:' expresses the observed shape distribution. Run with\n"
         "# --objective weighted to score a candidate across the whole family, with a\n"
         "# hard no-regression constraint on every variant; --variant still selects a\n"
         "# single configuration.\n"
@@ -188,7 +167,7 @@ def emit_candidate(
     output_dir: Path,
     tolerance: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
-    """Write the full candidate directory Xe-Forge consumes (§8).
+    """Write the full candidate directory Xe-Forge consumes.
 
     candidates/<kernel-id>/
         kernel.py            extracted kernel (or in-situ harness) + Model wrapper
@@ -231,7 +210,7 @@ sit beside `kernel.py` as `kernel_pytorch.py`.
 This is a stub: the eager-mode equivalent of the op has to be supplied before the
 correctness gate means anything. Orbit deliberately does not guess it — a plausible
 but wrong reference produces a candidate that passes correctness and is wrong in the
-model, which is the failure the whole correctness ladder exists to prevent (§19).
+model.
 """
 
 import torch

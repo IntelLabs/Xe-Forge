@@ -1,21 +1,7 @@
 """
-The framework adapter protocol (plan §10).
-
-vLLM is the first target, not a special one. The way that fails is subtle: vLLM gets
-built first, its assumptions leak into the analyzer, the measurement layer and the
-patch logic, and the second framework needs a core rewrite. Two rules prevent it:
-
-* **The core imports no framework.** Nothing in `orbit/models`, `orbit/analysis`,
-  `orbit/extract` or `orbit/patch` may import vllm, sglang or any serving package.
-  Enforced by a test that scans imports, not by convention (`test_core_purity`).
-* **Every framework is reached through this protocol**, one adapter each, and every
-  adapter passes the same conformance suite. Adding a framework is then a bounded,
-  testable unit of work rather than a negotiation with the core.
-
-Capabilities are *declared*, never assumed (§10.4). If an adapter cannot report TTFT,
-the analysis falls back to throughput or wall-clock and says so in the report. It
-never substitutes one metric for another silently, and where a capability is missing
-the affected actions are removed from the space rather than attempted and failed.
+The framework adapter protocol: one adapter per framework, capabilities declared
+rather than assumed, and the core imports no framework (enforced by test).
+Design rationale: docs/DESIGN.md.
 """
 
 from __future__ import annotations

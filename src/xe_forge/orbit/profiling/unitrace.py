@@ -1,14 +1,7 @@
 """
-Level Zero timing via unitrace (plan §18, moved early to PR 3 on purpose).
-
-Launch-gap and GPU-busy data decide whether the whole pipeline should run at all: a
-decode workload that is host-bound does not need a kernel optimizer, it needs the host
-path fixed. That verdict has to be available before ranking, not after.
-
-unitrace is an external Intel tool and is frequently absent. Every function here
-degrades explicitly — `available()` is false, the caller records that GPU-busy could
-not be measured, and the gating logic falls back to trace-derived estimates while
-saying so. It never guesses a number.
+Level Zero timing via unitrace: launch-gap and GPU-busy data for host-bound gating,
+plus the compiled-kernel properties table. unitrace is an external Intel tool that is
+frequently absent; every function here degrades explicitly and never guesses a number.
 """
 
 from __future__ import annotations
@@ -23,16 +16,9 @@ from xe_forge.orbit.executor import Executor, LocalExecutor
 
 UNITRACE_BIN = "unitrace"
 
-# unitrace is not packaged by any distro this project targets; it is built from Intel's
-# pti-gpu tree, which lands the launcher and its LD_PRELOAD tool library side by side in
-# the build directory. It therefore lives wherever the person
-# who built it put the checkout, and almost never on PATH. Searching only `/opt` and
-# PATH reported "unitrace unavailable" on a machine that had a working binary sitting in
-# `~/.cache/orbit-dev/pti-gpu/tools/unitrace/build` — and the pipeline then fell back to
-# estimating GPU busy from the trace span, which on this hardware read 81% where the
-# counter measured 7.25%. A resolver that cannot find an installed tool does not degrade
-# gracefully here; it silently swaps a measurement for an inference an order of magnitude
-# out (§18).
+# unitrace is not packaged by any distro this project targets; it is built from
+# Intel's pti-gpu tree and lives wherever the builder put the checkout, almost never
+# on PATH — hence the source-build search directories below.
 UNITRACE_SEARCH_ENV = "ORBIT_UNITRACE"
 _PTI_RELATIVE = "pti-gpu/tools/unitrace/build"
 UNITRACE_SEARCH_DIRS = (
@@ -48,15 +34,8 @@ UNITRACE_SEARCH_DIRS = (
 # that looks like a workload with no device activity.
 UNITRACE_TOOL_LIB = "libunitrace_tool.so"
 
-# Real unitrace output puts the unit in the label and the value after the colon:
-#
-#     Total Execution Time (ns):            988791682
-#     Total Device Time for L0 backend (ns):    71719869
-#
-# The first version of these patterns assumed "<value> <unit>" and silently matched
-# nothing on real output — parse_summary returned (None, None) and the caller fell back
-# to trace-span estimation while believing unitrace had been consulted. Patterns written
-# against imagined output are worse than no parser, because they fail quietly.
+# Real unitrace output puts the unit in the label and the value after the colon,
+# e.g. "Total Device Time for L0 backend (ns):    71719869".
 _TOTAL_TIME_RE = re.compile(r"Total\s+Execution\s+Time\s*\((ns|us|ms|s)\)\s*:\s*([\d.]+)", re.I)
 _DEVICE_TIME_RE = re.compile(
     r"Total\s+Device\s+Time(?:\s+for\s+\S+\s+backend)?\s*\((ns|us|ms|s)\)\s*:\s*([\d.]+)",
@@ -64,10 +43,9 @@ _DEVICE_TIME_RE = re.compile(
 )
 _UNIT_TO_US = {"ns": 1e-3, "us": 1.0, "ms": 1e3, "s": 1e6}
 
-# The "Kernel Properties" table carries exactly the compiled-kernel metadata §11.4 and
-# §12.10 require to verify an extracted bundle is the kernel that ran: whether it was
-# AOT-compiled or JIT'd from SPIR-V, its sub-group (SIMD) width, register-file size —
-# the GRF mode §11.7 sweeps — and any spill memory.
+# The "Kernel Properties" table carries the compiled-kernel metadata needed to verify
+# an extracted bundle is the kernel that ran: AOT vs JIT, sub-group (SIMD) width,
+# GRF mode, and spill memory.
 _KERNEL_PROPS_RE = re.compile(
     r'^\s*"(?P<name>[^"]+)",\s*(?P<compiled>AOT|JIT),\s*(?P<simd>\d+),'
     r"\s*(?P<args>\d+),\s*(?P<slm>\d+),\s*(?P<private>\d+),"
@@ -77,7 +55,7 @@ _KERNEL_PROPS_RE = re.compile(
 
 
 class KernelProperties(BaseModel):
-    """Per-kernel compiled metadata, as Level Zero actually reports it (§11.4)."""
+    """Per-kernel compiled metadata, as Level Zero actually reports it."""
 
     name: str
     compiled: str = ""  # AOT or JIT — these do not perform or rebuild alike
@@ -86,7 +64,7 @@ class KernelProperties(BaseModel):
     slm_per_group: int = 0
     private_per_thread: int = 0
     spill_per_thread: int = 0  # non-zero spills are a first-order concern on Xe
-    grf_per_thread: int = 0  # register file size: the GRF mode axis in §11.7
+    grf_per_thread: int = 0  # register file size (the GRF mode axis)
 
 
 class UnitraceResult(BaseModel):
@@ -137,15 +115,10 @@ def resolve_binary(binary: str = UNITRACE_BIN) -> str | None:
 def tracing_env(binary_path: str, base_env: dict[str, str] | None = None) -> dict[str, str]:
     """Environment for running a workload under unitrace.
 
-    Two rules, both learned the hard way on a working machine:
-
-    * The tool library's directory must be on `LD_LIBRARY_PATH`, or the LD_PRELOAD
-      silently fails and unitrace reports a run with no device activity.
-    * oneAPI's compiler libraries must **not** be prepended. Sourcing `setvars.sh`
-      before a torch-xpu workload shadows torch's own bundled runtime and
-      `torch.xpu.is_available()` flips to False with no error — the profiler would then
-      faithfully measure a workload it had just forced onto the CPU, and report an
-      honest-looking host-bound verdict about a run it broke itself.
+    The tool library's directory must be on `LD_LIBRARY_PATH`, or the LD_PRELOAD
+    silently fails and unitrace reports a run with no device activity. oneAPI's
+    compiler libraries must NOT be prepended: sourcing `setvars.sh` shadows torch's
+    bundled runtime and silently forces a torch-xpu workload onto the CPU.
     """
     env = dict(base_env or {})
     tool_dir = str(Path(binary_path).parent)
@@ -184,9 +157,8 @@ def parse_summary(text: str) -> tuple[float | None, float | None]:
 def parse_kernel_properties(text: str) -> list[KernelProperties]:
     """Parse the Kernel Properties table into the metadata extraction verifies against.
 
-    This is the SYCL counterpart to Triton's compiled-kernel metadata (§11.4): a bundle
-    that AOT-builds a kernel the workload JIT'd, or that lands on a different GRF mode
-    or sub-group width, is not the same kernel however well it benchmarks.
+    A bundle that AOT-builds a kernel the workload JIT'd, or that lands on a different
+    GRF mode or sub-group width, is not the same kernel however well it benchmarks.
     """
     found: list[KernelProperties] = []
     for m in _KERNEL_PROPS_RE.finditer(text):

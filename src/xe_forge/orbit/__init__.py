@@ -1,21 +1,8 @@
 """
 Xe-Orbit — workload-level performance optimization inside Xe-Forge.
 
-Orbit is the **control plane**. It decides *what to work on* and *whether it worked*.
-It never contains kernel transformation logic: kernel rewrites go to Xe-Forge, region
-fusion goes to Xe-Fuse, and everything deterministic (config sweeps, backend swaps,
-dependency closure, ranking arithmetic) is executed here without an LLM.
-
-The pipeline, in the order the plan builds it:
-
-    run      -> environment, versions, device, timing with repetitions
-    trace    -> torch.profiler ingestion, unitrace, launch-site interception
-    kernels  -> catalog with GPU-busy, launch gaps, MDE, Amdahl ceilings, ranking
-    capture  -> real input tensors with strides and data dependencies preserved
-
-Everything imports lazily: `import xe_forge.orbit` costs nothing and requires neither
-torch nor a GPU, which is what lets the analysis stages run in CPU-only CI from stored
-artifacts (§16.3).
+Everything imports lazily so `import xe_forge.orbit` needs neither torch nor a GPU.
+Design rationale: docs/DESIGN.md
 """
 
 from __future__ import annotations

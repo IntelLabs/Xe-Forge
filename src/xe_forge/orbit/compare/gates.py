@@ -1,26 +1,7 @@
 """
-The correctness ladder and acceptance decision (plan §17, §19, §14.3).
-
-v1's "L3 — framework/model correctness" was unenforceable as written. Here the ladder
-is concrete, ordered, and short-circuiting: a candidate that fails a gate never reaches
-the next one, which is what stops a numerically wrong kernel from ever being timed.
-
-    L0   build / import / registration succeeds
-    L0b  extraction verification passes (right kernel, right specialization)
-    L1   kernel correctness vs the captured reference, tightened tolerance
-    L2   weighted kernel latency improves, no variant regresses
-    L3   model-level numerical gate (greedy decode, token-exact or bounded logit drift)
-    L4   end-to-end performance, with a confidence interval
-    L5   re-profile: the kernel actually changed in the trace
-
-L0b and L5 are not optional. L0b catches optimizing the wrong specialization — a real
-speedup on a variant the workload never executes. L5 catches an apparent end-to-end
-gain that came from something other than the change.
-
-Acceptance across a serving matrix (§14.3) is deliberately strict: a weighted win is
-not enough on its own. A candidate that wins decode by 20% and loses prefill by 8% is
-not an improvement, it is a trade, and it must be surfaced as one per profile rather
-than averaged into a single number that hides it.
+The L0-L5 correctness ladder (ordered, short-circuiting: a failed gate blocks the
+rest) and matrix acceptance (a weighted win with no per-profile regression).
+Design rationale: docs/DESIGN.md.
 """
 
 from __future__ import annotations
@@ -205,7 +186,7 @@ def run_ladder(
 
 
 # ---------------------------------------------------------------------------
-# Matrix acceptance (§14.3)
+# Matrix acceptance
 # ---------------------------------------------------------------------------
 
 
@@ -222,7 +203,7 @@ class ProfileOutcome:
 
 @dataclass
 class MatrixDecision:
-    """Per-profile results plus the overall verdict. Never a single number (§14.3)."""
+    """Per-profile results plus the overall verdict. Never a single number."""
 
     decision: Decision
     weighted_improvement: float
@@ -260,15 +241,11 @@ def decide_matrix(
     regression_threshold_percent: float = 2.0,
     min_repetitions: int = 5,
 ) -> MatrixDecision:
-    """Accept only on a weighted win with no per-profile regression (§14.3).
+    """Accept only on a weighted win with no per-profile regression.
 
-    `samples` maps profile id -> (baseline samples, candidate samples).
-
-    A profile that regresses beyond `regression_threshold_percent` rejects the whole
-    candidate even when the weighted average is positive. That is deliberate: the
-    weighted number is what you report, but the per-profile table is what makes the
-    trade visible, and a trade presented as an improvement is the failure mode this
-    section exists to prevent.
+    `samples` maps profile id -> (baseline samples, candidate samples). A profile that
+    regresses beyond `regression_threshold_percent` rejects the whole candidate even
+    when the weighted average is positive: a trade must be surfaced as a trade.
     """
     weights = matrix.normalized_weights()
     outcomes: list[ProfileOutcome] = []

@@ -1,37 +1,7 @@
 """
-Framework-native measurement (plan §5.4, §10.3, §17).
-
-Xe-Forge times kernels through `ai_bench`, and that is correct for a *standalone
-extracted* kernel: a bundle has no framework to ask. The in-place path (§13.6) never
-extracts, so the thing under test is reachable through the framework's own entry
-points — and the framework already ships a benchmark for it, written by the people who
-know what its performance means.
-
-Using it instead of a bespoke timer is not a convenience. A hand-rolled harness measures
-something adjacent to the workload: it picks its own warmup, its own batching, its own
-definition of a token, and any of those can drift from what the framework does in
-production. When the number is going to be compared against a published figure, or
-against what the user sees, the framework's own harness is the only one that is
-measuring the same thing.
-
-AMD's Hyperloom takes the same position — its `integrate` step re-runs the framework's
-own `bench_serving` / `benchmark_serving.py` rather than a harness of its own, and its
-FLOP figures come from analytic per-architecture models, never from a bolted-on counter.
-
-Three layers, all native:
-
-* **Workload throughput** — the framework's declared benchmark (`vllm bench throughput`,
-  SGLang's `bench_offline_throughput`). Resolved per framework, because which harness is
-  authoritative is knowledge about that framework (§10.6), not a constant.
-* **Kernel timing** — `torch.utils.benchmark.Timer`, PyTorch's equivalent of Triton's
-  `do_bench`. It handles warmup, replicates and device synchronisation, and returns a
-  distribution rather than one scalar — which is what §17 needs and what a naive
-  `time.perf_counter()` around a launch cannot give.
-* **FLOPs** — `torch.utils.flop_counter.FlopCounterMode`, which counts through the
-  dispatcher and so sees what actually ran, including whatever the backend substituted.
-
-Nothing here imports torch at module scope: Orbit's analysis path runs in CPU-only CI
-without it (§15.3).
+Framework-native measurement: workload throughput via the framework's own benchmark,
+kernel timing via `torch.utils.benchmark.Timer`, FLOPs via `FlopCounterMode`. Torch is
+never imported at module scope. Design rationale: docs/DESIGN.md.
 """
 
 from __future__ import annotations
@@ -39,10 +9,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-# Each framework's own benchmark, as a command. The framework knows what its performance
-# means; we do not get to redefine it. Overridden from the adapter/knowledge file where
-# one is declared (§10.3) — this table is the fallback for a framework we have not been
-# told about.
+# Each framework's own benchmark, as a command. Overridden from the adapter/knowledge
+# file where one is declared; this table is the fallback.
 NATIVE_WORKLOAD_HARNESS: dict[str, list[str]] = {
     "vllm": ["vllm", "bench", "throughput"],
     "sglang": ["python", "-m", "sglang.bench_offline_throughput"],
@@ -70,7 +38,7 @@ class KernelTiming:
 
     @property
     def usable(self) -> bool:
-        """Whether there are enough samples for §17 to say anything."""
+        """Whether there are enough samples for a decision to be made."""
         return len(self.samples_us) >= MIN_REPLICATES
 
     def format(self) -> str:
@@ -88,27 +56,16 @@ def time_kernel(
     min_run_time: float = 0.2,
     replicates: int = MIN_REPLICATES,
     # 100 minimum on Intel hardware: the first many launches carry SPIR-V JIT,
-    # autotune selection, memory-pool growth and clock ramp, not the kernel — a
-    # 29% first-position effect was measured on this stack (§17.5), and 3 warmup
-    # passes measured the transient. Matches the core executor's 200 default.
+    # autotune selection, memory-pool growth and clock ramp, not the kernel.
     warmup: int = 100,
 ) -> KernelTiming:
     """Time a callable with PyTorch's own benchmark harness, as a distribution.
 
-    `Timer` is used rather than a loop around `perf_counter` because it synchronises the
-    device and sizes its inner loop to the measured cost; a hand-rolled loop on a GPU
-    usually times the launch rather than the kernel, and does so without saying it did.
-
-    Two details `blocked_autorange` alone gets wrong for §17's purposes:
-
-    * It returns one entry per *block*, and when `min_run_time` is satisfied by a single
-      block that is one sample. A single sample has no dispersion, so no interval can be
-      computed from it — the first version of this function silently produced exactly
-      that. Calling it `replicates` times and taking each block's median gives genuinely
-      independent samples.
-    * It does not warm up. On a JIT backend the first call compiles, and that cost lands
-      in the first sample: one measurement here came back at 220 ms for a 512x512 matmul.
-      The explicit warmup runs are discarded before anything is recorded.
+    `Timer` is used rather than a loop around `perf_counter` because it synchronises
+    the device and sizes its inner loop to the measured cost. `blocked_autorange` is
+    called `replicates` times because one call can return a single sample (no
+    dispersion, no interval), and it does not warm up — the explicit warmup runs are
+    discarded before anything is recorded.
     """
     from torch.utils.benchmark import Timer
 
@@ -179,11 +136,9 @@ def count_flops(fn: Callable[[], object]) -> FlopResult:
 def native_harness_for(framework: str, declared: list[str] | None = None) -> list[str] | None:
     """The framework's own benchmark command.
 
-    `declared` comes from the adapter or its knowledge file and wins, so adding a
-    framework's harness is a YAML change rather than an edit here (§10.6). Returning
-    None means we have not been told what this framework's benchmark is — which is
-    reported as a gap rather than papered over with a generic timer that would measure
-    something else.
+    `declared` comes from the adapter or its knowledge file and wins. Returning None
+    means we have not been told what this framework's benchmark is, which is reported
+    as a gap rather than papered over with a generic timer.
     """
     if declared:
         return list(declared)

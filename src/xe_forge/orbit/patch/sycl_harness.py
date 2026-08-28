@@ -1,32 +1,7 @@
-"""
-Spec-driven bench harness for a dispatcher-registered SYCL op (plan §9.7, §11.9).
-
-§9.7 has two halves. The override half exists: `sycl_override.py` builds the
-out-of-tree extension that shadows an existing op on the XPU key. The half this module
-closes is the harness — v10's status line reads *"the spec-driven bench harness for a
-dispatcher-registered SYCL op, correctness and weighted benchmarking through the same
-YAML contract, still does not exist."* Without it an optimized SYCL op can be
-installed but not judged: it never passes through the correctness gate or the weighted
-objective, because those gates consume a `kernel.py` with a `Model`, and a dispatcher
-op has neither.
-
-So this module renders exactly that: a `kernel.py` whose module-level `Model` drives
-`torch.ops.<namespace>.<name>` through the dispatcher — the same call path the
-framework takes — and writes it into the candidate-directory layout
-`optimize_kernel_dir` resolves. That is what lets a dispatcher-registered SYCL op be
-driven through `optimize_kernel_dir` like any Python kernel, which was the point of
-treating language as a dimension rather than a special case (§11.3).
-
-Two constraints shape the generated file:
-
-* **It is self-contained** — torch and stdlib only. A candidate directory travels to
-  machines that have torch but not this repository, so the harness cannot import
-  xe_forge.
-* **An unreachable op fails at construction**, naming the op and every load attempt.
-  The lazy alternative — resolving the op at first `forward` — runs cleanly through
-  `Model()` and then surfaces as a bare `AttributeError` inside a measurement loop,
-  which answers the wrong question in the wrong place.
-"""
+"""Spec-driven bench harness for a dispatcher-registered SYCL op: renders a
+self-contained `kernel.py` whose `Model` drives `torch.ops.<namespace>.<name>` through
+the dispatcher, in the candidate-directory layout `optimize_kernel_dir` resolves.
+Design rationale: docs/DESIGN.md."""
 
 from __future__ import annotations
 
@@ -34,15 +9,13 @@ import keyword
 from collections.abc import Sequence
 from pathlib import Path
 
-# The candidate-directory layout `orbit/optimize/kernel_dir.py` resolves. Restated
-# here rather than imported so patch/ does not grow a dependency on the optimizer
-# package; the names are contract on both sides and pinned by both test suites.
+# The layout `orbit/optimize/kernel_dir.py` resolves; restated rather than imported
+# so patch/ does not depend on the optimizer package.
 KERNEL_FILE = "kernel.py"
 REFERENCE_FILE = "kernel_pytorch.py"
 SPEC_FILE = "spec.yaml"
 
-# Only values whose repr round-trips as a literal may be baked into the generated
-# harness; anything richer would make the file depend on the generating process.
+# Only values whose repr round-trips as a literal may be baked into the harness.
 _LITERAL_TYPES = (bool, int, float, str, bytes, type(None))
 
 
@@ -93,22 +66,14 @@ def render_dispatcher_model(
 ) -> str:
     """Render the `kernel.py` whose `Model` drives a dispatcher-registered op.
 
-    `op` is "namespace::name" as the dispatcher knows it (a bare name defaults to
-    `aten`, matching `render_override_source`). Registration is a side effect of
-    loading, so the harness is told how the op becomes reachable: `loader_module` is
-    imported, or `library_path` is handed to `torch.ops.load_library` — the two forms
-    `sycl_override.generate` produces. With neither, the surrounding process must
-    already have registered the op.
-
-    `arg_names`, when given, become `forward`'s named parameters so the signature
-    mirrors the spec's `params`; otherwise `forward` takes `*tensors`. `fixed_args`
-    are trailing non-tensor arguments (an epsilon, a flag) baked in at generation
-    time, because the spec's `inputs` section describes tensors and scalars cannot
-    arrive through it.
-
-    Construction resolves the op eagerly and raises a specific error naming the op
-    and every load attempt if it is unreachable — never an `AttributeError` at first
-    `forward`, which would put a configuration failure inside a measurement loop.
+    `op` is "namespace::name" (a bare name defaults to `aten`, matching
+    `render_override_source`). `loader_module` is imported, or `library_path` is
+    handed to `torch.ops.load_library`, to make the op reachable; with neither, the
+    surrounding process must already have registered it. `arg_names`, when given,
+    become `forward`'s named parameters; otherwise `forward` takes `*tensors`.
+    `fixed_args` are trailing non-tensor literals baked in at generation time.
+    `Model()` resolves the op eagerly and raises, naming every load attempt, if it
+    is unreachable.
     """
     namespace, name = _split_op(op)
     qualified = f"{namespace}::{name}"
@@ -126,17 +91,11 @@ def render_dispatcher_model(
         )
 
     return f'''"""
-Bench harness for the dispatcher-registered op {qualified} (plan §9.7, §11.9).
+Bench harness for the dispatcher-registered op {qualified}.
 
-Generated by xe-orbit. This is the harness half of the SYCL kernel contract: `Model`
-calls `torch.ops.{namespace}.{name}` through the dispatcher — the same call path the
-framework takes — so the spec's correctness and weighted benchmarking gates apply to
-a dispatcher-registered op exactly as they do to a Python kernel. The override half,
-building the shadowing extension, is `orbit/patch/sycl_override.py`.
-
-An unreachable op fails at construction, naming the op and every load attempt. It
-does not fail at first `forward`: that would surface as a bare AttributeError inside
-a measurement loop, blaming the measurement for a configuration problem.
+Generated by xe-orbit. `Model` calls `torch.ops.{namespace}.{name}` through the
+dispatcher — the same call path the framework takes. An unreachable op fails at
+construction, naming the op and every load attempt.
 """
 
 import importlib
@@ -146,23 +105,16 @@ import torch
 NAMESPACE = {namespace!r}
 OP_NAME = {name!r}
 
-# How the op becomes reachable. A dispatcher op exists only after the module or
-# shared object that registers it has been loaded into this process, so loading is
-# not setup — it is the registration itself.
+# How the op becomes reachable: loading is the registration itself.
 LOADER_MODULE = {loader_module!r}
 LIBRARY_PATH = {library_path!r}
 
-# Trailing non-tensor arguments, baked in at generation time: the spec's `inputs`
-# section describes tensors, so scalars like an epsilon cannot arrive through it.
+# Trailing non-tensor arguments, baked in at generation time.
 FIXED_ARGS = {fixed!r}
 
 
 def _resolve_op():
-    """Make the op reachable, then return its overload packet — or say exactly why not.
-
-    Every attempt is recorded, success and failure alike, because "op not registered"
-    is only actionable when the error also says what was already tried.
-    """
+    """Make the op reachable, then return its overload packet — or say exactly why not."""
     attempts = []
     if LOADER_MODULE is not None:
         try:
@@ -193,12 +145,8 @@ def _resolve_op():
 
 
 class Model(torch.nn.Module):
-    """Launches {qualified} through the dispatcher.
-
-    Xe-Forge resolves `Model` by duck typing — a module-level attribute, constructed
-    no-arg — so nothing here imports beyond torch and the standard library, and the
-    file stays valid on machines that have torch but not xe-orbit.
-    """
+    """Launches {qualified} through the dispatcher. Self-contained: torch and
+    stdlib only, so the file stays valid on machines without xe-orbit."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -210,9 +158,7 @@ class Model(torch.nn.Module):
 def _reference_is_a_stub(source: str) -> bool:
     """A stub raises rather than computing; treating it as real is a trap.
 
-    Mirrors `kernel_dir._reference_is_a_stub` on source text instead of a path —
-    deliberately restated rather than imported, for the same reason the layout
-    constants are: patch/ must not depend on the optimizer package.
+    Restated from `kernel_dir` so patch/ does not depend on the optimizer package.
     """
     return "NotImplementedError" in source
 
@@ -228,21 +174,16 @@ def emit_dispatcher_candidate(
     arg_names: list[str] | None = None,
     fixed_args: Sequence[object] | None = None,
 ) -> dict[str, object]:
-    """Write the candidate directory `optimize_kernel_dir` resolves (plan §8, §9.7).
+    """Write the candidate directory `optimize_kernel_dir` resolves.
 
     candidates/<op>/
         kernel.py            the dispatcher harness — always written
         kernel_pytorch.py    eager reference — only when the caller supplies one
         spec.yaml            inputs and weighted bench variants — only when supplied
 
-    Nothing is fabricated for a missing piece. A guessed reference would pass a
-    meaningless correctness gate and be wrong in the model — the exact failure the
-    correctness ladder exists to prevent (§19) — so a missing reference or spec is
-    written into the summary's notes instead of papered over, and `resolve_candidate`
-    downstream keeps its honest refusals.
-
-    Returns a summary with the written paths (`None` for pieces not written) and the
-    notes explaining what a caller still owes the candidate.
+    Nothing is fabricated for a missing piece; a missing reference or spec is
+    recorded in the summary's notes instead. Returns a summary with the written
+    paths (`None` for pieces not written) and those notes.
     """
     target = Path(target_dir)
     target.mkdir(parents=True, exist_ok=True)

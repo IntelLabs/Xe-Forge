@@ -1,40 +1,9 @@
 """
-GPU hardware counters via VTune (plan §5.2, §9.5, §18).
-
-unitrace answers what a kernel *is*: AOT or JIT, its compiled SIMD width, its GRF mode,
-whether it spills. VTune answers what the device *did with it* — occupancy, and, more
-usefully, **which limit is binding**. Those are different questions and the second is the
-one an optimizer keeps guessing at.
-
-Measured on this machine, for the oneDNN GEMM that owns 93% of a Qwen decode:
-
-    Peak XVE Threads Occupancy        40.0%
-      limited by Work Size            40.0%    <- binding
-      limited by SLM Use             100.0%    (not limiting)
-      limited by Barriers            100.0%    (not limiting)
-
-"Occupancy is 40%" invites a guess. "Occupancy is 40% and the limiter is work size, not
-SLM and not barriers" names the lever. An agent given the first proposed larger blocks and
-more warps and measured 2x slower twice; the second forecloses both.
-
-Three setup facts, because each cost real time and none is discoverable from the error:
-
-* VTune cannot collect GPU hardware metrics without Intel's **Metrics Discovery** library
-  (`libigdmd.so`), which is not packaged on most distributions and is built from
-  `github.com/intel/metrics-discovery` (~100 s). Without it the collection aborts and
-  produces no result directory at all — not a partial one.
-* `/usr/lib/libmd.so` exists on many systems and is **not** it. That is BSD's
-  message-digest library; the name collision is a coincidence and following it wastes time.
-* **`-no-follow-child` is required for anything that imports a serving framework.** By
-  default VTune follows child processes, and importing vLLM spawns helpers (`ldconfig`
-  among them). Under the usual `ptrace_scope=1` it cannot attach to those, and the whole
-  collection fails with *"the scope of ptrace system call application is limited"* — an
-  error that points at a kernel setting needing root, when the actual fix is a flag. A
-  pure-torch script profiles fine and a vLLM one does not, which makes the cause look
-  like the framework rather than the follow-child default.
-
-Absence is reported, never guessed around: no VTune, or no Metrics Discovery, means the
-occupancy limiter is unknown, and the caller says so rather than inferring one.
+GPU hardware counters via VTune: per-kernel occupancy and which limit binds it.
+Requires Intel's Metrics Discovery library, libigdmd.so (/usr/lib/libmd.so is BSD's
+message-digest library, not it). Collection runs with -no-follow-child: framework
+imports spawn helpers VTune cannot ptrace under ptrace_scope=1, aborting the whole
+collection. Absence is reported, never guessed around. Design rationale: docs/DESIGN.md.
 """
 
 from __future__ import annotations
@@ -89,10 +58,8 @@ class KernelOccupancy:
     def limiter(self) -> str:
         """The binding constraint on occupancy, named.
 
-        This is the whole value of the measurement. Each `*_limit` is the occupancy that
-        factor alone would permit, so the smallest is what actually binds; anything at
-        100% is not limiting at all. Reporting occupancy without the limiter leaves the
-        reader to guess which lever to pull, and the guess has been wrong twice.
+        Each `*_limit` is the occupancy that factor alone would permit, so the
+        smallest is what actually binds; anything at 100% is not limiting at all.
         """
         candidates = {
             "work size": self.work_size_limit,
@@ -279,8 +246,8 @@ def collect(
 
     try:
         subprocess.run(
-            # -no-follow-child: see the module docstring. Following children makes any
-            # framework import fail against a restricted ptrace scope.
+            # -no-follow-child: framework imports spawn helper processes VTune cannot
+            # ptrace under the usual ptrace_scope=1, which aborts the whole collection.
             [
                 binary,
                 "-collect",

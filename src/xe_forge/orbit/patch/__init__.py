@@ -1,6 +1,5 @@
-"""Patch-back: the P1-P5 mechanism ladder and its dispatch assertion (plan §13),
-plus the spec-driven harness that lets a dispatcher-registered SYCL op be driven
-through the same Model + YAML contract as any Python kernel (plan §9.7)."""
+"""Patch-back: the P1-P5 mechanism ladder, its dispatch assertion, and the
+spec-driven harness for dispatcher-registered SYCL ops."""
 
 from xe_forge.orbit.patch.ladder import (
     RUNG_ORDER,

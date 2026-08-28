@@ -1,25 +1,8 @@
 """
-Launch-site interception (plan §12.4).
-
-Static analysis alone will not find the right kernel or its real configuration.
-Extraction is driven by intercepting the *actual* launch during the trace run: the
-concrete grid, the `constexpr` values as specialized, the autotune config that
-actually won, and the compiled binary's identity.
-
-Two interception points, matching the two ways a kernel is reached on this stack:
-
-* Triton — wrap the JIT launch path, recording per-launch configuration.
-* The PyTorch dispatcher — wrap `torch.ops.<ns>.<op>`, recording the op schema and
-  the shared object the implementation came from, which is how SYCL and C++ extension
-  ops are reached (`torch-xpu-ops`, IPEX, vLLM-XPU csrc, sgl-kernel-xpu).
-
-Both record the *dispatch chain*, because patch-back (§13) needs to know where to
-intervene, and the chain is also the cheapest explanation of why a given kernel ran.
-
-Neither Triton nor torch is required at import time. Where a hook cannot be installed,
-that fact is recorded as a limitation rather than silently producing an empty record
-set — an empty `launches.json` and "interception unavailable" mean very different
-things to the extractor downstream.
+Launch-site interception: records what each kernel launch actually was (grid,
+constexprs, winning autotune config, compiled binary identity) via the Triton JIT run
+path and the torch dispatcher. Hooks that cannot install are recorded as limitations,
+never as an empty record set. Design rationale: docs/DESIGN.md.
 """
 
 from __future__ import annotations
@@ -33,8 +16,7 @@ from pydantic import Field
 from xe_forge.orbit.models import Artifact, LaunchRecord
 
 # Attributes worth lifting off a compiled Triton kernel. Register and spill counts
-# matter twice: they verify extraction (§12.10), and register pressure is a
-# first-order concern on Xe.
+# both verify extraction and flag register pressure, a first-order concern on Xe.
 _COMPILED_METADATA_FIELDS = (
     "num_regs",
     "n_regs",

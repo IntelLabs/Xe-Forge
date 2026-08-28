@@ -1,21 +1,8 @@
 """
-Run any Python workload under torch.profiler and export the Chrome trace.
-
-    python -m xe_forge.orbit.profiling.wrap --out trace.json -- python -m my.workload args...
-    python -m xe_forge.orbit.profiling.wrap --out trace.json -- python script.py args...
-
-This is what makes `xe-orbit trace --wrap -- <command>` a point-and-start operation:
-the workload needs no profiler code of its own — the wrapper runs it in-process (the
-profiler must live in the process that launches the kernels) and writes the trace
-where the trace stage expects it.
-
-Scope, stated honestly: in-process wrapping covers single-process torch workloads —
-`orbit_mini`, training scripts, plain inference. A framework that moves GPU work into
-its own subprocess (vLLM's EngineCore, SGLang's scheduler) is NOT reachable this way;
-those are profiled through the framework's own hook (vLLM: `profiler_config` /
-`/start_profile`), which is per-framework knowledge the adapter carries. The wrapper
-refuses gracefully rather than emitting an empty trace as though it measured
-something: a trace with zero device events is reported as such.
+Run a Python workload under torch.profiler in-process and export the Chrome trace:
+`python -m xe_forge.orbit.profiling.wrap --out trace.json -- python script.py args...`
+Covers single-process torch workloads only; a framework that moves GPU work into its
+own subprocess (vLLM, SGLang) must be profiled through its own hook.
 """
 
 from __future__ import annotations

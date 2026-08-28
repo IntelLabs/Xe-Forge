@@ -1,27 +1,6 @@
-"""
-SYCL language backend (plan §11.4 - §11.7).
-
-On Intel this is where the time actually is. In a real vLLM-XPU or SGLang-XPU decode
-run a large share of GPU time sits in SYCL C++ — ATen XPU operators, extension ops and
-templated sycl-tla GEMM/attention — with oneDNN and oneMKL taking most of the rest. A
-Triton-only pipeline optimizes the tail and reports it as a win.
-
-Three things make SYCL different from Triton in *mechanism*, not in status:
-
-* **Identity** comes from a mangled symbol, not a Python function. Demangle it, map
-  the functor/lambda type back to a translation unit, and record whether the kernel
-  was AOT-compiled or JIT-compiled from SPIR-V — a bundle that AOT-builds a kernel the
-  workload JITs is not the same kernel (§11.4).
-* **Closure** comes from the build graph, not an AST walk. `compile_commands.json`
-  gives the exact compile line: every include path, every define, every flag. This is
-  more reliable than the Triton path, not less, because the build system is
-  authoritative where AST resolution is inferential (§11.5).
-* **Compiler options are a first-class action space** (§11.7). GRF mode, sub-group
-  size, AOT target and the floating-point contract are cheap, deterministic wins that
-  should be swept *before* any agent is invoked. An agent asked to rewrite a kernel
-  that is simply running in the wrong GRF mode will produce an expensive, complicated,
-  worse answer.
-"""
+"""SYCL language backend: identity from mangled symbols, closure from the build
+graph (`compile_commands.json`), and compiler options as a first-class action space.
+Design rationale: docs/DESIGN.md."""
 
 from __future__ import annotations
 
@@ -115,8 +94,7 @@ class SyclBackend(BaseLanguageBackend):
 
     name = "sycl"
     language = KernelLanguage.SYCL
-    # A rebuild, not a JIT compile: minutes, not seconds. This ratio is why budget
-    # accounting must price SYCL candidates separately (§11.6).
+    # A rebuild, not a JIT compile: minutes, not seconds.
     cost_profile = CostProfile(
         build_seconds=120.0,
         iteration_seconds=120.0,
@@ -180,9 +158,8 @@ class SyclBackend(BaseLanguageBackend):
     def resolve_source(self, kernel_name: str, launch=None) -> SourceLocation:
         """Map a mangled kernel name back to a translation unit.
 
-        Confidence is graded, not binary (§11.4): a name that resolves to a unique
-        translation unit is high confidence; a heavily templated lambda matching
-        several instantiations is not, and we say so rather than picking one.
+        Confidence is graded, not binary: an ambiguous match reports its candidates
+        rather than picking one.
         """
         demangled = self.demangle(kernel_name)
         template_args = _TEMPLATE_ARGS_RE.findall(demangled)
@@ -195,10 +172,8 @@ class SyclBackend(BaseLanguageBackend):
             for symbol in identifying_symbols(demangled):
                 hit = index.get(symbol)
                 if hit is not None:
-                    # An exact index hit carries no confidence figure: the symbol
-                    # either matched or it did not. The open question is which
-                    # instantiation ran, and that is `candidates`, not a probability
-                    # that the file is wrong.
+                    # An exact index hit carries no confidence figure; the open
+                    # question is which instantiation ran, held in `candidates`.
                     return SourceLocation(
                         file=str(hit),
                         symbol=demangled,
@@ -215,8 +190,7 @@ class SyclBackend(BaseLanguageBackend):
                     break
 
         if len(matches) == 1:
-            # The build system named this translation unit, which is authoritative
-            # (§11.5) — again exact rather than estimated.
+            # The build system named this translation unit: authoritative and exact.
             return SourceLocation(
                 file=str(matches[0].file),
                 symbol=demangled,
@@ -225,9 +199,8 @@ class SyclBackend(BaseLanguageBackend):
             )
 
         if len(matches) > 1:
-            # Several translation units matched by name, so nothing was resolved:
-            # the candidates are the finding, and a single file must not be invented
-            # from them (§11.4).
+            # Several translation units matched by name: the candidates are the
+            # finding, and a single file must not be invented from them.
             return SourceLocation(
                 symbol=demangled,
                 method=ResolutionMethod.UNRESOLVED,
@@ -235,9 +208,8 @@ class SyclBackend(BaseLanguageBackend):
                 candidates=[str(m.file) for m in matches],
             )
 
-        # No build database, or no match in it. Templated names without the concrete
-        # instantiation are explicitly ambiguous: a sycl-tla kernel without its tile
-        # shape and layout parameters is not a kernel (§11.5).
+        # No build database, or no match in it. A templated name without its
+        # concrete instantiation is explicitly ambiguous.
         confidence = 0.5 if not instantiations else 0.3
         return SourceLocation(
             symbol=demangled,
@@ -287,8 +259,7 @@ class SyclBackend(BaseLanguageBackend):
         if headers:
             files.extend(headers)
         else:
-            # Falling back to a textual include scan is weaker and must be visible as
-            # such to the caller, which is why it is separated from the real answer.
+            # The textual include scan is a weaker fallback than the preprocessor.
             files.extend(_scan_local_includes(tu))
         # Deduplicate while preserving order.
         seen: set[Path] = set()
@@ -328,11 +299,9 @@ class SyclBackend(BaseLanguageBackend):
             return None
         command = self._command_for(Path(source.file))
         if command is None:
-            # No compile-commands entry, so this line is reconstructed rather than
-            # verbatim. Two details matter enough to get right anyway: the compiler must
-            # be found even when oneAPI is not on PATH, and the standard must be C++20 —
-            # torch-xpu-ops uses `requires` clauses, and defaulting to C++17 produces a
-            # wall of errors inside framework headers that reads like a broken closure.
+            # Reconstructed rather than verbatim: the compiler must be found even
+            # off-PATH, and the standard must be C++20 (torch-xpu-ops uses
+            # `requires` clauses).
             from xe_forge.orbit.patch.sycl_override import available_compiler
 
             return BuildRecipe(
@@ -352,11 +321,7 @@ class SyclBackend(BaseLanguageBackend):
     # -- build and verify --------------------------------------------------
 
     def build(self, bundle: KernelBundle) -> BuildResult:
-        """Single-TU isolation: build one translation unit, not the whole repository.
-
-        That distinction is the difference between a two-minute loop and a forty-minute
-        one (§11.6).
-        """
+        """Single-TU isolation: build one translation unit, not the whole repository."""
         if bundle.build is None:
             return BuildResult(ok=False, reason="bundle has no BuildRecipe")
         if not bundle.primary_source:
@@ -407,8 +372,8 @@ class SyclBackend(BaseLanguageBackend):
                     f"GRF mode differs: workload ran {recorded_grf}, recipe builds "
                     f"{recipe_grf}; these do not perform the same"
                 )
-            # AOT vs JIT is not a detail: they perform differently and rebuild
-            # differently, so a mismatch means this is not the same kernel (§11.4).
+            # AOT and JIT perform and rebuild differently; a mismatch means this
+            # is not the same kernel.
             recorded_aot = bundle.launch.compiled_metadata.get("aot")
             if recorded_aot is not None:
                 recipe_aot = bundle.build.aot_target is not None
@@ -427,7 +392,7 @@ class SyclBackend(BaseLanguageBackend):
     # -- action space ------------------------------------------------------
 
     def option_axes(self) -> list[CompilerAxis]:
-        """Cheap, deterministic wins that need no code change and no agent (§11.7)."""
+        """Cheap, deterministic wins that need no code change and no agent."""
         return [
             CompilerAxis(
                 name="grf_mode",
@@ -461,8 +426,7 @@ class SyclBackend(BaseLanguageBackend):
                 values=["fast", "on", "off"],
                 flag_template="-ffp-contract=<value>",
                 description="Floating-point contract",
-                # fast-math changes numerics, so it is gated by the correctness rules
-                # rather than being a free win (§11.7, §19).
+                # fast-math changes numerics, so it is gated by the correctness rules.
                 changes_numerics=True,
             ),
         ]
@@ -506,7 +470,7 @@ def _grf_from_flags(flags: list[str]) -> str | None:
 
 def _parse_device_diagnostics(stderr: str) -> dict[str, object]:
     """Capture the compiler's device-side diagnostics — the SYCL counterpart to
-    Triton's compiled-kernel metadata, feeding the same verification (§11.4)."""
+    Triton's compiled-kernel metadata."""
     diagnostics: dict[str, object] = {}
     spills = re.search(r"(\d+)\s+bytes? of spill", stderr, re.I)
     if spills:
@@ -599,27 +563,13 @@ _GENERIC_WRAPPERS = frozenset(
 def identifying_symbols(demangled: str) -> list[str]:
     """Distinctive identifiers in a demangled SYCL kernel name, most specific first.
 
-    A real ATen XPU kernel name looks like:
-
-        at::native::xpu::VectorizedElementwiseKernel<
-            4, at::native::xpu::GeluErfFunctor<float>, ...>
-
-    The outer template is a generic launch wrapper shared by hundreds of kernels; the
-    thing that actually names the computation — and the file it lives in — is the
-    functor *inside* the template arguments. An earlier version of this resolver
-    stripped the template arguments before matching, which threw away the only useful
-    token and left every elementwise kernel looking identical.
+    The outer template is a generic launch wrapper shared by hundreds of kernels;
+    what names the computation — and the file it lives in — is the functor inside
+    the template arguments.
     """
-    # An Itanium-mangled name carries no separators, so the generic identifier scan
-    # below sees it as one token. Unitrace reports demangled names, but a raw Level Zero
-    # trace does not.
-    #
-    # Itanium mangling is length-prefixed — `_ZTS13IgammaFunctor` says "13 characters" —
-    # so the identifier can be read off exactly. An earlier version instead stripped a
-    # trailing `I...E` template suffix with a greedy pattern, which recovered
-    # `GeluErfFunctor` and silently reduced `IgammaFunctor` to an empty string because
-    # the identifier itself contains the `I` the pattern keyed on. Counting characters is
-    # both simpler and correct.
+    # A raw mangled name carries no separators. Itanium mangling is length-prefixed
+    # (`_ZTS13IgammaFunctor` says "13 characters"), so the identifier is read off
+    # exactly by counting, never by pattern-stripping a template suffix.
     candidates = [demangled]
     mangled = re.match(r"_ZTS(\d+)(.*)$", demangled)
     if mangled:
@@ -648,14 +598,8 @@ def identifying_symbols(demangled: str) -> list[str]:
 
 
 def index_source_tree(root: Path, patterns: tuple[str, ...] = ("*.cpp", "*.h")) -> dict[str, Path]:
-    """Map C++ symbol -> defining file across a SYCL source tree.
-
-    This is the practical alternative to `compile_commands.json`. Intel's kernel
-    surface — torch-xpu-ops, vllm-xpu-kernels, sgl-kernel-xpu — ships as open source,
-    but a *wheel* contains only the compiled shared object, so on a normal install
-    there is no build database to consult. Indexing the checked-out sources recovers
-    the kernel-to-file mapping without requiring the user to build anything.
-    """
+    """Map C++ symbol -> defining file across a SYCL source tree — the practical
+    alternative to `compile_commands.json` on a wheel-only install."""
     index: dict[str, Path] = {}
     root = Path(root)
     for pattern in patterns:

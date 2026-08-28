@@ -1,39 +1,8 @@
 """
-Correctness for a kernel that never left the framework (plan §19.6, §19.7).
-
-§19's ladder assumes an extracted kernel with a captured reference: L1 compares the
-bundle's output against what the workload produced. That works at E1/E2 and not at E3,
-where the framework drives dispatch and there is no standalone artifact to diff. E3 is
-also the level most kernels reach, so the ladder's most-used rung had no implementation.
-
-AMD's Hyperloom solves the same problem for a system that only ever works in place, and
-its answer transfers directly because an in-situ kernel is reachable the ordinary way —
-you import it. Their check is a small script that imports the framework's kernel,
-computes a reference in higher precision by hand, and compares:
-
-    from sglang.srt.layers.layernorm import RMSNorm   # the real kernel
-    reference = xf32 * rsqrt * weight                 # hand-written, fp32
-    rel = (diff / denom).max(dim=-1).values
-    accuracy = (rel < rtol).sum() / rel.numel()
-
-Two details there are the whole design, and both are easy to get wrong:
-
-* **The metric is the fraction of rows within tolerance, not `allclose`.** `allclose` is
-  a max over every element, so one bad value fails an otherwise correct kernel — and
-  on a reduction over thousands of elements in bf16, one bad value is normal. A plain
-  mean error has the opposite failure: a handful of catastrophically wrong elements
-  vanish into an average that still looks small. Taking the max *within* a row and then
-  the fraction of rows that pass is the middle: tolerant of scattered noise, and
-  impossible to pass while being broadly wrong.
-* **The reference is computed in higher precision than the kernel.** A bf16 reference
-  compared against a bf16 kernel agrees on its own rounding error. The reference exists
-  to be more accurate than the thing under test, or it is not a reference.
-
-`denom` is clamped because relative error against a near-zero reference is unbounded and
-says nothing about the kernel.
-
-The second layer is separate and is not optional: a kernel can be numerically fine and
-still leave the served model broken, so §19's L3 needs a task score too (§19.7).
+Numerical correctness for a kernel that never left the framework (the E3 case):
+per-row max relative error against a higher-precision reference, then the fraction of
+rows within tolerance — plus the separate task-level KEEP/REVERT gate.
+Design rationale: docs/DESIGN.md.
 """
 
 from __future__ import annotations
@@ -133,8 +102,7 @@ def compare_tensors(actual, reference, rtol: float = DEFAULT_RTOL, floor: float 
     """Same comparison for torch tensors, vectorised.
 
     torch is imported here rather than at module scope: Orbit's analysis path runs in
-    CPU-only CI without it (§15.3), and a top-level import would make this module
-    unimportable there for no reason.
+    CPU-only CI without it.
     """
     import torch
 
@@ -162,7 +130,7 @@ def compare_tensors(actual, reference, rtol: float = DEFAULT_RTOL, floor: float 
 
 
 # ---------------------------------------------------------------------------
-# §19.7 Task-level gate
+# Task-level gate
 # ---------------------------------------------------------------------------
 
 
@@ -177,13 +145,9 @@ class TaskVerdict(StrEnum):
 # How far a task score may fall before a candidate is reverted.
 DEFAULT_DEGRADATION = 0.05
 
-# The absolute floor a candidate must clear regardless of the baseline.
-#
-# This is non-zero for a specific reason, recorded by Hyperloom as a production scar: a
-# gate expressed only as "did not degrade by more than X" degenerates when the baseline
-# itself is low, and at a floor of 0.0 it becomes `score > 0`. A real run of theirs KEPT
-# a candidate scoring 0.00076 against a 0.906 baseline — 0.08% of it — as correct. A
-# model answering essentially nothing passed a correctness gate.
+# The absolute floor a candidate must clear regardless of the baseline. Non-zero on
+# purpose: a gate expressed only as "did not degrade by more than X" degenerates to
+# `score > 0` when the baseline itself is low.
 DEFAULT_FLOOR_SCORE = 0.5
 
 
@@ -214,12 +178,7 @@ def task_accuracy_gate(
     max_degradation: float = DEFAULT_DEGRADATION,
     floor: float = DEFAULT_FLOOR_SCORE,
 ) -> TaskAccuracyResult:
-    """Decide whether a candidate may be kept on task-level accuracy (§19.7).
-
-    A kernel that is numerically within tolerance can still leave the served model
-    broken — a wrong dtype on a rarely-hit path, a cache written but never read, a
-    dispatch that silently falls back. Numerics on one kernel do not cover that, which
-    is why this gate is separate from the ladder's L1 rather than folded into it.
+    """Decide whether a candidate may be kept on task-level accuracy.
 
     Two conditions, and the second is what stops the first from degenerating:
 

@@ -1,14 +1,7 @@
 """
-Trace ingestion (plan §PR 3, stage 2 of the test matrix in §16.4).
-
-Turns raw profiler output into a normalized `events.json` that every downstream stage
-reads. The normalization matters more than it looks: `torch.profiler` Chrome traces,
-unitrace output and future sources all describe "a kernel ran for this long" in
-different shapes, and the catalog stage must not know which one it came from.
-
-Torch is imported lazily. Ingesting a committed trace fixture requires no torch at
-all, which is what lets the catalog, provenance and ranking stages run in CPU-only CI
-with no GPU and no deep-learning stack (§16.3).
+Trace ingestion: normalizes raw profiler output (torch.profiler Chrome traces,
+unitrace) into the `TraceEvents` every downstream stage reads. Torch is imported
+lazily so committed fixtures ingest with no torch installed.
 """
 
 from __future__ import annotations
@@ -38,11 +31,8 @@ class RuntimeKernelEvent(BaseModel):
     stream: str | None = None
     correlation_id: int | None = None
     device: int | None = None
-    # Inherited from the launching host op via correlation id, because the profiler
-    # records shapes against `cpu_op` events and not against device kernels. Without
-    # this join the region detector has no producer->consumer dataflow to work with and
-    # silently finds zero fusable regions on a trace whose op classes and launch gaps
-    # are both perfectly fine (§7.3).
+    # Inherited from the launching host op via correlation id: the profiler records
+    # shapes against `cpu_op` events, never against device kernels.
     input_shapes: list[list[int]] = Field(default_factory=list)
     input_dtypes: list[str] = Field(default_factory=list)
     args: dict[str, object] = Field(default_factory=dict)
@@ -65,9 +55,8 @@ class HostEvent(BaseModel):
     # `record_shapes` puts "Input Dims" on the *host* op, never on the device kernel.
     # Carrying it here is what lets the kernel inherit it by correlation below.
     input_shapes: list[list[int]] = Field(default_factory=list)
-    # Recorded beside "Input Dims" as "Input type". Carried because a shape without a
-    # dtype cannot be turned into bytes, and bytes are what decide whether eliminating
-    # an intermediate is worth anything (§7.3).
+    # Recorded beside "Input Dims" as "Input type"; a shape without a dtype cannot be
+    # turned into bytes.
     input_dtypes: list[str] = Field(default_factory=list)
 
     @property
@@ -202,10 +191,8 @@ def ingest_chrome_trace(payload: object, source: str = "torch.profiler") -> Trac
 def ingest_trace_file(path: Path, source: str = "torch.profiler") -> TraceEvents:
     """Read and normalize a trace file from disk.
 
-    Handles gzip transparently. That is not a convenience: `torch.profiler` writes
-    `*.pt.trace.json.gz` by default, and vLLM's own profiler hook produces exactly that
-    — so a reader that only accepted plain JSON would fail on the most common real
-    input while working fine on every hand-made fixture.
+    Handles gzip transparently: `torch.profiler` writes `*.pt.trace.json.gz` by
+    default, so plain-JSON-only reading would fail on the most common real input.
     """
     target = Path(path)
     if not target.is_file():
@@ -326,22 +313,11 @@ def _as_shapes(value: object) -> list[list[int]]:
 def attach_shapes(events: TraceEvents) -> TraceEvents:
     """Give each device kernel the shapes recorded against the op that launched it.
 
-    The linkage is indirect, and assuming otherwise is why this returned nothing at
-    first. In a PyTorch trace:
-
-    * the device kernel carries a `correlation` id;
-    * so does the *runtime* event that enqueued it (`urEnqueue*`, `cudaLaunchKernel`);
-    * the `cpu_op` carrying `Input Dims` carries **no correlation at all** — measured
-      here, 0 of 141,947 shape-bearing ops had one.
-
-    So kernel and shapes share no key. What relates them is time: the runtime event
-    happens *inside* the `cpu_op` span, on the same thread. The join is therefore
-    kernel -> correlation -> runtime event -> innermost enclosing `cpu_op`.
-
-    Innermost matters. Ops nest (`aten::linear` contains `aten::addmm`), and the outer
-    op's shapes describe a different call than the one that launched the kernel. Taking
-    the outermost match would attach plausible, wrong shapes — which is worse than
-    attaching none, because the region detector would then build edges out of them.
+    The `cpu_op` carrying `Input Dims` has no correlation id, so the join is
+    kernel -> correlation -> runtime event -> innermost enclosing `cpu_op` on the same
+    thread. Innermost matters: ops nest (`aten::linear` contains `aten::addmm`), and
+    an outer op's shapes describe a different call than the one that launched the
+    kernel.
     """
     from bisect import bisect_right
 

@@ -1,4 +1,4 @@
-"""Kernel extraction: bundles, the E0-E4 ladder, and the bundle test rig (plan §12)."""
+"""Kernel extraction: bundles, the E0-E4 ladder, and the bundle test rig."""
 
 from xe_forge.orbit.extract.batch import (
     ExtractionCoverage,

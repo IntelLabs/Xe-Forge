@@ -1,25 +1,6 @@
-"""
-Kernel extraction and bundle construction (plan §12).
-
-Real kernels are not single self-contained files. A single hot kernel in the Intel
-inference stack can be spread across a `@triton.jit` entrypoint, device helpers
-imported from sibling modules, an autotune decorator whose winning configuration is
-decided at runtime, a tuned-config JSON keyed by device name, a launch wrapper that
-computes grid and strides, and a platform dispatch layer that chose the backend at
-all. "The kernel is a file" is the assumption most likely to break on contact with a
-real workload.
-
-Two packaging rules from §12.6, both of which exist because the obvious alternative
-fails silently:
-
-* **Keep the package structure; add a path shim.** Flattening the closure into one
-  file breaks relative imports and re-export chains, and destroys the mapping back to
-  the original source that patch-back needs. A bundle is a small tree plus a manifest.
-* **A partially resolved closure is worse than an honest in-situ harness**, because it
-  looks standalone and is not. Any unresolved step downgrades the level and records
-  which step failed, rather than emitting something that imports the installed package
-  behind your back.
-"""
+"""Kernel extraction and bundle construction: a bundle is a small tree plus a
+manifest with package structure preserved; any unresolved closure step downgrades
+the level and records which step failed. Design rationale: docs/DESIGN.md."""
 
 from __future__ import annotations
 
@@ -42,9 +23,7 @@ from xe_forge.orbit.models import (
 )
 
 # Written into every bundle so the extracted tree imports ahead of the installed
-# package. Without this a bundle silently executes the version already on sys.path,
-# and every measurement taken from it is meaningless — which is precisely what the
-# mutation check in `verify.py` is designed to catch.
+# package; without it a bundle silently executes the version already on sys.path.
 _PATH_SHIM = '''"""
 Path shim for an extracted kernel bundle.
 
@@ -82,30 +61,17 @@ class Extractor:
 
     def __init__(self, output_root: Path, agent: object | None = None) -> None:
         self.output_root = Path(output_root)
-        # Claude Code first (§6), but strictly opt-in. The agent is only consulted
-        # where the deterministic path genuinely cannot answer — a nested Itanium symbol
-        # like `_ZTSN6compat12experimental...` that no length-prefix parse recovers.
-        #
-        # Defaulting this on was a mistake worth recording: the test suite immediately
-        # began making real LLM calls and timed out, and §15.3 is explicit that CI must
-        # not call an LLM. A caller that wants agent resolution asks for it; the CLI
-        # does, the library does not.
+        # Strictly opt-in: the agent is consulted only where the deterministic path
+        # cannot answer. The library default is None so CI never calls an LLM.
         self.agent = agent
 
     # -- level selection ---------------------------------------------------
 
     def target_level(self, kernel: KernelRecord) -> ExtractionLevel:
-        """The level to *attempt* — which is not the level provenance expects.
+        """The level to *attempt* — E2 unless the provider is opaque.
 
-        §12.3 says `--level auto` attempts E2, verifies, and downgrades to E3 on
-        failure. Provenance carries a default like E3 for vLLM and SYCL ops because that
-        is the *likely* outcome, and treating that hint as a ceiling meant extraction
-        went straight to an in-situ harness and never tried to build a closure at all —
-        so no SYCL kernel could ever reach E2, however cleanly its source resolved.
-
-        The hint still matters: it is why E4 providers are not attempted, since an
-        opaque library primitive has no source to close over at any level — and neither
-        does a runtime memory operation, which is not a kernel in the first place.
+        Provenance's level hint is not treated as a ceiling; it only rules out E4
+        providers, which have no source to close over at any level.
         """
         if kernel.language is KernelLanguage.OPAQUE or kernel.provider.value in (
             "onednn",
@@ -213,13 +179,8 @@ class Extractor:
         downgraded_from: ExtractionLevel | None = None,
         closure: ClosureResult | None = None,
     ) -> ExtractionResult:
-        """E3 is not a failure mode.
-
-        It is the reliable default for tangled kernels: heavier per iteration than a
-        standalone file, but always available and always faithful to the real dispatch,
-        because the framework itself drives the op. Prefer E2 when the closure is
-        clean; fall back here without hesitation (§12.3).
-        """
+        """E3 in-situ harness: heavier per iteration than a standalone bundle, but
+        always available and always faithful to the real dispatch."""
         bundle_dir = self._bundle_dir(kernel.id)
         harness = bundle_dir / "harness.py"
         harness.parent.mkdir(parents=True, exist_ok=True)
@@ -255,11 +216,10 @@ class Extractor:
         launch: LaunchRecord | None,
         inputs: CapturedInvocation | None,
     ) -> ExtractionResult:
-        """No source extraction is possible; capture a reproducer instead (§12.5).
+        """No source extraction is possible; capture a reproducer instead.
 
-        For oneDNN the verbose problem string *is* the isolated reproducer: it drives
-        the library's own benchmark tool, which gives a real standalone measurement for
-        a kernel with no editable source.
+        For oneDNN the verbose problem string is the reproducer: it drives the
+        library's own benchmark tool.
         """
         bundle_dir = self._bundle_dir(kernel.id)
         bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -303,19 +263,13 @@ class Extractor:
         launch: LaunchRecord | None,
         inputs: CapturedInvocation | None,
     ) -> ExtractionResult:
-        """SYCL closure comes from the build graph, not an AST walk (§11.5).
-
-        In practice these start at E3 — drive the op in place, where the existing build
-        already works — and earn E2 only once a standalone build is proven to reproduce
-        the same binary.
-        """
+        """SYCL closure comes from the build graph, not an AST walk. These start at
+        E3 and earn E2 only once a standalone build reproduces the same binary."""
         backend = get_backend("sycl")
         source = backend.resolve_source(kernel.runtime_name, launch)
 
-        # The registry answers most real kernel names exactly. What it cannot do is
-        # unpick a nested Itanium symbol without demangling, so that residue — and only
-        # that residue — goes to the repository agent (§3: never an LLM for a task with
-        # a deterministic answer; an agent for the tasks without one).
+        # The registry answers most real kernel names exactly; only the residue it
+        # cannot unpick goes to the repository agent.
         if not source.file:
             from xe_forge.orbit.languages.sources import discover
 
@@ -324,15 +278,11 @@ class Extractor:
                 path, _tree, symbol = found
                 source = SourceLocation(
                     file=str(path),
-                    # The full demangled name, not the bare identifier the index was
-                    # keyed on: `IndexFunctor<OpaqueType<8>>` and `<OpaqueType<4>>`
-                    # share an identifier and are different code, so dropping the
-                    # arguments here would make two distinct kernels indistinguishable.
+                    # The full demangled name, not the bare identifier: two template
+                    # instantiations share an identifier and are different code.
                     symbol=backend.demangle(kernel.runtime_name) or symbol,
-                    # Resolved by reading the code rather than by matching an index, so
-                    # the file is well evidenced; which instantiation ran is still open.
-                    # This tier reports a confidence because it genuinely estimated one,
-                    # unlike an exact index hit (§11.4).
+                    # Estimated, unlike an exact index hit: the file is evidenced,
+                    # which instantiation ran is still open.
                     confidence=0.75,
                     method=ResolutionMethod.AGENT
                     if self.agent is not None
@@ -345,9 +295,8 @@ class Extractor:
 
         recipe = backend.build_recipe(source)
         if recipe is not None:
-            # The instantiation is recoverable from the demangled name and nowhere else,
-            # so it is recorded at extraction time rather than rediscovered later
-            # (§11.5 item 4).
+            # The instantiation is recoverable only from the demangled name, so it is
+            # recorded at extraction time.
             recipe.instantiation = _instantiation_of(backend.demangle(kernel.runtime_name))
 
         if not source.file:
@@ -394,11 +343,10 @@ class Extractor:
     def _copy_preserving_packages(
         self, files: list[Path], dest_root: Path
     ) -> tuple[list[Path], list[Path]]:
-        """Copy the closure keeping package structure intact (§12.6).
+        """Copy the closure keeping package structure intact.
 
         Returns (copied paths, source roots). Package roots are found by walking up
-        while `__init__.py` exists, so `pkg/sub/mod.py` lands at `pkg/sub/mod.py` in
-        the bundle and its relative imports still resolve.
+        while `__init__.py` exists, so relative imports still resolve in the bundle.
         """
         dest_root.mkdir(parents=True, exist_ok=True)
         roots: list[Path] = []
@@ -425,14 +373,9 @@ class Extractor:
     ) -> None:
         """Create the package markers the copied tree needs to be importable.
 
-        An original `__init__.py` is copied **only when the closure actually resolved
-        through it** — that is, when it is itself a closure file because a helper was
-        reached via a re-export it performs. Otherwise an empty marker is written.
-
-        Copying every real `__init__.py` verbatim looks more faithful and is worse: a
-        package init that imports siblings outside the closure makes the bundle depend
-        on modules it does not carry, which the isolated-import check then fails on.
-        The re-export chains that matter are already in the closure as real files.
+        An original `__init__.py` is copied only when the closure actually resolved
+        through it; otherwise an empty marker is written, since a verbatim init could
+        import siblings the bundle does not carry.
         """
         parts = Path(relative).parts[:-1]
         current_src = _package_root(source)
@@ -457,7 +400,7 @@ class Extractor:
                 )
 
     def _copy_data_deps(self, inputs: CapturedInvocation | None, bundle_dir: Path) -> list[str]:
-        """Data dependencies are copied, never regenerated (§12.8)."""
+        """Data dependencies are copied, never regenerated."""
         if inputs is None or not inputs.data_deps:
             return []
         target = bundle_dir / "data"
@@ -478,13 +421,8 @@ class Extractor:
     def _pin_autotune(
         self, bundle: KernelBundle, launch: LaunchRecord | None, closure: ClosureResult
     ) -> None:
-        """Pin the configuration that actually won at runtime (§12.7).
-
-        Baseline and candidate must be compared under a controlled configuration policy
-        or the measurement means nothing. If the kernel carries an autotune decorator
-        and we never saw which config won, that is recorded as a gap rather than
-        papered over with a default.
-        """
+        """Pin the autotune configuration that actually won at runtime; a missing
+        winner is recorded as a gap rather than papered over with a default."""
         if not closure.autotune_configs:
             return
         if launch is None or launch.selected_autotune_config is None:
@@ -522,9 +460,8 @@ def _in_situ_harness(kernel: KernelRecord, inputs: CapturedInvocation | None) ->
 In-situ harness for {kernel.id} ({kernel.runtime_name}).
 
 Extraction level E3: this kernel could not be isolated into a standalone closure, so
-`Model.forward` drives the op through the installed framework instead. That is heavier
-per iteration than a standalone bundle, but it is always available and always faithful
-to the real dispatch — which is why it is a default, not a failure (plan §12.3).
+`Model.forward` drives the op through the installed framework instead — heavier per
+iteration, but always faithful to the real dispatch.
 
 Dispatch chain: {chain}
 """
@@ -600,9 +537,7 @@ def _opaque_reproducer(kernel: KernelRecord) -> str:
 def _instantiation_of(demangled: str) -> str:
     """The outermost template argument list of a demangled kernel name, if any.
 
-    `at::native::xpu::FillFunctor<int>` yields `<int>`. A name with no arguments yields
-    the empty string, which is the honest answer for a non-template kernel and is
-    distinguishable from "we did not look".
+    `at::native::xpu::FillFunctor<int>` yields `<int>`; a non-template name yields "".
     """
     if not demangled:
         return ""
@@ -618,6 +553,5 @@ def _instantiation_of(demangled: str) -> str:
             depth -= 1
             if depth == 0:
                 return demangled[start : index + 1]
-    # An unbalanced name means the runtime truncated it; saying so beats inventing a
-    # closing bracket the symbol never had.
+    # An unbalanced name means the runtime truncated it.
     return ""

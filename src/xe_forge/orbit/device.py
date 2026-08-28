@@ -1,36 +1,14 @@
 """
-What machine this actually is (plan §9.5, §11.7, §18).
-
-Orbit was handing an agent a detailed picture of the workload — GPU share, Amdahl
-ceiling, observed shapes, the instantiation that ran — and nothing at all about the
-device. The consequence showed up the first time an agent authored a real change.
-
-Given that context it proposed raising a Triton `BLOCK_SIZE` from 1024 to 8192, arguing
-that 149 small programs per token waste per-program setup, and pinning `num_warps=16`,
-arguing that "Intel XPU uses a 16-wide sub-group" leaves the memory pipeline short of
-in-flight loads. Both arguments are sound. Both are sound *for a discrete GPU with
-hundreds of execution units*. This machine has **16 EUs**, a `max_work_group_size` of
-1024, a 64-bit memory bus and 128 KB of SLM. The two changes measured 2.1x and 2.3x
-**slower**, and the measurement gate caught them — but nothing had told the agent it was
-optimizing for an integrated GPU, so the reasoning never had a chance to be right.
-
-A kernel is not fast or slow in the abstract. Block size is bounded by
-`max_work_group_size`; occupancy is bounded by EU count; whether a kernel is
-memory-bound depends on the bus width and cache; whether a matrix instruction exists at
-all is a device capability. An agent asked to optimize without these is guessing at the
-hardware, and it will guess the popular one.
-
-Everything here is queried, never assumed. A device fact that cannot be read is reported
-as unknown rather than defaulted, because a plausible default is exactly what produced
-the wrong answer above.
+Queried device facts for the accelerator the workload runs on. Facts that cannot be
+read are reported as unknown, never defaulted.
+Design rationale: docs/DESIGN.md
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-# Devices below this EU count are small enough that occupancy advice written for
-# discrete GPUs is actively misleading — the failure mode this module exists for.
+# Below this EU count, occupancy advice written for discrete GPUs is misleading.
 SMALL_DEVICE_EU_THRESHOLD = 64
 
 
@@ -82,8 +60,7 @@ class DeviceFacts:
             + (f", {self.subslices} subslices" if self.subslices else "")
         )
 
-        # The hard limits come first because they invalidate proposals outright rather
-        # than merely making them slower.
+        # Hard limits first: they invalidate proposals outright.
         if self.max_work_group_size:
             lines.append(
                 f"  HARD LIMIT: max work-group size {self.max_work_group_size} — a block "
@@ -128,12 +105,7 @@ class DeviceFacts:
 
 
 def probe_device(index: int = 0) -> DeviceFacts:
-    """Read the accelerator's real properties. Never guesses.
-
-    A property that cannot be read stays at its default and is rendered as unknown; the
-    whole point of this module is that a plausible default for the popular device is
-    what produces confidently wrong advice.
-    """
+    """Read the accelerator's real properties; unreadable ones stay at their defaults."""
     try:
         import torch
     except ImportError:
@@ -175,11 +147,7 @@ def probe_device(index: int = 0) -> DeviceFacts:
 
 
 def launch_constraints(facts: DeviceFacts) -> list[str]:
-    """Rules a proposal must satisfy on this device, stated as checkable bounds.
-
-    Separate from `describe` because these are not background: a proposal that violates
-    one is wrong before it is measured, and saying so up front is cheaper than a trial.
-    """
+    """Rules a proposal must satisfy on this device, stated as checkable bounds."""
     rules: list[str] = []
     if not facts.available:
         return rules

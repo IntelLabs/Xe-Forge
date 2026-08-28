@@ -1,14 +1,7 @@
 """
-The `orbit-bench` command line: the measurement backbone, standalone (plan §5.4,
-§24 Tier C).
-
-Runs a command, times it with repetitions, and emits one structured JSON document.
-Everything downstream consumes that document rather than re-deriving a measurement —
-and someone who wants nothing else from Orbit can use this on its own.
-
-Deliberately stdlib plus `xe_forge.orbit.stats`/`models` only: no torch, no GPU, no
-framework. The statistics are imported, never re-derived here — a second
-implementation of the interval arithmetic would be a second chance to get it wrong.
+The `orbit-bench` command line: run a command with declared warmup and repetitions,
+emit one structured JSON document, and compare two such documents. Deliberately
+stdlib plus `xe_forge.orbit.stats`/`models` only — no torch, no GPU, no framework.
 """
 
 from __future__ import annotations
@@ -28,18 +21,19 @@ from xe_forge.orbit.models import SCHEMA_VERSION, Decision
 
 TOOL_NAME = "orbit-bench"
 
-# §17 refuses any accept/reject below this many repetitions; `stats.compare` returns
-# INVALID under it. A document measured with fewer still carries its samples, but is
+# No accept/reject below this many repetitions; `stats.compare` returns INVALID
+# under it. A document measured with fewer still carries its samples, but is
 # marked non-decision-grade and `compare` refuses it.
 DECISION_MIN_REPETITIONS = 5
 
-# Exit codes for `compare`, one per §17 verdict plus "refused the input".
+# Exit codes for `compare`, one per verdict plus "refused the input".
 EXIT_ACCEPT = 0
 EXIT_REJECT = 1
 EXIT_INCONCLUSIVE = 2
 EXIT_INVALID = 3
 EXIT_REFUSED = 4
 
+# tests/orbit/test_bench_cli.py asserts the "17.5" reference stays in this help text.
 _WARMUP_HELP = (
     "Warmup runs executed before measurement and DISCARDED. The discard is declared "
     "up front, before any timing — which is what separates a warmup from dropping an "
@@ -52,7 +46,7 @@ The command to measure goes after `--`:
     orbit-bench run --repetitions 5 --warmup 1 -- python train.py
 
 Warmup runs are executed and discarded as declared warmup: the discard is stated
-before measurement, never applied to a sample after seeing it (plan §17.5).
+before measurement, never applied to a sample after seeing it.
 
 Exit status: 0 when every repetition succeeded; 1 when any repetition failed
 (the document is then marked "valid": false — a failed run is not a fast run);
@@ -61,7 +55,7 @@ Exit status: 0 when every repetition succeeded; 1 when any repetition failed
 
 _COMPARE_EPILOG = """\
 Both inputs must be documents produced by `orbit-bench run`. The verdict is computed
-by the same accept/reject arithmetic the rest of Orbit uses (plan §17), lower wall
+by the same accept/reject arithmetic the rest of Orbit uses, lower wall
 time is better, and INCONCLUSIVE is a real outcome, not a soft REJECT.
 
 Exit status:
@@ -100,7 +94,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Measured runs. Below "
             f"{DECISION_MIN_REPETITIONS} the document is marked non-decision-grade "
-            "(§17) and `compare` refuses it. Default: 5."
+            "and `compare` refuses it. Default: 5."
         ),
     )
     run_p.add_argument("--warmup", type=int, default=1, metavar="N", help=_WARMUP_HELP)
@@ -121,7 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     cmp_p = sub.add_parser(
         "compare",
-        help="compare two stored measurement documents and print a §17 verdict",
+        help="compare two stored measurement documents and print a verdict",
         description="Decide ACCEPT/REJECT/INCONCLUSIVE/INVALID between two run documents.",
         epilog=_COMPARE_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -175,7 +169,7 @@ def cmd_run(args: argparse.Namespace, command: list[str]) -> int:
     warmup = max(0, args.warmup)
 
     # Declared warmup: executed, then discarded — stated here, before any sample
-    # exists, so the discard can never be a reaction to the data (§17.5).
+    # exists, so the discard can never be a reaction to the data.
     for _ in range(warmup):
         _run_once(command, args.timeout)
 
@@ -221,7 +215,7 @@ def cmd_run(args: argparse.Namespace, command: list[str]) -> int:
     document["decision_grade"] = repetitions >= DECISION_MIN_REPETITIONS
     if repetitions < DECISION_MIN_REPETITIONS:
         document["decision_grade_reason"] = (
-            f"{repetitions} repetitions; §17 requires at least "
+            f"{repetitions} repetitions; a decision requires at least "
             f"{DECISION_MIN_REPETITIONS} for any accept/reject"
         )
 

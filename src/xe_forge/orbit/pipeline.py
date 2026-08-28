@@ -1,24 +1,7 @@
 """
-The full loop (plan §24, PR 13).
-
-    trace -> kernels -> capture -> extract -> bundle test -> emit -> optimize -> apply -> compare
-
-Each stage reads the previous stage's artifact and writes its own, so the loop is
-resumable, replayable, and inspectable at every step. It is also *stoppable*: most of
-the value of this orchestration is in refusing to continue.
-
-The stop conditions are the design, not error handling:
-
-* Gating says the workload is host-bound or has no headroom -> stop. Optimizing a
-  kernel in a host-bound workload is the single easiest way to waste a week (§18).
-* The bundle cannot be verified -> stop. An unverified bundle is never optimized,
-  because a real speedup on a specialization the workload never runs is worse than no
-  speedup at all (§12.10).
-* No patch point exists -> stop, and say what action *would* apply instead.
-
-Every stop is reported with its reason and the arithmetic behind it. `NO_ACTION` and
-`INCONCLUSIVE` are first-class results here: a framework that cannot credibly say
-"there is no headroom" is not a measurement instrument (§7.6).
+The full pipeline: trace -> kernels -> extract -> bundle test -> emit -> optimize.
+Each stage reads the previous stage's artifact and writes its own; every stop is
+reported with its reason. Design rationale: docs/DESIGN.md
 """
 
 from __future__ import annotations
@@ -85,9 +68,9 @@ def run_pipeline(
 ) -> PipelineResult:
     """Drive the loop over an existing run's artifacts.
 
-    `stop_before_optimize` defaults to True because invoking an optimizer costs tokens
-    and GPU time: the pipeline prepares a verified candidate and hands it over rather
-    than spending a budget on the caller's behalf.
+    `stop_before_optimize` defaults to True: the pipeline prepares a verified
+    candidate and hands it over rather than spending token/GPU budget on the
+    caller's behalf.
     """
     from xe_forge.orbit.analysis.catalog import build_catalog
     from xe_forge.orbit.emit import emit_candidate
@@ -181,12 +164,8 @@ def run_pipeline(
         )
         return result
 
-    # "Passed" and "proven" are not the same claim. An E4 bundle passes because every
-    # substantive check was skipped — there is no source to import or mutate — and
-    # reporting that as proof would be exactly the kind of confident overstatement the
-    # verification step exists to prevent.
-    # Only these three establish that the bundle *is* the kernel that ran. A passing
-    # reproducer-present check says a text file exists, which is not the same claim.
+    # Only these three establish that the bundle *is* the kernel that ran; a passing
+    # reproducer-present check only says a text file exists.
     identity_checks = {"isolated import", "launch-record match", "mutation check"}
     proven = [c for c in report.checks if c.name in identity_checks and not c.skipped]
     skipped = [c for c in report.checks if c.skipped]
@@ -207,9 +186,7 @@ def run_pipeline(
     # An E4 bundle is verified but has no source to optimize; the actions available are
     # fusion, backend and config changes, which are a different pipeline.
     if extraction.level is ExtractionLevel.E4:
-        # A dead end for source optimization is not a dead end for the workload. If
-        # this kernel participates in a fusable region, that is the actionable next
-        # step, and naming it here is the difference between a stop and a handoff.
+        # If the kernel participates in a fusable region, name that as the next step.
         suggestion = ""
         try:
             from xe_forge.orbit.analysis.regions import detect_regions
@@ -231,8 +208,7 @@ def run_pipeline(
             suggestion = ""
 
         if target.provider.value == "runtime":
-            # A transfer is not an opaque kernel, and saying so would send the reader
-            # looking for a library to reconfigure. The action space is host-side.
+            # A transfer is not an opaque kernel; the action space is host-side.
             detail = (
                 "runtime memory operation, not a kernel: there is no source at any "
                 "level. Applicable actions are pinned memory, fewer or larger "

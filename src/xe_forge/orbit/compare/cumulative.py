@@ -1,36 +1,8 @@
 """
-How accepted changes compose into a reported total (plan §17.6).
-
-§17 is careful about measuring *one* change: interleave ABBA, pair the samples, report
-a confidence interval, and refuse a verdict the data does not support. It said nothing
-about what happens when five such changes are accepted, and the obvious thing to do
-with five accepted percentages is add them up.
-
-Adding them up is wrong, and it is wrong in the direction that flatters the tool.
-Three separate reasons, any one of which is enough:
-
-* **Percentages of different denominators do not add.** +12% then +8% is +21%, not
-  +20%. Small at two steps, not small at eight.
-* **Gains overlap.** Two kernels on the same critical path are partly the same win
-  counted twice. Amdahl's ceiling (§7.4) applies to the stack, not just to each entry.
-* **The stack drifts.** Every change alters what the next one is measured against —
-  a cache footprint, a launch pattern, a dispatch decision — and the drift is not
-  attributable to any single entry.
-
-So this module holds one rule: **the headline number is measured, never summed.** A
-cumulative gain is a fresh end-to-end measurement of the full stack against the session
-baseline. The per-entry figures are kept, because they are how each change earned its
-place, but they are labelled unsummable and reported beside the validated total rather
-than instead of it. The difference between the two is reported as drift rather than
-quietly distributed over the entries — if the parts claim +40% and the whole measures
-+31%, that 9-point gap is the most interesting number on the page.
-
-Convergent evidence that this is the right shape: AMD's Hyperloom, solving the same
-problem for ROCm, separates `gain_pct` ("gain against the session baseline — the only
-figure that can be summed") from `local_gain_pct` ("the executor's own figure ... not
-summable"), and headlines `cumulative_gain_pct_validated`, taken from a validated end
-state. Two independent designs landing on the same distinction is a reasonable sign
-that the distinction is real and not a matter of taste.
+How accepted changes compose into a reported total: the headline number is measured,
+never summed. A cumulative gain is a fresh end-to-end measurement of the full stack;
+per-entry figures are kept but labelled unsummable, and the gap between the two is
+reported as drift. Design rationale: docs/DESIGN.md.
 """
 
 from __future__ import annotations
@@ -65,7 +37,7 @@ class StackEntry:
     """One accepted change, and what is actually known about its contribution."""
 
     label: str
-    # The paired delta that got this change accepted (§17). Real, and about this change
+    # The paired delta that got this change accepted. Real, and about this change
     # in isolation. Never summed with any other entry's.
     local_delta_percent: float
     decision: Decision = Decision.ACCEPT

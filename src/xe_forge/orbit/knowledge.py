@@ -1,34 +1,7 @@
 """
-Handing Orbit's measurements to Xe-Forge's optimizer as knowledge (plan §9.5, §9.9).
-
-Orbit and Xe-Forge already meet at a directory: emit writes a `Model` plus a spec, and
-`optimize_kernel_dir` hands it to `XeForgePipeline`. That seam passes the *code* and
-throws away everything Orbit learned getting there — which provider produced the kernel,
-which template instantiation actually ran, what share of GPU time it holds, what its
-Amdahl ceiling is, which shapes the workload really used, and which compiler axes are
-worth sweeping before an agent is invoked at all.
-
-All of that is exactly what an optimizer needs and cannot derive from a source file. A
-kernel at 0.5% of GPU time and a kernel at 40% deserve different effort; a kernel whose
-ceiling is 2% should not be rewritten at all (§18); a SYCL kernel running in the wrong
-GRF mode wants a flag, not an algorithm (§11.7). Passing the file alone means the
-optimizer re-derives what it can and guesses the rest.
-
-Xe-Forge already has the mechanism for this. `knowledge/loader.py` collects
-`common/*.yaml`, then `<dsl>/common/`, then `<dsl>/<device>/`, and scopes entries by
-optimization stage — so a measured fact becomes available to the right stage without
-any new plumbing. This module renders a `KernelRecord` into that schema.
-
-Two rules keep it honest:
-
-* **Only what was measured.** Every entry cites the run it came from. A knowledge base
-  that mixes measurements with plausible-sounding advice is worse than one with fewer
-  entries, because a reader cannot tell which is which.
-* **A measurement is not a recommendation.** Entries carry the numbers and their
-  consequences ("this kernel holds 1.8% of GPU time, so its ceiling is 1.8%"), and stop
-  short of asserting what will be faster. Xe-Forge's stages decide that; inventing a
-  `pattern_after` we never benchmarked would put a guess into the corpus in the format
-  reserved for verified transformations.
+Renders Orbit's measured facts into Xe-Forge's knowledge-entry schema so the
+optimizer sees what was measured. Entries cite the run they came from and never
+assert what will be faster. Design rationale: docs/DESIGN.md
 """
 
 from __future__ import annotations
@@ -39,9 +12,7 @@ from typing import Any
 
 from xe_forge.orbit.models import KernelRecord, Provider
 
-# Where Orbit writes its contributions. `common/` because these are facts about a
-# measured workload rather than about a language, and the loader reads `common/` for
-# every DSL and device (§9.5).
+# `common/` because the loader reads it for every DSL and device.
 ORBIT_KB_SUBDIR = Path("common")
 ORBIT_KB_FILENAME = "orbit_measured.yaml"
 
@@ -52,8 +23,7 @@ STAGE_DEVICE = "device_specific"
 STAGE_AUTOTUNING = "autotuning"
 STAGE_MEMORY = "memory_access"
 
-# Providers whose kernels have no editable source, so a rewrite stage cannot act on
-# them however attractive the numbers look (§7.2).
+# Providers whose kernels have no editable source, so a rewrite stage cannot act.
 OPAQUE_PROVIDERS = {Provider.ONEDNN, Provider.ONEMKL, Provider.RUNTIME}
 
 
@@ -70,9 +40,8 @@ class MeasuredFact:
     notes: str = ""
 
     def to_entry(self) -> dict[str, Any]:
-        # `pattern_before`/`pattern_after` are deliberately empty: this is a measurement,
-        # not a transformation. The loader accepts an entry without them; inventing a
-        # transformation we never benchmarked would file a guess as a verified pattern.
+        # `pattern_before`/`pattern_after` are deliberately empty: this is a
+        # measurement, not a transformation.
         return {
             "id": self.id,
             "name": self.name,
@@ -93,12 +62,9 @@ def facts_for_kernel(kernel: KernelRecord, run_id: str = "") -> list[MeasuredFac
         p for p in (kernel.provider.value, (kernel.language.value if kernel.language else "")) if p
     ]
 
-    # -- what it costs, which is what decides how much effort it deserves ----
+    # -- measured cost and ceiling ------------------------------------------
     share = kernel.gpu_time_share * 100
-    # `max_e2e_gain` is ALREADY a percentage — `amdahl_ceiling` multiplies by 100 before
-    # returning, so it compares directly against the MDE. Scaling it again here printed
-    # "at most 3774.87%" for a kernel holding 93% of GPU time, which is impossible on
-    # its face and was caught by reading the output rather than by a test.
+    # `max_e2e_gain` is ALREADY a percentage — do not scale it again.
     ceiling = kernel.max_e2e_gain
     facts.append(
         MeasuredFact(
@@ -162,7 +128,7 @@ def facts_for_kernel(kernel: KernelRecord, run_id: str = "") -> list[MeasuredFac
             )
         )
 
-    # -- compiler axes first, because they are cheap and deterministic (§11.7) --
+    # -- compiler axes first, because they are cheap and deterministic --------
     if kernel.language and kernel.language.value in ("sycl", "sycl_tla"):
         facts.append(
             MeasuredFact(
@@ -233,7 +199,7 @@ def write_knowledge(
     knowledge_dir: Path,
     run_id: str = "",
 ) -> Path:
-    """Write Orbit's measurements where Xe-Forge's loader will find them (§9.5).
+    """Write Orbit's measurements where Xe-Forge's loader will find them.
 
     Under `common/` because the loader collects `common/` for every DSL and device; a
     file at the knowledge-base root is silently ignored.
@@ -258,37 +224,19 @@ def _short(kernel: KernelRecord) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Hardware counters in the agent's context (§9.5, §11.7, §18)
+# Hardware counters in the agent's context
 # ---------------------------------------------------------------------------
 
 
 def profiler_context(properties, gpu_busy_us=None, total_time_us=None, launch_gap_us=None) -> str:
-    """Render unitrace's per-kernel device metrics for an optimizer prompt.
-
-    Orbit collects these and, until now, told the agent none of them — so the agent
-    reasoned about occupancy and register pressure from first principles and got both
-    wrong. Every number below answers a question it was otherwise guessing at:
-
-    * **spills** settle whether a larger block costs register pressure. The agent argued
-      that raising `BLOCK_SIZE` from 1024 to 8192 would amortize per-program setup; the
-      spill count is the direct evidence for or against, and it measured 2x slower.
-    * **SIMD width** is what the kernel was *compiled* for, not what the ISA supports.
-      The agent asserted "Intel XPU uses a 16-wide sub-group" as a fact about the vendor;
-      it is a fact about this compilation.
-    * **GRF per thread** is the §11.7 axis — the single largest lever on Xe, and not
-      something to propose blind.
-    * **AOT versus JIT** changes both performance and how a rebuild behaves (§11.4).
-    * **launch gap against GPU busy** decides whether the kernel is even the problem. A
-      workload whose device is idle most of the wall clock is launch-bound, and no amount
-      of kernel work will show up end to end.
-    """
+    """Render unitrace's per-kernel device metrics (spills, SIMD width, GRF, AOT/JIT,
+    launch gap vs GPU busy) for an optimizer prompt."""
     lines: list[str] = []
 
     if gpu_busy_us is not None and total_time_us:
         busy = gpu_busy_us / total_time_us * 100.0
         lines.append(f"  GPU busy: {busy:.1f}% of wall clock (measured, not estimated)")
         if busy < 50.0:
-            # Worth stating outright: it inverts what is worth proposing.
             lines.append(
                 "    The device is idle for most of the run, so this workload is "
                 "launch- or host-bound. A faster kernel cannot show up end to end until "
@@ -328,14 +276,8 @@ def profiler_context(properties, gpu_busy_us=None, total_time_us=None, launch_ga
 def occupancy_context(result) -> str:
     """Render VTune's occupancy findings for an optimizer prompt.
 
-    Only the limiter is actionable, so it leads. Occupancy alone is a number an agent
-    will reason around; the limiter is the lever. Both of the agent's failed proposals
-    on this hardware — a larger reduction tile and more warps — were occupancy arguments
-    made without knowing which constraint bound, and both measured roughly 2x slower.
-
-    A kernel already at full occupancy is stated as such rather than omitted, because
-    "nothing is limiting this" is exactly the fact that stops an agent proposing an
-    occupancy fix for a kernel that does not have an occupancy problem.
+    The limiter leads because it is the actionable part; a kernel already at full
+    occupancy is stated as such rather than omitted.
     """
     if result is None or not getattr(result, "available", False):
         reason = getattr(result, "reason", "") if result is not None else "not collected"

@@ -1,19 +1,7 @@
 """
-Kernel provenance: name -> provider -> source -> available actions (plan §PR 5).
-
-Answers "which operator, provider and source file produced this kernel", and just as
-importantly "what can be done about it". Two rules from the plan are enforced here:
-
-* An ambiguous name resolves to *low confidence*, never to a guess. A demangled SYCL
-  symbol matching several template instantiations reports all candidates and a low
-  score, so the ranking can prefer a kernel we actually understand (§11.4).
-* An unknown kernel gets `PROFILE_MORE`, never an optimization action. A kernel
-  holding significant GPU time that we cannot attribute is a finding to report, not a
-  target to guess at (§12.5).
-
-`actions_available` replaces v1's `editable: bool`. An opaque oneDNN GEMM has no
-editable source but still supports fusion, backend, layout and library-config actions
-— which is exactly the kernel that owns the most GPU time in a transformer.
+Kernel provenance: name -> provider -> source -> available actions. An ambiguous name
+resolves to low confidence, never a guess; an unknown kernel gets PROFILE_MORE, never
+an optimization action. Design rationale: docs/DESIGN.md.
 """
 
 from __future__ import annotations
@@ -104,7 +92,7 @@ def _actions_for_editable_native() -> list[ActionType]:
 
 
 def _actions_for_opaque() -> list[ActionType]:
-    """No editable source, but far from unactionable (§7.2)."""
+    """No editable source, but far from unactionable."""
     return [
         ActionType.REGION_FUSION,
         ActionType.BACKEND_CHANGE,
@@ -130,7 +118,7 @@ def resolve_inductor(name: str) -> ProvenanceResult | None:
         notes=[
             "Inductor-generated: the kernel body lives in the Inductor cache module "
             "and the launch wrapper in output_code.py; both are needed, and the "
-            "bundle must pin the torch version (§12.5)."
+            "bundle must pin the torch version."
         ],
     )
 
@@ -161,7 +149,7 @@ def resolve_sycl(name: str) -> ProvenanceResult | None:
     is_tla = bool(_SYCL_TLA_RE.search(name))
     provider = Provider.IPEX if _IPEX_RE.search(name) else Provider.SYCL
 
-    # Confidence is graded, not binary (§11.4). A heavily templated name that could
+    # Confidence is graded, not binary. A heavily templated name that could
     # match several instantiations is reported as ambiguous rather than pinned.
     template_args = _TEMPLATE_ARGS_RE.findall(name)
     ambiguous = len(template_args) > 1
@@ -173,7 +161,7 @@ def resolve_sycl(name: str) -> ProvenanceResult | None:
         candidates = template_args
         notes.append(
             "templated name resolves to multiple instantiations; the concrete template "
-            "arguments the workload used must be recovered before extraction (§11.5)"
+            "arguments the workload used must be recovered before extraction"
         )
 
     return ProvenanceResult(
@@ -187,7 +175,7 @@ def resolve_sycl(name: str) -> ProvenanceResult | None:
         source=SourceLocation(confidence=confidence, candidates=candidates),
         dispatch_chain=["aten", "xpu_key", name],
         notes=notes
-        or ["SYCL op: closure comes from compile_commands.json, not an AST walk (§11.5)"],
+        or ["SYCL op: closure comes from compile_commands.json, not an AST walk"],
     )
 
 
@@ -205,7 +193,7 @@ def resolve_onednn(name: str) -> ProvenanceResult | None:
         dispatch_chain=["aten", "library_dispatch", name],
         notes=[
             "Opaque library primitive: no source extraction. Capture the verbose "
-            "problem string as the isolated reproducer (§12.5). Still actionable via "
+            "problem string as the isolated reproducer. Still actionable via "
             "fusion, backend, layout and library config."
         ],
     )
@@ -293,11 +281,9 @@ def resolve(name: str, resolvers: tuple[Resolver, ...] = DEFAULT_RESOLVERS) -> P
         if result is not None:
             if not result.source.symbol:
                 result.source.symbol = name
-            # Every resolver in this chain matches a *name pattern*, which is exactly
-            # the NAME_MATCH tier (§11.4): an estimate, not an exact hit. Recording it
-            # here rather than in each resolver keeps the tier claim next to the code
-            # that makes it true. The build-graph and symbol-index tiers live in the
-            # language backends and stamp their own methods.
+            # Every resolver in this chain matches a name pattern — the NAME_MATCH
+            # tier, an estimate, not an exact hit. The build-graph and symbol-index
+            # tiers live in the language backends and stamp their own methods.
             if result.source.method is ResolutionMethod.UNRESOLVED:
                 result.source.method = ResolutionMethod.NAME_MATCH
             if result.source.confidence is None:
@@ -307,11 +293,11 @@ def resolve(name: str, resolvers: tuple[Resolver, ...] = DEFAULT_RESOLVERS) -> P
 
 
 def extraction_tractability(level: ExtractionLevel | None) -> float:
-    """How cheaply a kernel at this extraction level can be iterated on (§18).
+    """How cheaply a kernel at this extraction level can be iterated on.
 
     An E2 bundle iterates in seconds, an E3 harness in minutes, an E4 kernel not at
-    all. Used as a tie-breaker in ranking — and capped there, so it cannot overturn an
-    order-of-magnitude difference in end-to-end headroom (§11.10).
+    all. Used as a tie-breaker in ranking — and capped there, so it cannot overturn
+    an order-of-magnitude difference in end-to-end headroom.
     """
     return {
         ExtractionLevel.E1: 1.0,

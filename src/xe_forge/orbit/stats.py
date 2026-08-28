@@ -1,12 +1,7 @@
 """
-Measurement statistics and the accept/reject arithmetic (plan §17).
-
-Single-value measurements are not accepted anywhere in the decision path. Everything
-here turns a list of samples into an interval, and turns two intervals into one of
-four decisions. `INCONCLUSIVE` is a real outcome, not a soft `REJECT`.
-
-Deliberately stdlib-only: this module is the hot path of T0 CPU-only CI, and it must
-import in milliseconds with no scientific stack present.
+Measurement statistics and the accept/reject arithmetic. Samples become intervals,
+intervals become decisions; `INCONCLUSIVE` is a real outcome, not a soft `REJECT`.
+Deliberately stdlib-only so it imports fast with no scientific stack present.
 """
 
 from __future__ import annotations
@@ -17,9 +12,8 @@ from statistics import stdev as _stdev
 
 from xe_forge.orbit.models import Decision, MetricEstimate
 
-# Two-sided 95% critical values of Student's t, indexed by degrees of freedom.
-# A lookup table keeps scipy out of the dependency set; beyond df=30 the normal
-# approximation is within ~1% and we use it deliberately.
+# Two-sided 95% Student's t critical values by df; the table keeps scipy out of the
+# dependency set, and beyond df=30 the normal approximation is within ~1%.
 _T95: dict[int, float] = {
     1: 12.706,
     2: 4.303,
@@ -73,7 +67,7 @@ def estimate(samples: list[float], unit: str = "") -> MetricEstimate:
     """Turn raw samples into a mean with a 95% confidence interval.
 
     A single sample yields a degenerate interval (low == high == mean) and n=1, which
-    the decision rule then refuses to accept — by design, not by accident.
+    the decision rule then refuses to accept.
     """
     if not samples:
         raise ValueError("estimate() requires at least one sample")
@@ -99,9 +93,8 @@ def estimate(samples: list[float], unit: str = "") -> MetricEstimate:
 def minimum_detectable_effect(samples: list[float], n_planned: int | None = None) -> float:
     """Smallest relative effect (as a percent of the mean) this setup can resolve.
 
-    Uses the standard two-sample formula at alpha=0.05 / power=0.80. If the Amdahl
-    ceiling for a kernel is below this number, optimizing it cannot produce a
-    resolvable end-to-end result and the correct action is `NO_ACTION` (§18).
+    Standard two-sample formula at alpha=0.05 / power=0.80. An Amdahl ceiling below
+    this number means optimizing the kernel cannot produce a resolvable result.
     """
     if len(samples) < 2:
         return float("inf")
@@ -123,8 +116,8 @@ def clocks_stable(
 ) -> bool:
     """True when observed clock variation is low enough for a run to be comparable.
 
-    An empty sample list means we could not read clocks at all, which is not the same
-    as instability — the caller records that as a limitation rather than an anomaly.
+    An empty sample list means clocks could not be read at all, which is not the same
+    claim as instability.
     """
     if len(clock_samples) < 2:
         return True
@@ -158,8 +151,7 @@ def _welch_interval(a: list[float], b: list[float]) -> tuple[float, float, float
 
 def _paired_interval(a: list[float], b: list[float]) -> tuple[float, float, float]:
     """(mean paired difference b-a, ci_low, ci_high) for interleaved A/B runs."""
-    # strict=True is the invariant, not a formality: pairing only means anything when
-    # every baseline run has the candidate run it was interleaved with.
+    # strict=True is the invariant: every baseline run must have its interleaved pair.
     diffs = [bi - ai for ai, bi in zip(a, b, strict=True)]
     n = len(diffs)
     md = _mean(diffs)
@@ -182,13 +174,10 @@ def compare(
 ) -> tuple[Decision, dict[str, float | str]]:
     """Compare candidate against baseline and return a decision plus its evidence.
 
-    `paired` defaults to True when the two sample lists are the same length, which is
-    what interleaved A,B,A,B execution produces (§17). Pairing removes drift that
-    both arms experienced together, so it is strictly the better estimator when
-    available.
-
-    Returns the decision and a detail dict carrying the improvement percentage, its
-    confidence interval, and the reason — so a caller never has to re-derive them.
+    `paired` defaults to True when the sample lists are the same length (what
+    interleaved A,B,A,B execution produces); pairing removes drift both arms shared.
+    Returns the decision and a detail dict with the improvement percentage, its
+    confidence interval, and the reason.
     """
     detail: dict[str, float | str] = {}
 
@@ -255,7 +244,7 @@ def compare(
 
 
 def amdahl_ceiling(share: float, speedup: float, gpu_busy_fraction: float) -> float:
-    """Maximum end-to-end gain (percent) from speeding one kernel up (§18).
+    """Maximum end-to-end gain (percent) from speeding one kernel up.
 
         max_e2e_gain(k, s) = share(k) * (1 - 1/s) * gpu_busy_fraction
 

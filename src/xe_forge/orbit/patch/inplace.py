@@ -1,47 +1,6 @@
-"""
-Editing an installed tree in place, survivably (plan §13.6).
-
-The default answer to "should we edit in place" is **no**. P1 — an operator override
-registered from an out-of-tree extension (§13, §11.8) — reaches most of what matters,
-never touches the installed tree, and reverts by not importing a module. Nothing here
-is safer than that, and this module should be the second choice every time.
-
-But P1 cannot express everything. A change to a framework's Python layer, an E3 in-situ
-harness, a patch to a launch wrapper — these live in the installed tree, and AMD's
-Hyperloom runs its entire kernel path this way. So the mechanism has to exist, and the
-question that decides whether it is usable is not "does it apply the edit" but **"what
-happens when we are wrong, or when the process dies halfway through"**.
-
-Editing site-packages naively fails in ways that outlive the run:
-
-* A process killed mid-write leaves a **truncated file**, and the environment is broken
-  for every later run — including the one that would have diagnosed it.
-* An edit with no recorded original **cannot be reverted**, only guessed at.
-* A revert that blindly restores will **destroy a change someone else made** in between.
-* A crash before revert leaves the tree modified with **nothing on disk saying so**, so
-  the next run measures a patched baseline and calls it clean.
-
-Six properties, each aimed at one of those:
-
-1. **Refuse what cannot be restored.** Non-writable, symlinked, or outside the declared
-   sandbox roots — refuse before touching anything. A patch that cannot be undone is
-   not a patch, it is damage with an optimistic name.
-2. **Record the original first**, bytes and digest, in the run directory — outside the
-   tree being modified, so the record survives whatever happens to the tree.
-3. **Replace atomically.** Write a sibling temp file, fsync it, `os.replace`. A reader
-   sees either the old file or the new one, never a partial one, even on SIGKILL.
-4. **Journal before, clear after.** The journal entry is fsynced *before* the edit, so a
-   crash at any point leaves evidence. `recover()` reads it on the next run.
-5. **Verify before reverting.** The file must still hash to what we wrote. If it does
-   not, a third party changed it, and restoring would silently discard their work —
-   report it instead.
-6. **Idempotent revert.** Reverting twice, or reverting something already restored, is
-   a no-op rather than an error.
-
-The crash argument in one line: the journal is fsynced before the file is touched and
-cleared only after the file is restored, so at every instant the on-disk state is either
-"nothing to do" or "an entry naming exactly what to put back".
-"""
+"""Crash-durable in-place edits to an installed tree: the original and journal entry
+land on disk before the target is touched, writes are atomic, and reverts are
+digest-verified and idempotent. Design rationale: docs/DESIGN.md."""
 
 from __future__ import annotations
 
@@ -62,11 +21,9 @@ class PatchSafetyError(RuntimeError):
 
 class RecoveryOutcome(StrEnum):
     RESTORED = "restored"
-    # The file already matched its recorded original: the crash happened before the
-    # write landed, so there is nothing to undo.
+    # Already matches the recorded original; nothing to undo.
     ALREADY_CLEAN = "already_clean"
-    # The file matches neither the original nor what we wrote. Something else edited it,
-    # and restoring would discard that edit.
+    # Matches neither the original nor the patched digest: a third party edited it.
     CONFLICT = "conflict"
     MISSING = "missing"
 
@@ -109,12 +66,8 @@ class PatchRecord:
 
 
 def _fsync_dir(path: Path) -> None:
-    """Force the directory entry to disk so a rename survives a power loss.
-
-    Renaming durably requires fsyncing the *directory*, not just the file. Skipped
-    silently where the platform does not permit it — best effort beats an exception on
-    a path that is otherwise correct.
-    """
+    """Fsync the directory so a rename survives power loss; best-effort where the
+    platform does not permit it."""
     try:
         fd = os.open(str(path), os.O_RDONLY)
     except OSError:
@@ -130,10 +83,8 @@ def _fsync_dir(path: Path) -> None:
 def atomic_write(target: Path, data: bytes) -> None:
     """Replace `target` with `data`, or leave it exactly as it was.
 
-    The temp file is created in the target's own directory so that `os.replace` is a
-    rename within one filesystem, which is atomic. A temp file elsewhere would make it a
-    copy, and a copy can be interrupted half-written — the failure this exists to
-    prevent.
+    The temp file lives in the target's own directory so `os.replace` is an atomic
+    same-filesystem rename, never an interruptible copy.
     """
     target = Path(target)
     directory = target.parent
@@ -158,8 +109,7 @@ class InPlacePatcher:
 
     def __init__(self, journal_dir: Path, sandbox_roots: list[Path] | None = None) -> None:
         self.journal_dir = Path(journal_dir)
-        # Paths outside these roots are refused. An agent-proposed path is untrusted
-        # input, and "edit this file" is a capability worth bounding explicitly.
+        # Paths outside these roots are refused; agent-proposed paths are untrusted.
         self.sandbox_roots = [Path(r).resolve() for r in (sandbox_roots or [])]
 
     # -- safety checks -----------------------------------------------------
@@ -171,8 +121,7 @@ class InPlacePatcher:
         if not target.exists():
             raise PatchSafetyError(f"{target} does not exist")
         if target.is_symlink():
-            # Writing through a symlink modifies whatever it points at, which may be
-            # outside the sandbox entirely — the check would pass and the edit escape.
+            # Writing through a symlink could modify a file outside the sandbox.
             raise PatchSafetyError(
                 f"{target} is a symlink; writing through it would modify its target, "
                 f"possibly outside the sandbox"
@@ -250,12 +199,8 @@ class InPlacePatcher:
         self.journal_dir.mkdir(parents=True, exist_ok=True)
         journal = self._load_journal()
 
-        # Patching a target that is already patched must not record the *current*
-        # content as the original — that would be the previous patch's output, and
-        # reverting would restore an intermediate state rather than a pristine tree.
-        # The first record holds the true original, so a second edit inherits it and
-        # replaces the entry. The invariant this maintains is one record per target,
-        # which is also what lets revert key results by target without collapsing them.
+        # A second patch to the same target inherits the first record's true original
+        # (never the current, already-patched content); one record per target.
         existing = next((r for r in journal if r.target == str(target)), None)
         if existing is not None:
             original_hash = existing.original_digest
@@ -282,9 +227,7 @@ class InPlacePatcher:
     def revert(self, record: PatchRecord, force: bool = False) -> RecoveryOutcome:
         """Put the original back, refusing to discard a third party's edit.
 
-        `force` overrides that refusal. It exists because an operator who knows the
-        other change was ours-in-a-previous-run needs a way through; it is not a default
-        because the whole point is that we cannot tell those two cases apart.
+        `force` overrides that refusal.
         """
         target = Path(record.target)
         if not target.exists():
@@ -322,14 +265,7 @@ class InPlacePatcher:
         return {r.target: self.revert(r, force=force) for r in self._load_journal()}
 
     def recover(self, force: bool = False) -> dict[str, RecoveryOutcome]:
-        """Undo edits left behind by a run that died. Safe to call at startup.
-
-        An orphaned journal entry is the only evidence that a previous process modified
-        an installed tree and never put it back. Without this, the next run measures a
-        patched baseline and reports it as clean — a wrong number produced by a
-        correct-looking pipeline, which is the failure mode this project exists to
-        refuse.
-        """
+        """Undo edits left behind by a run that died. Safe to call at startup."""
         return self.revert_all(force=force)
 
     def _forget(self, record: PatchRecord) -> None:

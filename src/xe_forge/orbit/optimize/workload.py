@@ -1,37 +1,6 @@
-"""
-Optimizing the workload's path, not one kernel (plan §13.7, §7.6, §14).
-
-The kernel-scoped loop in `loop.py` answers "can this kernel be made faster". That is
-the wrong unit for an inference workload, and picking it produces a predictable kind of
-failure: you optimize whatever happens to be extractable and report the result as if it
-were a workload improvement.
-
-Measured on Qwen2.5-0.5B under vLLM, the path is:
-
-    GEMM (qkv/o/gate/up/down/lm_head)  93.17%   6305 calls   oneDNN, opaque
-    RoPE                                2.56%   3144 calls   SYCL
-    SwiGLU activation                   1.60%   1560 calls   vLLM SYCL
-    RMSNorm                             1.19%   3185 calls   vLLM SYCL
-    sampling                            0.61%    260 calls   Triton
-    KV cache write                      0.52%   1560 calls   vLLM SYCL
-
-Every rewritable kernel there sums to under 7%. So the honest action space for *this*
-model is dominated by things that are not kernel rewrites at all — batch and serving
-configuration, the GEMM backend, layout, fusing adjacent stages — and a loop that can
-only patch kernel source cannot reach 93% of the runtime.
-
-That is why the unit here is the workload. An action may be a config change, an
-environment or backend change, or a source patch; they are trialled the same way and
-measured the same way, by re-running the framework's own benchmark end to end. Hyperloom
-draws the same boundary: its EXPLORE phase sweeps server arguments and environment
-variants alongside source patches, and every KEEP is revalidated against the full stack
-rather than against the kernel that changed.
-
-The architecture is part of the context on purpose. "Optimize this GEMM" invites generic
-advice; "this is a 24-layer Qwen2 with hidden 896, GQA 14:2, SwiGLU over 4864, tied
-embeddings into a 151936 vocab, decoding at batch 32" invites reasoning about which
-projections are skinny and why the model is memory-bound at decode.
-"""
+"""Workload-level optimization: actions may be config, environment, or source
+changes, all trialled and measured end to end through the framework's own benchmark.
+Design rationale: docs/DESIGN.md."""
 
 from __future__ import annotations
 
@@ -64,12 +33,8 @@ class WorkloadAction:
 
     @property
     def reversible_without_patching(self) -> bool:
-        """Config and environment changes revert by not passing them again.
-
-        Worth distinguishing because it decides how much can go wrong: a config trial
-        that crashes leaves nothing behind, while a source trial that crashes leaves a
-        modified framework and needs the journal in §13.6 to recover.
-        """
+        """Config and environment changes revert by not passing them again; a source
+        trial that crashes leaves a modified framework and needs the journal."""
         return self.kind in (ActionKind.CONFIG, ActionKind.ENVIRONMENT)
 
 
@@ -135,12 +100,7 @@ class ModelArchitecture:
         return self.hidden_size // self.attention_heads
 
     def projection_shapes(self, batch: int) -> list[tuple[str, int, int, int]]:
-        """The per-layer GEMM shapes at a given decode batch, as (name, M, K, N).
-
-        These are what the 93% actually is. At decode M is the batch, so every one of
-        them is skinny — which is the whole reason batching moved throughput 5x and a
-        kernel rewrite could not have.
-        """
+        """The per-layer GEMM shapes at a given decode batch, as (name, M, K, N)."""
         if not (self.hidden_size and self.attention_heads):
             return []
         h, d = self.hidden_size, self.head_dim
@@ -178,12 +138,7 @@ class WorkloadProfile:
         return sum(s.gpu_share for s in self.stages if not s.rewritable)
 
     def describe(self) -> str:
-        """Render the profile as proposer context.
-
-        Deliberately leads with what cannot be rewritten. A proposer given only the
-        kernel list will reach for a kernel; told that 93% of the time is behind a
-        closed library, it reaches for the things that can actually move that 93%.
-        """
+        """Render the profile as proposer context, opaque share first."""
         lines = [self.architecture.describe(), ""]
         if self.batch:
             lines.append(f"serving at batch {self.batch} on {self.framework or 'this framework'}")
@@ -204,7 +159,7 @@ class WorkloadProfile:
         if self.minimum_detectable_effect:
             lines.append(
                 f"This workload can resolve a difference of {self.minimum_detectable_effect:.2f}% "
-                f"or larger; anything smaller cannot be demonstrated (§17)."
+                f"or larger; anything smaller cannot be demonstrated."
             )
         if self.architecture.hidden_size and self.batch:
             lines.append("")
@@ -215,13 +170,8 @@ class WorkloadProfile:
 
 
 def action_space(profile: WorkloadProfile) -> list[str]:
-    """The actions worth proposing for this profile, as prompt guidance.
-
-    Derived from the measured split rather than listed generically: a workload whose
-    time is mostly opaque gets told to reach for configuration and fusion, and one with
-    real rewritable share gets told a kernel rewrite is on the table. Offering the full
-    menu every time is how a proposer ends up suggesting a rewrite for a closed library.
-    """
+    """The actions worth proposing for this profile, derived from the measured
+    opaque/rewritable split."""
     actions = [
         "CONFIG: serving arguments — batch size, scheduling, sequence limits. On a "
         "decode-bound model these change the GEMM shapes themselves, which is the only "

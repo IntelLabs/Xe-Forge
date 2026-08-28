@@ -1,9 +1,5 @@
-"""Language backends: one per kernel language, same protocol (plan §11.3).
-
-Registry resolution picks the backend with the highest identification confidence, so a
-mangled SYCL symbol goes to the SYCL backend and an Inductor-generated name goes to
-Triton, without either being the default.
-"""
+"""Language backends: one per kernel language, same protocol. Registry resolution
+picks the backend with the highest identification confidence."""
 
 from xe_forge.orbit.languages.base import (
     BaseLanguageBackend,

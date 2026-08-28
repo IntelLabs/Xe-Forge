@@ -1,36 +1,14 @@
-"""
-The directory-level optimizer entry point (plan §8, §9.9).
-
-§8 hands Orbit's candidates to Xe-Forge through the file contract Xe-Forge already
-consumes. What did *not* exist was a directory-level entry point: the real API is
-`XeForgePipeline.optimize()` / `optimize_file()` plus `create_engine()`, all of which
-take a kernel file and an explicit spec path. This module is the thin wrapper §9.9
-asks for — it resolves the candidate directory's conventional layout and calls into
-the existing pipeline.
-
-Three details of the actual repository shape this, and each one would be a silent
-failure if assumed away:
-
-* **`kernel_pytorch.py` is resolved by name substitution**, so the reference file's
-  name is load-bearing rather than conventional.
-* **`target_speedup` exists in config but nothing reads it.** Passing an accept
-  threshold therefore means threading it to the caller's own decision, not setting a
-  config value and trusting the pipeline to honour it.
-* **`ClaudeEngine` is fire-and-forget.** It generates a workspace, optionally spawns
-  `claude -p`, and returns success immediately with no measured speedup. Any caller
-  that treats its result as a completed optimization gets an empty answer that looks
-  like a successful one, so `engine="claude"` requires an explicit synchronous path.
-
-Xe-Forge itself is imported lazily: Orbit's analysis stages must stay importable
-without torch, ai_bench or DSPy present (§16.3).
-"""
+"""Directory-level optimizer entry point: resolves a candidate directory's layout and
+hands it to Xe-Forge's existing pipeline. Xe-Forge is imported lazily so Orbit's
+analysis stages stay importable without torch, ai_bench or DSPy. Design rationale:
+docs/DESIGN.md."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# The candidate directory layout from §8.
+# The candidate directory layout.
 KERNEL_FILE = "kernel.py"
 REFERENCE_FILE = "kernel_pytorch.py"
 SPEC_FILE = "spec.yaml"
@@ -42,12 +20,9 @@ class OptimizeError(RuntimeError):
 
 @dataclass
 class Budget:
-    """What a caller is willing to spend on one candidate.
-
-    Xe-Forge expresses this today as `TrialConfig.max_trials`; the wall-clock and
-    agent-call limits are carried here so the cost accounting §25 asks for has
-    somewhere to live, even before the optimizer enforces them.
-    """
+    """What a caller is willing to spend on one candidate. `trials` maps onto
+    Xe-Forge's `TrialConfig.max_trials`; the other limits are carried but not
+    yet enforced by the optimizer."""
 
     trials: int = 10
     wall_clock_s: float | None = None
@@ -122,9 +97,7 @@ def optimize_kernel_dir(
 ) -> OptimizeOutcome:
     """Optimize a candidate directory through Xe-Forge's existing pipeline.
 
-    `dry_run` resolves and validates the candidate without invoking an engine, which is
-    what lets this be exercised in CPU-only CI where neither DSPy nor ai_bench is
-    installed.
+    `dry_run` resolves and validates the candidate without invoking an engine.
     """
     request = OptimizeRequest(
         path=Path(path),
@@ -151,10 +124,6 @@ def optimize_kernel_dir(
             f"raise rather than compare. Supply the eager-mode equivalent before trusting "
             f"any result."
         )
-
-    # 'weighted_latency' maps onto Xe-Forge's weighted objective (§9.1): the pipeline
-    # scores the winner across the whole variant family, applies the per-variant
-    # no-regression constraint, and enforces `required_speedup` itself.
 
     if dry_run:
         return OptimizeOutcome(
@@ -200,14 +169,12 @@ def _optimize_with_pipeline(
     success = bool(getattr(result, "success", False))
 
     if weighted:
-        # §9.1 landed: the pipeline enforced the threshold and the per-variant
-        # no-regression constraint itself; its reason is the authoritative one.
+        # The pipeline enforced the threshold and no-regression constraint itself.
         detail = getattr(result, "error_message", "") or ""
         if not success and detail:
             notes.append(f"weighted objective: {detail}")
     elif request.required_speedup is not None and speedup is not None:
-        # Single-variant path: the threshold is applied here rather than inside the
-        # pipeline, because `target_speedup` in config is inert (§9.2).
+        # Threshold applied here: `target_speedup` in config is inert.
         if speedup < request.required_speedup:
             notes.append(
                 f"speedup {speedup:.2f}x is below the required {request.required_speedup:.2f}x "
@@ -228,14 +195,9 @@ def _optimize_with_pipeline(
 def _optimize_with_claude(
     request: OptimizeRequest, resolved: dict[str, Path], notes: list[str]
 ) -> OptimizeOutcome:
-    """Handle the fire-and-forget engine honestly rather than reporting a false success.
-
-    `ClaudeEngine.optimize` returns `success=True` immediately with no measured
-    speedup: it generates a workspace and optionally spawns `claude -p` without
-    waiting. Reporting that as a completed optimization would put an unmeasured
-    candidate into the decision path, which §19 forbids ("never report a candidate as
-    successful on the basis of generated reasoning alone").
-    """
+    """Handle the fire-and-forget ClaudeEngine: it returns success immediately with
+    no measured speedup, so the outcome is reported as not synchronous and not
+    successful."""
     try:
         from xe_forge.config import get_config
         from xe_forge.engines import create_engine

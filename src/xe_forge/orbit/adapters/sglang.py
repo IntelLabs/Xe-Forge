@@ -1,38 +1,8 @@
 """
-Tier 1: the SGLang adapter (plan §10.9).
-
-This is the scheduled v0.2 portability test: the second Tier 1 adapter, built
-deliberately before any planner work, because its cost in lines changed outside
-`adapters/` is the evidence that the §10 boundary holds. If SGLang had required a
-change to the core, the abstraction would have been wrong (§10.8) — it did not.
-
-`sglang` itself is imported lazily, inside the few methods that genuinely need a live
-engine, for the same reasons the vLLM adapter does it (§10.2, §10.4):
-
-* the module imports, and most of it tests, on a machine with no SGLang and no GPU —
-  which is where CI runs;
-* `detect()` returns False when the *workload* shows no SGLang evidence, so the Tier 0
-  adapter wins resolution instead of a Tier 1 adapter claiming a workload that is not
-  its own — the same regression the vLLM adapter guards against;
-* anything that needs a live engine — the §19 L3 quality gate, a radix-cache flush
-  against a running server — raises `AdapterError` naming exactly what is missing.
-  Never a fabricated number.
-
-What Tier 1 buys over Tier 0: serving metrics parsed from SGLang's own benchmark
-output (`sglang.bench_serving` result table, `bench_offline_throughput`, scheduler
-decode logs), the determinism knobs that make an A/B mean something (§10.5) — chiefly
-`--disable-radix-cache`, which pins RadixAttention's prefix reuse — a config action
-space of real server arguments, framework-aware patch points (§13 rungs P1 and P3)
-and the §19 L3 quality gate.
-
-Like the vLLM adapter, it does **not** declare `can_construct_single_layer`: building
-and *verifying* an in-situ SGLang layer harness needs SGLang installed, and an
-unverified harness constructor mis-ranks extraction tractability (§18).
-
-Per §10.6 the framework's knowledge lives in
-`knowledge_base/common/framework_sglang.yaml`, not here. This module carries
-operational defaults so it works from a wheel with no knowledge base on disk, and the
-YAML may extend them (extra config axes, extra metric patterns) without a code change.
+Tier 1 SGLang adapter: serving metrics, determinism pins (chiefly
+--disable-radix-cache), config axes, patch points and the L3 quality gate. `sglang` is
+imported lazily so the module works with no SGLang installed. Design rationale:
+docs/DESIGN.md.
 """
 
 from __future__ import annotations
@@ -67,15 +37,14 @@ from xe_forge.orbit.models import (
 
 logger = logging.getLogger(__name__)
 
-# §19 L3 fixes the shape of the model-level gate: greedy decode, fixed seed, at least
-# this many prompts. Identical to the vLLM adapter because it is the same gate — the
-# framework changes, the correctness bar does not.
+# The L3 gate is fixed-shape: greedy decode, fixed seed, at least this many prompts.
+# Identical to the vLLM adapter because it is the same gate.
 MIN_QUALITY_PROMPTS = 32
 QUALITY_SEED = 0
 QUALITY_MAX_TOKENS = 64
 
-# Versions whose change invalidates every stored artifact and accepted candidate
-# (§12.9, §13). Reported as found; a package that is absent is simply not listed.
+# Versions whose change invalidates stored artifacts and accepted candidates.
+# Reported as found; an absent package is simply not listed.
 _TRACKED_PACKAGES = (
     "sglang",
     "sgl-kernel",
@@ -85,11 +54,9 @@ _TRACKED_PACKAGES = (
     "triton",
 )
 
-# Whole-token markers in a command's arguments, matched exactly, never as substrings —
-# the vLLM adapter learned the substring lesson on a real machine (a virtualenv named
-# after the framework claimed every workload run from it). SGLang's benchmark scripts
-# are `bench_serving.py` / `bench_offline_throughput.py` / `bench_one_batch.py`;
-# vLLM's is `benchmark_serving.py`, so the stems do not collide.
+# Whole-token markers in a command's arguments, matched exactly, never as substrings.
+# SGLang's script stems (`bench_serving` etc.) do not collide with vLLM's
+# (`benchmark_serving`).
 _SGLANG_COMMAND_TOKENS = (
     "bench_serving",
     "bench_offline_throughput",
@@ -100,16 +67,12 @@ _SGLANG_COMMAND_TOKENS = (
 _SGLANG_EXECUTABLES = frozenset({"sglang"})
 
 # ---------------------------------------------------------------------------
-# Metrics parsing (§10.3 `benchmark`, §10.6 "metrics parsing rules")
+# Metrics parsing
 # ---------------------------------------------------------------------------
 
-# Ordered preference per metric: first match wins, so the mean from SGLang's own
-# result table beats a median, and a decode-side token rate beats a total token rate
-# (total moves with input length, which makes it useless for an A/B on a decode
-# kernel). `sglang.bench_serving` prints the same result-table shape as vLLM's
-# benchmark — it is derived from it — with `Total token throughput` in lower case.
-# The last pattern is the scheduler's own decode-batch log line
-# (`gen throughput (token/s)`), the only rate an offline engine run emits.
+# Ordered preference per metric: first match wins. Total token throughput moves with
+# input length, so it is a fallback, never the default. The last pattern is the
+# scheduler's decode-batch log line, the only rate an offline engine run emits.
 _METRIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("ttft_ms", re.compile(r"^\s*Mean TTFT \(ms\):\s*([0-9.]+)", re.M)),
     ("ttft_ms", re.compile(r"^\s*Median TTFT \(ms\):\s*([0-9.]+)", re.M)),
@@ -127,9 +90,8 @@ _METRIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("throughput", re.compile(r"gen throughput \(token/s\):\s*([0-9.]+)")),
 )
 
-# BenchRunner's field names on the left, the capability names declared in
-# `FrameworkCapabilities.metrics` on the right — the same translation the vLLM
-# adapter performs, so conformance rule 3 compares like with like.
+# BenchRunner field names on the left, capability names declared in
+# `FrameworkCapabilities.metrics` on the right.
 _METRIC_CAPABILITY_NAMES = {
     "throughput": "throughput",
     "ttft_ms": "ttft",
@@ -143,9 +105,7 @@ def parse_sglang_metrics(
 ) -> dict[str, float]:
     """Pull serving metrics out of SGLang benchmark output.
 
-    Returns only what was actually present. A metric that did not appear is absent
-    from the result rather than zero — a zero TTFT would sail through the statistics
-    and produce a confident wrong comparison.
+    A metric that did not appear is absent from the result rather than zero.
     """
     found: dict[str, float] = {}
     for key, pattern in (*_METRIC_PATTERNS, *extra_patterns):
@@ -162,13 +122,12 @@ def parse_sglang_metrics(
 
 
 # ---------------------------------------------------------------------------
-# Config axes (§10.3 `config_axes`, §10.6 "config axes and their legal values")
+# Config axes
 # ---------------------------------------------------------------------------
 
-# Every axis here is a real SGLang server argument. There is deliberately no
-# environment-variable axis: SGLang steers its engine through `ServerArgs`, and
-# declaring an env knob the engine does not read would be a pin that runs cleanly and
-# pins nothing — this codebase's documented recurring bug class.
+# Every axis here is a real SGLang server argument. Deliberately no env-var axis:
+# SGLang steers its engine through `ServerArgs`, and an env knob the engine does not
+# read would be a pin that runs cleanly and pins nothing.
 _CLI_AXES = (
     ConfigAxis(
         name="attention_backend",
@@ -184,7 +143,7 @@ _CLI_AXES = (
         values=[True, False],
         description=(
             "Turn off RadixAttention prefix/KV reuse across requests — the largest "
-            "single source of run-to-run nondeterminism in a serving benchmark (§10.5)"
+            "single source of run-to-run nondeterminism in a serving benchmark"
         ),
     ),
     ConfigAxis(
@@ -260,7 +219,7 @@ _CLI_FLAGS: dict[str, str] = {
 _PRESENCE_AXES = frozenset({"disable_radix_cache", "disable_cuda_graph"})
 
 # ---------------------------------------------------------------------------
-# Determinism (§10.5)
+# Determinism
 # ---------------------------------------------------------------------------
 
 # The source names are shared with Tier 0 and the vLLM adapter, so a report can
@@ -295,7 +254,7 @@ _NON_PINNABLE_KNOBS: dict[str, str] = {
 }
 
 # Command-line evidence that a non-pinnable source is actually active in this run,
-# so §17 can refuse ACCEPT and name the reason (§10.5).
+# so the verdict layer can refuse ACCEPT and name the reason.
 _ACTIVE_MARKERS: dict[str, tuple[str, ...]] = {
     "speculative_decoding": (
         "--speculative-algorithm",
@@ -307,7 +266,7 @@ _ACTIVE_MARKERS: dict[str, tuple[str, ...]] = {
 }
 
 # ---------------------------------------------------------------------------
-# Patch points (§13)
+# Patch points
 # ---------------------------------------------------------------------------
 
 _ATTENTION_HINTS = (
@@ -337,7 +296,7 @@ def _mentions(kernel: KernelRecord, hints: tuple[str, ...]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Knowledge file (§10.6)
+# Knowledge file
 # ---------------------------------------------------------------------------
 
 KNOWLEDGE_FILENAME = "framework_sglang.yaml"
@@ -348,7 +307,7 @@ def knowledge_path() -> Path | None:
 
     The loader is DSL/device-scoped — `common/` then `<dsl>/common/` then
     `<dsl>/<device>/` — so the file lives under `common/`; a flat file at the
-    knowledge-base root is silently ignored (§10.6).
+    knowledge-base root is silently ignored.
     """
     roots: list[Path] = []
     for env_var in ("XE_ORBIT_KNOWLEDGE_DIR", "KNOWLEDGE_DIR"):
@@ -449,12 +408,9 @@ def _import_sglang() -> Any:
 def _mentions_sglang(command: list[str]) -> bool:
     """True when the *command* invokes SGLang, not merely when a path contains it.
 
-    Same matching discipline as the vLLM adapter, for the same reason: substring
-    matching over the joined command made an interpreter path inside a framework-named
-    virtualenv count as workload evidence. The executable is matched on its basename
-    and the remaining arguments as whole dotted tokens, which is what distinguishes
-    `python -m sglang.launch_server` and `python -m sglang.bench_serving` from a
-    directory that merely has "sglang" in its name.
+    The executable is matched on its basename and the remaining arguments as whole
+    dotted tokens, so `python -m sglang.launch_server` counts while an interpreter
+    path that merely contains "sglang" does not.
     """
     if not command:
         return False
@@ -513,7 +469,7 @@ class SGLangAdapter(BaseAdapter):
     tier = 1
     capabilities = FrameworkCapabilities(
         # Parsed from SGLang's own benchmark output; when they do not parse,
-        # `benchmark()` reports wall_time alone and records why (§10.4).
+        # `benchmark()` reports wall_time alone and records why.
         metrics={"wall_time", "throughput", "ttft", "tpot"},
         # The radix tree is flushed by POST /flush_cache against a live server, by
         # Engine.flush_cache() in-process, or — for the process-launched workloads
@@ -521,10 +477,8 @@ class SGLangAdapter(BaseAdapter):
         can_reset_state=True,
         # --max-running-requests 1 plus --schedule-policy fcfs.
         can_pin_batching=True,
-        # SGLang's scheduler runs in its own processes (launch_server and Engine both
-        # spawn them), so an in-process torch.profiler in the caller observes zero
-        # device kernels — the same measured fact as vLLM v1. Device attribution must
-        # go through SGLang's own hook.
+        # SGLang's scheduler runs in its own processes, so an in-process
+        # torch.profiler in the caller observes zero device kernels.
         profiles_in_process=False,
         profile_hook=(
             "SGLANG_TORCH_PROFILER_DIR + POST /start_profile / /stop_profile "
@@ -532,10 +486,8 @@ class SGLangAdapter(BaseAdapter):
         ),
         # --disable-radix-cache.
         can_disable_prefix_cache=True,
-        # Not declared: constructing an SGLang attention/MoE layer in-process and
-        # proving it reproduces the reference output cannot be verified without
-        # SGLang installed; an unverified harness constructor mis-ranks extraction
-        # tractability (§18). Over-declaring is worse than missing (§10.4).
+        # Not declared: an in-situ layer harness cannot be verified without SGLang
+        # installed, and an unverified constructor mis-ranks extraction tractability.
         can_construct_single_layer=False,
         patchable_layers={"attention_backend", "fused_moe"},
     )
@@ -550,19 +502,11 @@ class SGLangAdapter(BaseAdapter):
     def detect(self, spec: WorkloadSpec) -> bool:
         """Claim only workloads with positive evidence of being SGLang ones.
 
-        The evidence rule is the one the vLLM adapter converged on after a real
-        install exposed the alternative: an importable package is evidence about the
-        *machine*, and `resolve_adapter` prefers the highest tier, so installability
-        as evidence makes a Tier 1 adapter claim every workload on the box — which
-        hands each of them declared TTFT/TPOT and a determinism profile describing
-        radix caching they do not have. Evidence must be about the workload: the
-        command names SGLang, the environment carries SGLang's own configuration, or
-        the caller declared the framework. Anything else correctly degrades to
-        Tier 0 (§10.2).
-
-        A script that uses SGLang without saying so is reached with
-        `--framework sglang` — one explicit word from the caller, instead of silently
-        wrong capabilities for everyone else.
+        Evidence must be about the workload — the command names SGLang, the
+        environment carries SGLANG_* configuration, or the caller declared the
+        framework — never the mere presence of the package on the machine. Anything
+        else degrades to Tier 0. A script that uses SGLang without saying so is
+        reached with `--framework sglang`.
         """
         declared = (spec.framework or "").strip().lower()
         if declared:
@@ -584,7 +528,7 @@ class SGLangAdapter(BaseAdapter):
         if not sglang_available():
             notes.append(
                 "sglang is not importable here: serving metrics will not parse, the "
-                "§19 L3 quality gate is unavailable, and this run degrades to "
+                "L3 quality gate is unavailable, and this run degrades to "
                 "wall-clock only."
             )
         if _mentions_sglang(spec.command) and not any(
@@ -592,14 +536,14 @@ class SGLangAdapter(BaseAdapter):
         ):
             notes.append(
                 "--random-seed is unpinned. SGLang draws a fresh seed per launch when "
-                "it is unset; pin it before comparing anything (§10.5)."
+                "it is unset; pin it before comparing anything."
             )
         profile = self.determinism_profile(spec)
         if profile.active_non_pinnable:
             notes.append(
                 "active non-pinnable nondeterminism: "
                 + ", ".join(sorted(profile.active_non_pinnable))
-                + " — §17 must emit INCONCLUSIVE rather than ACCEPT if variance "
+                + " — the verdict must be INCONCLUSIVE rather than ACCEPT if variance "
                 "exceeds the MDE."
             )
         notes.append(
@@ -628,8 +572,7 @@ class SGLangAdapter(BaseAdapter):
         """Measure, reporting exactly the metrics that were actually parsed.
 
         A serving metric that did not appear in the output is absent, not zero, and
-        the fallback to wall-clock is recorded on the handle so the report can say so
-        instead of leaving a reader to assume TTFT was measured (§10.4).
+        the fallback to wall-clock is recorded on the handle so the report can say so.
         """
         executor = handle.state.get("executor") or self.executor
         runner = BenchRunner(executor=executor, metric_extractor=self.metric_extractor)
@@ -696,11 +639,11 @@ class SGLangAdapter(BaseAdapter):
     # --- reproducibility --------------------------------------------------
 
     def determinism_profile(self, spec: WorkloadSpec | None = None) -> DeterminismProfile:
-        """Which of §10.5's sources SGLang can pin, and which it cannot.
+        """Which nondeterminism sources SGLang can pin, and which it cannot.
 
         Passing a spec is optional and additive: it fills `active_non_pinnable` from
-        command-line evidence, which is what lets §17 refuse ACCEPT and name the
-        reason rather than returning a number with a caveat nobody reads.
+        command-line evidence, which is what lets the verdict layer refuse ACCEPT and
+        name the reason.
         """
         active: set[str] = set()
         if spec is not None:
@@ -796,10 +739,10 @@ class SGLangAdapter(BaseAdapter):
             "ipex",
         ]
 
-    # --- extraction (§13) -------------------------------------------------
+    # --- extraction -------------------------------------------------------
 
     def patch_points(self, kernel: KernelRecord) -> list[PatchPoint]:
-        """Where an optimized kernel can be reinserted, highest rung first (§13).
+        """Where an optimized kernel can be reinserted, highest rung first.
 
         P1 first because it touches nothing in the framework and reverts by not
         importing a module; P3 only for the layers this adapter actually declares in
@@ -820,8 +763,8 @@ class SGLangAdapter(BaseAdapter):
                         "sgl-kernel registers its native ops through TORCH_LIBRARY "
                         "(torch.ops.sgl_kernel), so an optimized kernel ships as a "
                         "small out-of-tree extension that shadows the default. SGLang "
-                        "is untouched; revert is not importing the module. §13 "
-                        "requires the dispatch assertion afterwards: the new kernel "
+                        "is untouched; revert is not importing the module. The "
+                        "dispatch assertion must follow: the new kernel "
                         "must appear in the re-profile and the old one must not."
                     ),
                 )
@@ -858,7 +801,7 @@ class SGLangAdapter(BaseAdapter):
                     description=(
                         "MoE runs through a selectable implementation plus a tuned-"
                         "config JSON. The config is data and must be copied, never "
-                        "regenerated (§12.8); a mismatched config silently benchmarks "
+                        "regenerated; a mismatched config silently benchmarks "
                         "a different tile."
                     ),
                 )
@@ -869,7 +812,7 @@ class SGLangAdapter(BaseAdapter):
     # --- action space -----------------------------------------------------
 
     def config_axes(self) -> list[ConfigAxis]:
-        """Declared axes, extended (never overridden) by the knowledge file (§10.6)."""
+        """Declared axes, extended (never overridden) by the knowledge file."""
         axes = list(_CLI_AXES)
         known = {axis.name for axis in axes}
         axes.extend(axis for axis in _knowledge_axes(self.knowledge) if axis.name not in known)
@@ -878,9 +821,8 @@ class SGLangAdapter(BaseAdapter):
     def apply_config(self, spec: WorkloadSpec, config: dict[str, Any]) -> WorkloadSpec:
         """Apply a config point to a workload, as server arguments.
 
-        Refuses rather than drops. A determinism pin that was requested and silently
-        not applied produces a measurement that looks controlled and is not — which
-        is exactly the failure §10.5 exists to prevent.
+        Refuses rather than drops: a pin that was requested and silently not applied
+        produces a measurement that looks controlled and is not.
         """
         axes = {axis.name: axis for axis in self.config_axes()}
         env = dict(spec.env)
@@ -912,7 +854,7 @@ class SGLangAdapter(BaseAdapter):
 
         return spec.model_copy(update={"env": env, "command": command})
 
-    # --- correctness (§19 L3) --------------------------------------------
+    # --- correctness ------------------------------------------------------
 
     def capture_quality_reference(self, handle: Handle, prompts: list[str]) -> list[list[int]]:
         """Record the baseline token ids the L3 gate will compare against."""
@@ -921,23 +863,21 @@ class SGLangAdapter(BaseAdapter):
         return reference
 
     def quality_gate(self, handle: Handle, prompts: list[str]) -> QualityResult:
-        """§19 L3: greedy decode, fixed seed, >= 32 prompts, token-exact comparison.
+        """L3 gate: greedy decode, fixed seed, >= 32 prompts, token-exact comparison.
 
         Raises rather than returning a failure when the gate cannot be *run*: an
-        unavailable gate and a failed gate are different facts, and collapsing them
-        into `passed=False` is how a candidate gets rejected for the wrong reason —
-        or, worse, how an unrun gate gets read as a pass elsewhere.
+        unavailable gate and a failed gate are different facts.
         """
         if not sglang_available():
             raise AdapterError(
-                "sglang is not importable, so the §19 L3 model-level gate cannot be "
+                "sglang is not importable, so the L3 model-level gate cannot be "
                 "run; refusing to report a quality result that was never measured"
             )
         if len(prompts) < MIN_QUALITY_PROMPTS:
             return QualityResult(
                 passed=False,
                 detail=(
-                    f"§19 L3 requires at least {MIN_QUALITY_PROMPTS} prompts; got "
+                    f"L3 requires at least {MIN_QUALITY_PROMPTS} prompts; got "
                     f"{len(prompts)}. Fewer prompts is a different gate, not a weaker one"
                 ),
             )
@@ -1001,11 +941,9 @@ class SGLangAdapter(BaseAdapter):
 def _completion_token_ids(output: Any) -> list[int]:
     """Token ids from one SGLang completion, or a refusal — never a text fallback.
 
-    SGLang's generate output carries `output_ids` directly on recent versions, and
-    token ids inside `meta_info.output_token_logprobs` when logprobs were requested.
-    Comparing decoded *text* instead would pass a gate that token comparison fails
+    Comparing decoded text would pass a gate that token comparison fails
     (retokenization can round-trip differing ids to identical strings), so when
-    neither field is present the gate refuses rather than degrades (§19).
+    neither id field is present the gate refuses rather than degrades.
     """
     if isinstance(output, dict):
         ids = output.get("output_ids")
@@ -1019,7 +957,7 @@ def _completion_token_ids(output: Any) -> list[int]:
     raise AdapterError(
         "SGLang generate output carries no token ids (neither 'output_ids' nor "
         "meta_info['output_token_logprobs']); run the engine with return_logprob=True "
-        "or a version that reports output_ids. The §19 gate compares token ids, "
+        "or a version that reports output_ids. The gate compares token ids, "
         "never decoded text"
     )
 

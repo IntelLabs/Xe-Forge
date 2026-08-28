@@ -1,39 +1,7 @@
 """
-Tier 1: the vLLM adapter (plan §10, §13, §19).
-
-vLLM is the first Tier 1 target, not a special one (§10.1). Everything here that is
-not literally a vLLM flag name is expressed through the protocol SGLang and TGI will
-use, and the core imports none of it.
-
-`vllm` itself is imported lazily, inside the few methods that genuinely need a live
-engine. That is not politeness, it is what makes the adapter usable:
-
-* the module imports, and most of it tests, on a machine with no vLLM and no GPU —
-  which is where CI runs;
-* `detect()` returns False when vLLM is absent, so the Tier 0 adapter wins resolution
-  instead of a Tier 1 adapter failing loudly at launch (§10.2);
-* anything that needs a live engine — the §19 L3 quality gate, a prefix-cache reset
-  against a running server — raises `AdapterError` naming exactly what is missing.
-  Never a fabricated number: a silently-degraded measurement is the failure mode this
-  whole layer exists to prevent (§10.4).
-
-What Tier 1 buys over Tier 0: serving metrics parsed from vLLM's own benchmark output
-(TTFT/TPOT/throughput), the determinism knobs that make an A/B comparison mean
-something (§10.5), a config action space of real engine flags, framework-aware patch
-points (§13 rungs P1 and P3) and the L3 model-level quality gate (§19).
-
-What it deliberately does **not** declare is `can_construct_single_layer`. Building an
-E3 in-situ harness means instantiating a vLLM attention or MoE layer in-process and
-proving it reproduces the reference output; that cannot be written, let alone
-verified, without vLLM installed. Declaring it would promote tangled kernels in the
-`extraction_tractability` ranking (§18) whose extraction cannot actually be built —
-over-declaring is worse than missing (§10.4). Flipping it to True is a bounded
-follow-up on a machine that has vLLM.
-
-Per §10.6 the framework's *knowledge* lives in `knowledge_base/common/framework_vllm.yaml`,
-not here. This module carries operational defaults so it works from a wheel with no
-knowledge base on disk, and the YAML may extend them (extra config axes, extra metric
-patterns) without a code change.
+Tier 1 vLLM adapter: serving metrics, determinism pins, config axes, patch points and
+the L3 model-level quality gate. `vllm` is imported lazily so the module works with no
+vLLM installed. Design rationale: docs/DESIGN.md.
 """
 
 from __future__ import annotations
@@ -68,15 +36,13 @@ from xe_forge.orbit.models import (
 
 logger = logging.getLogger(__name__)
 
-# §19 L3 fixes the shape of the model-level gate: greedy decode, fixed seed, at least
-# this many prompts. Fewer prompts is not a weaker gate, it is a different one, and
-# §19's hard rules forbid weakening a correctness test.
+# The L3 gate is fixed-shape: greedy decode, fixed seed, at least this many prompts.
 MIN_QUALITY_PROMPTS = 32
 QUALITY_SEED = 0
 QUALITY_MAX_TOKENS = 64
 
-# Versions whose change invalidates every stored artifact and accepted candidate
-# (§12.9, §13). Reported as found; a package that is absent is simply not listed.
+# Versions whose change invalidates stored artifacts and accepted candidates.
+# Reported as found; an absent package is simply not listed.
 _TRACKED_PACKAGES = (
     "vllm",
     "torch",
@@ -100,13 +66,11 @@ _VLLM_COMMAND_TOKENS = (
 _VLLM_EXECUTABLES = frozenset({"vllm"})
 
 # ---------------------------------------------------------------------------
-# Metrics parsing (§10.3 `benchmark`, §10.6 "metrics parsing rules")
+# Metrics parsing
 # ---------------------------------------------------------------------------
 
-# Ordered preference per metric: the first pattern that matches wins, so the mean from
-# vLLM's own result table beats a median, and a decode-side token rate beats a total
-# token rate. Total token throughput moves with input length, which makes it useless
-# for an A/B on a decode kernel; that is why it is a fallback, not the default.
+# Ordered preference per metric: the first pattern that matches wins. Total token
+# throughput moves with input length, so it is a fallback, never the default.
 _METRIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("ttft_ms", re.compile(r"^\s*Mean TTFT \(ms\):\s*([0-9.]+)", re.M)),
     ("ttft_ms", re.compile(r"^\s*Median TTFT \(ms\):\s*([0-9.]+)", re.M)),
@@ -126,10 +90,8 @@ _METRIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("throughput", re.compile(r"Avg generation throughput:\s*([0-9.]+)\s*tokens/s")),
 )
 
-# BenchRunner's field names on the left, the capability names declared in
-# `FrameworkCapabilities.metrics` on the right. Conformance test 3 compares the two
-# sets exactly, so the translation has to happen somewhere; doing it here keeps the
-# declared vocabulary framework-agnostic.
+# BenchRunner field names on the left, capability names declared in
+# `FrameworkCapabilities.metrics` on the right.
 _METRIC_CAPABILITY_NAMES = {
     "throughput": "throughput",
     "ttft_ms": "ttft",
@@ -143,9 +105,7 @@ def parse_vllm_metrics(
 ) -> dict[str, float]:
     """Pull serving metrics out of vLLM benchmark output.
 
-    Returns only what was actually present. A metric that did not appear is absent
-    from the result rather than zero — a zero TTFT would sail through the statistics
-    and produce a confident wrong comparison.
+    A metric that did not appear is absent from the result rather than zero.
     """
     found: dict[str, float] = {}
     for key, pattern in (*_METRIC_PATTERNS, *extra_patterns):
@@ -162,7 +122,7 @@ def parse_vllm_metrics(
 
 
 # ---------------------------------------------------------------------------
-# Config axes (§10.3 `config_axes`, §10.6 "config axes and their legal values")
+# Config axes
 # ---------------------------------------------------------------------------
 
 # Axes steered by environment variables. These apply to any vLLM process, including
@@ -204,15 +164,14 @@ _ENV_AXES = (
     ),
 )
 
-# Axes that are engine CLI flags. `ConfigAxis` has no flag field, so the mapping lives
-# here rather than in the shared model — a framework-specific detail does not belong
-# in the core (§10.1).
+# Axes that are engine CLI flags. `ConfigAxis` has no flag field, so the
+# framework-specific flag mapping lives here rather than in the shared model.
 _CLI_AXES = (
     ConfigAxis(
         name="enable_prefix_caching",
         values=[True, False],
         description="Prefix/radix KV reuse across requests — the largest single source of "
-        "run-to-run nondeterminism in a serving benchmark (§10.5)",
+        "run-to-run nondeterminism in a serving benchmark",
     ),
     ConfigAxis(
         name="max_num_seqs",
@@ -252,7 +211,7 @@ _CLI_FLAGS: dict[str, str] = {
 _BOOLEAN_AXES = frozenset({"enable_prefix_caching", "enforce_eager"})
 
 # ---------------------------------------------------------------------------
-# Determinism (§10.5)
+# Determinism
 # ---------------------------------------------------------------------------
 
 # The source names are the ones Tier 0 uses, so a report can compare what a Tier 1
@@ -279,9 +238,8 @@ _NON_PINNABLE_KNOBS: dict[str, str] = {
     ),
 }
 
-# Command-line evidence that a non-pinnable source is actually active in this run. The
-# measurement layer refuses ACCEPT when one of these is live and variance exceeds the
-# MDE, and names it (§10.5) — which only works if the adapter can see it.
+# Command-line evidence that a non-pinnable source is actually active in this run;
+# the measurement layer refuses ACCEPT when one is live and variance exceeds the MDE.
 _ACTIVE_MARKERS: dict[str, tuple[str, ...]] = {
     "speculative_decoding": (
         "--speculative",
@@ -293,7 +251,7 @@ _ACTIVE_MARKERS: dict[str, tuple[str, ...]] = {
 }
 
 # ---------------------------------------------------------------------------
-# Patch points (§13)
+# Patch points
 # ---------------------------------------------------------------------------
 
 _ATTENTION_HINTS = (
@@ -330,7 +288,7 @@ def _mentions(kernel: KernelRecord, hints: tuple[str, ...]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Knowledge file (§10.6)
+# Knowledge file
 # ---------------------------------------------------------------------------
 
 KNOWLEDGE_FILENAME = "framework_vllm.yaml"
@@ -341,7 +299,7 @@ def knowledge_path() -> Path | None:
 
     The loader is DSL/device-scoped — `common/` then `<dsl>/common/` then
     `<dsl>/<device>/` — so the file lives under `common/`; a flat file at the
-    knowledge-base root is silently ignored (§10.6).
+    knowledge-base root is silently ignored.
     """
     roots: list[Path] = []
     for env_var in ("XE_ORBIT_KNOWLEDGE_DIR", "KNOWLEDGE_DIR"):
@@ -442,16 +400,9 @@ def _import_vllm() -> Any:
 def _mentions_vllm(command: list[str]) -> bool:
     """True when the *command* invokes vLLM, not merely when a path contains "vllm".
 
-    Substring-matching the joined command was wrong in a way that only shows up on a
-    real machine: an interpreter at `/home/u/.cache/vllmenv/bin/python` matched, so a
-    plain `python bench.py` run from a virtualenv that happens to be named after vLLM
-    was treated as a vLLM entrypoint. The consequences are not cosmetic — it decides
-    whether engine flags get appended to a command that cannot accept them, and whether
-    this adapter claims a workload that is not its own.
-
-    So the executable is matched on its *basename* and the remaining arguments are
-    matched as whole dotted tokens, which is what actually distinguishes
-    `vllm serve ...` and `python -m vllm.entrypoints...` from a directory name.
+    The executable is matched on its basename and the remaining arguments as whole
+    dotted tokens, so `vllm serve ...` and `python -m vllm.entrypoints...` count while
+    an interpreter path that merely contains "vllm" does not.
     """
     if not command:
         return False
@@ -515,7 +466,7 @@ class VLLMAdapter(BaseAdapter):
     tier = 1
     capabilities = FrameworkCapabilities(
         # Parsed from vLLM's own benchmark output; when they do not parse, `benchmark()`
-        # reports wall_time alone and records why (§10.4).
+        # reports wall_time alone and records why.
         metrics={"wall_time", "throughput", "ttft", "tpot"},
         # Prefix cache, captured graphs and scheduler queues are reset by
         # POST /reset_prefix_cache against a live server, by
@@ -524,9 +475,8 @@ class VLLMAdapter(BaseAdapter):
         can_reset_state=True,
         # --max-num-seqs 1 plus a fixed --max-num-batched-tokens.
         can_pin_batching=True,
-        # Measured, not assumed: vLLM v1 runs its engine in a separate process, so an
-        # in-process torch.profiler in the caller observes zero device kernels. Device
-        # attribution must go through vLLM's own hook.
+        # vLLM v1 runs its engine in a separate process, so an in-process
+        # torch.profiler in the caller observes zero device kernels.
         profiles_in_process=False,
         profile_hook=(
             'ProfilerConfig(profiler="torch", torch_profiler_dir=...) + '
@@ -534,9 +484,8 @@ class VLLMAdapter(BaseAdapter):
         ),
         # --no-enable-prefix-caching.
         can_disable_prefix_cache=True,
-        # Not declared: constructing a vLLM attention/MoE layer in-process and proving
-        # it reproduces the reference output cannot be verified without vLLM, and an
-        # unverified harness constructor mis-ranks extraction tractability (§18).
+        # Not declared: an in-situ layer harness cannot be verified without vLLM
+        # installed, and an unverified constructor mis-ranks extraction tractability.
         can_construct_single_layer=False,
         patchable_layers={"attention_backend", "fused_moe", "custom_op"},
     )
@@ -551,24 +500,10 @@ class VLLMAdapter(BaseAdapter):
     def detect(self, spec: WorkloadSpec) -> bool:
         """Claim only workloads with positive evidence of being vLLM ones.
 
-        An earlier version treated an importable vLLM as evidence about the *workload*,
-        on the reasoning that mis-claiming was cheap because the metrics would simply
-        fail to parse. Testing against a real vLLM install showed that is not cheap.
-        `resolve_adapter` prefers the highest tier, so on any machine with vLLM
-        installed this adapter claimed *every* workload — including plain PyTorch
-        training — and §10.4 has the decision layer read `capabilities` to decide which
-        actions exist. A workload would inherit declared TTFT/TPOT and a determinism
-        profile describing prefix caching it does not have. That is not a visible
-        degradation; it is a quietly wrong capability set.
-
-        So evidence must be about the workload: the command names vLLM, the environment
-        carries vLLM's own configuration, or the caller declared the framework. Anything
-        else correctly degrades to Tier 0 (§10.2), which is the designed behaviour for
-        an unrecognized workload rather than a loss.
-
-        A script that uses vLLM without saying so is reached with `--framework vllm` —
-        one explicit word from the caller, instead of silently wrong capabilities for
-        everyone else.
+        Evidence must be about the workload — the command names vLLM, the environment
+        carries VLLM_* configuration, or the caller declared the framework — never the
+        mere presence of the package on the machine. Anything else degrades to Tier 0.
+        A script that uses vLLM without saying so is reached with `--framework vllm`.
         """
         declared = (spec.framework or "").strip().lower()
         if declared:
@@ -589,21 +524,21 @@ class VLLMAdapter(BaseAdapter):
         notes: list[str] = []
         if not vllm_available():
             notes.append(
-                "vllm is not importable here: serving metrics will not parse, the §19 L3 "
+                "vllm is not importable here: serving metrics will not parse, the L3 "
                 "quality gate is unavailable, and this run degrades to wall-clock only."
             )
         if "VLLM_USE_V1" not in spec.env and "VLLM_USE_V1" not in os.environ:
             notes.append(
                 "VLLM_USE_V1 is unpinned. V0 and V1 differ in scheduler, chunked-prefill "
-                "policy and kernel mix; pin it before comparing anything (§10.5)."
+                "policy and kernel mix; pin it before comparing anything."
             )
         profile = self.determinism_profile(spec)
         if profile.active_non_pinnable:
             notes.append(
                 "active non-pinnable nondeterminism: "
                 + ", ".join(sorted(profile.active_non_pinnable))
-                + " — §17 must emit INCONCLUSIVE rather than ACCEPT if variance exceeds "
-                "the MDE."
+                + " — the verdict must be INCONCLUSIVE rather than ACCEPT if variance "
+                "exceeds the MDE."
             )
         notes.append(
             "determinism pins available: --no-enable-prefix-caching, --max-num-seqs 1, "
@@ -630,8 +565,7 @@ class VLLMAdapter(BaseAdapter):
         """Measure, reporting exactly the metrics that were actually parsed.
 
         A serving metric that did not appear in the output is absent, not zero, and the
-        fallback to wall-clock is recorded on the handle so the report can say so
-        instead of leaving a reader to assume TTFT was measured (§10.4).
+        fallback to wall-clock is recorded on the handle so the report can say so.
         """
         executor = handle.state.get("executor") or self.executor
         runner = BenchRunner(executor=executor, metric_extractor=self.metric_extractor)
@@ -697,11 +631,11 @@ class VLLMAdapter(BaseAdapter):
     # --- reproducibility --------------------------------------------------
 
     def determinism_profile(self, spec: WorkloadSpec | None = None) -> DeterminismProfile:
-        """Which of §10.5's sources vLLM can pin, and which it cannot.
+        """Which nondeterminism sources vLLM can pin, and which it cannot.
 
         Passing a spec is optional and additive: it fills `active_non_pinnable` from
-        command-line evidence, which is what lets §17 refuse ACCEPT and name the reason
-        rather than returning a number with a caveat nobody reads.
+        command-line evidence, which is what lets the verdict layer refuse ACCEPT and
+        name the reason.
         """
         active: set[str] = set()
         if spec is not None:
@@ -798,10 +732,10 @@ class VLLMAdapter(BaseAdapter):
             "ipex",
         ]
 
-    # --- extraction (§13) -------------------------------------------------
+    # --- extraction -------------------------------------------------------
 
     def patch_points(self, kernel: KernelRecord) -> list[PatchPoint]:
-        """Where an optimized kernel can be reinserted, highest rung first (§13).
+        """Where an optimized kernel can be reinserted, highest rung first.
 
         P1 first because it touches nothing in the framework and reverts by not
         importing a module; P3 only for the layers this adapter actually declares in
@@ -820,8 +754,8 @@ class VLLMAdapter(BaseAdapter):
                         "vLLM's native ops are registered through TORCH_LIBRARY "
                         "(torch.ops._C, torch.ops._moe_C), so an optimized kernel ships as "
                         "a small out-of-tree extension that shadows the default. vLLM is "
-                        "untouched; revert is not importing the module. §13 requires the "
-                        "dispatch assertion afterwards: the new kernel must appear in the "
+                        "untouched; revert is not importing the module. The dispatch "
+                        "assertion must follow: the new kernel must appear in the "
                         "re-profile and the old one must not."
                     ),
                 )
@@ -857,8 +791,8 @@ class VLLMAdapter(BaseAdapter):
                     ),
                     description=(
                         "MoE runs through a selectable method object plus a tuned-config "
-                        "JSON. The config is data and must be copied, never regenerated "
-                        "(§12.8); a mismatched config silently benchmarks a different tile."
+                        "JSON. The config is data and must be copied, never regenerated; "
+                        "a mismatched config silently benchmarks a different tile."
                     ),
                 )
             )
@@ -885,7 +819,7 @@ class VLLMAdapter(BaseAdapter):
     # --- action space -----------------------------------------------------
 
     def config_axes(self) -> list[ConfigAxis]:
-        """Declared axes, extended (never overridden) by the knowledge file (§10.6)."""
+        """Declared axes, extended (never overridden) by the knowledge file."""
         axes = [*_ENV_AXES, *_CLI_AXES]
         known = {axis.name for axis in axes}
         axes.extend(axis for axis in _knowledge_axes(self.knowledge) if axis.name not in known)
@@ -894,9 +828,8 @@ class VLLMAdapter(BaseAdapter):
     def apply_config(self, spec: WorkloadSpec, config: dict[str, Any]) -> WorkloadSpec:
         """Apply a config point to a workload, as env vars and as engine flags.
 
-        Refuses rather than drops. A determinism pin that was requested and silently
-        not applied produces a measurement that looks controlled and is not — which is
-        exactly the failure §10.5 exists to prevent.
+        Refuses rather than drops: a pin that was requested and silently not applied
+        produces a measurement that looks controlled and is not.
         """
         axes = {axis.name: axis for axis in self.config_axes()}
         env = dict(spec.env)
@@ -928,7 +861,7 @@ class VLLMAdapter(BaseAdapter):
 
         return spec.model_copy(update={"env": env, "command": command})
 
-    # --- correctness (§19 L3) --------------------------------------------
+    # --- correctness ------------------------------------------------------
 
     def capture_quality_reference(self, handle: Handle, prompts: list[str]) -> list[list[int]]:
         """Record the baseline token ids the L3 gate will compare against."""
@@ -937,23 +870,21 @@ class VLLMAdapter(BaseAdapter):
         return reference
 
     def quality_gate(self, handle: Handle, prompts: list[str]) -> QualityResult:
-        """§19 L3: greedy decode, fixed seed, >= 32 prompts, token-exact comparison.
+        """L3 gate: greedy decode, fixed seed, >= 32 prompts, token-exact comparison.
 
         Raises rather than returning a failure when the gate cannot be *run*: an
-        unavailable gate and a failed gate are different facts, and collapsing them
-        into `passed=False` is how a candidate gets rejected for the wrong reason — or,
-        worse, how an unrun gate gets read as a pass elsewhere.
+        unavailable gate and a failed gate are different facts.
         """
         if not vllm_available():
             raise AdapterError(
-                "vllm is not importable, so the §19 L3 model-level gate cannot be run; "
+                "vllm is not importable, so the L3 model-level gate cannot be run; "
                 "refusing to report a quality result that was never measured"
             )
         if len(prompts) < MIN_QUALITY_PROMPTS:
             return QualityResult(
                 passed=False,
                 detail=(
-                    f"§19 L3 requires at least {MIN_QUALITY_PROMPTS} prompts; got "
+                    f"L3 requires at least {MIN_QUALITY_PROMPTS} prompts; got "
                     f"{len(prompts)}. Fewer prompts is a different gate, not a weaker one"
                 ),
             )

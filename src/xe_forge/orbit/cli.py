@@ -1,15 +1,8 @@
 #!/usr/bin/env python3
 """
-The `xe-orbit` command line (plan §21).
-
-Every stage is a subcommand, every stage reads and writes typed artifacts, and every
-stage accepts `--replay <run-id>` to re-run from stored artifacts instead of live
-hardware (§16.3). Replay is what makes this testable on CPU-only CI, and it is also
-the debugging tool: when a run produces a surprising decision, the whole downstream
-chain can be re-run against the exact artifacts that produced it.
-
-`xe-orbit optimize` plans by default and runs the §13.5 loop only under `--apply`,
-with an operator-supplied correctness harness — nothing autonomous ships by accident.
+The `xe-orbit` command line. Every stage is a subcommand that reads and writes typed
+artifacts and accepts `--replay <run-id>` to re-run from stored artifacts instead of
+live hardware. `optimize` plans by default and applies only under `--apply`.
 """
 
 from __future__ import annotations
@@ -99,7 +92,7 @@ def _emit(payload: object, as_json: bool, text: str = "") -> None:
 
 
 def cmd_frameworks(args: argparse.Namespace) -> int:
-    """List adapters, tiers and declared capabilities (§10)."""
+    """List adapters, tiers and declared capabilities."""
     from xe_forge.orbit.adapters import describe_adapters
 
     rows = describe_adapters()
@@ -127,7 +120,7 @@ def cmd_frameworks(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    """Baseline: environment, versions, device, timing with repetitions (§PR 2)."""
+    """Baseline: environment, versions, device, timing with repetitions."""
     from xe_forge.orbit.adapters import resolve_adapter
     from xe_forge.orbit.adapters.base import LoadSpec
     from xe_forge.orbit.executor import LocalExecutor
@@ -186,7 +179,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_trace(args: argparse.Namespace) -> int:
-    """torch.profiler + unitrace + launch interception (§PR 3, §12.4)."""
+    """torch.profiler + unitrace + launch interception."""
     from xe_forge.orbit.executor import LocalExecutor
     from xe_forge.orbit.profiling import trace as trace_mod
     from xe_forge.orbit.profiling import unitrace as unitrace_mod
@@ -213,7 +206,7 @@ def cmd_trace(args: argparse.Namespace) -> int:
     executor = LocalExecutor()
 
     # unitrace first: its GPU-busy and launch-gap numbers decide whether the rest of
-    # the pipeline is even worth running (§18).
+    # the pipeline is even worth running.
     unitrace_result = unitrace_mod.run(
         spec.command,
         executor=executor,
@@ -227,13 +220,10 @@ def cmd_trace(args: argparse.Namespace) -> int:
     if not unitrace_result.available:
         print(f"unitrace: unavailable — {unitrace_result.reason}")
 
-    # The workload runs as a subprocess, so in-process torch profiling and launch
-    # interception do not apply here; a trace file is the handoff. With --wrap, the
-    # handoff is arranged for the workload: the command runs through the shipped
-    # profiler wrapper, which writes the trace exactly where this stage looks — the
-    # point-and-start path for single-process torch workloads. Framework engines
-    # that move GPU work into a subprocess (vLLM, SGLang) need their own profiler
-    # hook, and the wrapper says so rather than emitting an empty trace silently.
+    # The workload runs as a subprocess, so a trace file is the handoff. With --wrap,
+    # the command runs through the shipped profiler wrapper, which writes the trace
+    # where this stage looks; framework engines that move GPU work into a subprocess
+    # need their own profiler hook.
     run_command, run_env = spec.command, spec.env
     if getattr(args, "wrap", False):
         import os
@@ -257,8 +247,7 @@ def cmd_trace(args: argparse.Namespace) -> int:
         print(f"workload failed: exit {result.returncode}", file=sys.stderr)
         if result.stderr:
             print(result.stderr[-1500:], file=sys.stderr)
-        # The failure is an enablement finding, not only a dead end (§5.6): classify
-        # it and name the rung, the same wiring BenchRunner.measure carries.
+        # The failure is an enablement finding: classify it and name the rung.
         from xe_forge.orbit.enablement import diagnose
 
         for gap in diagnose(result.returncode, result.stdout, result.stderr):
@@ -289,7 +278,7 @@ def cmd_trace(args: argparse.Namespace) -> int:
 
 
 def cmd_kernels(args: argparse.Namespace) -> int:
-    """Kernel catalog with gating and ranking (§PR 4, §18)."""
+    """Kernel catalog with gating and ranking."""
     from xe_forge.orbit.analysis.catalog import build_catalog, format_catalog
     from xe_forge.orbit.profiling.trace import TraceEvents
 
@@ -332,7 +321,7 @@ def cmd_kernels(args: argparse.Namespace) -> int:
 
 
 def cmd_inspect(args: argparse.Namespace) -> int:
-    """Provenance, shapes, headroom and extraction level for one kernel (§21)."""
+    """Provenance, shapes, headroom and extraction level for one kernel."""
     from xe_forge.orbit.languages import resolve_backend
     from xe_forge.orbit.models import KernelCatalog
 
@@ -412,7 +401,7 @@ def _launch_map(store: RunStore, kernels) -> dict:
 
 
 def cmd_extract_all(args: argparse.Namespace) -> int:
-    """Extract every kernel in the run and report coverage by GPU time (§12.3)."""
+    """Extract every kernel in the run and report coverage by GPU time."""
     from xe_forge.orbit.extract import extract_all
     from xe_forge.orbit.models import KernelCatalog
 
@@ -466,7 +455,7 @@ def cmd_extract_all(args: argparse.Namespace) -> int:
 
 
 def cmd_extract(args: argparse.Namespace) -> int:
-    """Build a KernelBundle, downgrading rather than guessing (§12)."""
+    """Build a KernelBundle, downgrading rather than guessing."""
     from xe_forge.orbit.extract import Extractor
     from xe_forge.orbit.models import CapturedInvocation
     from xe_forge.orbit.profiling.interception import LaunchLog
@@ -522,7 +511,7 @@ def cmd_extract(args: argparse.Namespace) -> int:
 
 
 def cmd_bundle(args: argparse.Namespace) -> int:
-    """Prove a bundle is the kernel that actually ran (§12.10, §12.12)."""
+    """Prove a bundle is the kernel that actually ran."""
     from xe_forge.orbit.extract import verify_bundle
     from xe_forge.orbit.models import KernelBundle
 
@@ -558,7 +547,7 @@ def cmd_bundle(args: argparse.Namespace) -> int:
 
 
 def cmd_emit(args: argparse.Namespace) -> int:
-    """Write the Model + spec contract Xe-Forge consumes (§8, §PR 9)."""
+    """Write the Model + spec contract Xe-Forge consumes."""
     from xe_forge.orbit.emit import emit_candidate
     from xe_forge.orbit.models import KernelBundle
 
@@ -594,11 +583,10 @@ def cmd_emit(args: argparse.Namespace) -> int:
 
 
 def cmd_optimize(args: argparse.Namespace) -> int:
-    """Run the agentic in-place optimization loop for one kernel (§13.5).
+    """Run the agentic in-place optimization loop for one kernel.
 
-    Orbit owns the loop; the agent answers the one question it is better at — what to
-    try. Apply, verify, measure and revert are all programmatic, so the result is
-    reproducible regardless of what the model said.
+    Orbit owns the loop; the agent only proposes. Apply, verify, measure and revert
+    are all programmatic.
     """
     from xe_forge.orbit.knowledge import facts_for_kernel
     from xe_forge.orbit.models import KernelCatalog
@@ -607,8 +595,8 @@ def cmd_optimize(args: argparse.Namespace) -> int:
     store = _resolve_store(args)
     if args.apply and not args.harness:
         print(
-            "--apply requires --harness: a loop without a correctness gate is what "
-            "§19 forbids. Provide a script exiting 0 (correct) / 1 (wrong) / 2 "
+            "--apply requires --harness: a loop without a correctness gate is "
+            "forbidden. Provide a script exiting 0 (correct) / 1 (wrong) / 2 "
             "(could not check).",
             file=sys.stderr,
         )
@@ -626,9 +614,8 @@ def cmd_optimize(args: argparse.Namespace) -> int:
         f"{kernel.max_e2e_gain:.2f}%, MDE {catalog.minimum_detectable_effect:.2f}%"
     )
     if kernel.max_e2e_gain < catalog.minimum_detectable_effect:
-        # Say this before any work is done, not in a footnote afterwards. §18 is explicit
-        # that a ceiling below the MDE means the win cannot be demonstrated end to end
-        # even if it is real.
+        # Say this before any work is done: a ceiling below the MDE means the win
+        # cannot be demonstrated end to end even if it is real.
         print(
             "  NOTE: the ceiling is below the minimum detectable effect, so an "
             "end-to-end verdict\n        will be INCONCLUSIVE however good the kernel "
@@ -636,10 +623,8 @@ def cmd_optimize(args: argparse.Namespace) -> int:
         )
 
     if not kernel.source_file:
-        # Provenance says who produced a kernel; the language backend says where it
-        # lives. Resolving lazily here rather than at catalog time keeps a filesystem
-        # scan out of the common path — the catalog is built for every run, and only a
-        # kernel actually being optimized needs its file located.
+        # Resolved lazily here rather than at catalog time: only a kernel actually
+        # being optimized needs its file located.
         from xe_forge.orbit.languages import get_backend
 
         language = kernel.language.value if kernel.language else "triton"
@@ -649,9 +634,8 @@ def cmd_optimize(args: argparse.Namespace) -> int:
             located = None
         if located is not None and located.file:
             kernel.source_file = located.file
-            # Persist the tier alongside the path (§5.6 / G2): the record now says
-            # *how* the file was found, and its confidence keeps the None-for-exact
-            # semantics rather than being flattened back into a float.
+            # Persist the tier alongside the path: the record says *how* the file was
+            # found, and confidence keeps the None-for-exact semantics.
             kernel.resolution_method = located.method
             kernel.provenance_confidence = located.confidence
             print(
@@ -676,14 +660,11 @@ def cmd_optimize(args: argparse.Namespace) -> int:
 
     proposer = ClaudeProposer()
     if not proposer.available():
-        print("\nclaude is not on PATH; cannot propose (§6)")
+        print("\nclaude is not on PATH; cannot propose")
         return 1
 
-    # §13.5's session memory, across CLI invocations: without this, a second
-    # `optimize` run re-proposes exactly what the first run measured and reverted —
-    # the loop rejected them correctly and the agent never found out. The device
-    # facts travel too, for the same measured reason: the first live run's failures
-    # were sound reasoning applied to a device the agent had not been told about.
+    # Session memory across CLI invocations: without it, a second `optimize` run
+    # re-proposes exactly what the first run measured and reverted.
     history = _prior_trials(store, kernel.id)
     if history:
         knowledge += (
@@ -713,7 +694,7 @@ def cmd_optimize(args: argparse.Namespace) -> int:
     if not args.apply:
         print(
             "\nProposals only. Pass --apply (with --harness, and --measure to compare) "
-            "to run the §13.5 loop: implement, apply, verify, measure, keep or revert."
+            "to run the loop: implement, apply, verify, measure, keep or revert."
         )
         return 0
 
@@ -750,12 +731,10 @@ def _prior_trials(store, kernel_id: str) -> str:
 def _implement_round(
     proposer, proposals, target, experiments: Path, harness: Path, round_index: int = 0
 ) -> int:
-    """IMPLEMENT one round's proposals, each in its own workspace *copy* (§13.5).
+    """IMPLEMENT one round's proposals, each in its own workspace *copy*.
 
-    A session that goes wrong cannot leave the tree broken, and the agent sees its own
-    tracebacks. Round 1 keeps the historical `proposal_<i>` workspace names so a
-    single-round invocation is unchanged on disk; later rounds are namespaced per round
-    so a re-planned session cannot overwrite the evidence of an earlier one.
+    Round 1 keeps the historical `proposal_<i>` workspace names; later rounds are
+    namespaced per round so a re-planned session cannot overwrite earlier evidence.
     """
     prefix = "proposal" if round_index == 0 else f"round{round_index + 1}_proposal"
     implemented = 0
@@ -783,9 +762,7 @@ def _plan_next_round(
     """PLAN a round after the first: the measured context, plus what this session learned.
 
     The history travels through `plan()`'s `knowledge` parameter, which the proposer
-    interpolates into the prompt as MEASURED CONTEXT — and measured context is exactly
-    what a round's verdicts are. Feeding the seam that already exists keeps the
-    proposer unchanged and the layering honest (§13.7).
+    interpolates into the prompt as measured context.
     """
     print(f"\n--- round {round_index + 1}/{rounds} ---")
     learned = history.render_for_knowledge()
@@ -820,20 +797,14 @@ def _session_summary(history, stopped_because: str) -> str:
 
 
 def _run_optimize_loop(args, store, kernel, proposer, proposals, knowledge: str = "") -> int:
-    """Drive §13.5's loop from the CLI (gap G1), for one round or several.
+    """Drive the optimization loop from the CLI, for one round or several.
 
-    The agent has proposed; everything from here is programmatic. Each proposal is
-    implemented in an isolated workspace *copy*, then applied through the journalled
-    patcher and driven through the gates — novelty, sandbox, apply, correctness,
-    measure — with Orbit owning every verdict. Only the winner stays on disk.
-
-    With `--rounds N` above 1 the plan -> implement -> trial cycle repeats, and each
-    round's measured verdicts — with their reasons — go back to the proposer as
-    session history (§13.7). That closes the "the agent never found out" seam
-    in-process, where `_prior_trials` closes it only across separate invocations. The
-    patcher and the novelty ledger are created once and shared by every round: novelty
-    is memory, and memory that resets each round would readmit in round 2 exactly what
-    round 1 already measured (§20.4).
+    Each proposal is implemented in an isolated workspace copy, applied through the
+    journalled patcher and driven through the gates, with Orbit owning every verdict;
+    only the winner stays on disk. With `--rounds N` above 1 the cycle repeats and
+    each round's measured verdicts go back to the proposer as session history. The
+    patcher and novelty ledger are created once and shared by every round — memory
+    that reset each round would readmit what an earlier round already measured.
     """
     from xe_forge.orbit.novelty import NoveltyLedger
     from xe_forge.orbit.optimize.harness import run_harness
@@ -876,7 +847,7 @@ def _run_optimize_loop(args, store, kernel, proposer, proposals, knowledge: str 
 
     elif args.measure and 0 < args.samples < 5:
         print(
-            f"\n--samples {args.samples} is below the 5-repetition floor (§17); "
+            f"\n--samples {args.samples} is below the 5-repetition floor; "
             "falling back to a single measurement and the fixed floor"
         )
     if not args.measure:
@@ -975,7 +946,7 @@ def _measure_once(command: str, timeout_s: float = 600.0) -> float | None:
 
 
 def _write_loop_result(path: Path, result) -> None:
-    """Persist the loop's verdicts as an artifact (§23), without the source bytes."""
+    """Persist the loop's verdicts as an artifact, without the source bytes."""
     payload = {
         "kernel_id": result.kernel_id,
         "baseline_us": result.baseline_us,
@@ -999,12 +970,10 @@ def _write_loop_result(path: Path, result) -> None:
 
 
 def cmd_patch(args: argparse.Namespace) -> int:
-    """Show or undo in-place edits left in the installed tree (§13.6).
+    """Show or undo in-place edits left in the installed tree.
 
-    An orphaned journal entry is the only on-disk evidence that a previous run modified
-    an installed tree and never put it back. Left alone, the next run measures a patched
-    baseline and reports it as clean — a wrong number produced by a correct-looking
-    pipeline, which is exactly what this project refuses to ship.
+    An orphaned journal entry means a previous run modified the tree and never put
+    it back; left alone, the next run measures a patched baseline as clean.
     """
     from xe_forge.orbit.patch.inplace import InPlacePatcher, RecoveryOutcome
 
@@ -1037,7 +1006,7 @@ def cmd_patch(args: argparse.Namespace) -> int:
 
 
 def cmd_apply(args: argparse.Namespace) -> int:
-    """Patch a candidate back into the workload, highest rung first (§13)."""
+    """Patch a candidate back into the workload, highest rung first."""
     from xe_forge.orbit.adapters import resolve_adapter
     from xe_forge.orbit.models import WorkloadSpec
     from xe_forge.orbit.patch import PatchError, apply_patch
@@ -1081,12 +1050,12 @@ def cmd_apply(args: argparse.Namespace) -> int:
         print(f"  note:     {note}")
     print()
     print("  Not yet verified. A patch is not applied until re-profiling shows the new")
-    print("  kernel present AND the old one absent — run `xe-orbit compare` (§13).")
+    print("  kernel present AND the old one absent — run `xe-orbit compare`.")
     return 0
 
 
 def cmd_compare(args: argparse.Namespace) -> int:
-    """Run the correctness ladder and the acceptance decision (§17, §19, §14.3)."""
+    """Run the correctness ladder and the acceptance decision."""
     from xe_forge.orbit.compare import decide_matrix, run_ladder
     from xe_forge.orbit.models import KernelBundle, WorkloadMatrix
 
@@ -1168,12 +1137,11 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
 
 def cmd_arena(args: argparse.Namespace) -> int:
-    """A/B engines on a shared task set, outside the optimization loop (§5.3, §5.4).
+    """A/B engines on a shared task set, outside the optimization loop.
 
-    Discovery, availability, execution and reporting are all honest about their
-    limits: an unavailable contestant is skipped with the reason, a task without
-    held-out variants says its generalization gap is unmeasurable, and the
-    leaderboard never ranks a measured mean against an unmeasured one.
+    An unavailable contestant is skipped with the reason, a task without held-out
+    variants says its generalization gap is unmeasurable, and the leaderboard never
+    ranks a measured mean against an unmeasured one.
     """
     from xe_forge.orbit.arena import ArenaError, build_contestants, discover_tasks, run_arena
 
@@ -1218,13 +1186,13 @@ def cmd_arena(args: argparse.Namespace) -> int:
 
 
 def cmd_matrix(args: argparse.Namespace) -> int:
-    """Show serving profiles, weights and derived shapes (§14.5)."""
+    """Show serving profiles, weights and derived shapes."""
     from xe_forge.orbit.models import ServingProfile, WorkloadMatrix
 
     if args.path:
         matrix = WorkloadMatrix.model_validate_json(Path(args.path).read_text(encoding="utf-8"))
     else:
-        # The example matrix from §14.3, so `matrix show` is useful with no file.
+        # A built-in example matrix, so `matrix show` is useful with no file.
         matrix = WorkloadMatrix(
             profiles=[
                 ServingProfile(
@@ -1267,13 +1235,13 @@ def cmd_matrix(args: argparse.Namespace) -> int:
             f"{profile.osl:>6} {profile.concurrency:>5} {weights[profile.id]:>7.2f}"
         )
     print()
-    print("Acceptance requires a weighted win AND no per-profile regression (§14.3):")
+    print("Acceptance requires a weighted win AND no per-profile regression:")
     print("a candidate that wins decode and loses prefill is a trade, not an improvement.")
     return 0
 
 
 def cmd_sources(args: argparse.Namespace) -> int:
-    """Show which Intel SYCL kernel source trees are available (§11.2)."""
+    """Show which Intel SYCL kernel source trees are available."""
     from xe_forge.orbit.languages.sources import candidate_roots, discover
 
     registry = discover()
@@ -1313,7 +1281,7 @@ def cmd_sources(args: argparse.Namespace) -> int:
 
 
 def cmd_support_matrix(args: argparse.Namespace) -> int:
-    """Publish the measured support matrix (§5.3, §6)."""
+    """Publish the measured support matrix."""
     from xe_forge.orbit.support import build_matrix, format_languages
 
     matrix = build_matrix()
@@ -1326,12 +1294,12 @@ def cmd_support_matrix(args: argparse.Namespace) -> int:
     print(format_languages())
     print()
     print("Versions are pinned, not chased: a change to any of them invalidates stored")
-    print("bundles and measurements and forces re-extraction (§12.9).")
+    print("bundles and measurements and forces re-extraction.")
     return 0
 
 
 def cmd_regions(args: argparse.Namespace) -> int:
-    """Fusable multi-kernel regions and their Xe-Fuse handoff (§7.3, §12.11)."""
+    """Fusable multi-kernel regions and their Xe-Fuse handoff."""
     from xe_forge.orbit.analysis.regions import detect_regions, format_regions
     from xe_forge.orbit.models import KernelCatalog
     from xe_forge.orbit.profiling.trace import TraceEvents
@@ -1370,7 +1338,7 @@ def _region_gemm_shapes(region, kernels) -> tuple[int, int, int] | None:
     Only the clean case is derived — two 2-D inputs sharing exactly one dimension,
     read from the dominant observed shape. Anything else returns None and the caller
     asks for --shapes: a guessed problem size would autotune a kernel the workload
-    never runs, which is §12.10's wrong-specialization failure by another road.
+    never runs.
     """
     by_id = {kernel.id: kernel for kernel in kernels}
     for kernel_id in region.kernel_ids:
@@ -1394,12 +1362,11 @@ def _region_gemm_shapes(region, kernels) -> tuple[int, int, int] | None:
 
 
 def cmd_fuse(args: argparse.Namespace) -> int:
-    """Autotune a region's fused kernel through Xe-Fuse (§13.4, §11.7).
+    """Autotune a region's fused kernel through Xe-Fuse.
 
-    Fully automated and deterministic: pattern → preset, shapes from the trace (or
-    --shapes), a tile sweep with every result kept, the winner named. The output is
-    a timing table, not an acceptance — correctness stays gated by the differential
-    check before any comparison built on these numbers is believed.
+    Deterministic: pattern -> preset, shapes from the trace (or --shapes), a tile
+    sweep with every result kept, the winner named. The output is a timing table,
+    not an acceptance — correctness stays gated by the differential check.
     """
     from xe_forge.orbit.models import KernelCatalog
     from xe_forge.orbit.optimize.fusion import task_from_region
@@ -1487,12 +1454,11 @@ def cmd_fuse(args: argparse.Namespace) -> int:
 
 
 def cmd_build_lane(args: argparse.Namespace) -> int:
-    """Operate the rung-5 off-loop build lane (§24 Tier E, E1).
+    """Operate the rung-5 off-loop build lane.
 
     `submit` queues a build; `run` executes the oldest queued job in the single
-    slot (long compiles belong here, never in the tick loop); `status` lists the
-    journal; `mark` records the runnable gate's verdict on a SUCCEEDED build —
-    the lane itself never KEEPs.
+    slot; `status` lists the journal; `mark` records the runnable gate's verdict
+    on a SUCCEEDED build — the lane itself never KEEPs.
     """
     from xe_forge.orbit.enablement import BuildLane
 
@@ -1538,20 +1504,19 @@ def cmd_build_lane(args: argparse.Namespace) -> int:
 
 
 def _gpu_lease(reason: str):
-    """The per-device lease every GPU-touching command holds (§24 Tier E, E2)."""
+    """The per-device lease every GPU-touching command holds."""
     from xe_forge.orbit.policy import ResourceLease
 
     return ResourceLease().hold(reason)
 
 
 def cmd_fuse_apply(args: argparse.Namespace) -> int:
-    """Point at a model, get a patched-and-measured verdict (§13.4, §25).
+    """Point at a model, get a patched-and-measured verdict.
 
     Deterministic first: model id -> architecture -> vLLM model file -> exact
     anchor. The residue is a printed agent handoff, never a looser regex. With
     --e2e the command runs ABBA arm pairs (baseline = same patched tree with the
-    guard off, byte-for-byte the original path) and applies §17: ACCEPT keeps the
-    patch, anything else reverts it.
+    guard off) and decides: ACCEPT keeps the patch, anything else reverts it.
     """
     import subprocess
 
@@ -1563,8 +1528,7 @@ def cmd_fuse_apply(args: argparse.Namespace) -> int:
         print("--model is required (except with --revert, which needs it to pick the journal)")
         return 2
     # One journal per model: revert_all() on a shared journal would restore every
-    # model's patch at once — measured live when a Qwen INCONCLUSIVE revert also
-    # wiped TinyLlama's kept ACCEPT patch.
+    # model's patch at once.
     slug = (args.model or "all").replace("/", "--")
     journal_dir = Path.home() / ".cache/orbit-dev/fuse_apply_journal" / slug
 
@@ -1669,7 +1633,7 @@ def cmd_fuse_apply(args: argparse.Namespace) -> int:
 
 
 def cmd_pipeline(args: argparse.Namespace) -> int:
-    """Run the full loop over a run's artifacts (§24, PR 13)."""
+    """Run the full loop over a run's artifacts."""
     from xe_forge.orbit.pipeline import run_pipeline
 
     store = _resolve_store(args)
@@ -1699,7 +1663,7 @@ def cmd_pipeline(args: argparse.Namespace) -> int:
 
 
 def cmd_conformance(args: argparse.Namespace) -> int:
-    """Run the adapter conformance suite (§10.7)."""
+    """Run the adapter conformance suite."""
     from xe_forge.orbit.adapters import get_adapter
     from xe_forge.orbit.adapters.conformance import run_conformance
 
@@ -1721,7 +1685,7 @@ def cmd_conformance(args: argparse.Namespace) -> int:
 
 
 def cmd_selftest(args: argparse.Namespace) -> int:
-    """Full-loop invariants on stub data, no LLM and no GPU (§15)."""
+    """Full-loop invariants on stub data, no LLM and no GPU."""
     from xe_forge.orbit.selftest import run_selftest
 
     report = run_selftest(chaos=args.chaos, quick=args.quick)
@@ -1736,7 +1700,7 @@ def cmd_selftest(args: argparse.Namespace) -> int:
 
 
 def cmd_schemas(args: argparse.Namespace) -> int:
-    """Export the versioned artifact schemas (§16.2)."""
+    """Export the versioned artifact schemas."""
     from xe_forge.orbit import schemas
 
     if args.export:
@@ -1775,7 +1739,7 @@ def cmd_runs(args: argparse.Namespace) -> int:
 
 
 def cmd_capture(args: argparse.Namespace) -> int:
-    """Verify a stored capture round-trips with strides preserved (§7.5, §PR 6)."""
+    """Verify a stored capture round-trips with strides preserved."""
     from xe_forge.orbit.capture import verify_roundtrip
     from xe_forge.orbit.models import CapturedInvocation
 
@@ -1836,7 +1800,7 @@ Examples:
   xe-orbit trace --from-trace trace.json    # ingest an existing Chrome trace
   xe-orbit kernels --run <id>               # catalog, gating verdict, ranking
   xe-orbit inspect k0 --run <id>            # provenance and headroom for one kernel
-  xe-orbit arena tasks/ --contestants dspy  # engine A/B outside the loop (§5.4)
+  xe-orbit arena tasks/ --contestants dspy  # engine A/B outside the loop
   xe-orbit selftest                         # full-loop invariants, no GPU, no LLM
   xe-orbit conformance generic_torch        # adapter conformance suite
 """,
@@ -1939,7 +1903,7 @@ Examples:
     p.add_argument("--limit", type=int, default=20)
     p.set_defaults(func=cmd_regions)
 
-    p = sub.add_parser("fuse", help="autotune a region's fused kernel via Xe-Fuse (§13.4, §11.7)")
+    p = sub.add_parser("fuse", help="autotune a region's fused kernel via Xe-Fuse")
     p.add_argument("region_id")
     p.add_argument("--run", help="run id (default: most recent)")
     p.add_argument("--replay", help="alias for --run")
@@ -1950,7 +1914,7 @@ Examples:
 
     p = sub.add_parser(
         "fuse-apply",
-        help="apply the generic fused-MLP patch to a served model and A/B it e2e (§13.4, §25)",
+        help="apply the generic fused-MLP patch to a served model and A/B it e2e",
     )
     p.add_argument("--model", help="HF model id, served exactly as the user would")
     p.add_argument("--python", dest="arm_python", help="interpreter of the serving venv (default: this one)")
@@ -1958,14 +1922,14 @@ Examples:
     p.add_argument("--lib", help="fused-op extension .so (default: $ORBIT_FUSED_LIB)")
     p.add_argument("--revert", action="store_true", help="digest-verified revert of the journalled patch")
     p.add_argument("--status", action="store_true", help="show the deterministic plan and stop")
-    p.add_argument("--e2e", action="store_true", help="run the ABBA arm pairs and give a §17 verdict")
+    p.add_argument("--e2e", action="store_true", help="run the ABBA arm pairs and give a verdict")
     p.add_argument("--pairs", type=int, default=3, help="arm pairs (each pair = one baseline + one fused engine)")
     p.add_argument("--replicates", type=int, default=6, help="decode replicates per arm")
     p.add_argument("--batch", type=int, default=16, help="prompts per replicate (decode M)")
     p.add_argument("--greedy-check", action="store_true", help="also diff greedy token streams (informational)")
     p.set_defaults(func=cmd_fuse_apply)
 
-    p = sub.add_parser("build-lane", help="the rung-5 off-loop build queue (§24 Tier E, E1)")
+    p = sub.add_parser("build-lane", help="the rung-5 off-loop build queue")
     p.add_argument("action", choices=["status", "submit", "run", "mark"])
     p.add_argument("--lane-dir", help="lane directory (default: ~/.cache/orbit-dev/build-lane)")
     p.add_argument("--component", help="submit: what is being built, in kernel_sources terms")
@@ -2001,7 +1965,7 @@ Examples:
     p.add_argument("--replay", help="alias for --run")
     p.set_defaults(func=cmd_apply)
 
-    p = sub.add_parser("optimize", help="agentic in-place optimization loop for one kernel (§13.5)")
+    p = sub.add_parser("optimize", help="agentic in-place optimization loop for one kernel")
     p.add_argument("kernel_id")
     p.add_argument("--trials", type=int, default=3, help="how many candidates to try")
     p.add_argument(
@@ -2021,14 +1985,14 @@ Examples:
     p.add_argument(
         "--apply",
         action="store_true",
-        help="run the full §13.5 loop: implement each proposal in a workspace, then "
+        help="run the full loop: implement each proposal in a workspace, then "
         "apply, verify, measure and keep or revert through the journalled patcher. "
         "Without it, planning stops at ranked proposals.",
     )
     p.add_argument(
         "--harness",
         help="correctness script run in a fresh process per trial; exits 0 (correct), "
-        "1 (wrong), 2 (could not check). Required with --apply (§19).",
+        "1 (wrong), 2 (could not check). Required with --apply.",
     )
     p.add_argument(
         "--measure",
@@ -2040,7 +2004,7 @@ Examples:
         "--samples",
         type=int,
         default=0,
-        help=">=5 collects this many measurements per arm and decides with the §17 "
+        help=">=5 collects this many measurements per arm and decides with the "
         "statistics (INCONCLUSIVE is a real outcome); otherwise one measurement "
         "against the --min-improvement floor",
     )
@@ -2048,7 +2012,7 @@ Examples:
         "--min-improvement",
         type=float,
         default=1.0,
-        help="fallback accept floor in percent, used only when --samples is not (§17.5.2)",
+        help="fallback accept floor in percent, used only when --samples is not",
     )
     p.add_argument(
         "--sandbox",
@@ -2076,14 +2040,14 @@ Examples:
         "--regression",
         type=float,
         default=2.0,
-        help="per-profile regression threshold in percent (§14.3)",
+        help="per-profile regression threshold in percent",
     )
     p.add_argument("--run", help="run id (default: most recent)")
     p.add_argument("--replay", help="alias for --run")
     p.set_defaults(func=cmd_compare)
 
     p = sub.add_parser(
-        "arena", help="A/B engines on one task set, outside the optimization loop (§5.4)"
+        "arena", help="A/B engines on one task set, outside the optimization loop"
     )
     p.add_argument(
         "task_root",
@@ -2106,7 +2070,7 @@ Examples:
     p.set_defaults(func=cmd_arena)
 
     p = sub.add_parser("matrix", help="show serving profiles, weights and derived shapes")
-    p.add_argument("path", nargs="?", default=None, help="matrix JSON (default: the §14 example)")
+    p.add_argument("path", nargs="?", default=None, help="matrix JSON (default: the built-in example)")
     p.set_defaults(func=cmd_matrix)
 
     p = sub.add_parser("conformance", help="run the adapter conformance suite")
@@ -2149,7 +2113,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except PolicyViolation as exc:
-        # A refusal, not a crash: the gate names its invariant (§24 Tier E, E2).
+        # A refusal, not a crash: the gate names its invariant.
         print(f"refused: {exc}", file=sys.stderr)
         return 5
     except KeyboardInterrupt:

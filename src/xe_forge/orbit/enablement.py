@@ -1,32 +1,8 @@
 """
-Enablement: making a workload run at all, before optimizing it (plan §5.6 item 1).
-
-Hyperloom's largest structural lead over this codebase is a six-rung escalation
-ladder: diagnose the capability gap, then climb — serve-flag wire-up, in-tree source
-patch, attempt-scoped runtime in an isolated venv, source localization, off-loop
-compiled build — with a **runnable gate**: a fix earns KEEP only when the workload
-boots with it and re-passes the accuracy eval, never on artifact verification alone.
-
-This module is the working bottom of that ladder: **diagnosis** (rung 0,
-deterministic — classifying a failed launch is trace parsing, and §3 forbids an LLM
-where a deterministic answer exists), the rungs Orbit can act on (a serve-flag
-suggestion; a source patch through §13.2's journalled patcher; and rung 3, the
-attempt-scoped runtime — `create_scoped_runtime` builds an isolated venv named
-deterministically from its package set, and `climb_missing_package` installs what
-the diagnosis named, re-runs the workload through the runnable gate, and keeps the
-environment only on the gate's KEEP), and the runnable gate as an enforced
-contract. Rung 5 — the off-loop compiled build — is `BuildLane` at the bottom of
-this file (§24 Tier E, E1): a single-slot, journalled, resumable queue whose
-SUCCEEDED is never KEPT until the runnable gate passes. Rung 4 — source
-localization — remains deferred; it stays in the enum so a diagnosis can honestly
-say "the fix for this lives on a rung that is not built yet", which is a
-different finding from "there is no fix".
-
-The measured motivation, from §5.6: on Wildcat Lake, `GRAPH_CAPTURE` was unavailable
-(`No valid triton configs`, `Internal Triton ZEBIN codegen error`) and the pipeline
-correctly reported the dead end — honest, and the end of the road. Diagnosis-then-
-climb is the difference between reporting that a lever is unavailable and making it
-available.
+Enablement: making a workload run at all, before optimizing it. Deterministic
+diagnosis of a failed launch, an escalation ladder of rungs to climb, and the
+runnable gate — a fix earns KEEP only when the workload boots and re-passes the
+accuracy eval. Design rationale: docs/DESIGN.md
 """
 
 from __future__ import annotations
@@ -50,18 +26,18 @@ class Rung(IntEnum):
     DIAGNOSE = 0
     # Wire up an existing flag or environment variable; nothing is modified.
     SERVE_FLAG = 1
-    # An in-tree source patch, applied through the §13.2 journalled patcher.
+    # An in-tree source patch, applied through the journalled patcher.
     SOURCE_PATCH = 2
     # An attempt-scoped runtime in an isolated venv (`climb_missing_package`).
     SCOPED_RUNTIME = 3
     # Check the framework's sources out locally. Not built yet.
     SOURCE_LOCALIZE = 4
-    # An off-loop compiled build on the single-slot `BuildLane` (§24 Tier E, E1).
+    # An off-loop compiled build on the single-slot `BuildLane`.
     COMPILED_BUILD = 5
 
 
-# Rungs Orbit can act on today. A gap whose lowest useful rung is above this line is
-# reported as deferred, not as hopeless — the distinction §24 Tier C exists to keep.
+# Rungs Orbit can act on today. A gap above this line is reported as deferred,
+# not as hopeless.
 IMPLEMENTED_RUNGS = frozenset(
     {Rung.DIAGNOSE, Rung.SERVE_FLAG, Rung.SOURCE_PATCH, Rung.SCOPED_RUNTIME, Rung.COMPILED_BUILD}
 )
@@ -90,10 +66,8 @@ class CapabilityGap:
 
 
 # Classification patterns, most specific first. Each maps a failure signature to the
-# lowest rung that could address it. These are deterministic on purpose: the residue
-# that no pattern matches is reported as `unknown`, never guessed at (§12.5's rule
-# about the unknown category applies here too — its value is that everything in it
-# deserves a second look).
+# lowest rung that could address it. Deterministic on purpose: the residue no pattern
+# matches is reported as `unknown`, never guessed at.
 _CLASSIFIERS: list[tuple[re.Pattern[str], str, Rung, str]] = [
     (
         re.compile(r"No valid triton configs|ZEBIN codegen error|Triton.*codegen", re.I),
@@ -112,7 +86,7 @@ _CLASSIFIERS: list[tuple[re.Pattern[str], str, Rung, str]] = [
         "oom",
         Rung.SERVE_FLAG,
         "reduce the resident footprint: smaller batch, pinned KV-cache bytes "
-        "(§17.5 — on shared-memory devices size to truly-free memory), or a "
+        "(on shared-memory devices size to truly-free memory), or a "
         "lower gpu_memory_utilization",
     ),
     (
@@ -134,7 +108,7 @@ _CLASSIFIERS: list[tuple[re.Pattern[str], str, Rung, str]] = [
         ),
         "missing_op",
         Rung.SOURCE_PATCH,
-        "an operator has no implementation on this dispatch key; §13's operator "
+        "an operator has no implementation on this dispatch key; an operator "
         "override can supply one without forking the framework",
     ),
     (
@@ -145,11 +119,8 @@ _CLASSIFIERS: list[tuple[re.Pattern[str], str, Rung, str]] = [
         "attempt-scoped venv and re-runs the workload through the runnable gate",
     ),
     (
-        # A quantization method the installed kernel backend cannot execute, e.g.
-        # "Marlin does not support weight_bits = uint8b128. Only types = [uint4...]".
-        # Measured live: vLLM-XPU routed GPTQ-Int8 to a 4-bit-only Marlin path. The
-        # message names the supported set, so the suggestion sends the operator to a
-        # supported variant rather than to a rebuild that will not help.
+        # A quantization format the installed kernel backend cannot execute; the
+        # error names the supported set.
         re.compile(
             r"does not support weight_bits|quantization.*not supported|"
             r"Only types = \[.*\] are supported",
@@ -162,12 +133,8 @@ _CLASSIFIERS: list[tuple[re.Pattern[str], str, Rung, str]] = [
         "select a different quantization backend, rather than rebuilding",
     ),
     (
-        # A precompiled kernel library that lacks the instantiation this model's
-        # configuration needs, e.g. "Paged decode kernel not compiled for this
-        # configuration" — measured live: phi-2's head_dim=80 is outside the head
-        # sizes the XPU paged-attention build instantiates. Distinct from
-        # missing_op (no implementation at all) and from quant_capability (format
-        # unsupported by design): the kernel exists, this shape was not compiled.
+        # The kernel exists but this configuration was not compiled — distinct from
+        # missing_op (no implementation) and quant_capability (format unsupported).
         re.compile(
             r"not compiled for this configuration|"
             r"unsupported head[_ ]?(dim|size)|head[_ ]?(dim|size).*not supported",
@@ -181,10 +148,8 @@ _CLASSIFIERS: list[tuple[re.Pattern[str], str, Rung, str]] = [
         "configuration compiled in (off-loop build lane, deferred)",
     ),
     (
-        # A build-time dependency resolver that cannot see a platform wheel index,
-        # e.g. uv build isolation failing on `torch==2.13.0+xpu` — measured live on
-        # the lane's first vllm-xpu-kernels job. The wheel exists; the isolated
-        # resolver has no index for it. Not a code failure at all.
+        # An isolated build resolver that cannot see a platform wheel index; not a
+        # code failure.
         re.compile(
             r"No solution found when resolving|Failed to resolve requirements from "
             r"`build-system.requires`",
@@ -207,12 +172,10 @@ _CLASSIFIERS: list[tuple[re.Pattern[str], str, Rung, str]] = [
 
 
 def diagnose(returncode: int, stdout: str = "", stderr: str = "") -> list[CapabilityGap]:
-    """Classify why a launch failed, deterministically (§3).
+    """Classify why a launch failed, deterministically.
 
     Returns every gap the output evidences, most specific first, or a single
-    honest `unknown` when nothing matches — an unclassified failure is a real
-    finding, and inventing a classification for it would send the operator the
-    wrong way with confidence.
+    honest `unknown` when nothing matches.
     """
     if returncode == 0:
         return []
@@ -245,13 +208,10 @@ def diagnose(returncode: int, stdout: str = "", stderr: str = "") -> list[Capabi
 
 @dataclass
 class GateResult:
-    """The runnable gate's verdict on a fix (§5.6).
+    """The runnable gate's verdict on a fix.
 
-    `kept` is true only when the workload booted *and* the accuracy eval passed.
-    Booting alone is not the gate: Hyperloom is explicit that a build does not earn
-    KEEP on artifact verification, and the same discipline applies one rung down —
-    a serve flag that boots a model which now answers wrongly is not enablement,
-    it is a different workload wearing the same name.
+    `kept` is true only when the workload booted *and* the accuracy eval passed;
+    booting alone never earns KEEP.
     """
 
     booted: bool
@@ -269,10 +229,10 @@ def runnable_gate(
     """Decide whether a fix earns KEEP: boot the workload, then re-run the eval.
 
     `boot` launches the workload with the fix applied and returns
-    (returncode, stdout, stderr) — a fresh process, for the §13.5 reason: an
-    already-imported module would keep serving the pre-fix code. `quality` re-runs
-    the accuracy eval; when it is not supplied, the verdict is `booted,
-    unevaluated, not kept`, stated as such — never a KEEP by omission.
+    (returncode, stdout, stderr) — a fresh process, because an already-imported
+    module would keep serving the pre-fix code. `quality` re-runs the accuracy
+    eval; when it is not supplied, the verdict is `booted, unevaluated, not kept`
+    — never a KEEP by omission.
     """
     returncode, stdout, stderr = boot()
     if returncode != 0:
@@ -293,7 +253,7 @@ def runnable_gate(
             eval_passed=None,
             kept=False,
             reason="boots, but no accuracy eval was supplied; a boot alone does not "
-            "earn KEEP (§5.6) — wire a quality gate and re-run",
+            "earn KEEP — wire a quality gate and re-run",
         )
 
     passed = bool(quality())
@@ -310,11 +270,8 @@ def runnable_gate(
 
 # --- Rung 3: the attempt-scoped runtime -------------------------------------------
 
-# A missing module's *import* name is not always its *distribution* name. This map
-# covers the ones this stack actually hits; the identity entries are listed so the
-# claim "we know this module" is explicit rather than an accident of passthrough.
-# An unknown module passes through as-is, with a note — a guessable pip name beats
-# refusing, but the guess must be visible in the result.
+# A missing module's *import* name is not always its *distribution* name. An
+# unknown module passes through as-is, with a note visible in the result.
 KNOWN_DISTRIBUTIONS: dict[str, str] = {
     "vllm": "vllm",
     "torch": "torch",
@@ -324,9 +281,7 @@ KNOWN_DISTRIBUTIONS: dict[str, str] = {
     "dotenv": "python-dotenv",
 }
 
-# The quoted module in a ModuleNotFoundError line — the same evidence string the
-# missing_package classifier matched, re-extracted here so the gap's shape does not
-# have to change to carry it.
+# The quoted module in a ModuleNotFoundError line, re-extracted from the gap's evidence.
 _MODULE_NAME = re.compile(r"No module named '([^']+)'")
 
 # installer(venv_python, packages) -> (returncode, stdout, stderr)
@@ -349,8 +304,7 @@ class ClimbResult:
     """Outcome of one rung-3 climb, gated exactly as `runnable_gate` gates.
 
     `kept` mirrors the gate's verdict: boot AND passed eval, never boot alone.
-    A not-kept climb discards the environment — an installed-but-unproven venv
-    left behind would be a fix that never faced the gate.
+    A not-kept climb discards the environment.
     """
 
     rung: Rung = Rung.SCOPED_RUNTIME
@@ -387,10 +341,8 @@ def create_scoped_runtime(
     """Build (or reuse) an isolated venv holding exactly `packages`.
 
     The venv's name is a hash of the sorted package set, so a repeat attempt with
-    the same needs reuses the environment instead of re-creating it — and says so.
-    Failures are named in `reason`, never raised past the result: a runtime that
-    could not be built is a finding for the climb to report, not an exception for
-    the caller to unwind.
+    the same needs reuses the environment. Failures are named in `reason`, never
+    raised past the result.
     """
     installer = installer or _uv_pip_install
     digest = hashlib.sha256("\n".join(sorted(packages)).encode()).hexdigest()[:12]
@@ -460,11 +412,8 @@ def climb_missing_package(
     """The rung-3 climb: install what the diagnosis named, then face the gate.
 
     Collects the missing modules from `missing_package` gaps, maps them to pip
-    distributions (`KNOWN_DISTRIBUTIONS`; unknown names pass through with a note),
-    builds the scoped runtime, and re-runs `boot_cmd` under the venv's python
-    through `runnable_gate`. The gate's discipline is unchanged: without a
-    `quality` callable the result is booted-but-not-kept, stated as such. The
-    environment survives only a KEEP; anything less is discarded.
+    distributions, builds the scoped runtime, and re-runs `boot_cmd` under the
+    venv's python through `runnable_gate`. The environment survives only a KEEP.
     """
     missing = [g for g in gaps if g.kind == "missing_package"]
     if not missing:
@@ -530,16 +479,12 @@ def climb_missing_package(
     return ClimbResult(runtime=runtime, gate=gate, kept=gate.kept, reason=reason)
 
 
-# ---- rung 5: the off-loop build lane (plan §24 Tier E, item E1) ----------------
+# ---- rung 5: the off-loop build lane -------------------------------------------
 #
-# A long compile must never block the tick loop, and a build must never earn KEEP
-# on artifact verification alone — the runnable gate above stays the only door.
-# The lane is deliberately dumb: a file-based queue, one slot, every state change
-# on disk so a crashed builder is recovered honestly (a RUNNING job whose pid is
-# dead becomes FAILED with a note, never silently re-queued as if it had not run).
-# The two live cases this was built against: sgl-kernel-xpu needs a serial
-# MAX_JOBS=1 build (parallel icpx exhausts shared memory), and vllm-xpu-kernels
-# lacks phi-2's head_dim=80 in its compiled paged-decode set (`kernel_capability`).
+# A long compile must never block the tick loop, and a build never earns KEEP on
+# artifact verification alone — the runnable gate above stays the only door.
+# File-based queue, one slot, every state change on disk so a crashed builder is
+# recovered honestly.
 
 _JOB_STATES = ("QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "KEPT", "DISCARDED")
 
@@ -572,15 +517,12 @@ class BuildJob:
 class BuildLane:
     """Single-slot, journalled, resumable build queue (rung 5).
 
-    `submit` is novelty-aware in the §20.4 sense: an identical job (same
-    component, command and cwd) that is already QUEUED or RUNNING is returned
-    rather than duplicated, and one that already FAILED is re-admitted only with
-    the prior failure named in its note — the lane never silently loops on an
-    identical failing build. `run_next` executes the oldest QUEUED job, streaming
-    output to a log file; SUCCEEDED/FAILED comes from the exit code, and a FAILED
-    job carries `diagnose()`'s classification. KEPT/DISCARDED belong to the
-    caller, who alone can run the runnable gate — the lane records the verdict
-    via `mark` and refuses to invent it.
+    `submit` is novelty-aware: an identical job already QUEUED or RUNNING is
+    returned rather than duplicated, and a FAILED one is re-admitted only with
+    the prior failure named in its note. `run_next` executes the oldest QUEUED
+    job, streaming output to a log file; a FAILED job carries `diagnose()`'s
+    classification. KEPT/DISCARDED belong to the caller, who alone can run the
+    runnable gate — the lane records the verdict via `mark`.
     """
 
     def __init__(self, lane_dir: Path | None = None) -> None:

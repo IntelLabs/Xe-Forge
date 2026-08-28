@@ -1,21 +1,7 @@
 """
-The stub optimizer and pipeline self-test (plan §15.3, §15.4).
-
-CI must not call an LLM. `StubOptimizer` returns, on demand, four variants that
-between them cover every branch of the decision logic deterministically, in seconds,
-at zero token cost:
-
-* **known-good** — a real, reproducible speedup. Must be ACCEPTed.
-* **known-bad** — faster in the microbenchmark, slower end to end. Must be REJECTed,
-  which is the test that the accept/reject logic is looking at the right number.
-* **incorrect** — passes a loose tolerance and fails a tight one. Must be rejected at
-  the correctness gate and never reach the performance gate.
-* **no-op** — byte-identical in behaviour. Must return INCONCLUSIVE, not ACCEPT. This
-  is the null test: a pipeline that "finds" an improvement here cannot be trusted to
-  find a real one.
-
-The self-test asserts the pipeline's own invariants rather than a workload's
-performance, so it is meaningful on a machine with no GPU at all.
+The stub optimizer and pipeline self-test. Four deterministic stub variants
+(known-good, known-bad, incorrect, no-op) cover every branch of the decision logic
+without calling an LLM, so the self-test is meaningful on a machine with no GPU.
 """
 
 from __future__ import annotations
@@ -48,11 +34,8 @@ class StubCandidate:
     description: str = ""
 
     def kernel_samples(self, baseline_us: float = 100.0, n: int = 8) -> list[float]:
-        """Deterministic per-sample timings, with a little structured jitter.
-
-        Jitter is deliberate and reproducible: zero-variance samples would make every
-        comparison trivially significant and would not exercise the interval maths.
-        """
+        """Deterministic per-sample timings with reproducible jitter — zero-variance
+        samples would make every comparison trivially significant."""
         target = baseline_us / self.kernel_speedup
         return [target * (1.0 + 0.01 * ((i % 3) - 1)) for i in range(n)]
 
@@ -153,7 +136,7 @@ class SelfTestReport:
 
 
 def run_selftest(chaos: bool = False, quick: bool = False) -> SelfTestReport:
-    """Run the full-loop invariants on stub data (§15.4)."""
+    """Run the full-loop invariants on stub data."""
     report = SelfTestReport()
     optimizer = StubOptimizer()
 
@@ -164,8 +147,7 @@ def run_selftest(chaos: bool = False, quick: bool = False) -> SelfTestReport:
         improved = [s / candidate.e2e_speedup for s in baseline]
 
         if not candidate.correct_tight:
-            # The correctness gate (L1) fires before any performance comparison, so a
-            # numerically wrong candidate must never reach the timing decision.
+            # The correctness gate (L1) fires before any performance comparison.
             report.add(
                 f"stub/{candidate.variant.value}: rejected at correctness gate",
                 True,
@@ -350,7 +332,7 @@ def run_selftest(chaos: bool = False, quick: bool = False) -> SelfTestReport:
 
 
 def _check_core_purity() -> tuple[str, bool, str]:
-    """The core must import no serving framework (§10.1), enforced not assumed."""
+    """The core must import no serving framework — enforced, not assumed."""
     import ast
     from pathlib import Path
 
@@ -386,7 +368,7 @@ def _check_core_purity() -> tuple[str, bool, str]:
 
 
 def _run_chaos_checks() -> list[SelfTestResult]:
-    """Failure-injection paths that only appear when something goes wrong (§16.5)."""
+    """Failure-injection paths that only appear when something goes wrong."""
     import tempfile
     from pathlib import Path
 

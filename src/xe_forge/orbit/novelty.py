@@ -1,30 +1,7 @@
 """
-The stall gate: repeating an attempt is not progress (plan §20.4).
-
-A loop that can retry will retry, and the cheapest thing for it to retry is whatever it
-just did. Left alone that produces a run which looks busy — attempts logged, time spent,
-budget consumed — and ends where it started, with the failure repeated N times in the
-report instead of once.
-
-The rule is one line: **an attempt identical to one already made does not get to run
-again.** Identity is the tuple that determines the outcome — what was attempted, on what
-target, with what parameters — so a genuinely different attempt is admitted and only a
-literal repeat is refused.
-
-Two distinctions decide whether this helps or gets in the way:
-
-* **A repeat is a stall; a novel attempt is progress even if it also fails.** Failing
-  differently is how a search moves. Only sameness is the problem.
-* **A timeout is not a repeat.** The same attempt that timed out may succeed with more
-  time or a warmer cache, because a timeout says something about the machine rather than
-  about the attempt. Retrying it once is legitimate; retrying it forever is not, so
-  timeouts get a bounded allowance rather than an exemption.
-
-Convergent design: AMD's Hyperloom carries a "novelty-ledger stall gate" over the same
-tuple — component, ref, GPU arch, build command — with the same timeout carve-out,
-reverting on a repeat so the loop "keeps making forward progress rather than looping on
-an identical failing build". Arriving at the same rule from a different loop is a
-reasonable sign it is load-bearing.
+The stall gate: an attempt identical to one already made does not run again.
+Timeouts get a bounded retry allowance rather than counting as a real outcome.
+Design rationale: docs/DESIGN.md
 """
 
 from __future__ import annotations
@@ -33,16 +10,13 @@ import json
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-# How many times one attempt may be retried after a timeout before it counts as a
-# repeat. One retry distinguishes "the machine was busy" from "this does not finish";
-# a second tells you nothing the first did not.
+# Retries allowed after a timeout before the attempt counts as a repeat.
 DEFAULT_TIMEOUT_RETRIES = 1
 
 
 class Verdict(StrEnum):
     NOVEL = "novel"
-    # Seen before with a real outcome. Running it again would consume budget to learn
-    # something already known.
+    # Seen before with a real outcome.
     STALL = "stall"
     # Seen before, but only as a timeout, and the retry allowance is not exhausted.
     RETRY = "retry"
@@ -52,9 +26,8 @@ class Verdict(StrEnum):
 class Attempt:
     """What was tried, in the terms that determine the outcome.
 
-    `parameters` is part of identity because the same action with different parameters
-    is a different experiment. It is normalized through sorted JSON so that dict
-    ordering — which says nothing about the attempt — cannot make a repeat look novel.
+    `parameters` is part of identity; it is normalized through sorted JSON so dict
+    ordering cannot make a repeat look novel.
     """
 
     action: str
@@ -86,11 +59,7 @@ class NoveltyLedger:
     _seen: dict[str, _Record] = field(default_factory=dict)
 
     def classify(self, attempt: Attempt) -> tuple[Verdict, str]:
-        """Decide whether this attempt may run, and say why in the same breath.
-
-        The reason is returned rather than logged because a refusal the caller cannot
-        explain to a user is indistinguishable from a bug.
-        """
+        """Decide whether this attempt may run, returning the verdict and its reason."""
         record = self._seen.get(attempt.key)
         if record is None:
             return Verdict.NOVEL, "not attempted before"

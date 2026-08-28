@@ -1,27 +1,6 @@
-"""Generic fused-MLP patch for vLLM decoder layers (plan §13.4, §14.4).
-
-The observation that makes this generic rather than per-model: every vLLM text
-decoder in the Llama lineage (Llama, Qwen2, TinyLlama, SmolLM, Mistral, ...) ends
-its layer forward with the same three lines —
-
-    hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-    hidden_states = self.mlp(hidden_states)
-    return hidden_states, residual
-
-— and the fused replacement only touches attributes that idiom guarantees
-(``post_attention_layernorm.variance_epsilon``, ``mlp.gate_up_proj``,
-``mlp.down_proj``). The patch therefore targets the *idiom*, not a model file
-someone hand-picked: the model id resolves to an architecture (HF config), the
-architecture to the vLLM source file that defines it, and the anchor is matched
-by exact text. Deterministic first (§5.6); the residue — a model whose decoder
-layer does not match — is handed to the agent with the file and the reason,
-never guessed at with a looser regex.
-
-The injected branch is guarded three ways (``ORBIT_FUSED_MLP=1``, M <= 32, the
-extension loadable), so with the guard off the original path runs byte-for-byte
-and one patched tree serves both arms of the e2e A/B. Validated end-to-end on
-Qwen2.5-0.5B (three independent §17 ACCEPTs) before being generalized here.
-"""
+"""Generic fused-MLP patch for vLLM decoder layers: matches the Llama-lineage
+decoder-layer idiom by exact text and injects a guarded fused branch; non-matching
+decoders are handed to the agent. Design rationale: docs/DESIGN.md."""
 
 from __future__ import annotations
 
@@ -31,8 +10,7 @@ from pathlib import Path
 
 from xe_forge.orbit.patch.inplace import InPlacePatcher
 
-# The idiom every Llama-lineage vLLM decoder layer ends with. Byte-exact match,
-# required to appear exactly once in the model file.
+# The Llama-lineage decoder-layer idiom; byte-exact, must appear exactly once.
 ANCHOR = """        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual"""
@@ -46,7 +24,7 @@ _ORBIT_FUSED_LOADED = False
 
 
 def _orbit_fused_ready(m: int) -> bool:
-    """The fused r0/r1 path: opt-in, small-M only, extension present (plan §14.4)."""
+    """The fused r0/r1 path: opt-in, small-M only, extension present."""
     global _ORBIT_FUSED_LOADED
     if _orbit_os.environ.get("ORBIT_FUSED_MLP") != "1" or m > 32:
         return False
@@ -77,10 +55,8 @@ def _orbit_packed_weight(layer) -> torch.Tensor:
 '''
 
 FUSED = """        if _orbit_fused_ready(hidden_states.shape[0]):
-            # Fused r0/r1 chain (plan §13.4): residual add + rms scale in one tiny
-            # kernel, then Xe-Fuse's k2 GEMM+SwiGLU with gamma folded into the
-            # packed weight. Numerically as close to fp64 truth as the unfused
-            # path (measured); token-level equivalence is gated by the e2e check.
+            # Fused r0/r1 chain: residual add + rms scale, then GEMM+SwiGLU
+            # with gamma folded into the packed weight.
             eps = self.post_attention_layernorm.variance_epsilon
             scale = torch.ops.orbit_fused.add_rms_scale(hidden_states, residual, eps)
             packed = _orbit_packed_weight(self)
@@ -99,7 +75,7 @@ class FusedMlpPlan:
     model_file: Path | None = None
     ok: bool = False
     already_patched: bool = False
-    needs_agent: str | None = None  # the residue, stated: why exact matching stopped
+    needs_agent: str | None = None  # why exact matching stopped, if it did
 
     def format(self) -> str:
         lines = [f"model:        {self.model_id}"]
@@ -175,7 +151,7 @@ def plan(model_id: str, vllm_root: Path, hub_root: Path | None = None) -> FusedM
 
 
 def apply(plan_result: FusedMlpPlan, journal_dir: Path) -> None:
-    """Apply the guarded patch through the journalled patcher (§13.2)."""
+    """Apply the guarded patch through the journalled patcher."""
     if not plan_result.ok or plan_result.model_file is None:
         raise ValueError("apply() called on a plan that did not resolve; check plan().ok first")
     if plan_result.already_patched:

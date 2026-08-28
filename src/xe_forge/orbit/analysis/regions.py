@@ -1,50 +1,7 @@
 """
-Region detection: the multi-kernel optimization unit (plan §7.3, §12.11, §18).
-
-**The optimization unit is not always a kernel.** The largest wins in inference come
-from *eliminating* kernels, not from speeding them up: three kernels that write an
-intermediate tensor to HBM and read it straight back become one sycl-tla kernel with a
-fused epilogue, and the memory traffic between them stops existing. A `KernelRecord`-only
-model cannot express a many-to-one replacement, which is exactly why v1's fusion action
-had no executor behind it (§7.3).
-
-How a region is found
----------------------
-1. **Temporal adjacency bounds the search.** Kernels are ordered per stream. A consumer
-   is only considered within `MAX_LOOKAHEAD` positions of its producer, and only when
-   the *device-idle* time between them is small — idle meaning the gap minus whatever
-   else ran on that stream in between. An idle gap means the host got involved, and two
-   kernels separated by host work are not one region.
-
-2. **A tensor link is what actually creates the edge.** Where the trace records input
-   shapes, an edge exists when one of the consumer's inputs matches the producer's
-   inferred output. This is the part that keeps the chains honest: in the reference
-   decode trace an attention kernel runs *between* the RMSNorm and the SwiGLU, and it
-   shares no tensor with either — a different data path that happened to be interleaved.
-   Temporal adjacency alone would swallow it; the shape link steps over it, and leaves
-   attention as its own single-kernel chain, which is not a region.
-
-   When shapes are absent for either kernel (a trace taken without `record_shapes`) the
-   fallback is strict immediate adjacency, and no intermediate tensor is claimed for
-   that edge. Nothing is invented from a shape we do not have.
-
-3. **Correlation ids order the launches.** Where both kernels carry one, the consumer's
-   host op must have been issued after the producer's; a kernel launched first cannot
-   consume a later kernel's output.
-
-4. **A pattern names the region.** `FUSION_PATTERNS` is module-level data, matched
-   against the chain's op classes longest-first. Adding a fusable shape is appending a
-   row, not editing the algorithm.
-
-Each edge is one-in/one-out, which keeps regions linear. A true fusion DAG is out of
-scope for v0.1 — the presets Xe-Fuse actually ships are chains (§9.6).
-
-What survives
--------------
-A region must be worth more than its parts, so it is emitted only when it holds at
-least two *distinct* kernels, clears `MIN_REGION_SHARE` of GPU time, and beats its own
-largest member by `MIN_REGION_UPLIFT`. A "region" that is one dominant kernel with a
-rounding error attached is a kernel, and the catalog already ranks it.
+Region detection: links producer-consumer kernel chains (temporal adjacency, tensor
+shape links, correlation-id ordering) into multi-kernel fusion candidates named by
+`FUSION_PATTERNS`. Design rationale: docs/DESIGN.md.
 """
 
 from __future__ import annotations
@@ -62,10 +19,9 @@ from xe_forge.orbit.profiling.trace import RuntimeKernelEvent, TraceEvents
 # entire layer.
 MAX_LOOKAHEAD = 3
 
-# Device-idle microseconds tolerated between producer and consumer. Idle is the gap
-# minus the work that ran in between, so an interleaved kernel does not break a chain
-# but a host round-trip does. A quarter of a millisecond of a *silent* device between
-# two kernels means the framework went away and came back; they are not one region.
+# Device-idle microseconds tolerated between producer and consumer: the gap minus the
+# work that ran in between, so an interleaved kernel does not break a chain but a host
+# round-trip does.
 MAX_IDLE_GAP_US = 250.0
 
 # A region below this share of GPU time cannot repay the cost of a fused rewrite.
@@ -182,10 +138,8 @@ class _Occurrence:
     tensors: list[TensorInfo] = field(default_factory=list)
     aten_ops: list[str] = field(default_factory=list)
     time_us: float = 0.0
-    # Time each member contributed *within this region*. The uplift test needs this
-    # rather than the member's run-wide share: a kernel used both inside and outside a
-    # region has a global share that the region can never exceed, which made every
-    # region containing a hot kernel structurally unreachable.
+    # Time each member contributed *within this region* — the uplift test needs this,
+    # not the member's run-wide share, which a region containing it can never exceed.
     member_time_us: dict[str, float] = field(default_factory=dict)
 
 
@@ -199,16 +153,13 @@ def detect_regions(
     max_idle_gap_us: float = MAX_IDLE_GAP_US,
     min_share: float = MIN_REGION_SHARE,
 ) -> list[RegionRecord]:
-    """Find fusable producer-consumer regions in a trace (§7.3, §12.11).
+    """Find fusable producer-consumer regions in a trace.
 
     `kernels` is the catalog's records, which supply the `k<n>` ids a `RegionRecord`
     refers to and the operator attribution used for op classification. Events whose
-    kernel is not in the catalog are ignored — a region cannot cite an id that does not
-    exist. Returns regions ranked by combined GPU-time share, ids assigned `r0`, `r1`, …
-    in that order.
-
-    Total ordering, no LLM, no randomness: two runs over the same trace produce the same
-    regions (§3).
+    kernel is not in the catalog are ignored. Returns regions ranked by combined
+    GPU-time share, ids assigned `r0`, `r1`, … in that order. Deterministic: two runs
+    over the same trace produce the same regions.
     """
     if not events.kernels or not kernels:
         return []
@@ -501,26 +452,10 @@ def _merge_and_rank(
         floor = min_share if occurrence.pattern else max(min_share, MIN_UNNAMED_REGION_SHARE)
         if share < floor:
             continue
-        # Worth more than its parts, or it is its largest part. A "region" that adds a
-        # rounding error to one dominant kernel is that kernel, and the catalog already
-        # ranks it — emitting it twice would double-count the same GPU time.
-        # The uplift test applies to UNNAMED chains only, and getting that wrong hid
-        # the single largest fusion opportunity in the run.
-        #
-        # Its intent is sound for an unnamed chain: "one dominant kernel with a rounding
-        # error attached is that kernel, and the catalog already ranks it". For a *named*
-        # pattern the reasoning inverts. `gemm+activation` is worth fusing precisely
-        # BECAUSE the GEMM dominates — the value is eliminating the intermediate write
-        # between them, not the activation's own cost. Requiring the region to be 10%
-        # larger than its biggest member asks the epilogue to be expensive, which is the
-        # opposite of the condition that makes it fusable.
-        #
-        # Measured on a Qwen decode trace: `gemm+activation` held 37.62% of GPU time and
-        # `gemm+rmsnorm` 25.88%, and both were dropped — the first against a run-wide
-        # share it could never exceed, and after that was fixed, against a within-region
-        # share it still could not exceed. A pattern in FUSION_PATTERNS is an assertion
-        # that the shape is fusable; the threshold that decides whether it is worth doing
-        # is `min_share`, which it has already cleared.
+        # The uplift test applies to UNNAMED chains only: a named pattern is fusable
+        # precisely because one member may dominate (the value is eliminating the
+        # intermediate write, not the epilogue's own cost), and it has already
+        # cleared `min_share`.
         if occurrence.pattern is None:
             largest_member_us = max(occurrence.member_time_us.values(), default=0.0)
             if largest_member_us > 0:
@@ -575,11 +510,9 @@ def _op_class(event: RuntimeKernelEvent, record: KernelRecord, host_ops: dict[in
 def _input_dims(event: RuntimeKernelEvent) -> list[list[int]]:
     """The shapes torch records with `record_shapes=True`, normalized.
 
-    Prefers the joined `input_shapes` field over the raw args. The profiler puts
-    `Input Dims` on the *host* op, never on the device kernel, so a kernel's own args
-    carry nothing — reading only args meant this returned `[]` for every kernel and no
-    dataflow edge could ever form, whatever the shapes said. `trace.attach_shapes`
-    performs the kernel -> runtime-event -> enclosing-cpu_op join; this reads its result.
+    Prefers the joined `input_shapes` field over the raw args: the profiler puts
+    `Input Dims` on the *host* op, never on the device kernel, and
+    `trace.attach_shapes` performs the kernel -> runtime-event -> cpu_op join.
     """
     joined = getattr(event, "input_shapes", None)
     if joined:
@@ -604,10 +537,7 @@ def _input_dtypes(event: RuntimeKernelEvent) -> list[str]:
     """Dtypes for the same operands `_input_dims` returns.
 
     Reads the joined field first, for the same reason as `_input_dims`: the profiler
-    records types on the host op, not the device kernel. Without this the shapes were
-    joined and the dtypes were not, so every intermediate tensor came back as 0 bytes
-    and the region table reported "traffic saved: 0.0 MB" for a fusion eliminating a
-    172x9728 tensor.
+    records types on the host op, not the device kernel.
     """
     joined = getattr(event, "input_dtypes", None)
     if joined:
@@ -619,11 +549,8 @@ def _input_dtypes(event: RuntimeKernelEvent) -> list[str]:
 
 
 def _tensor_bytes(shape: Sequence[int], dtype: str) -> int:
-    # The profiler spells dtypes as C++ type names — `c10::Half`, `c10::BFloat16`,
-    # `at::Half` — not as the torch names the table is keyed on. Looking up the raw
-    # string missed every one of them and returned 0 bytes, so a fusion eliminating a
-    # 172x9728 half tensor reported "0.0 MB saved": a number that reads as "measured and
-    # negligible" when it means "not recognized".
+    # The profiler spells dtypes as C++ type names (`c10::Half`, `at::Half`), not the
+    # torch names the table is keyed on; normalize before lookup.
     name = dtype.strip().lower().rsplit("::", 1)[-1]
     width = _DTYPE_BYTES.get(name)
     if width is None:
@@ -640,12 +567,10 @@ def _tensor_bytes(shape: Sequence[int], dtype: str) -> int:
 
 
 def format_regions(regions: Sequence[RegionRecord], limit: int = 20) -> str:
-    """Render the region table the CLI prints (§21).
+    """Render the region table the CLI prints.
 
-    Mirrors `format_catalog`: a header, one row per region, then the facts a reader
-    needs to judge the table. The route column names Xe-Fuse and says whether it is
-    actually installed, because a row that reads `-> Xe-Fuse` next to an absent project
-    is the kind of thing a reader takes for a result.
+    Mirrors `format_catalog`. The route column names Xe-Fuse only when it is actually
+    installed.
     """
     header = f"{'ID':<5} {'GPU%':>6}  {'Kernels':<16} {'Pattern':<24} {'Extract':<8} {'Route'}"
     lines = [header, "-" * 100]
@@ -654,9 +579,8 @@ def format_regions(regions: Sequence[RegionRecord], limit: int = 20) -> str:
         lines.append("(no fusable regions: no producer-consumer chain cleared the thresholds)")
         return "\n".join(lines)
 
-    # Xe-Fuse is one executor among several, not the route. When it is absent the
-    # region is authored instead (§13.8) — an external project must not be a hard
-    # dependency for the only path that reaches an opaque GEMM.
+    # Xe-Fuse is one executor among several; when it is absent the region is authored
+    # instead, so an external project is never a hard dependency.
     available = xe_fuse_available()
     route = "Xe-Fuse" if available else "author"
 
@@ -683,7 +607,7 @@ def format_regions(regions: Sequence[RegionRecord], limit: int = 20) -> str:
     if not available:
         lines.append(
             "Executor 'author' means Orbit writes the fused kernel for these "
-            "shapes and registers it as an operator override (\u00a713.8); 'Xe-Fuse' "
+            "shapes and registers it as an operator override; 'Xe-Fuse' "
             "means its autotuned template matched. Either way the result goes through "
             "the same correctness and measurement gates, and no external project is "
             "required to act on a region."

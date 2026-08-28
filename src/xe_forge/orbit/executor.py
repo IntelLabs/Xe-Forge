@@ -1,10 +1,6 @@
 """
-Process execution (plan §20).
-
-Local execution only. Running inside an interactive Slurm allocation is local
-execution from Orbit's perspective — `salloc`, then `xe-orbit` — so there is exactly
-one implementation here. The protocol exists so a batch backend can be added later
-without touching call sites, not because one is being built now.
+Process execution. Local subprocess execution only; the Executor protocol allows a
+batch backend to be added later without touching call sites.
 """
 
 from __future__ import annotations

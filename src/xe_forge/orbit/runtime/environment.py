@@ -1,15 +1,7 @@
 """
-Environment and device identity capture (plan §12.9, §20).
-
-Every bundle and every measurement records the environment that produced it, because
-extraction and comparison results are not reproducible without it. A change in torch,
-IPEX, Triton, vLLM, the driver, or the device invalidates stored artifacts; silent
-reuse across versions is the failure mode that produces unexplainable results months
-later.
-
-Torch is imported lazily and never required. On a machine with no torch, or with torch
-but no working GPU runtime, this module reports what it found and what it could not
-find, rather than failing or pretending.
+Environment and device identity capture: every bundle and measurement records the
+packages, device, driver and env pins that produced it, since a change in any of them
+invalidates stored artifacts. Torch is imported lazily and never required.
 """
 
 from __future__ import annotations
@@ -195,7 +187,7 @@ def capture(cwd: Path | None = None, preferred_device: str | None = None) -> Env
 
 
 def compatibility_gap(stored: EnvironmentInfo, current: EnvironmentInfo) -> list[str]:
-    """Differences that invalidate a stored artifact (§12.9).
+    """Differences that invalidate a stored artifact.
 
     Returned as human-readable reasons so a caller can refuse reuse *and* explain why.
     """

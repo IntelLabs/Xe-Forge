@@ -1,39 +1,5 @@
-"""
-An agent that learns from its own trials (plan §13.7).
-
-The first live run exposed the shape of the problem. PLAN was called once, produced two
-well-argued candidates, and both measured roughly 2x slower. The loop reverted them
-correctly and stopped — and the agent never found out. Asked again it would have
-proposed the same two things, because nothing in the design carried a result backwards.
-
-That is the difference between a batch of suggestions and a search. A search needs three
-things the one-shot design lacks:
-
-* **Memory of what was tried and what it measured.** Not "this exact edit was attempted"
-  — the novelty ledger already refuses literal repeats — but *why* it failed and by how
-  much. `BLOCK_SIZE 1024 -> 8192 measured -108.87%` is a fact about the device that
-  should reshape every subsequent proposal, including ones in different directions.
-* **The machine.** The two failures were sound reasoning applied to a device the agent
-  had not been told about: it argued from a discrete GPU with hundreds of EUs, on a part
-  with sixteen. §9.5 says measured facts belong in the context; the device is a measured
-  fact.
-* **A cheap way to reject the impossible.** `BLOCK_SIZE = 8192` exceeds this device's
-  1024 work-group limit. That is checkable from `DeviceFacts` before anything is applied,
-  and catching it costs nothing where a trial costs a patch, a correctness run and a
-  measurement.
-
-Rounds rather than a fixed stage order. Xe-Forge directs its own loop through a
-curriculum — ALGORITHMIC before FUSION before AUTOTUNING — which encodes real knowledge
-about what to try when. That structure suits a pipeline whose stages are known in
-advance. Here the agent chooses its own next move from what the last round measured,
-which is the same shape Hyperloom gives its Orchestration role: *"a single persistent
-multi-turn conversation ... the agent's plan and reasoning live in the conversation, so
-reasoning continuity is preserved between ticks."*
-
-What does not change is who decides. The agent picks the direction; Orbit applies,
-verifies, measures and reverts. A round's result is a measurement, never the agent's
-opinion of its own patch.
-"""
+"""Round-based optimization sessions: each round's proposals are informed by the
+device's facts and by what previous rounds measured. Design rationale: docs/DESIGN.md."""
 
 from __future__ import annotations
 
@@ -42,8 +8,7 @@ from dataclasses import dataclass, field
 from xe_forge.orbit.device import DeviceFacts, launch_constraints
 from xe_forge.orbit.optimize.loop import Proposal, TrialRecord, TrialVerdict
 
-# Rounds of propose-trial-learn. Two is the minimum that can demonstrate a correction;
-# beyond a handful the budget is better spent elsewhere (§11.6).
+# Rounds of propose-trial-learn per session.
 DEFAULT_ROUNDS = 3
 
 
@@ -88,13 +53,7 @@ class SessionHistory:
         return max(candidates, key=lambda t: t.delta_percent or 0.0) if candidates else None
 
     def failed_directions(self) -> list[str]:
-        """Directions already shown not to work, so the agent can stop re-deriving them.
-
-        Phrased as measured outcomes rather than prohibitions. "Larger blocks measured
-        2x slower" is evidence the agent can reason from — including reasoning that the
-        opposite direction is worth trying. "Do not change the block size" is an
-        instruction it can only obey, and it forecloses the correction.
-        """
+        """Directions already shown not to work, phrased as measured outcomes."""
         out: list[str] = []
         for round_ in self.rounds:
             for trial in round_.trials:
@@ -118,16 +77,8 @@ class SessionHistory:
         return "\n\n".join(parts)
 
     def render_for_knowledge(self) -> str:
-        """Render as a block for `ClaudeProposer.plan`'s `knowledge` parameter.
-
-        `build_round_prompt` owns the full-prompt path; this is the seam for a caller
-        that can only extend the measured context `plan()` already accepts, where it is
-        interpolated as MEASURED CONTEXT — and measured context is exactly what a
-        round's verdicts are. The framing matches the CLI's cross-invocation
-        `_prior_trials` wording, because the two blocks are the same evidence at
-        different distances: results are measurements, not opinions, and re-proposing
-        one spends a trial to learn what is already known.
-        """
+        """Render as a MEASURED CONTEXT block for `ClaudeProposer.plan`'s
+        `knowledge` parameter. Empty string when nothing has been trialled."""
         body = self.render()
         if not body:
             return ""
@@ -141,10 +92,8 @@ class SessionHistory:
 def violates_device_limits(proposal: Proposal, facts: DeviceFacts) -> str:
     """Reject what the hardware cannot do, before a trial is spent on it.
 
-    Only checks bounds that are genuinely hard. A proposal that is merely unwise is left
-    to the measurement — being wrong about what is slow is what the gate is for, and a
-    heuristic that pre-rejects plausible ideas would have removed the only mechanism
-    that has actually produced a true answer here.
+    Only hard device bounds are checked; merely unwise proposals are left to the
+    measurement.
     """
     if not facts.available:
         return ""

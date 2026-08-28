@@ -1,45 +1,7 @@
 """
-Roofline headroom for the ranking function (plan §18).
-
-§18's ranking multiplies the Amdahl ceiling by `roofline_headroom(k)`:
-
-    priority(k) = max_e2e_gain(k, s_est)
-                * roofline_headroom(k)
-                * action_availability(k)
-                * provenance_confidence(k)
-                * min(extraction_tractability(k), TRACTABILITY_CAP)
-
-v1 filled that slot with an unspecified `estimated_headroom` fudge factor. §18 removed
-it and said to use the real roofline: **measured** achieved TFLOPS and bandwidth against
-the hardware ceiling. This module is that replacement, and it refuses to guess.
-
-Direction convention — read this before changing anything here
---------------------------------------------------------------
-`headroom` is a **multiplier on priority expressing how much of the hardware the kernel
-is leaving on the table**, defined as::
-
-    headroom = roofline_ceiling_tflops / achieved_tflops        (>= 1.0)
-
-* A kernel sitting *on* the roof achieves the ceiling, so the ratio is **1.0** — no
-  room, and the ranking is left untouched by this term.
-* A kernel at a quarter of its ceiling scores **4.0** — four times the achievable
-  performance is unclaimed, so it outranks an equally hot kernel that is already
-  saturating the hardware.
-
-Getting this backwards inverts the ranking: it would promote exactly the kernels that
-have nothing left to give. If you find yourself writing `achieved / ceiling`, stop.
-
-`NEUTRAL_HEADROOM` is 1.0, deliberately the same value as "already at the roof". When
-FLOP and byte counts are unavailable — the common case, because a `torch.profiler`
-trace does not carry them — the estimate is neutral *and flagged* (`measured=False`).
-Neutral is the conservative end of the range: it never promotes a kernel on the
-strength of data we do not have. That is the whole difference between this module and
-the fudge factor it replaces.
-
-Both FLOPs and bytes are required for a measured result. With only one of them the
-roofline cannot tell whether the kernel sits under the flat compute roof or the sloped
-memory roof, and picking a roof on a guess systematically *overstates* headroom. That
-is the failure §18 removed, so the answer is neutral-and-say-so instead.
+Roofline headroom for the ranking: headroom = ceiling_tflops / achieved_tflops
+(>= 1.0; 1.0 means at the roof, larger means more unclaimed — never inverted).
+Unmeasured inputs yield neutral 1.0, flagged. Design rationale: docs/DESIGN.md.
 """
 
 from __future__ import annotations
@@ -52,13 +14,9 @@ from xe_forge.orbit.models import KernelRecord
 # ---------------------------------------------------------------------------
 # Hardware presets.
 #
-# SOURCE: copied verbatim from `scripts/roofline.py`'s HARDWARE_PRESETS. That script
-# is a standalone PEP-723 tool that deliberately does not import this package, so the
-# constants are duplicated rather than shared. Duplication is the point: it makes
-# drift visible, and `tests/orbit/test_roofline.py` parses the script and asserts the
-# two tables still agree. If you change a number here, change it there.
-#
-# Peak figures are FP16/BF16 dense throughput and peak DRAM bandwidth.
+# Copied verbatim from `scripts/roofline.py`'s HARDWARE_PRESETS (a standalone script
+# that does not import this package); test_roofline.py asserts the tables agree, so
+# change both together. Peak figures are FP16/BF16 dense throughput and DRAM bandwidth.
 # ---------------------------------------------------------------------------
 
 
@@ -113,10 +71,8 @@ _PUNCTUATION_RE = re.compile(r"[^a-z0-9]+")
 # an unmeasured kernel is never promoted over a measured one on missing evidence.
 NEUTRAL_HEADROOM = 1.0
 
-# Ceiling on the ratio. Unbounded, a kernel at 1% of the roof would score 100x and
-# overturn an order-of-magnitude difference in the Amdahl ceiling — the §11.10 language
-# bias failure in a new costume, with "badly optimized and tiny" beating "dominant".
-# Eight is already four times the DEFAULT_ESTIMATED_SPEEDUP the ceiling assumes.
+# Ceiling on the ratio: unbounded, a kernel at 1% of the roof would score 100x and
+# overturn an order-of-magnitude difference in the Amdahl ceiling.
 MAX_HEADROOM = 8.0
 
 
@@ -206,9 +162,8 @@ def estimate_headroom(
 
     `flops` and `bytes_moved` are per invocation and `time_us` is that invocation's
     duration; the ratio is scale-free, so totals work equally well as long as both come
-    from the same window. Returns >= 1.0: 1.0 means the kernel is at the roof (no room),
-    larger means that much of the hardware is unclaimed. See the module docstring for
-    why the direction is this way round.
+    from the same window. Returns >= 1.0: 1.0 means the kernel is at the roof (no
+    room), larger means that much of the hardware is unclaimed.
     """
     device = device_name
     hardware = resolve_hardware(device_name)
@@ -231,7 +186,7 @@ def estimate_headroom(
         return unmeasured(
             f"{missing} unavailable (the trace does not carry them); the roofline needs "
             f"both to know which roof applies, and choosing one on a guess overstates "
-            f"headroom — see plan §18",
+            f"headroom",
             device,
         )
 

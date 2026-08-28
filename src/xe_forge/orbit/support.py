@@ -1,32 +1,14 @@
 """
-The published support matrix (plan §5.3, §6).
-
-§5.3 lists this as one of three structural lessons worth adopting: name the GPUs, the
-driver and oneAPI versions, the framework ranges, the kernel languages and the Python
-version, and publish them. It is a credibility artifact, it sets expectations before
-someone files an issue, and it forces the version pinning §12.9 requires anyway.
-
-The matrix is *measured*, not declared. Every row reports what this machine actually
-has, next to what the project supports, because a support matrix written from intent
-drifts from reality within a release — which is the same failure §12.9 describes for
-bundles, one level up.
-
-One entry deserves explaining because it is easy to misread. oneDNN is statically
-linked into `libtorch_xpu.so`: there is no separate package and no way to upgrade it
-independently. Its version is therefore an *implicit part of the torch version*, and on
-an Intel inference workload it is rarely a footnote — the vLLM decode profiled during
-development put 96.4% of GPU time in a single oneDNN GEMM. A oneDNN change is a
-performance change to the kernel that owns almost all the runtime, so it invalidates
-stored measurements exactly as §12.9 says.
+The published support matrix: what this machine has, next to what the project
+supports. Measured, not declared.
+Design rationale: docs/DESIGN.md
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-# Kernel languages Orbit can identify, extract and patch back. "Validated" means the
-# whole path — identity, closure, override, dispatch assertion — has been exercised on
-# real hardware, not merely implemented.
+# Kernel languages Orbit can identify, extract and patch back.
 SUPPORTED_LANGUAGES = {
     "triton": "identify, closure (AST), E2 bundle, P1 override via torch.library",
     "sycl": "identify (demangle), closure (compile_commands), P1 override via icpx extension",
@@ -35,25 +17,23 @@ SUPPORTED_LANGUAGES = {
     "opaque": "E4 reproducer only; actions are fusion, backend, layout, library config",
 }
 
-# Frameworks reached through the §10 adapter protocol.
+# Frameworks reached through the adapter protocol.
 SUPPORTED_FRAMEWORKS = {
     "generic_torch": "Tier 0 — any torch workload; wall-clock, discovery, provenance, capture",
     "vllm": "Tier 1 — serving metrics, determinism knobs, config axes, P1/P3 patch points",
 }
 
-# Minimum versions the code actually assumes. Below these, behaviour is untested rather
-# than known-broken — which is a different claim and worth keeping distinct.
+# Minimum versions the code assumes; below these, behaviour is untested.
 MINIMUM_VERSIONS = {
     "python": "3.11",
     "torch": "2.8",
     "vllm": "0.11",
 }
 
-# Tooling that is optional but changes what can be measured. Absence is always reported
-# rather than silently degrading the result (§10.4, §18).
+# Optional tooling that changes what can be measured; absence is always reported.
 OPTIONAL_TOOLING = {
     "unitrace": "Level Zero GPU-busy and launch-gap timing; without it GPU-busy is "
-    "estimated from trace span, which cannot see time between launches (§18)",
+    "estimated from trace span, which cannot see time between launches",
     "icpx": "builds SYCL operator overrides; identity, closure and option axes work without it",
     "level-zero-headers": "required before Triton can JIT for XPU",
     "vtune": "kernel-level profiling enrichment",
@@ -92,11 +72,7 @@ class SupportMatrix:
 
 
 def _onednn_version() -> tuple[str, str]:
-    """oneDNN as torch reports it, plus how it is linked.
-
-    Read from `torch.__config__`, which is the only honest source: there is no separate
-    package to query, because the library is compiled in.
-    """
+    """oneDNN version as torch reports it (via `torch.__config__`), plus how it is linked."""
     try:
         import re
 
@@ -202,7 +178,7 @@ def format_languages() -> str:
     for name, capability in SUPPORTED_LANGUAGES.items():
         lines.append(f"  {name:<10} {capability}")
     lines.append("")
-    lines.append("FRAMEWORKS (§10 adapter protocol)")
+    lines.append("FRAMEWORKS")
     lines.append("-" * 60)
     for name, capability in SUPPORTED_FRAMEWORKS.items():
         lines.append(f"  {name:<16} {capability}")

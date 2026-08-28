@@ -1,31 +1,6 @@
-"""
-The agentic optimization loop (plan §13.7).
-
-An agent proposes; Orbit decides. That split is §3's rule, and AMD's Hyperloom states
-the same one outright for the same reason — *"Kernel work is not handled by an LLM
-agent... No LLM turn is consumed."* Applying a patch, checking correctness, timing it and
-reverting are all deterministic, so an agent doing them would only make a reproducible
-answer non-reproducible. The agent is asked the one thing it is actually better at:
-what to try next.
-
-    SELECT -> PLAN -> [ per trial: REVIEW -> APPLY -> VERIFY -> MEASURE -> KEEP/REVERT ] -> PROMOTE
-              agent               agent    <------------ programmatic ------------>
-
-Gates run cheapest-first, and this is where we deliberately differ from Hyperloom. Their
-`integrate_handler` grades accuracy only for a candidate that already cleared the
-throughput bar, because their accuracy eval is the expensive half. Ours is the opposite:
-a correctness check is seconds and a framework engine load is nearly a minute, so
-correctness gates first and a wrong kernel never costs a measurement.
-
-Two rules the loop will not bend on:
-
-* **The agent's own verdict is never the verdict.** A workspace may run the harness
-  itself and report success; Orbit re-runs it in a fresh process and believes only that.
-  An agent grading its own homework is not a gate.
-* **A failure to measure is not a failure of the candidate.** `UNCHECKED` reverts like a
-  failure — because an unproven patch must not stay on disk — but it is recorded as a
-  gap in the run, not as evidence against the change.
-"""
+"""The agentic optimization loop: an agent proposes; Orbit applies, verifies,
+measures and keeps or reverts, with gates run cheapest-first (correctness before
+measurement). Design rationale: docs/DESIGN.md."""
 
 from __future__ import annotations
 
@@ -39,9 +14,7 @@ from xe_forge.orbit.optimize.harness import CheckOutcome, CheckResult
 from xe_forge.orbit.patch.inplace import InPlacePatcher, PatchSafetyError
 from xe_forge.orbit.policy import PolicyGate, PolicyViolation
 
-# Default number of candidates to trial. Small on purpose: each costs an agent session
-# plus a measurement, and §11.6's economics say a budget disappears into three trials if
-# nobody prices them.
+# Small on purpose: each trial costs an agent session plus a measurement.
 DEFAULT_TRIALS = 3
 
 
@@ -51,10 +24,8 @@ class TrialVerdict(StrEnum):
     REVERTED_SLOWER = "REVERTED_SLOWER"
     # Applied and numerically wrong. The positive-control case.
     REVERTED_WRONG = "REVERTED_WRONG"
-    # Never applied: a gate refused it — the novelty ledger, the sandbox check, the
-    # critic, or the policy gate. The gate that exists is §24 Tier C's minimal one
-    # (action allowlist, sandbox invariants, single-writer, in `orbit/policy.py`);
-    # the full PRELUDE→CLOSE phase machine of §5.6 remains deferred.
+    # Never applied: a gate refused it — the novelty ledger, the sandbox check,
+    # the critic, or the policy gate.
     REFUSED = "REFUSED"
     # Applied but nothing could be established. Reverted, and recorded as a gap.
     UNPROVEN = "UNPROVEN"
@@ -149,19 +120,13 @@ class OptimizationLoop:
         self.measure = measure
         self.critic = critic
         self.ledger = ledger or NoveltyLedger()
-        # Below this, a "win" is indistinguishable from measurement noise on a kernel
-        # timed through repeated launches. Keeping a change on that evidence is how a
-        # stack of no-ops accumulates and gets reported as a speedup (§17.6).
+        # Below this, a "win" is indistinguishable from measurement noise.
         self.min_improvement_percent = min_improvement_percent
-        # §17's rule is that a verdict comes from an interval, not a threshold. The
-        # fixed floor below is a fallback for callers that can only produce one number;
-        # where samples are available the decision is `stats.compare`, which can say
-        # INCONCLUSIVE — a distinction a threshold cannot express, and the reason a real
-        # +0.63% improvement was rejected as though it had been disproved.
+        # When samples are available, the decision is `stats.compare` (which can say
+        # INCONCLUSIVE); the fixed floor is the fallback for single-number callers.
         self.measure_samples = measure_samples
-        # The §24 Tier C minimal policy gate. Optional so a caller without one keeps
-        # exactly the pre-gate behavior: the patcher's sandbox check alone at gate 2,
-        # and no single-writer lock around the trial body.
+        # Optional; without one, the patcher's sandbox check alone gates writes and
+        # no single-writer lock is taken.
         self.policy = policy
 
     def run(self, proposals: list[Proposal], baseline_us: float | None = None) -> LoopResult:
@@ -190,8 +155,7 @@ class OptimizationLoop:
             if record.verdict is TrialVerdict.KEPT:
                 result.accepted = record
 
-        # Only the winner stays. Anything else is reverted before the loop returns, so a
-        # crash mid-loop cannot leave an unaccepted patch on disk (§13.6).
+        # Only the winner stays; anything else is reverted before the loop returns.
         if result.accepted is None:
             self._revert_all()
         return result
@@ -221,10 +185,8 @@ class OptimizationLoop:
             )
 
         # -- gate 2: policy / sandbox (free) --------------------------------
-        # With a policy gate present, the action allowlist is consulted and the write
-        # invariants are checked through the gate, so every refusal reaches the caller
-        # as one exception type with its reason. Without one, the patcher's own check
-        # is the whole gate — exactly the pre-Tier-C behavior.
+        # With a policy gate, the allowlist and write invariants are checked through
+        # it; without one, the patcher's own check is the whole gate.
         try:
             if self.policy is not None:
                 self.policy.check_action("apply_patch")
@@ -242,10 +204,8 @@ class OptimizationLoop:
 
         if self.policy is None:
             return self._apply_and_judge(index, proposal, attempt, baseline_us)
-        # The single-writer lock is held for exactly the mutating span — apply, check,
-        # measure, keep-or-revert — so two concurrent loops cannot patch the same
-        # target. A refused lock is a refusal like any other gate's, carrying the
-        # holder's name.
+        # The single-writer lock covers exactly the mutating span, so two concurrent
+        # loops cannot patch the same target.
         try:
             with self.policy.single_writer(self.target):
                 return self._apply_and_judge(index, proposal, attempt, baseline_us)
@@ -294,9 +254,8 @@ class OptimizationLoop:
             )
 
         # -- measure ----------------------------------------------------------
-        # The statistical path is checked first: it collects its own samples, so calling
-        # the single-value `measure` before it would either duplicate the measurement or,
-        # for a caller that only supplies samples, fail on a None it never needed.
+        # The statistical path collects its own samples, so it is checked before the
+        # single-value `measure` is called.
         if self.measure_samples is not None and getattr(self, "_baseline_samples", None):
             return self._decide_statistically(index, proposal, check, baseline_us)
 
@@ -314,11 +273,8 @@ class OptimizationLoop:
         delta = (baseline_us - candidate_us) / baseline_us * 100.0
         if delta < self.min_improvement_percent:
             self._revert_all()
-            # "Below the floor" and "a clear regression" are both rejections and they are
-            # not the same finding. A first live run rejected a candidate measuring 2x
-            # slower with the words "indistinguishable from noise" — a right verdict
-            # carrying a plainly false reason, which is worse than no reason at all
-            # because it invites the reader to dismiss a real result.
+            # "Below the floor" and "a clear regression" are both rejections but not
+            # the same finding; the reason must say which.
             if delta <= -self.min_improvement_percent:
                 reason = (
                     f"{delta:+.2f}% — a clear regression, well outside the "
@@ -354,22 +310,14 @@ class OptimizationLoop:
     def _revert_all(self) -> None:
         """Undo the candidate under trial, and only that one.
 
-        Named for what callers mean by it — "put this trial back" — but scoped to the
-        current patch. Reverting the whole journal would undo previously accepted
-        candidates too, which is how a run reported two KEPT verdicts and finished with
-        an unmodified tree.
-
         Never raises: a failed revert must not mask the verdict that prompted it.
         """
         try:
             self.patcher.revert_all()
         except Exception:
             pass
-        # Reverting restores the *pristine* file, not the previously accepted state: the
-        # patcher keeps one record per target and a second apply inherits the original,
-        # so undoing the loser undoes the winner with it. Re-applying what was accepted
-        # is what makes "revert this trial" mean what the caller intends. Measured: a run
-        # reported two KEPT verdicts and finished with an unmodified tree.
+        # revert_all restores the pristine file (the patcher keeps one record per
+        # target), which undoes the accepted winner too — so re-apply it.
         accepted = getattr(self, "_accepted_source", None)
         if accepted is not None:
             try:
@@ -389,14 +337,9 @@ class OptimizationLoop:
         check: CheckResult,
         baseline_us: float | None,
     ) -> TrialRecord:
-        """Decide with §17's rule: an interval, not a threshold.
-
-        A fixed floor can only say "big enough" or "not big enough", so a real but small
-        improvement is rejected exactly as though it had been disproved. `stats.compare`
-        distinguishes the three outcomes that actually exist — the candidate is faster,
-        it is slower, or this workload cannot resolve the difference — and only the first
-        is a reason to keep, while only the second is evidence against the change.
-        """
+        """Decide from an interval, not a threshold: `stats.compare` distinguishes
+        faster, slower, and cannot-resolve — only the first is a reason to keep,
+        only the second is evidence against the change."""
         from xe_forge.orbit.models import Decision
         from xe_forge.orbit.stats import compare, minimum_detectable_effect
 
@@ -437,9 +380,8 @@ class OptimizationLoop:
         if decision is Decision.REJECT:
             verdict, text = TrialVerdict.REVERTED_SLOWER, f"slower: {improvement:+.2f}%, {reason}"
         else:
-            # INCONCLUSIVE and INVALID are both "not established". Reverting is right —
-            # an unproven patch must not stay — but calling it slower would be a claim
-            # the data does not support.
+            # INCONCLUSIVE and INVALID are "not established": revert, but calling it
+            # slower would be a claim the data does not support.
             verdict = TrialVerdict.UNPROVEN
             text = f"{decision.value.lower()}: {improvement:+.2f}%, {reason} (MDE {mde:.2f}%)"
         return TrialRecord(
@@ -477,23 +419,11 @@ def interleaved_samples(
     pairs: int = 3,
     kernel_id: str = "",
 ) -> tuple[list[float], list[float]]:
-    """Collect baseline and candidate samples ABBA-interleaved (§17 item 2).
+    """Collect baseline and candidate samples ABBA-interleaved to cancel drift.
 
-    Measuring every baseline sample and then every candidate sample lets drift over the
-    run land entirely on the second arm. At kernel level that drift is real — the device
-    warms, clocks move — and it is indistinguishable from the effect under test.
-
-    ABBA rather than ABAB because with ABAB the baseline always occupies first position
-    and absorbs every first-position effect. Counterbalancing spreads it across both.
-
-    **Check the precondition before using this.** Interleaving only helps when switching
-    arms costs less variance than the drift it cancels. Where an arm switch means a fresh
-    process — as it does for an in-place source patch, since the module is already
-    imported — it does not: measured on gumbel_sample, seven replicates within one
-    process spread 1.6%, while six ABBA samples across processes spread 8.5%, moving the
-    MDE from ~1% to 14.31%. Use this where arms can be swapped cheaply; prefer many
-    in-process replicates otherwise. A `None` measurement is dropped rather than recorded as zero — a
-    failed run is missing data, not a fast one.
+    Only use where switching arms is cheap: a fresh process per switch costs more
+    variance than the drift it cancels, so prefer many in-process replicates there.
+    A `None` measurement is dropped — a failed run is missing data, not a fast one.
     """
     baseline: list[float] = []
     candidate: list[float] = []

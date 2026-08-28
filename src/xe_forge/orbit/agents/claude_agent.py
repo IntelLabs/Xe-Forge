@@ -1,21 +1,7 @@
 """
-Claude Code as the repository agent (plan §3, §6).
-
-§6 names Claude Code as the repository agent for the hard-to-automate steps, and §3
-requires that it be reached through the `RepoAgent` protocol rather than imported
-directly, so a provider can be swapped by config without touching a call site.
-
-This provider shells out to the `claude` CLI in print mode. That is deliberate: it means
-Orbit depends on a binary rather than on an SDK, the agent runs with whatever
-credentials the user already has, and nothing in Orbit's analysis path imports an LLM
-client — which is what keeps CPU-only CI able to import these modules at all.
-
-The task it exists for is symbol resolution in C++ kernel trees. That was first written
-with regular expressions and failed in a way worth recording: a greedy pattern for
-Itanium template mangling recovered `GeluErfFunctor` and silently reduced
-`IgammaFunctor` to an empty string, because the identifier itself contains the `I` the
-pattern was looking for. The regex was not parsing C++; it was guessing, and guessing
-quietly.
+Claude Code as the repository agent: shells out to the `claude` CLI in print mode, so
+Orbit depends on a binary rather than an SDK and its analysis path never imports an
+LLM client. Design rationale: docs/DESIGN.md.
 """
 
 from __future__ import annotations
@@ -55,7 +41,7 @@ class ClaudeRepoAgent(BaseRepoAgent):
         if not self.available():
             raise RepoAgentError(
                 f"{self.binary!r} is not on PATH. Install Claude Code, or select a "
-                f"different RepoAgent provider by config (§3)."
+                f"different RepoAgent provider by config."
             )
 
         prompt = self.build_prompt(task)

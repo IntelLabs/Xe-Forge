@@ -1,31 +1,6 @@
 """
-Artifact layout, persistence and replay (plan §16.2, §16.3, §23).
-
-Every stage reads a typed artifact and writes a typed artifact. Nothing downstream
-parses console output when a structured artifact exists, and nothing re-derives a
-measurement another stage already made.
-
-The layout under `.orbit/runs/<run-id>/` is the contract:
-
-    manifest.json           versions, device, driver, clock state, env pins
-    workload.json
-    environment.json
-    measurement.json        samples + CIs, never point values
-    traces/
-        torch_trace.json
-        unitrace/
-        launches.json       intercepted launch records (§12.4)
-    kernels/catalog.json
-    regions/catalog.json
-    captures/<kernel-id>/
-    bundles/<kernel-id>/
-    candidates/<kernel-id>/
-    experiments/<exp-id>/
-    report.json
-
-`RunStore.load()` is what makes `--replay` work: a stage run with `--replay <run-id>`
-reads its input from the store instead of from live hardware, which is how catalog,
-provenance, ranking and decision logic stay testable on CPU-only CI.
+Typed artifact persistence and replay for `.orbit/runs/<run-id>/`. Every stage reads
+and writes typed artifacts; `RunStore.load()` is what makes `--replay` work.
 """
 
 from __future__ import annotations
@@ -48,11 +23,7 @@ _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class ArtifactError(RuntimeError):
-    """Raised for a missing, malformed or incompatible artifact.
-
-    Stages surface this as a clean typed failure rather than a crash or a silent
-    default — required by the per-stage definition of done (§16.2, item 5).
-    """
+    """Raised for a missing, malformed or incompatible artifact."""
 
 
 def new_run_id(prefix: str = "run") -> str:
@@ -183,10 +154,8 @@ class RunStore:
     def record_stage(self, stage: str) -> None:
         """Append a stage name to the manifest's completion list.
 
-        Creates a minimal manifest when the run has none. A stage can legitimately be
-        the first thing to touch a run — `trace --from-trace` ingests a file without
-        ever running a workload — and a run whose manifest never records what happened
-        to it cannot be replayed with any confidence about what it contains.
+        Creates a minimal manifest when the run has none — a stage can legitimately be
+        the first thing to touch a run.
         """
         from xe_forge.orbit.models import RunManifest
 

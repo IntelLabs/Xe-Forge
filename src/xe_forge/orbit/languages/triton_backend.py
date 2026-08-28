@@ -1,24 +1,6 @@
-"""
-Triton language backend (plan §11.3, §12.6).
-
-Closure for Triton is an AST walk: starting from the intercepted launch record, every
-call that lands on a `@triton.jit` function is a device helper and joins the work
-list — transitively, across modules, including helpers reached through a re-export or
-an alias. Module-level constants used as `constexpr` values come along, as do the
-autotune configuration list and any heuristics callable that closes over module state.
-
-Two rules from §12.6 are enforced here because getting them wrong is silent:
-
-* **Keep the package structure, add a path shim.** Flattening into one file breaks
-  relative imports and re-export chains, and destroys the mapping back to original
-  source that patch-back needs. A bundle is a small tree plus a manifest.
-* **A partially resolved closure is worse than an honest in-situ harness**, because it
-  looks standalone and is not. Any unresolved step downgrades to E3 and records which
-  step failed.
-
-Triton itself is not required to compute a closure: the AST walk runs on source text,
-which is what lets closure resolution be tested on CPU-only CI with no GPU stack.
-"""
+"""Triton language backend: identity, transitive AST-walk closure over `@triton.jit`
+helpers (no Triton install required), and verification. Any unresolved closure step
+downgrades to E3 and records which step failed. Design rationale: docs/DESIGN.md."""
 
 from __future__ import annotations
 
@@ -86,7 +68,7 @@ class TritonBackend(BaseLanguageBackend):
         return 0.0
 
     def resolve_source(self, kernel_name: str, launch=None) -> SourceLocation:
-        """Prefer the intercepted launch record over any static guess (§12.4)."""
+        """Prefer the intercepted launch record over any static guess."""
         if launch is not None and getattr(launch, "source_file", None):
             return SourceLocation(
                 file=launch.source_file,
@@ -106,12 +88,9 @@ class TritonBackend(BaseLanguageBackend):
                     confidence=0.7,
                 )
 
-        # A Triton kernel in an *installed* framework has no launch record and no cache
-        # entry until it has been JIT-compiled in this process, but its definition is
-        # ordinary Python sitting in site-packages. Searching the framework tree for the
-        # `@triton.jit` function by name resolves it exactly and deterministically — no
-        # agent needed (§3), and these are the most patchable kernels we have, so failing
-        # to locate them costs the whole in-place path.
+        # A kernel in an installed framework has no launch record until JIT-compiled
+        # in this process, but its definition is ordinary Python in site-packages;
+        # search the framework trees for the `@triton.jit` definition by name.
         found = _find_jit_definition(kernel_name)
         if found is not None:
             path, line = found
@@ -135,7 +114,7 @@ class TritonBackend(BaseLanguageBackend):
         return result.files
 
     def resolve_closure(self, source: SourceLocation, max_depth: int = 12) -> ClosureResult:
-        """Walk the `@triton.jit` call graph transitively across modules (§12.6)."""
+        """Walk the `@triton.jit` call graph transitively across modules."""
         out = ClosureResult()
         if not source.file:
             out.unresolved.append("no source file resolved for entrypoint")
@@ -177,11 +156,8 @@ class TritonBackend(BaseLanguageBackend):
             imports = _import_map(tree)
             out.constants.update(_module_constants(tree))
 
-            # Follow *every* in-package import, not only the ones we can see being
-            # called. A module cannot be imported at all unless its module-level
-            # imports resolve, so a closure built from the call graph alone produces a
-            # bundle that looks complete and fails on import — which is exactly what
-            # the isolated-import check catches (§12.12).
+            # Follow every in-package import, not only observed calls: a module
+            # cannot be imported at all unless its module-level imports resolve.
             for name, (module_name, level) in imports.items():
                 target = _resolve_import(module_name, level, current_file)
                 if target is None:
@@ -242,7 +218,7 @@ class TritonBackend(BaseLanguageBackend):
         return BuildResult(ok=True, artifact=source, output="triton bundle parses; JIT at launch")
 
     def verify(self, bundle: KernelBundle) -> ExtractionCheck:
-        """Check the bundle is the kernel that ran, not merely a kernel (§12.10)."""
+        """Check the bundle is the kernel that ran, not merely a kernel."""
         check = ExtractionCheck()
         failures: list[str] = []
 
@@ -322,9 +298,7 @@ def _import_map(tree: ast.Module) -> dict[str, tuple[str, int]]:
     """Map imported symbol -> (module, relative level), following aliases.
 
     The level matters: `from .helpers import f` and `from helpers import f` name
-    different modules, and treating a relative import as absolute is how a closure
-    walk over a real package silently fails to find helpers that are right next to the
-    kernel. Real inference kernels are packaged, so relative imports are the norm.
+    different modules.
     """
     mapping: dict[str, tuple[str, int]] = {}
     for node in ast.walk(tree):
@@ -369,11 +343,8 @@ def _within(path: Path, root: Path) -> bool:
 def _resolve_import(module: str, level: int, current_file: Path) -> Path | None:
     """Locate an imported module's source file, honouring relative imports.
 
-    A relative import is resolved against the importing file's own directory, walking
-    up one level for each extra leading dot. That is done on the filesystem rather
-    than through `find_spec`, because the package may not be importable from wherever
-    Orbit happens to be running — and requiring it to be would make closure resolution
-    depend on the caller's working directory.
+    Relative imports are resolved on the filesystem rather than through `find_spec`,
+    since the package may not be importable from where Orbit is running.
     """
     if level and level > 0:
         base = current_file.parent
@@ -445,9 +416,8 @@ def _module_file(module_path: str) -> Path | None:
     return path if path.is_file() else None
 
 
-# Framework trees worth searching for a `@triton.jit` definition, most specific first.
-# An installed framework is the common case; the environment variable exists so a
-# developer working from a checkout can point at it without reinstalling.
+# Framework trees worth searching for a `@triton.jit` definition, most specific
+# first; the env var lets a developer point at a checkout without reinstalling.
 _FRAMEWORK_SOURCE_ENV = "ORBIT_FRAMEWORK_SOURCES"
 _FRAMEWORK_PACKAGES = ("vllm", "sglang", "torch")
 
@@ -455,10 +425,8 @@ _FRAMEWORK_PACKAGES = ("vllm", "sglang", "torch")
 def _find_jit_definition(name: str) -> tuple[Path, int] | None:
     """Locate `def <name>(` inside an installed framework's Python tree.
 
-    Only a definition counts, not a call site: a kernel is patched where it is written.
-    The first match wins, and ambiguity is reported by returning nothing rather than by
-    guessing, because two frameworks defining the same kernel name is exactly the
-    collision that produced a wrong resolution once already (§11.4 item 6).
+    Only a definition counts, not a call site; ambiguity returns None rather than
+    guessing.
     """
     import os
 

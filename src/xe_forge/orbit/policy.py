@@ -1,33 +1,7 @@
 """
-The minimal policy gate (plan §24 Tier C).
-
-This is deliberately the *minimal* gate — an action allowlist, the sandbox
-invariants, and a single-writer lock — enforced before an intent mutates state.
-It is the affordable half of Hyperloom's PolicyGate (§5.6 item 2), which also
-enforces phase ordering, resource leases and data dependencies inside a
-PRELUDE→CLOSE phase machine; that half stays deferred, because a phase machine
-without phases would be a name for a component that does not exist — the exact
-failure §24 tells this file's caller to stop committing.
-
-What the minimal gate buys, concretely:
-
-* **An allowlist, not a denylist.** An agent proposes actions, and an
-  agent-proposed action is untrusted input. The gate admits what a context has
-  explicitly granted and refuses everything else by default, so a new action
-  is powerless until someone decides it should not be.
-* **One exception type at the boundary.** The path invariants are
-  `InPlacePatcher.check`'s — symlinks, writability, sandbox roots — and are
-  *reused*, not re-implemented: a second copy of a safety check is a second
-  place for the two to disagree. The patcher's refusal is wrapped in
-  `PolicyViolation` so a caller sees one gate and one exception type.
-* **Single-writer.** Two concurrent loops patching the same file interleave
-  their journals and each other's reverts. An advisory per-target lock file
-  refuses the second writer by name, and a lock whose holder is dead is broken
-  with a logged note — never silently, because a silently broken lock is
-  indistinguishable from a lock that never worked.
-
-Every refusal says which invariant refused and why: a gate whose decisions the
-caller cannot explain is indistinguishable from a bug (§20.4).
+The minimal policy gate: an action allowlist, the sandbox invariants, and a
+single-writer lock, enforced before an intent mutates state. Every refusal names
+the invariant that refused. Design rationale: docs/DESIGN.md
 """
 
 from __future__ import annotations
@@ -44,32 +18,27 @@ from xe_forge.orbit.patch.inplace import InPlacePatcher, PatchSafetyError
 
 logger = logging.getLogger(__name__)
 
-# The one action the optimization loop performs against the tree. A context that
-# grants nothing else has granted exactly what the loop needs, and an agent
-# proposal naming any other action is refused before anything happens.
+# The one action the optimization loop performs against the tree.
 DEFAULT_ALLOWED_ACTIONS = frozenset({"apply_patch"})
 
-# How many times acquisition retries after breaking a stale lock. One retry is
-# enough: if the slot is taken again immediately, the new holder is live and the
-# refusal below names it.
+# Retries after breaking a stale lock; a slot re-taken immediately means a live holder.
 _ACQUIRE_ATTEMPTS = 2
 
 
 class PolicyViolation(Exception):
     """Raised when the gate refuses an intent, before any state has changed.
 
-    The message always names the invariant that refused — allowlist, sandbox,
-    or single-writer — and why, so the caller can relay a decision rather than
-    report a mystery.
+    The message names the invariant that refused — allowlist, sandbox, or
+    single-writer — and why.
     """
 
 
 class PolicyGate:
-    """The §24 Tier C gate: allowlist + sandbox + single-writer, checked first.
+    """Allowlist + sandbox + single-writer, checked before any state changes.
 
     The sandbox invariants are delegated to the patcher given at construction;
-    this class adds only what the patcher does not know about — which actions
-    the current context permits, and who else may be writing.
+    this class adds only which actions the context permits and who else may be
+    writing.
     """
 
     def __init__(
@@ -80,9 +49,7 @@ class PolicyGate:
     ) -> None:
         self.patcher = patcher
         self.allowed_actions = frozenset(allowed_actions)
-        # Locks live alongside the patch journal by default: the journal
-        # directory is already the run's designated writable scrap of disk, and
-        # a lock next to the journal it protects is easy to find in a post-mortem.
+        # Locks default to the journal directory — the run's designated writable disk.
         self.lock_dir = Path(lock_dir) if lock_dir is not None else patcher.journal_dir
 
     # -- action allowlist --------------------------------------------------
@@ -101,10 +68,8 @@ class PolicyGate:
     def check_write(self, target: Path) -> None:
         """Refuse a write the patcher could not make safely, as a policy decision.
 
-        The invariants themselves — existence, symlinks, writability, sandbox
-        roots — are `InPlacePatcher.check`'s and are not duplicated here; the
-        patcher's refusal is re-raised as a `PolicyViolation` carrying the same
-        reason, so the caller catches one exception type for every gate.
+        The invariants are `InPlacePatcher.check`'s, not duplicated here; its
+        refusal is re-raised as `PolicyViolation` with the same reason.
         """
         try:
             self.patcher.check(Path(target))
@@ -114,9 +79,7 @@ class PolicyGate:
     # -- single-writer -----------------------------------------------------
 
     def _lock_path(self, target: Path) -> Path:
-        # Keyed by the resolved path so two spellings of one file contend for
-        # one lock; the digest keeps the name filesystem-safe and the suffix
-        # keeps it human-readable, mirroring the journal's backup naming.
+        # Keyed by the resolved path so two spellings of one file contend for one lock.
         target = Path(target)
         key = hashlib.sha256(str(target.resolve()).encode("utf-8")).hexdigest()[:16]
         return self.lock_dir / f"{key}-{target.name}.lock"
@@ -140,8 +103,7 @@ class PolicyGate:
         lock = self._lock_path(target)
         holder: int | None = None
         for _ in range(_ACQUIRE_ATTEMPTS):
-            # O_CREAT|O_EXCL is the atomicity: exactly one contender can create
-            # the file, so there is no window between "check" and "take".
+            # O_CREAT|O_EXCL is the atomicity: no window between "check" and "take".
             try:
                 fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
             except FileExistsError:
@@ -152,10 +114,7 @@ class PolicyGate:
                         f"{holder} ({lock}); a second concurrent writer on one "
                         f"target would interleave journals and reverts"
                     ) from None
-                # The holder is dead (or the lock file is unreadable, meaning
-                # its writer died between creating and stamping it). Breaking it
-                # is correct, and doing so silently is not: a broken lock is an
-                # event the operator should be able to find afterwards.
+                # Stale lock: breaking it is correct, but never silently.
                 if holder is None:
                     logger.warning(
                         "single-writer: breaking stale lock %s on %s; the lock file "
@@ -175,8 +134,7 @@ class PolicyGate:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump({"pid": os.getpid(), "target": str(target)}, handle)
             return lock
-        # Only reachable if a stale lock was broken and the slot was taken again
-        # before the retry — meaning a live contender is racing for this target.
+        # Only reachable if a broken stale lock was re-taken before the retry.
         raise PolicyViolation(
             f"single-writer: {target} could not be locked; a stale lock was broken "
             f"but another writer re-took {lock} immediately, so a live contender "
@@ -214,23 +172,12 @@ def _pid_alive(pid: int) -> bool:
 
 
 class ResourceLease:
-    """Exclusive per-device lease (plan §24 Tier E, item E2).
+    """Exclusive per-device lease. A second claimant is refused with the holder's
+    name, reason and start time; a stale lease is broken with a logged note.
 
-    §17.5 requires the GPU to be quiet during a measurement, and until now that
-    was discipline — a rule the operator follows — rather than a mechanism. The
-    measured motivation: a served arm was once launched while an eval still held
-    the GPU, and only a fast manual kill kept the numbers honest. This class
-    makes the collision impossible instead of disciplined-against: every
-    GPU-touching command holds the lease for the duration, and a second claimant
-    is refused with the holder's name, reason and start time.
-
-    The mechanism is the single-writer lock's, deliberately — one lock idiom in
-    this module, not two: ``O_CREAT|O_EXCL`` for atomicity, a JSON stamp naming
-    the holder, stale-holder breaking with a logged note, and every refusal
-    naming its invariant. An optional ``probe`` runs after acquisition and
-    before the caller proceeds (the §17.5 quiet-machine check is the intended
-    probe), so taking the lease and validating the measurement precondition are
-    one gesture; a probe failure releases the lease and refuses.
+    An optional ``probe`` runs after acquisition and before the caller proceeds
+    (the intended probe is the quiet-machine check); a probe failure releases
+    the lease and refuses.
     """
 
     def __init__(
@@ -240,8 +187,8 @@ class ResourceLease:
         probe: Callable[[], None] | None = None,
     ) -> None:
         self.resource = resource
-        # ORBIT_LEASE_DIR isolates tests and CI runners from the machine-wide
-        # lease; operators on one device share the default and that is the point.
+        # ORBIT_LEASE_DIR isolates tests and CI from the machine-wide lease;
+        # operators on one device share the default deliberately.
         default = os.environ.get("ORBIT_LEASE_DIR") or Path.home() / ".cache/orbit-dev/leases"
         self.lease_dir = Path(lease_dir) if lease_dir else Path(default)
         self.probe = probe
@@ -281,7 +228,7 @@ class ResourceLease:
                         f"lease: {self.resource} is held by live pid {pid} "
                         f"({stamp.get('reason', '?')}, since {stamp.get('since', '?')}); "
                         f"two claimants on one device would corrupt both measurements "
-                        f"(§17.5) — wait, or investigate the holder"
+                        f"— wait, or investigate the holder"
                     ) from None
                 logger.warning(
                     "lease: breaking stale lease %s on %s; %s",

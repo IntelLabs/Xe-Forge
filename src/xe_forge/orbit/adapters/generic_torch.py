@@ -1,15 +1,7 @@
 """
-Tier 0: the framework-agnostic adapter (plan §10.2).
-
-No framework-specific code at all. Works on any torch-based workload, and gives you
-kernel discovery, provenance, input capture and a wall-clock end-to-end number.
-
-This exists so an unfamiliar framework **degrades to Tier 0 rather than failing**.
-Someone can point Orbit at an internal serving harness on day one and still get a
-kernel catalog and a measured delta. An adapter buys precision, not basic function.
-
-It also ships alongside the vLLM adapter deliberately: building the generic path at
-the same time as the specific one is what keeps vLLM's assumptions out of the core.
+Tier 0 framework-agnostic adapter: kernel discovery, provenance, input capture and a
+wall-clock number for any torch workload, so an unfamiliar framework degrades to
+Tier 0 rather than failing. Design rationale: docs/DESIGN.md.
 """
 
 from __future__ import annotations
@@ -117,7 +109,7 @@ class GenericTorchAdapter(BaseAdapter):
             repetitions=load.repetitions,
             profile_id=load.profile_id,
         )
-        # Never report a metric we did not declare (§10.4, conformance test 3).
+        # Never report a metric we did not declare (conformance test 3).
         measurement.metrics_available = ["wall_time"]
         measurement.throughput = None
         measurement.ttft_ms = None
@@ -135,12 +127,8 @@ class GenericTorchAdapter(BaseAdapter):
         ]
 
     def determinism_profile(self) -> DeterminismProfile:
-        """Tier 0 can pin nothing it cannot see.
-
-        Naming the non-pinnable sources is the point: the measurement layer refuses to
-        emit ACCEPT when one of these is active and variance exceeds the MDE, and it
-        names the reason instead of quietly returning a number (§10.5).
-        """
+        """Tier 0 can pin nothing it cannot see; it names the non-pinnable sources so
+        the measurement layer can refuse ACCEPT when variance exceeds the MDE."""
         return DeterminismProfile(
             pinnable=set(),
             non_pinnable={
@@ -153,7 +141,7 @@ class GenericTorchAdapter(BaseAdapter):
             },
             notes=(
                 "Tier 0 has no framework hooks, so no nondeterminism source can be "
-                "pinned. Interleaved measurement (§17) is the only mitigation."
+                "pinned. Interleaved measurement is the only mitigation."
             ),
         )
 
@@ -164,11 +152,8 @@ class GenericTorchAdapter(BaseAdapter):
         return ["inductor", "triton", "onednn", "sycl"]
 
     def patch_points(self, kernel: KernelRecord) -> list[PatchPoint]:
-        """P1 operator override is available whenever the kernel sits behind an op.
-
-        This is the rung that ports across frameworks for free, and it needs no
-        framework knowledge at all — which is why Tier 0 can offer it.
-        """
+        """P1 operator override is available whenever the kernel sits behind an op;
+        it needs no framework knowledge, which is why Tier 0 can offer it."""
         if not kernel.framework_op:
             return []
         return [

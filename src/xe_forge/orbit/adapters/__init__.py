@@ -1,13 +1,7 @@
 """
-Adapter registry (plan §10.3).
-
-Adapters are resolved by `detect()` and registered through the `xe_orbit.frameworks`
-entry-point group, so internal or proprietary frameworks can plug in without forking
-the repository. Built-in adapters are registered directly; third-party ones are
-discovered from installed distributions.
-
-Resolution tries the highest tier first, so `GenericTorchAdapter` — which claims every
-workload — is the guaranteed fallback rather than a shadow over real adapters.
+Adapter registry: resolution by `detect()`, third-party adapters via the
+`xe_orbit.frameworks` entry-point group. Highest tier wins, so the Tier 0 fallback
+never shadows a real adapter.
 """
 
 from __future__ import annotations
@@ -33,10 +27,6 @@ logger = logging.getLogger(__name__)
 
 ENTRY_POINT_GROUP = "xe_orbit.frameworks"
 
-# Built-in adapters. v0.1 ships Tier 0 alongside the first Tier 1 adapter on purpose
-# (§10.9): building the generic path at the same time keeps one framework's shape from
-# becoming the core's shape. SGLang is the scheduled v0.2 portability test — the
-# second Tier 1 adapter, whose cost outside `adapters/` is a reported metric (§10.8).
 _BUILTIN: dict[str, type] = {
     "generic_torch": GenericTorchAdapter,
     "vllm": VLLMAdapter,

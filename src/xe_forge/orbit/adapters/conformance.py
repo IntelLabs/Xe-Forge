@@ -1,20 +1,7 @@
 """
-The adapter conformance suite (plan §10.7).
-
-Every adapter, Tier 0 and Tier 1, passes the same framework-agnostic test set before
-it ships. That is the one-to-one guarantee: adding a framework is a bounded, testable
-unit of work rather than a negotiation with the core.
-
-Two of these tests are what make a new framework trustworthy rather than hopeful:
-
-* **Null test** — benchmark an unchanged workload against itself; the resulting
-  confidence interval must contain zero. An adapter that reports a difference where
-  none exists cannot be trusted to report one where it does.
-* **Positive control** — inject an artificial slowdown of known magnitude; the adapter
-  must detect it, at a consistent magnitude. This validates the entire measurement
-  chain — trace, attribution, statistics — per framework.
-
-Both are cheap and belong in CI for every adapter.
+The adapter conformance suite: the same framework-agnostic checks for every adapter,
+including the null test (identical workloads must not differ) and the positive
+control (an injected slowdown must be detected). Design rationale: docs/DESIGN.md.
 """
 
 from __future__ import annotations
@@ -140,19 +127,9 @@ def run_conformance(
                 pass
 
     # 3. Reported metrics must be consistent with declared capabilities.
-    #
-    # The two halves are not symmetric, and treating them as if they were made this
-    # check unpassable for any serving adapter:
-    #
-    # * An **extra** metric is always a failure. Reporting something undeclared means
-    #   the capability set lies about what the adapter can do, and the decision layer
-    #   reads that set to choose which actions are even available (§10.4).
-    # * A **missing** metric is only a failure when the adapter cannot say why. This
-    #   suite benchmarks a synthetic sleep workload, so a serving adapter genuinely
-    #   cannot produce TTFT or throughput from it. Refusing to invent one is the
-    #   correct behaviour — what §10.4 forbids is substituting *silently*. An adapter
-    #   that degrades and states the reason has done exactly the right thing; one that
-    #   degrades without explanation has hidden a measurement gap.
+    # Asymmetric on purpose: an extra (undeclared) metric always fails, while a
+    # missing one fails only when the adapter cannot say why — a serving adapter
+    # genuinely cannot produce TTFT from the synthetic sleep workload.
     if measurement is not None:
         declared = set(adapter.capabilities.metrics)
         reported = set(measurement.metrics_available)
@@ -205,12 +182,8 @@ def run_conformance(
         return report
 
     # 5. NULL TEST — an unchanged workload against itself must not show a difference.
-    #
-    # Gating on a single 95% interval would build in a 1-in-20 false failure: a 95% CI
-    # excludes zero 5% of the time *by construction*, even on a flawless measurement
-    # chain. So we retry, and fail only when the adapter reports a difference
-    # consistently. A genuinely broken adapter — one that mixes up its arms, or leaks
-    # state between runs — fails every attempt; sampling noise does not.
+    # A 95% CI excludes zero 5% of the time by construction, so retry and fail only
+    # when a difference is reported consistently.
     try:
         from xe_forge.orbit.bench.core import BenchRunner
 

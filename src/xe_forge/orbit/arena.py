@@ -1,28 +1,8 @@
 """
-The agent arena — engine A/B, deliberately outside the optimization loop (§5.3, §5.4).
-
-Mixing "which agent is better" into "make this workload faster" corrupts both
-questions, so the arena shares the loop's task format and scoring but none of its
-control flow. A task is the same candidate directory the pipeline already produces
-(`kernel.py` + `spec.yaml` + `kernel_pytorch.py`, §8), which is why getting that
-format right once serves both.
-
-Three properties define the arena, and each is enforced here rather than assumed:
-
-* **Isolation.** A contestant never optimizes the shared task in place. The default
-  runner copies the candidate directory into a per-(contestant, task) workspace and
-  optimizes the copy; the original stays byte-identical however the run ends.
-* **Resumability.** Every pair persists a `result.json`. A re-run loads it instead of
-  spending the budget again, and the report says how many pairs were resumed — a
-  loaded number and a fresh number must never be indistinguishable.
-* **Honest generalization.** Held-out variants are shapes the contestant never
-  optimizes against. Measuring a held-out speedup takes the device the variant names,
-  so a runner that cannot measure reports `None` and the leaderboard prints
-  "unmeasured" — never a fabricated gap, and never a ranking that compares a measured
-  mean against an unmeasured one.
-
-Engines are reached through `optimize_kernel_dir` (§9.9); nothing here imports torch,
-DSPy or ai_bench at module import time.
+The agent arena — engine A/B over candidate-directory tasks, outside the
+optimization loop. Contestants optimize isolated copies, every pair persists a
+resumable `result.json`, and unmeasured speedups are reported as such, never
+ranked against measured ones. Design rationale: docs/DESIGN.md
 """
 
 from __future__ import annotations
@@ -120,9 +100,7 @@ def _load_task(directory: Path) -> ArenaTask:
     task.heldout_variants = [str(v) for v in heldout_raw]
 
     if task.train_variant in task.heldout_variants:
-        # A variant the contestant trains on is not held out. Silently accepting it
-        # would produce a gap of ~zero that measures nothing — a check that runs
-        # cleanly and answers the wrong question.
+        # A variant the contestant trains on cannot also be held out.
         raise ArenaError(
             f"{config_path}: train variant {task.train_variant!r} also listed as held-out; "
             f"a shape the contestant optimizes against cannot measure generalization"
@@ -164,12 +142,9 @@ def default_runner(
 ) -> ContestantResult:
     """Copy the candidate into the workspace and optimize the copy.
 
-    The copy is the arena's defining property: the shared task directory is read,
-    never written, so every contestant starts from the identical bundle and no run
-    can contaminate the next. Held-out variants are then resolved per variant with
-    `dry_run=True` — actually measuring them needs the device the variant names, so
-    their speedups stay None here and the report says so. A runner with hardware
-    access replaces this callable and fills the numbers in.
+    The shared task directory is read, never written. Held-out variants are
+    resolved with `dry_run=True`, so their speedups stay None here; a runner with
+    hardware access replaces this callable and fills the numbers in.
     """
     workspace_dir = Path(workspace_dir)
     workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -224,8 +199,7 @@ def contestant_available(name: str) -> tuple[bool, str]:
 
     `claude` shells out to the binary; every other engine is routed by
     `optimize_kernel_dir` through Xe-Forge's pipeline, which needs DSPy, ai_bench
-    and torch importable. An availability check that answered an easier question
-    (say, "does the module file exist") would pass cleanly and mean nothing.
+    and torch importable.
     """
     if name == "claude":
         if shutil.which("claude") is None:
@@ -291,8 +265,7 @@ def run_arena(
                     results.append(loaded)
                     resumed += 1
                     continue
-                # A result that does not verifiably belong to this pair is not a
-                # resume point; re-running is the honest recovery.
+                # A result that does not verifiably belong to this pair is re-run.
 
             workspace = pair_dir / "workspace"
             try:
@@ -416,9 +389,7 @@ class ArenaReport:
             ]
             heldout_slots = sum(len(r.heldout_speedups) for r in solved)
 
-            # The gap is computed only over tasks where BOTH sides were measured:
-            # a train mean over one task set minus a held-out mean over another
-            # would be a number with no question behind it.
+            # The gap is computed only over tasks where BOTH sides were measured.
             paired = [
                 r
                 for r in solved

@@ -1,24 +1,5 @@
-"""
-Extract every kernel in a run, and report the coverage honestly (plan §12.3, §11.10).
-
-"Can we extract all the kernels?" has a precise answer, and it is not yes or no. Every
-kernel gets *a* level on the E0-E4 ladder — that part is total, because E4 (an opaque
-reproducer) and E3 (an in-situ harness) are always available. But the levels differ in
-what they let you do, and averaging them into a single "coverage: 100%" would be the
-kind of number that reads as progress and means nothing:
-
-* **E1/E2** — a standalone bundle. Iterates in seconds. This is what "extracted" means
-  when someone says it hopefully.
-* **E3** — an in-situ harness. The framework drives the real dispatch, so it is always
-  faithful and always available, but each iteration costs a framework round trip.
-* **E4** — a reproducer string. No source, no rewrite; the actions are fusion, backend,
-  layout and library config.
-* **none** — no provenance at all. Not a target, a finding to report.
-
-So this reports the distribution *weighted by GPU time*, because a run where 90% of
-kernels reach E2 but the remaining 10% own 60% of the runtime is not 90% covered in
-any sense that matters (§11.10).
-"""
+"""Extract every kernel in a run and report per-level coverage weighted by GPU time.
+Design rationale: docs/DESIGN.md."""
 
 from __future__ import annotations
 
@@ -29,7 +10,7 @@ from xe_forge.orbit.extract.bundle import ExtractionResult, Extractor
 from xe_forge.orbit.extract.verify import verify_bundle
 from xe_forge.orbit.models import ExtractionLevel, KernelCatalog, KernelRecord, LaunchRecord
 
-# What each level actually buys, so a coverage table never implies more than it should.
+# What each extraction level buys, shown in the coverage table.
 LEVEL_MEANING = {
     ExtractionLevel.E1: "standalone bundle, file-local",
     ExtractionLevel.E2: "standalone bundle with closure",
@@ -147,9 +128,8 @@ def extract_all(
 ) -> ExtractionCoverage:
     """Extract every kernel in the catalog and report what each one achieved.
 
-    `skip_unattributed` leaves kernels with no provenance alone by default: extraction
-    would produce a harness for something we cannot name, which is worse than an honest
-    gap because it looks like progress (§12.5).
+    `skip_unattributed` (default True) skips kernels with no provenance rather than
+    producing a harness for something we cannot name.
     """
     extractor = Extractor(output_root=Path(output_root), agent=agent)
     coverage = ExtractionCoverage(run_id=catalog.run_id)

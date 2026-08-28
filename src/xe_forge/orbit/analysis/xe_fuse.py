@@ -1,24 +1,7 @@
 """
-Routing a fusable region to Xe-Fuse (plan §3, §7.3, §9.6, §12.11).
-
-**Xe-Fuse is an external sibling project.** It appears nowhere in this repository: not
-a dependency, not a submodule, not an import. `REGION_FUSION` therefore has no executor
-here, and this module's job is to say so precisely rather than to pretend otherwise.
-
-What it does instead is build the *handoff*: the description Xe-Fuse would receive if it
-were installed — the fusion pattern, the kernels that collapse into one, the
-intermediate tensors that disappear, and which of Xe-Fuse's published model presets the
-observed region matches. Orbit's stated job in §9.6 is exactly that detection step; the
-codegen belongs to the other project.
-
-Two rules, both of them the reason this module is separate from `regions.py`:
-
-* **Availability is determined, never assumed.** `xe_fuse_available()` looks for the
-  module and reports what it finds. A route for an absent optimizer is a plan, not a
-  result, and it is labelled `blocked`.
-* **A preset match is a candidate list, not a pick.** Several architectures share a
-  hidden size. Reporting them all with the ambiguity named is the §11.4 rule applied to
-  model identity instead of kernel identity.
+Routing a fusable region to Xe-Fuse, an external sibling project that is never a
+dependency: builds the handoff description, determines availability, and reports
+preset matches as candidate lists. Design rationale: docs/DESIGN.md.
 """
 
 from __future__ import annotations
@@ -29,26 +12,22 @@ from dataclasses import dataclass
 
 from xe_forge.orbit.models import ActionType, ExtractionLevel, RegionRecord
 
-# The import name Xe-Fuse would publish. Deliberately a constant: nothing in this
-# package may add xe-fuse to its dependency set (§9.6 calls it an *optional* dependency
-# behind the engine seam, which is future integration work, not a requirement today).
+# The import name Xe-Fuse would publish. Nothing in this package may add xe-fuse to
+# its dependency set.
 XE_FUSE_MODULE = "xe_fuse"
 
-# Region bundles are almost always E3 in the first instance: the region is defined by
-# how the framework strings the kernels together, so the framework is the most faithful
-# driver (§12.11).
+# Region bundles are almost always E3: the region is defined by how the framework
+# strings the kernels together, so the framework is the most faithful driver.
 REGION_EXTRACTION_LEVEL = ExtractionLevel.E3
 
 
 @dataclass(frozen=True)
 class ModelPreset:
-    """One transformer architecture as Xe-Fuse's presets encode it (§9.6).
+    """One transformer architecture as Xe-Fuse's presets encode it.
 
-    SOURCE: the preset families named in plan §9.6 — LLaMA 2/3, Gemma 2, Mistral,
-    Qwen 2.5, Phi-3 — with the published architecture dimensions for the reference
-    sizes. This table exists to *detect* which preset an observed region matches; it is
-    not authoritative over Xe-Fuse's own table, and a match should be re-checked
-    against that project before anything is generated from it.
+    This table exists to *detect* which preset an observed region matches; it is not
+    authoritative over Xe-Fuse's own table, and a match should be re-checked against
+    that project before anything is generated from it.
     """
 
     key: str
@@ -80,12 +59,8 @@ _PATTERN_ACTIVATIONS: dict[str, str] = {
 def xe_fuse_available() -> bool:
     """True when Xe-Fuse is usable here: importable, or present as a checkout.
 
-    Xe-Fuse in practice is a *checkout*, not a pip package — a kernel generator plus
-    header-only templates compiled per-shape with icpx (§13.4, measured live on the
-    Qwen decode regions). So availability means either an installed `xe_fuse` module
-    or a checkout the executor can drive. `find_spec` rather than a real import for
-    the module case, so probing for an optional optimizer never executes third-party
-    module-level code as a side effect of printing a table.
+    `find_spec` rather than a real import, so probing for an optional optimizer never
+    executes third-party module-level code as a side effect of printing a table.
     """
     try:
         if importlib.util.find_spec(XE_FUSE_MODULE) is not None:
@@ -130,7 +105,7 @@ def match_model_preset(region: RegionRecord) -> list[ModelPreset]:
 
     Returns *every* candidate, most specific first. A single-entry list is a confident
     match; several entries mean the observed dimensions do not discriminate and the
-    caller must not pick one (§11.4).
+    caller must not pick one.
     """
     dims = observed_dims(region)
     if not dims:
@@ -172,15 +147,15 @@ def requirements_for(region: RegionRecord) -> list[str]:
     return [
         f"region bundle at {REGION_EXTRACTION_LEVEL.value} with a driver that runs the "
         f"{len(region.kernel_ids)} kernels unfused, so the fused replacement can be "
-        f"compared against the sequence as a unit (§12.11)",
+        f"compared against the sequence as a unit",
         f"the {len(region.intermediate_tensors)} intermediate tensor(s) fusion "
         f"eliminates, with shape, dtype and stride ({eliminated} bytes per pass)",
         f"producer-consumer edges: {_render_edges(region)}",
         "the matched model preset (H, H_kv, FFN width, activation, RoPE) so the "
-        "sycl-tla epilogue is instantiated for the right architecture (§9.6)",
-        "captured real tensors for the region entry point, not synthesized inputs (§7.5)",
-        "the per-variant rtol/atol derived from the end-to-end numerical budget (§9.3)",
-        "the accept threshold implied by the region's Amdahl ceiling (§9.2)",
+        "sycl-tla epilogue is instantiated for the right architecture",
+        "captured real tensors for the region entry point, not synthesized inputs",
+        "the per-variant rtol/atol derived from the end-to-end numerical budget",
+        "the accept threshold implied by the region's Amdahl ceiling",
     ]
 
 
@@ -209,13 +184,13 @@ def route_region(region: RegionRecord) -> dict[str, object]:
         status = "ready"
         reason = (
             f"xe_fuse {xe_fuse_version() or '(version unknown)'} is importable; the "
-            f"region can be handed over through the engine seam (§9.6)."
+            f"region can be handed over through the engine seam."
         )
     else:
         status = "blocked"
         reason = (
             "xe_fuse is not importable in this environment. Xe-Fuse is an external "
-            "sibling project (plan §9.6): it is not a dependency, submodule or import "
+            "sibling project: it is not a dependency, submodule or import "
             "of Xe-Forge, so REGION_FUSION has no executor here. The handoff below is "
             "what it would receive; nothing was executed and no speedup is implied."
         )

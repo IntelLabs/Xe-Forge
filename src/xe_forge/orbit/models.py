@@ -1,16 +1,6 @@
 """
-Typed data models for Xe-Orbit.
-
-Every artifact Orbit writes to disk is one of the models in this module, and every
-model carries a ``schema_version`` so a stored artifact can be validated against the
-code that reads it (plan §16.2). Dictionary-passing between subsystems is not allowed.
-
-Model groups map onto the plan:
-    §7  workload, kernel, region, measurement, captured inputs, actions
-    §10 framework adapter capabilities and determinism
-    §12 kernel bundle contract, launch records, build recipes
-    §14 serving profiles and the shape matrix
-    §17 decisions
+Typed data models for Xe-Orbit. Every persisted artifact is one of these models and
+carries a ``schema_version``; dictionary-passing between subsystems is not allowed.
 """
 
 from __future__ import annotations
@@ -24,9 +14,6 @@ from pydantic import BaseModel, Field
 
 # Bumped when any artifact model changes shape incompatibly. Stored in every
 # artifact; `xe_forge.orbit.artifacts` refuses to load a mismatched major version.
-# 1.1: KernelRecord gained `resolution_method` and a nullable `provenance_confidence`
-# (§5.6 / gap G2 — the resolution tier is persisted through the catalog, and an exact
-# hit no longer renders as a float). Additive and optional, hence a minor bump.
 SCHEMA_VERSION = "1.1"
 
 
@@ -43,11 +30,8 @@ class Artifact(BaseModel):
 
 
 class ActionType(StrEnum):
-    """What can be done about a kernel or region (§7.6).
-
-    Replaces v1's `editable: bool`: an opaque library GEMM has no editable source
-    but still supports fusion, backend and layout actions.
-    """
+    """What can be done about a kernel or region. An opaque library GEMM has no
+    editable source but still supports fusion, backend and layout actions."""
 
     KERNEL_REWRITE = "kernel_rewrite"
     KERNEL_AUTOTUNE = "kernel_autotune"
@@ -65,7 +49,7 @@ class ActionType(StrEnum):
 
 
 class ExtractionLevel(StrEnum):
-    """The extraction ladder (§12.3). E0 is in-place, E4 is opaque."""
+    """The extraction ladder. E0 is in-place, E4 is opaque."""
 
     E0 = "E0"
     E1 = "E1"
@@ -84,15 +68,14 @@ class Provider(StrEnum):
     SYCL = "sycl"
     IPEX = "ipex"
     CUSTOM = "custom"
-    # Not a kernel at all: a runtime memory operation (host/device copy, fill). It has
-    # no source because there is no source to have, which is a different statement from
-    # UNKNOWN's "we could not attribute this".
+    # A runtime memory operation (copy, fill), not a kernel — distinct from UNKNOWN's
+    # "we could not attribute this".
     RUNTIME = "runtime"
     UNKNOWN = "unknown"
 
 
 class KernelLanguage(StrEnum):
-    """Source language, a dimension rather than a special case (§11.3)."""
+    """Source language of a kernel."""
 
     TRITON = "triton"
     SYCL = "sycl"
@@ -102,7 +85,7 @@ class KernelLanguage(StrEnum):
 
 
 class Decision(StrEnum):
-    """Accept/reject arithmetic outcomes (§17). INCONCLUSIVE is not REJECT."""
+    """Accept/reject arithmetic outcomes. INCONCLUSIVE is not REJECT."""
 
     ACCEPT = "ACCEPT"
     REJECT = "REJECT"
@@ -111,7 +94,7 @@ class Decision(StrEnum):
 
 
 # ---------------------------------------------------------------------------
-# §7.1 Workload
+# Workload
 # ---------------------------------------------------------------------------
 
 
@@ -130,7 +113,7 @@ class WorkloadSpec(Artifact):
 
 
 class EnvironmentInfo(Artifact):
-    """Everything needed to decide whether two runs are comparable (§12.9, §20)."""
+    """Everything needed to decide whether two runs are comparable."""
 
     python_version: str = ""
     platform: str = ""
@@ -146,12 +129,12 @@ class EnvironmentInfo(Artifact):
 
 
 # ---------------------------------------------------------------------------
-# §7.4 / §17 Measurement
+# Measurement
 # ---------------------------------------------------------------------------
 
 
 class MetricEstimate(BaseModel):
-    """A measured quantity with an interval. Never a bare float (§17)."""
+    """A measured quantity with an interval. Never a bare float."""
 
     mean: float
     stdev: float = 0.0
@@ -178,12 +161,12 @@ class ShapeObservation(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# §12.2 Bundle contract
+# Bundle contract
 # ---------------------------------------------------------------------------
 
 
 class LaunchRecord(BaseModel):
-    """One intercepted launch (§12.4). The ground truth extraction is built from."""
+    """One intercepted launch. The ground truth extraction is built from."""
 
     fq_name: str
     source_file: str | None = None
@@ -200,7 +183,7 @@ class LaunchRecord(BaseModel):
 
 
 class BuildRecipe(BaseModel):
-    """How to rebuild a compiled-language kernel standalone (§11.5)."""
+    """How to rebuild a compiled-language kernel standalone."""
 
     compiler: str
     flags: list[str] = Field(default_factory=list)
@@ -208,17 +191,15 @@ class BuildRecipe(BaseModel):
     defines: dict[str, str] = Field(default_factory=dict)
     link: list[str] = Field(default_factory=list)
     entry_symbol: str = ""
-    # The concrete template arguments the workload actually used (§11.5 item 4). A
-    # templated SYCL kernel without them is not a kernel: `IndexFunctor<OpaqueType<8>>`
-    # and `IndexFunctor<OpaqueType<4>>` share an entry symbol and are different code,
-    # so a bundle that records only the symbol can rebuild the wrong specialization and
-    # measure a speedup on a variant the workload never ran (§12.10).
+    # The concrete template arguments the workload actually used. Two instantiations
+    # share an entry symbol but are different code; recording only the symbol can
+    # rebuild the wrong specialization.
     instantiation: str = ""
     aot_target: str | None = None
 
 
 class ExtractionCheck(BaseModel):
-    """Result of proving a bundle is the kernel that actually ran (§12.10)."""
+    """Result of proving a bundle is the kernel that actually ran."""
 
     verified: bool = False
     identity_match: bool | None = None
@@ -230,7 +211,7 @@ class ExtractionCheck(BaseModel):
 
 
 class CapturedInvocation(Artifact):
-    """Real tensors captured from the running workload (§7.5)."""
+    """Real tensors captured from the running workload."""
 
     kernel_id: str
     call_index: int = 0
@@ -245,7 +226,7 @@ class CapturedInvocation(Artifact):
 
 
 class KernelBundle(Artifact):
-    """Everything extraction produces, regardless of source or language (§12.2)."""
+    """Everything extraction produces, regardless of source or language."""
 
     kernel_id: str
     extraction_level: ExtractionLevel = ExtractionLevel.E0
@@ -264,27 +245,24 @@ class KernelBundle(Artifact):
 
 
 # ---------------------------------------------------------------------------
-# §7.2 / §7.3 Kernels and regions
+# Kernels and regions
 # ---------------------------------------------------------------------------
 
 
 class ResolutionMethod(StrEnum):
-    """How a kernel's source location was decided, best evidence first (§11.4).
+    """How a kernel's source location was decided, best evidence first.
 
-    Recording this is what makes a resolution auditable. A path alone cannot be
-    reviewed: "we found `Indexing.cpp`" is a different claim depending on whether the
-    build database said so, a symbol index matched exactly, or a model read the code
-    and formed an opinion. Without the method, all three render identically.
+    Recorded so a resolution is auditable: a path alone cannot be reviewed.
     """
 
-    # The build system named the translation unit. Authoritative (§11.5).
+    # The build system named the translation unit. Authoritative.
     BUILD_GRAPH = "build_graph"
     # An exact match in a symbol index over the checked-out tree.
     SYMBOL_INDEX = "symbol_index"
     # Matched by filename or identifier pattern rather than by an exact symbol.
     NAME_MATCH = "name_match"
-    # A RepoAgent read the tree and named the file (§3, §6). Runs last and sees the
-    # deterministic tiers' output, which makes it later — not more trustworthy.
+    # A RepoAgent read the tree and named the file. Runs last — later, not more
+    # trustworthy.
     AGENT = "agent"
     UNRESOLVED = "unresolved"
 
@@ -297,11 +275,8 @@ class SourceLocation(BaseModel):
     file: str | None = None
     line: int | None = None
     symbol: str | None = None
-    # `None` for the deterministic tiers, which are either right or silent — an exact
-    # symbol-index hit has no meaningful probability attached to it. Giving one 0.85
-    # made it sort alongside an agent's self-reported 0.85, which is a category error:
-    # the first is a lookup that either matched or did not, the second is a model's
-    # opinion about its own reliability. A float means "someone estimated this".
+    # `None` for the deterministic tiers, which are either right or silent; a float
+    # always means "someone estimated this".
     confidence: float | None = None
     method: ResolutionMethod = ResolutionMethod.UNRESOLVED
     candidates: list[str] = Field(default_factory=list)
@@ -344,20 +319,17 @@ class KernelRecord(BaseModel):
     avg_time_us: float = 0.0
     shapes: list[ShapeObservation] = Field(default_factory=list)
     actions_available: list[ActionType] = Field(default_factory=list)
-    # Mirrors `SourceLocation` (§5.6, §11.4): `None` means no one estimated anything —
-    # either the tier is deterministic and the hit is exact, or nothing was resolved at
-    # all; `resolution_method` says which. A float always means "someone estimated
-    # this". The previous plain float made an exact symbol-index hit sort alongside an
-    # agent's self-reported 0.85, which is a category error.
+    # Mirrors `SourceLocation`: `None` means no one estimated anything (deterministic
+    # hit, or nothing resolved — `resolution_method` says which); a float always means
+    # "someone estimated this".
     provenance_confidence: float | None = None
-    # How the source location was decided, persisted so the catalog can be reviewed:
-    # "we found Indexing.cpp" is a different claim depending on which tier said so.
+    # How the source location was decided, persisted so the catalog can be reviewed.
     resolution_method: ResolutionMethod = ResolutionMethod.UNRESOLVED
     extraction_level: ExtractionLevel | None = None
     bundle: str | None = None
     captured_inputs: str | None = None
 
-    # Derived by the catalog stage (§18); present so the ranking is auditable.
+    # Derived by the catalog stage; present so the ranking is auditable.
     gpu_time_share: float = 0.0
     max_e2e_gain: float = 0.0
     roofline_headroom: float = 1.0
@@ -367,13 +339,11 @@ class KernelRecord(BaseModel):
 
     @property
     def confidence_factor(self) -> float:
-        """Confidence as a ranking multiplier (§18).
+        """Confidence as a ranking multiplier.
 
-        A deterministic tier contributes 1.0 — it is either right or silent, so there
-        is no probability to discount by. An estimated tier contributes its estimate.
-        No estimate and no deterministic tier contributes the same conservative floor
-        the unknown resolver reports, so an unattributed kernel cannot outrank an
-        attributed one by omitting a number.
+        A deterministic tier contributes 1.0; an estimated tier its estimate; no
+        estimate contributes the conservative floor, so an unattributed kernel
+        cannot outrank an attributed one by omitting a number.
         """
         if self.resolution_method in DETERMINISTIC_METHODS:
             return 1.0
@@ -398,7 +368,7 @@ class TensorInfo(BaseModel):
 
 
 class RegionRecord(BaseModel):
-    """A multi-kernel optimization unit (§7.3). Xe-Fuse's input."""
+    """A multi-kernel optimization unit. Xe-Fuse's input."""
 
     id: str
     kernel_ids: list[str] = Field(default_factory=list)
@@ -412,7 +382,7 @@ class RegionRecord(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# §7.4 Workload measurement
+# Workload measurement
 # ---------------------------------------------------------------------------
 
 
@@ -449,12 +419,12 @@ class KernelCatalog(Artifact):
 
 
 # ---------------------------------------------------------------------------
-# §10 Framework adapters
+# Framework adapters
 # ---------------------------------------------------------------------------
 
 
 class FrameworkCapabilities(BaseModel):
-    """Declared, never assumed (§10.4)."""
+    """Declared, never assumed."""
 
     metrics: set[str] = Field(default_factory=lambda: {"wall_time"})
     can_reset_state: bool = False
@@ -463,26 +433,20 @@ class FrameworkCapabilities(BaseModel):
     can_construct_single_layer: bool = False
     patchable_layers: set[str] = Field(default_factory=set)
 
-    # Whether the framework runs its device work in the calling process. False means an
-    # in-process `torch.profiler` sees *nothing*: the engine lives in a child process
-    # and the parent's profiler is looking in the wrong place.
-    #
-    # This is not hypothetical. Profiling a real vLLM v1 decode this way returned zero
-    # kernel events, and the only reason that did not become a confident empty catalog
-    # is that §18's gate reports "no device activity source" instead of ranking an
-    # empty list. An adapter for such a framework must expose its own profiling hook
-    # (`profile_hook` below) rather than letting the generic path silently under-report.
+    # Whether the framework runs its device work in the calling process. False means
+    # an in-process `torch.profiler` sees nothing — the adapter must expose its own
+    # profiling hook (`profile_hook` below).
     profiles_in_process: bool = True
 
-    # Name of the framework-specific mechanism that captures device activity when
-    # `profiles_in_process` is False — for vLLM, `VLLM_TORCH_PROFILER_DIR` plus
-    # `start_profile()`/`stop_profile()`. Empty when none exists, which is itself worth
-    # knowing: it means device attribution is unavailable for that framework.
+    # Framework-specific mechanism that captures device activity when
+    # `profiles_in_process` is False (for vLLM, `VLLM_TORCH_PROFILER_DIR` plus
+    # `start_profile()`/`stop_profile()`). Empty when none exists — device
+    # attribution is then unavailable for that framework.
     profile_hook: str = ""
 
 
 class DeterminismProfile(BaseModel):
-    """Which nondeterminism sources an adapter can pin, and which it cannot (§10.5)."""
+    """Which nondeterminism sources an adapter can pin, and which it cannot."""
 
     pinnable: set[str] = Field(default_factory=set)
     non_pinnable: set[str] = Field(default_factory=set)
@@ -498,7 +462,7 @@ class ConfigAxis(BaseModel):
 
 
 class PatchPoint(BaseModel):
-    """Where an optimized kernel can be reinserted (§13)."""
+    """Where an optimized kernel can be reinserted."""
 
     rung: str
     target: str
@@ -514,7 +478,7 @@ class QualityResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# §14 Serving profiles
+# Serving profiles
 # ---------------------------------------------------------------------------
 
 
@@ -545,12 +509,12 @@ class WorkloadMatrix(Artifact):
 
 
 # ---------------------------------------------------------------------------
-# §17 Decisions
+# Decisions
 # ---------------------------------------------------------------------------
 
 
 class ComparisonOutcome(Artifact):
-    """The result of comparing a candidate against a baseline (§17)."""
+    """The result of comparing a candidate against a baseline."""
 
     decision: Decision = Decision.INCONCLUSIVE
     metric: str = "wall_time"
@@ -565,7 +529,7 @@ class ComparisonOutcome(Artifact):
 
 
 class RunManifest(Artifact):
-    """Identity of one Orbit run (§23)."""
+    """Identity of one Orbit run."""
 
     run_id: str
     workload: WorkloadSpec | None = None

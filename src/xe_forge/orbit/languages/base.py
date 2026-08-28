@@ -1,20 +1,5 @@
-"""
-The `LanguageBackend` protocol (plan §11.3).
-
-Language is a dimension, not a special case, and it gets the same treatment as
-framework (§10): one backend per language, same protocol, same conformance
-obligations. Where Triton and SYCL differ, they differ in mechanism, not in status.
-
-Xe-Forge already documents its own per-language seam in `docs/DSL.md` — an eleven-step
-guide for adding a kernel DSL, with Triton as the reference path and gluon, sycl and
-cuda registered alongside it in `dsl_registry.py`. This layer extends that seam rather
-than building a parallel one.
-
-`cost_profile` is not decoration. A Triton iteration is a JIT compile measured in
-seconds; a SYCL iteration is a rebuild measured in minutes. That difference propagates
-into budget accounting and into ranking, and pretending the two are interchangeable is
-how an eight-hour budget disappears into three SYCL trials (§11.6).
-"""
+"""The `LanguageBackend` protocol: one backend per kernel language, each carrying a
+`cost_profile` used for budget accounting and ranking. Design rationale: docs/DESIGN.md."""
 
 from __future__ import annotations
 
@@ -47,7 +32,7 @@ class CostProfile:
 
 @dataclass
 class CompilerAxis:
-    """A compiler or runtime option that can be swept without touching code (§11.7)."""
+    """A compiler or runtime option that can be swept without touching code."""
 
     name: str
     values: list[Any] = field(default_factory=list)
