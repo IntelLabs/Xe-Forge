@@ -1135,6 +1135,56 @@ def cmd_compare(args: argparse.Namespace) -> int:
     return 0 if ladder.passed else 1
 
 
+def cmd_arena(args: argparse.Namespace) -> int:
+    """A/B engines on a shared task set, outside the optimization loop (§5.3, §5.4).
+
+    Discovery, availability, execution and reporting are all honest about their
+    limits: an unavailable contestant is skipped with the reason, a task without
+    held-out variants says its generalization gap is unmeasurable, and the
+    leaderboard never ranks a measured mean against an unmeasured one.
+    """
+    from xe_forge.orbit.arena import ArenaError, build_contestants, discover_tasks, run_arena
+
+    task_root = Path(args.task_root)
+    try:
+        tasks = discover_tasks(task_root)
+    except ArenaError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if not tasks:
+        print(
+            f"no tasks under {task_root}: a task is a subdirectory with kernel.py "
+            f"and spec.yaml (see `xe-orbit emit`)"
+        )
+        return 1
+
+    names = [name.strip() for name in args.contestants.split(",") if name.strip()]
+    contestants, skipped = build_contestants(names)
+    for name, reason in skipped.items():
+        print(f"skipped contestant: {name} ({reason})")
+    if not contestants:
+        print("no contestant is available; nothing to run")
+        return 1
+
+    for task in tasks:
+        for note in task.notes:
+            print(f"note [{task.task_id}]: {note}")
+
+    arena_dir = Path(args.arena_dir) if args.arena_dir else task_root / ".arena"
+    report = run_arena(tasks, contestants, arena_dir, resume=not args.no_resume, skipped=skipped)
+
+    if getattr(args, "json", False):
+        _emit(report.summary(), True)
+    else:
+        print(report.format())
+
+    summary_path = arena_dir / "summary.json"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(json.dumps(report.summary(), indent=2), encoding="utf-8")
+    print(f"summary: {summary_path}")
+    return 0
+
+
 def cmd_matrix(args: argparse.Namespace) -> int:
     """Show serving profiles, weights and derived shapes (§14.5)."""
     from xe_forge.orbit.models import ServingProfile, WorkloadMatrix
@@ -1571,6 +1621,7 @@ Examples:
   xe-orbit trace --from-trace trace.json    # ingest an existing Chrome trace
   xe-orbit kernels --run <id>               # catalog, gating verdict, ranking
   xe-orbit inspect k0 --run <id>            # provenance and headroom for one kernel
+  xe-orbit arena tasks/ --contestants dspy  # engine A/B outside the loop (§5.4)
   xe-orbit selftest                         # full-loop invariants, no GPU, no LLM
   xe-orbit conformance generic_torch        # adapter conformance suite
 """,
@@ -1774,6 +1825,29 @@ Examples:
     p.add_argument("--run", help="run id (default: most recent)")
     p.add_argument("--replay", help="alias for --run")
     p.set_defaults(func=cmd_compare)
+
+    p = sub.add_parser(
+        "arena", help="A/B engines on one task set, outside the optimization loop (§5.4)"
+    )
+    p.add_argument(
+        "task_root",
+        help="directory whose candidate subdirectories (kernel.py + spec.yaml) are the tasks",
+    )
+    p.add_argument(
+        "--contestants",
+        default="dspy,claude",
+        help="comma-separated engine names (default: dspy,claude)",
+    )
+    p.add_argument(
+        "--arena-dir",
+        help="workspace and result root (default: <task_root>/.arena)",
+    )
+    p.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="re-run pairs that already have a persisted result.json",
+    )
+    p.set_defaults(func=cmd_arena)
 
     p = sub.add_parser("matrix", help="show serving profiles, weights and derived shapes")
     p.add_argument("path", nargs="?", default=None, help="matrix JSON (default: the §14 example)")
