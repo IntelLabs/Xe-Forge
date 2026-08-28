@@ -2337,6 +2337,15 @@ of it away.
   proposes rewrite candidates and judges structural applicability (§3's residue);
   the choosing itself is deterministic measurement. The M≤32 guard on the fused
   MLP is this mechanism in miniature and becomes its first recorded bracket.
+  **Granularity is part of the candidate space**: a serve flag flips a whole
+  kernel class (vLLM's `--attention-backend` moves prefill and decode together),
+  a rung-2 source patch can route per phase (SYCL prefill + Triton decode), the
+  P1 override swaps a single op, and a runtime guard dispatches per shape — free
+  coarse candidates enter the bracket first, and a mixed candidate is admitted
+  only when measurement justifies its patch cost. On decode-heavy traces here the
+  attention mix has a low Amdahl ceiling (GEMM holds 86–96% of GPU time) and the
+  bracket must say so; the mix becomes decisive at long context, where
+  attention's share grows.
 
 **Execution order:** E2-lease first (small, and it protects every measurement that
 follows), then E1 (both live validation cases are waiting on it), then E5's SGLang
@@ -2384,6 +2393,22 @@ per-model code:**
 | Qwen2.5-1.5B | served | 92.8% | 94.0% | 2, 76.3% | not yet run |
 | SmolLM2-1.7B | served | 92.7% | (Amdahl 42.9%) | 2, 74.0% | not yet run |
 | phi-2 (2.7B) | **enabled rung 1** | — | 86.3% | 1, 27.6% | n/a (bracket pending) |
+
+**Build-lane durability, measured the hard way (2026-08-28 afternoon):** the lane's
+first real drain survived two kill classes and one environment trap, each of which
+improved it. (1) A session exit killed the detached runner mid-icpx; the journal
+recovered honestly ("builder pid died before finishing") and the runner moved under
+a systemd user unit, outside any session's process tree. (2) systemd-oomd then
+killed the unit at 10.8G RSS + 20.4G swap — a *single* cutlass TU, MAX_JOBS=1
+honored — so the lane's unit now runs oomd-exempt (`ManagedOOMSwap=auto`) with
+`MemoryHigh=11G` and low CPU weight: the monster TU pages through the 30G of swap
+instead of being shot, and the desktop keeps its RAM. (3) kineto: the torch XPU
+wheel ships without `libkineto.a`, which fails sgl-kernel's cmake; the lane built
+the GPU-capable variant (Intel PTI SDK from the pti-gpu checkout, then kineto with
+XPUPTI) and installed it into the wheel's lib dir — `KINETO_VARIANT=xpupti`, with a
+CPU-only fallback scripted and unused. vllm-xpu-kernels' conf-driven kernel
+generation is per-line template TUs (one .cpp per policy×flags), so config size
+governs kernel count, not per-TU memory.
 
 phi-2's row is the day-1 contract working end to end: blocked (SYCL head bucket
 missing) → diagnosed → served via `attention_backend=TRITON_ATTN` at 97 tok/s →
