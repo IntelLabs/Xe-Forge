@@ -1486,6 +1486,50 @@ def cmd_fuse(args: argparse.Namespace) -> int:
     return 0 if sweep.best is not None else 1
 
 
+def cmd_build_lane(args: argparse.Namespace) -> int:
+    """Operate the rung-5 off-loop build lane (§24 Tier E, E1).
+
+    `submit` queues a build; `run` executes the oldest queued job in the single
+    slot (long compiles belong here, never in the tick loop); `status` lists the
+    journal; `mark` records the runnable gate's verdict on a SUCCEEDED build —
+    the lane itself never KEEPs.
+    """
+    from xe_forge.orbit.enablement import BuildLane
+
+    lane = BuildLane(Path(args.lane_dir) if args.lane_dir else None)
+    if args.action == "status":
+        recovered = lane.recover()
+        for job in recovered:
+            print(f"recovered: {job.format()}")
+        print(lane.format())
+        return 0
+    if args.action == "submit":
+        command = args.command[1:] if args.command and args.command[0] == "--" else args.command
+        if not args.component or not command:
+            print("submit needs --component and a command after --")
+            return 2
+        job = lane.submit(args.component, command, Path(args.cwd or "."))
+        print(f"queued: {job.format()}")
+        return 0
+    if args.action == "run":
+        job = lane.run_next(timeout=args.timeout)
+        if job is None:
+            print("nothing to run: queue empty, or the slot is held by a live builder")
+            return 0
+        print(job.format())
+        print(f"log: {job.log}")
+        return 0 if job.status == "SUCCEEDED" else 1
+    if args.action == "mark":
+        if not args.job or args.kept is None:
+            print("mark needs --job and --kept/--discarded with --reason")
+            return 2
+        job = lane.mark(args.job, kept=args.kept, reason=args.reason or "")
+        print(job.format())
+        return 0
+    print(f"unknown action {args.action!r}")
+    return 2
+
+
 def _gpu_lease(reason: str):
     """The per-device lease every GPU-touching command holds (§24 Tier E, E2)."""
     from xe_forge.orbit.policy import ResourceLease
@@ -1906,6 +1950,21 @@ Examples:
     p.add_argument("--batch", type=int, default=16, help="prompts per replicate (decode M)")
     p.add_argument("--greedy-check", action="store_true", help="also diff greedy token streams (informational)")
     p.set_defaults(func=cmd_fuse_apply)
+
+    p = sub.add_parser("build-lane", help="the rung-5 off-loop build queue (§24 Tier E, E1)")
+    p.add_argument("action", choices=["status", "submit", "run", "mark"])
+    p.add_argument("--lane-dir", help="lane directory (default: ~/.cache/orbit-dev/build-lane)")
+    p.add_argument("--component", help="submit: what is being built, in kernel_sources terms")
+    p.add_argument("--cwd", help="submit: build working directory")
+    p.add_argument("--timeout", type=float, default=14400.0, help="run: per-build timeout seconds")
+    p.add_argument("--job", help="mark: job id")
+    p.add_argument("--kept", dest="kept", action="store_true", default=None, help="mark: runnable gate passed")
+    p.add_argument("--discarded", dest="kept", action="store_false", help="mark: runnable gate failed")
+    p.add_argument("--reason", help="mark: the gate's reason, recorded verbatim")
+    # nargs="*", not REMAINDER: REMAINDER would greedily swallow the --component/--cwd
+    # flags themselves; with "*" argparse's native bare-`--` separator does the split.
+    p.add_argument("command", nargs="*", help="submit: build command after --")
+    p.set_defaults(func=cmd_build_lane)
 
     p = sub.add_parser("pipeline", help="run the full loop over a run's artifacts")
     p.add_argument("kernel_id", nargs="?", default=None, help="target a specific kernel")

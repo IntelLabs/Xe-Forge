@@ -240,7 +240,10 @@ class ResourceLease:
         probe: Callable[[], None] | None = None,
     ) -> None:
         self.resource = resource
-        self.lease_dir = Path(lease_dir) if lease_dir else Path.home() / ".cache/orbit-dev/leases"
+        # ORBIT_LEASE_DIR isolates tests and CI runners from the machine-wide
+        # lease; operators on one device share the default and that is the point.
+        default = os.environ.get("ORBIT_LEASE_DIR") or Path.home() / ".cache/orbit-dev/leases"
+        self.lease_dir = Path(lease_dir) if lease_dir else Path(default)
         self.probe = probe
 
     @property

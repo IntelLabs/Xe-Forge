@@ -15,10 +15,12 @@ attempt-scoped runtime — `create_scoped_runtime` builds an isolated venv named
 deterministically from its package set, and `climb_missing_package` installs what
 the diagnosis named, re-runs the workload through the runnable gate, and keeps the
 environment only on the gate's KEEP), and the runnable gate as an enforced
-contract. Rungs 4-5 — source localization and the off-loop build lane — remain
-v0.2 (§24 Tier C names enablement the v0.2 headline); they stay in the enum so a
-diagnosis can honestly say "the fix for this lives on a rung that is not built
-yet", which is a different finding from "there is no fix".
+contract. Rung 5 — the off-loop compiled build — is `BuildLane` at the bottom of
+this file (§24 Tier E, E1): a single-slot, journalled, resumable queue whose
+SUCCEEDED is never KEPT until the runnable gate passes. Rung 4 — source
+localization — remains deferred; it stays in the enum so a diagnosis can honestly
+say "the fix for this lives on a rung that is not built yet", which is a
+different finding from "there is no fix".
 
 The measured motivation, from §5.6: on Wildcat Lake, `GRAPH_CAPTURE` was unavailable
 (`No valid triton configs`, `Internal Triton ZEBIN codegen error`) and the pipeline
@@ -39,6 +41,7 @@ from enum import IntEnum
 from pathlib import Path
 
 from xe_forge.orbit.executor import Executor, LocalExecutor
+from xe_forge.orbit.policy import _pid_alive
 
 
 class Rung(IntEnum):
@@ -53,14 +56,14 @@ class Rung(IntEnum):
     SCOPED_RUNTIME = 3
     # Check the framework's sources out locally. Not built yet.
     SOURCE_LOCALIZE = 4
-    # An off-loop compiled build on a dedicated lane. Not built yet.
+    # An off-loop compiled build on the single-slot `BuildLane` (§24 Tier E, E1).
     COMPILED_BUILD = 5
 
 
 # Rungs Orbit can act on today. A gap whose lowest useful rung is above this line is
 # reported as deferred, not as hopeless — the distinction §24 Tier C exists to keep.
 IMPLEMENTED_RUNGS = frozenset(
-    {Rung.DIAGNOSE, Rung.SERVE_FLAG, Rung.SOURCE_PATCH, Rung.SCOPED_RUNTIME}
+    {Rung.DIAGNOSE, Rung.SERVE_FLAG, Rung.SOURCE_PATCH, Rung.SCOPED_RUNTIME, Rung.COMPILED_BUILD}
 )
 
 
@@ -509,3 +512,210 @@ def climb_missing_package(
         reason += "; " + "; ".join(notes)
 
     return ClimbResult(runtime=runtime, gate=gate, kept=gate.kept, reason=reason)
+
+
+# ---- rung 5: the off-loop build lane (plan §24 Tier E, item E1) ----------------
+#
+# A long compile must never block the tick loop, and a build must never earn KEEP
+# on artifact verification alone — the runnable gate above stays the only door.
+# The lane is deliberately dumb: a file-based queue, one slot, every state change
+# on disk so a crashed builder is recovered honestly (a RUNNING job whose pid is
+# dead becomes FAILED with a note, never silently re-queued as if it had not run).
+# The two live cases this was built against: sgl-kernel-xpu needs a serial
+# MAX_JOBS=1 build (parallel icpx exhausts shared memory), and vllm-xpu-kernels
+# lacks phi-2's head_dim=80 in its compiled paged-decode set (`kernel_capability`).
+
+_JOB_STATES = ("QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "KEPT", "DISCARDED")
+
+
+@dataclass
+class BuildJob:
+    """One build in the lane; every field lives in the job file on disk."""
+
+    id: str
+    component: str
+    command: list[str]
+    cwd: str
+    env: dict[str, str] = field(default_factory=dict)
+    status: str = "QUEUED"
+    submitted: str = ""
+    started: str = ""
+    finished: str = ""
+    returncode: int | None = None
+    log: str = ""
+    note: str = ""
+    pid: int | None = None
+
+    def format(self) -> str:
+        line = f"{self.id}  {self.status:<10} {self.component}"
+        if self.note:
+            line += f"\n{'':14}note: {self.note}"
+        return line
+
+
+class BuildLane:
+    """Single-slot, journalled, resumable build queue (rung 5).
+
+    `submit` is novelty-aware in the §20.4 sense: an identical job (same
+    component, command and cwd) that is already QUEUED or RUNNING is returned
+    rather than duplicated, and one that already FAILED is re-admitted only with
+    the prior failure named in its note — the lane never silently loops on an
+    identical failing build. `run_next` executes the oldest QUEUED job, streaming
+    output to a log file; SUCCEEDED/FAILED comes from the exit code, and a FAILED
+    job carries `diagnose()`'s classification. KEPT/DISCARDED belong to the
+    caller, who alone can run the runnable gate — the lane records the verdict
+    via `mark` and refuses to invent it.
+    """
+
+    def __init__(self, lane_dir: Path | None = None) -> None:
+        self.lane_dir = Path(lane_dir) if lane_dir else Path.home() / ".cache/orbit-dev/build-lane"
+        self.jobs_dir = self.lane_dir / "jobs"
+        self.logs_dir = self.lane_dir / "logs"
+
+    # -- persistence -----------------------------------------------------
+
+    def _job_path(self, job_id: str) -> Path:
+        return self.jobs_dir / f"{job_id}.json"
+
+    def _save(self, job: BuildJob) -> None:
+        self.jobs_dir.mkdir(parents=True, exist_ok=True)
+        import json as _json
+
+        self._job_path(job.id).write_text(_json.dumps(job.__dict__, indent=2), encoding="utf-8")
+
+    def jobs(self) -> list[BuildJob]:
+        import json as _json
+
+        out = []
+        for path in sorted(self.jobs_dir.glob("*.json")):
+            try:
+                out.append(BuildJob(**_json.loads(path.read_text(encoding="utf-8"))))
+            except (ValueError, TypeError):
+                continue
+        return sorted(out, key=lambda j: j.submitted)
+
+    # -- queue -----------------------------------------------------------
+
+    def submit(self, component: str, command: list[str], cwd: Path, env: dict[str, str] | None = None) -> BuildJob:
+        key = hashlib.sha256("\0".join([component, *command, str(cwd)]).encode()).hexdigest()[:12]
+        existing = {j.id: j for j in self.jobs()}
+        if key in existing:
+            prior = existing[key]
+            if prior.status in ("QUEUED", "RUNNING"):
+                return prior  # already in flight; a duplicate would race the slot
+            if prior.status == "FAILED":
+                prior.status = "QUEUED"
+                prior.note = f"re-admitted after failure at {prior.finished}: {prior.note}"[:500]
+                prior.returncode = None
+                self._save(prior)
+                return prior
+        job = BuildJob(
+            id=key,
+            component=component,
+            command=list(command),
+            cwd=str(cwd),
+            env=dict(env or {}),
+            submitted=_lane_now(),
+        )
+        self._save(job)
+        return job
+
+    def recover(self) -> list[BuildJob]:
+        """RUNNING jobs whose builder is dead become FAILED, named — never re-queued silently."""
+        recovered = []
+        for job in self.jobs():
+            if job.status == "RUNNING" and (job.pid is None or not _pid_alive(job.pid)):
+                job.status = "FAILED"
+                job.note = f"builder pid {job.pid} died before finishing; log ends where it stopped"
+                job.finished = _lane_now()
+                self._save(job)
+                recovered.append(job)
+        return recovered
+
+    def run_next(self, timeout: float = 14400.0) -> BuildJob | None:
+        """Run the oldest QUEUED job in the single slot; None if queue empty or slot held."""
+        import os as _os
+
+        self.recover()
+        queued = [j for j in self.jobs() if j.status == "QUEUED"]
+        if not queued:
+            return None
+        slot = self.lane_dir / "slot.lock"
+        self.lane_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = _os.open(str(slot), _os.O_CREAT | _os.O_EXCL | _os.O_WRONLY, 0o644)
+        except FileExistsError:
+            try:
+                holder = int(slot.read_text().strip() or 0)
+            except (OSError, ValueError):
+                holder = 0
+            if holder and _pid_alive(holder):
+                return None  # one slot, and it is taken by a live builder
+            slot.unlink(missing_ok=True)
+            return self.run_next(timeout=timeout)
+        with _os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(str(_os.getpid()))
+
+        job = queued[0]
+        try:
+            self.logs_dir.mkdir(parents=True, exist_ok=True)
+            log_path = self.logs_dir / f"{job.id}.log"
+            job.status, job.started, job.pid, job.log = "RUNNING", _lane_now(), _os.getpid(), str(log_path)
+            self._save(job)
+            env = dict(_os.environ)
+            env.update(job.env)
+            with open(log_path, "w", encoding="utf-8") as log:
+                try:
+                    proc = subprocess.run(
+                        job.command, cwd=job.cwd, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=timeout
+                    )
+                    job.returncode = proc.returncode
+                except subprocess.TimeoutExpired:
+                    job.returncode = -1
+                    job.note = f"timed out after {timeout:.0f}s"
+            job.finished = _lane_now()
+            if job.returncode == 0:
+                job.status = "SUCCEEDED"
+                job.note = job.note or "built; not KEPT until the runnable gate passes (mark via gate caller)"
+            else:
+                job.status = "FAILED"
+                tail = ""
+                try:
+                    tail = log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+                except OSError:
+                    pass
+                gaps = diagnose(job.returncode or 1, "", tail)
+                if gaps and not job.note:
+                    job.note = f"[{gaps[0].kind}] {gaps[0].suggestion[:200]}"
+            self._save(job)
+            return job
+        finally:
+            slot.unlink(missing_ok=True)
+
+    def mark(self, job_id: str, kept: bool, reason: str) -> BuildJob:
+        """Record the runnable gate's verdict on a SUCCEEDED build."""
+        jobs = {j.id: j for j in self.jobs()}
+        if job_id not in jobs:
+            raise ValueError(f"no job {job_id!r} in the lane")
+        job = jobs[job_id]
+        if job.status != "SUCCEEDED":
+            raise ValueError(
+                f"job {job_id} is {job.status}, not SUCCEEDED; only a finished build "
+                f"can face the runnable gate"
+            )
+        job.status = "KEPT" if kept else "DISCARDED"
+        job.note = reason
+        self._save(job)
+        return job
+
+    def format(self) -> str:
+        jobs = self.jobs()
+        if not jobs:
+            return "build lane: empty"
+        return "\n".join(job.format() for job in jobs)
+
+
+def _lane_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

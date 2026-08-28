@@ -2307,18 +2307,72 @@ of it away.
   store, and a generated report that *is* the fleet table, under §17.6 discipline
   (a workload whose stack was never re-measured reports NOT ESTABLISHED, never a
   projection).
-- **E5. Breadth, single-device.** SGLang e2e locally once E1 lands (the §25 bar on
-  both frameworks); the fleet table as the standing day-1-support artifact, phi-2
-  row included after E1. Larger single-GPU Intel hardware runs the same commands
-  unchanged — that claim is already partially measured (four architectures through
-  the untouched pipeline) and E1–E4 only widen it.
+- **E5. Breadth, single-device — and the day-1 contract, stated correctly.**
+  Day-1 support means: an unknown model arrives, vLLM-XPU cannot necessarily serve
+  it yet, and the job is first to **enable** it on vLLM's own path — its SYCL `_C`
+  ops or Triton kernels — via the ladder, and then to **optimize those kernels**,
+  the ones the framework actually ships, in place. Replacement paths (Xe-Fuse,
+  agent-written alternatives) enter later as candidates, never as the definition.
+  Both halves are proven separately — the phi-2 diagnosis names its enablement gap
+  and climb, and the +26.9% kernel ACCEPT on vLLM's own `_C::fused_add_rms_norm`
+  (extracted from pinned vllm-xpu-kernels sources, installed by the P1 override)
+  is the optimize-half on exactly the framework's own kernel — so phi-2 is the
+  first full-story validation: diagnose → rung-5 rebuild with head_dim=80 →
+  runnable gate → profile on the stock path → optimize vLLM's own kernels.
+  SGLang e2e locally once E1 lands (the §25 bar on both frameworks); larger
+  single-GPU Intel hardware runs the same commands unchanged.
+
+- **E6. The candidate bracket — choose between implementations, don't assume one.**
+  Frameworks on Intel ship their own SYCL kernels (vllm-xpu-kernels' `_C` ops, with
+  vLLM's `IrOpPriorityConfig` already choosing `vllm_c` vs `native` internally), and
+  oneDNN, Xe-Fuse presets, Triton and agent rewrites all compete for the same op.
+  The taxonomy exists (`actions_available` on every `KernelRecord`: region_fusion,
+  backend_change, layout_change) and every *installation* mechanism exists — a
+  serve-flag flip of the framework's own priority list (rung 1), the P1 dispatch
+  override, `fuse-apply`'s guarded branch — but nothing enumerates the candidates
+  into one measured bracket. Build the selector: enumerate per kernel/region, bench
+  kernel-level under one harness, prune by Amdahl, take survivors to the guarded
+  e2e, record the winner *per serving profile* (§14.4) with the losers' numbers
+  kept — a recorded choice without the losers' numbers is an opinion. The agent
+  proposes rewrite candidates and judges structural applicability (§3's residue);
+  the choosing itself is deterministic measurement. The M≤32 guard on the fused
+  MLP is this mechanism in miniature and becomes its first recorded bracket.
 
 **Execution order:** E2-lease first (small, and it protects every measurement that
 follows), then E1 (both live validation cases are waiting on it), then E5's SGLang
 and phi-2 runs as E1's acceptance tests, with E3 interleaved (CPU-side, never holds
-the lease), then E4, then E2's phase declarations. Campaign search beyond E4 —
-long-horizon planning over many campaigns — stays out until there is a fleet of
-results worth planning over.
+the lease), then E6's bracket over the regions the fleet already measured, then E4,
+then E2's phase declarations. Campaign search beyond E4 — long-horizon planning
+over many campaigns — stays out until there is a fleet of results worth planning
+over.
+
+**Status (2026-08-28, evening).** E2's lease is live and proven (a second claimant
+was refused by name, exit 5; unit tests contend in `ORBIT_LEASE_DIR`). E1's lane is
+live with two queued jobs — vllm-xpu-kernels with the 96 bucket added to both
+decode and prefill configs (branch `orbit-phi2-head96`; the upstream error message
+itself prescribes the config line and rebuild, which is rung-4 localization done
+for us), and sgl-kernel-xpu with `USE_SYCL_JIT=ON`, the research-verified answer to
+the 8GB-per-TU AOT compile that OOMed this box. TinyLlama's e2e through the generic
+`fuse-apply` returned **ACCEPT** (+0.62% tok/s, paired CI [0.33, 0.91], MDE 0.65%,
+arms 197–202 tok/s on a quiet machine) — the fourth independent e2e ACCEPT and the
+second architecture; an earlier 3-pair session was INCONCLUSIVE at MDE 2.51% and a
+5-pair rerun was discarded after our own CPU load (test suite during arms) throttled
+the shared-TDP iGPU, which is E2's probe-hook argument made flesh. **phi-2 is the
+day-1 contract demonstrated end-to-end at rung 1**: the compiled SYCL paged-decode
+set lacks its head bucket, the first serve-flag attempt tested a dead knob
+(`VLLM_ATTENTION_BACKEND` is gone on this vLLM branch — the knob is the
+`attention_backend` engine argument; the wrong-question trap, caught by retesting),
+and the correct knob boots it through vLLM's own in-wheel Triton attention at 97
+tok/s output with no rebuild. The queued rung-5 build turns phi-2 into E6's first
+real bracket: SYCL 96-bucket paged decode vs Triton attention, measured. Alignment
+decision recorded in the knowledge files: **Intel's canonical stacks are the
+targets** (vllm-xpu-kernels — pinned 07d44bcb, wheel-respins-without-tags noted;
+sgl-kernel-xpu source-only, `--attention-backend intel_xpu`, Triton reused for MoE;
+mainline PyTorch XPU with torch-xpu-ops pinned bc294243, IPEX dissolving into it),
+**operated on with the Hyperloom mechanism set** (ladder + runnable gate, in-place
+patch for in-wheel Triton source, dispatch override for compiled kernels, build
+lane for kernel libraries, deterministic routing) — aligned with Intel, not far
+from AMD.
 
 ---
 

@@ -299,13 +299,24 @@ quality_gate:
 # to look, and that is knowledge about the framework — data, not code (§10.6). Without
 # it a kernel resolves to nothing and lands at E3 for want of a checkout, which says
 # nothing about the kernel itself.
+# Serve-flag knowledge (measured 2026-08-28, vLLM dev 0.1.dev1+g28b484e5d):
+# VLLM_ATTENTION_BACKEND env var is GONE on this branch (absent from envs.py) — the
+# knob is the `attention_backend` engine argument (LLM(attention_backend=...) /
+# --attention-backend). On XPU, TRITON_ATTN is the generic fallback: head_size >= 32
+# only constraint, so models whose head_dim the compiled SYCL paged kernels lack
+# (phi-2: 80 -> bucket 96 absent from default conf) boot through it — measured: phi-2
+# served at 97 tok/s output via attention_backend=TRITON_ATTN, rung-1 climb, no
+# rebuild. Upstream: vllm/platforms/xpu.py wires it; fp32 always falls back to it.
+
 kernel_sources:
   - name: vllm-xpu-kernels
     repo: https://github.com/vllm-project/vllm-xpu-kernels
-    # No pin yet: set to the revision the installed `vllm_xpu_kernels` wheel was built
-    # from. Empty is reported as `unpinned` by `xe-orbit sources`, never silently
-    # treated as matching (§12.10).
-    revision: ""
+    # Wheel 0.1.13.2 (installed 2026-08-28) has no git tag: PyPI-only respins carry a
+    # 4th version component ("same code base, different build config" per upstream
+    # release notes). v0.1.13 == v0.1.13.1 == commit 07d44bcb; the mapping of .2 to
+    # that commit is inferred, not documented — verify against the wheel if a bundle
+    # skew appears at exactly this boundary.
+    revision: "07d44bcb"
     subdir: src
     provider: custom
     language: sycl

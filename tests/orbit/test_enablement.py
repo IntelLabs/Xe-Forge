@@ -8,6 +8,8 @@ motivated the ladder.
 
 from __future__ import annotations
 
+import pytest
+
 from xe_forge.orbit.enablement import (
     IMPLEMENTED_RUNGS,
     CapabilityGap,
@@ -61,10 +63,9 @@ class TestDiagnosis:
         assert not gaps[0].deferred
         assert "actionable now" in gaps[0].format()
         assert "climb_missing_package" in gaps[0].suggestion
-        # The old honesty still holds one rung up: 4 and 5 remain deferred, and a
-        # gap that lands there must still say so.
+        # The old honesty still holds one rung up: 4 remains deferred, and a gap
+        # that lands there must still say so. (5 joined via BuildLane, Tier E.)
         assert Rung.SOURCE_LOCALIZE not in IMPLEMENTED_RUNGS
-        assert Rung.COMPILED_BUILD not in IMPLEMENTED_RUNGS
 
     def test_config_error_blames_the_command_not_the_workload(self):
         gaps = diagnose(2, "", "error: unrecognized arguments: --frobnicate")
@@ -94,16 +95,19 @@ class TestDiagnosis:
 
 
 class TestLadderShape:
-    def test_implemented_rungs_are_the_bottom_of_the_ladder(self):
+    def test_implemented_rungs_are_all_but_source_localize(self):
+        # Rung 5 joined with BuildLane (§24 Tier E, E1); rung 4 is the one
+        # honest remaining hole in the ladder.
         assert IMPLEMENTED_RUNGS == {
             Rung.DIAGNOSE,
             Rung.SERVE_FLAG,
             Rung.SOURCE_PATCH,
             Rung.SCOPED_RUNTIME,
+            Rung.COMPILED_BUILD,
         }
 
     def test_deferred_is_derived_from_the_rung_not_declared(self):
-        gap = CapabilityGap(kind="x", evidence="e", rung=Rung.COMPILED_BUILD, suggestion="s")
+        gap = CapabilityGap(kind="x", evidence="e", rung=Rung.SOURCE_LOCALIZE, suggestion="s")
         assert gap.deferred
 
 
@@ -199,3 +203,67 @@ class TestKernelCapabilityGap:
         # was not instantiated — the climb differs (backend flag vs op override).
         gaps = diagnose(1, "", "unsupported head_dim: 80")
         assert gaps[0].kind == "kernel_capability"
+
+
+class TestBuildLane:
+    """E1: the off-loop build lane — single slot, journalled, honest recovery."""
+
+    def _lane(self, tmp_path):
+        from xe_forge.orbit.enablement import BuildLane
+
+        return BuildLane(lane_dir=tmp_path / "lane")
+
+    def test_submit_run_succeed(self, tmp_path):
+        lane = self._lane(tmp_path)
+        job = lane.submit("demo", ["sh", "-c", "echo built"], tmp_path)
+        assert job.status == "QUEUED"
+        done = lane.run_next()
+        assert done.id == job.id and done.status == "SUCCEEDED"
+        assert "not KEPT until the runnable gate" in done.note
+        assert "built" in (tmp_path / "lane/logs" / f"{job.id}.log").read_text()
+
+    def test_failure_carries_diagnosis(self, tmp_path):
+        lane = self._lane(tmp_path)
+        lane.submit("broken", ["sh", "-c", "echo 'XPU out of memory' >&2; exit 1"], tmp_path)
+        done = lane.run_next()
+        assert done.status == "FAILED"
+        assert "[oom]" in done.note
+
+    def test_identical_inflight_job_not_duplicated(self, tmp_path):
+        lane = self._lane(tmp_path)
+        a = lane.submit("demo", ["true"], tmp_path)
+        b = lane.submit("demo", ["true"], tmp_path)
+        assert a.id == b.id and len(lane.jobs()) == 1
+
+    def test_failed_job_readmitted_with_prior_failure_named(self, tmp_path):
+        lane = self._lane(tmp_path)
+        lane.submit("flaky", ["false"], tmp_path)
+        assert lane.run_next().status == "FAILED"
+        again = lane.submit("flaky", ["false"], tmp_path)
+        assert again.status == "QUEUED" and "re-admitted after failure" in again.note
+
+    def test_dead_builder_recovered_as_failed_never_requeued(self, tmp_path):
+        lane = self._lane(tmp_path)
+        job = lane.submit("crashed", ["true"], tmp_path)
+        job.status, job.pid = "RUNNING", 2**22 + 54321
+        lane._save(job)
+        recovered = lane.recover()
+        assert recovered[0].status == "FAILED" and "died before finishing" in recovered[0].note
+
+    def test_mark_requires_succeeded(self, tmp_path):
+        lane = self._lane(tmp_path)
+        job = lane.submit("demo", ["true"], tmp_path)
+        with pytest.raises(ValueError, match="not SUCCEEDED"):
+            lane.mark(job.id, kept=True, reason="gate passed")
+        lane.run_next()
+        kept = lane.mark(job.id, kept=True, reason="boots and re-passes the eval")
+        assert kept.status == "KEPT"
+
+    def test_slot_held_by_live_builder_defers(self, tmp_path):
+        import os
+
+        lane = self._lane(tmp_path)
+        lane.submit("demo", ["true"], tmp_path)
+        lane.lane_dir.mkdir(parents=True, exist_ok=True)
+        (lane.lane_dir / "slot.lock").write_text(str(os.getpid()))  # a live "builder"
+        assert lane.run_next() is None

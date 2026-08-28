@@ -39,6 +39,9 @@ def fake_checkouts(tmp_path, monkeypatch):
     (tla / "include").mkdir(parents=True)
     monkeypatch.setenv("ORBIT_XE_FUSE_DIR", str(fuse))
     monkeypatch.setenv("SYCL_TLA_DIR", str(tla))
+    # cmd_fuse holds the device lease around the sweep; tests must contend in a
+    # private lease dir, never with a live measurement on this machine (E2).
+    monkeypatch.setenv("ORBIT_LEASE_DIR", str(tmp_path / "leases"))
     return fuse, tla
 
 

@@ -269,10 +269,11 @@ class TestClimb:
 
 
 class TestLadderState:
-    def test_scoped_runtime_is_now_implemented_and_rungs_4_5_are_not(self):
+    def test_scoped_runtime_is_now_implemented_and_rung_4_is_not(self):
         assert Rung.SCOPED_RUNTIME in IMPLEMENTED_RUNGS
         assert Rung.SOURCE_LOCALIZE not in IMPLEMENTED_RUNGS
-        assert Rung.COMPILED_BUILD not in IMPLEMENTED_RUNGS
+        # COMPILED_BUILD joined via BuildLane (§24 Tier E, E1)
+        assert Rung.COMPILED_BUILD in IMPLEMENTED_RUNGS
 
     def test_missing_package_gap_is_no_longer_deferred(self):
         gaps = missing_package_gaps("vllm")

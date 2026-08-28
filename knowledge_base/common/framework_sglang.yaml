@@ -303,6 +303,14 @@ quality_gate:
 kernel_sources:
   - name: sgl-kernel-xpu
     repo: https://github.com/sgl-project/sgl-kernel-xpu
+    # Research 2026-08-28: no prebuilt XPU wheels exist — source build is the only
+    # path (docs/platforms/xpu.md; pyproject_xpu.toml swapped in before pip install).
+    # On memory-constrained boxes build with USE_SYCL_JIT=ON: kernel templates
+    # compile on demand via icpx at first use instead of ahead-of-time, avoiding the
+    # ~8GB-per-TU AOT compile that OOMs 16GB machines. Intel's XPU attention backend
+    # name in SGLang is `intel_xpu` (--attention-backend intel_xpu); Triton is reused
+    # for MoE per the Intel roadmap (sglang#8309). Targets Arc B-series (B580
+    # verified upstream); older iGPUs are same-architecture but below target.
     # No pin yet: set to the revision the installed `sgl_kernel` wheel was built from.
     # Empty is reported as `unpinned` by `xe-orbit sources`, never silently treated as
     # matching (§12.10).
