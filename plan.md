@@ -1366,8 +1366,17 @@ compat queue rather than torch's stream — two `wait()` serializations per laye
 24 layers per decode step, exceeding the fused margin. The revert restored the tree
 byte-for-byte. This is §1's founding question — do kernel wins convert to
 tokens/s? — answered *no, and instrumented to the microsecond why not* for this
-candidate; sharing torch's in-order stream is the named follow-up with the verified
-kernel margin waiting behind it. Reproduction kit: `examples/fused_mlp_experiment/`.
+candidate. **And then the instrumented cause was fixed and the answer became yes.**
+The cutlass adapter's `run()` accepts a `sycl::queue*`, so round two launches both
+ops on torch's in-order XPU stream with no waits — numerics unchanged — and the
+fresh two-arm A/B returned **ACCEPT: +0.56% end-to-end, 95% CI [0.21%, 0.91%]
+excluding zero, MDE 0.46%**. That is §25's primary criterion met for the first
+time, with the honest scope attached: one session, one serving profile; §25's
+three-session reproducibility and §14.3's profile matrix are what turn it into the
+full claim. The REJECT→cause→fix→ACCEPT sequence is also the strongest evidence yet
+for §17's design: a loop that had collapsed the REJECT into a bare failure would
+have discarded a real win one wait-removal away. Reproduction kit:
+`examples/fused_mlp_experiment/`.
 
 ### 13.5 The agentic loop: the agent proposes, Orbit decides (v9)
 
