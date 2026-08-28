@@ -1400,7 +1400,18 @@ in generation (tokens 11–38, never at position 0) — the signature of near-ti
 flips from the declared rounding differences of a path proven *closer* to fp64
 truth than the baseline, chaos-amplified by argmax; per §19's own ladder,
 acceptance for deployment moves to the bounded-logit-deviation + small-task-eval
-branch, which is the named remaining step. (Precision, stated plainly: the kernel
+branch — which then ran, with both thresholds declared before measurement. The
+logit gate passed decisively: all six divergences sit at pristine top-2 gaps of
+0.0000 or 0.1250 nats against a 0.25-nat budget — three are *exact ties*; the fused
+path flips tokens only where the baseline itself is flipping a coin. The task-eval
+gate as declared (fused accuracy ≥ pristine, n=32) **failed by exactly one answer**
+(22/32 vs 23/32, near-identical miss sets, one discordant prompt each way — pure
+binomial noise at this n), and the declared gate is not relaxed after the fact:
+the recorded verdict is that the gate was underpowered as designed — a strict ≥ at
+n=32 breaks on a single coin-flip answer — and **deployment acceptance is withheld**
+pending a larger pre-declared eval (hundreds of prompts, an equivalence margin
+rather than strict dominance). The performance case stands; the quality case is
+unproven-not-disproven, stated as exactly that. (Precision, stated plainly: the kernel
 computes at the standard bf16-data/fp32-accumulate; fp64 exists only as the host
 referee, which must out-precision both contestants to rank them.) *Served A/B:*
 a real `vllm serve` per arm with `xe-orbit run --framework vllm` driving
