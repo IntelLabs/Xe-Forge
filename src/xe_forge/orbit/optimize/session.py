@@ -117,6 +117,26 @@ class SessionHistory:
             )
         return "\n\n".join(parts)
 
+    def render_for_knowledge(self) -> str:
+        """Render as a block for `ClaudeProposer.plan`'s `knowledge` parameter.
+
+        `build_round_prompt` owns the full-prompt path; this is the seam for a caller
+        that can only extend the measured context `plan()` already accepts, where it is
+        interpolated as MEASURED CONTEXT — and measured context is exactly what a
+        round's verdicts are. The framing matches the CLI's cross-invocation
+        `_prior_trials` wording, because the two blocks are the same evidence at
+        different distances: results are measurements, not opinions, and re-proposing
+        one spends a trial to learn what is already known.
+        """
+        body = self.render()
+        if not body:
+            return ""
+        return (
+            "WHAT THIS SESSION ALREADY TRIED AND MEASURED ON THIS EXACT DEVICE"
+            " (measurements, not opinions — do not re-propose these; a direction that"
+            " measured worse is evidence the opposite direction may be the move):\n" + body
+        )
+
 
 def violates_device_limits(proposal: Proposal, facts: DeviceFacts) -> str:
     """Reject what the hardware cannot do, before a trial is spent on it.

@@ -686,7 +686,9 @@ def cmd_optimize(args: argparse.Namespace) -> int:
         )
         return 0
 
-    return _run_optimize_loop(args, store, kernel, proposer, proposals)
+    # The knowledge string travels into the loop because rounds after the first
+    # re-plan with it: same measured context, plus what this session has since learned.
+    return _run_optimize_loop(args, store, kernel, proposer, proposals, knowledge=knowledge)
 
 
 def _prior_trials(store, kernel_id: str) -> str:
@@ -713,17 +715,98 @@ def _prior_trials(store, kernel_id: str) -> str:
     return "\n".join(lines)
 
 
-def _run_optimize_loop(args, store, kernel, proposer, proposals) -> int:
-    """Drive §13.5's loop from the CLI (gap G1).
+def _implement_round(
+    proposer, proposals, target, experiments: Path, harness: Path, round_index: int = 0
+) -> int:
+    """IMPLEMENT one round's proposals, each in its own workspace *copy* (§13.5).
+
+    A session that goes wrong cannot leave the tree broken, and the agent sees its own
+    tracebacks. Round 1 keeps the historical `proposal_<i>` workspace names so a
+    single-round invocation is unchanged on disk; later rounds are namespaced per round
+    so a re-planned session cannot overwrite the evidence of an earlier one.
+    """
+    prefix = "proposal" if round_index == 0 else f"round{round_index + 1}_proposal"
+    implemented = 0
+    for index, proposal in enumerate(proposals):
+        workspace = experiments / f"{prefix}_{index}"
+        print(f"\nimplementing {index + 1}/{len(proposals)}: {proposal.title}")
+        proposal.new_source = proposer.implement(proposal, target, workspace, harness=harness)
+        if proposal.new_source is None:
+            print("  no edit produced; the loop will refuse this proposal")
+        else:
+            implemented += 1
+    return implemented
+
+
+def _plan_next_round(
+    proposer,
+    kernel,
+    target: Path,
+    knowledge: str,
+    history,
+    round_index: int,
+    rounds: int,
+    count: int,
+):
+    """PLAN a round after the first: the measured context, plus what this session learned.
+
+    The history travels through `plan()`'s `knowledge` parameter, which the proposer
+    interpolates into the prompt as MEASURED CONTEXT — and measured context is exactly
+    what a round's verdicts are. Feeding the seam that already exists keeps the
+    proposer unchanged and the layering honest (§13.7).
+    """
+    print(f"\n--- round {round_index + 1}/{rounds} ---")
+    learned = history.render_for_knowledge()
+    context = knowledge.rstrip()
+    round_knowledge = f"{context}\n\n{learned}" if context else learned
+    # Re-read rather than reuse: the file on disk after a round of reverts is the
+    # loop's ground truth, and the source the next plan sees must be the same one.
+    source = target.read_text(encoding="utf-8")
+    print(f"planning up to {count} candidates from this session's measurements...")
+    proposals = proposer.plan(source, round_knowledge, count, kernel.runtime_name[:40])
+    for i, proposal in enumerate(proposals):
+        print(f"  {i + 1}. {proposal.title}")
+        print(f"     {proposal.rationale}")
+    return proposals
+
+
+def _session_summary(history, stopped_because: str) -> str:
+    """The whole session in three lines: what ran, why it stopped, what won."""
+    lines = [
+        f"session: {len(history.rounds)} round(s) run",
+        f"  stopped: {stopped_because}",
+    ]
+    best = history.best_so_far
+    if best is not None and best.delta_percent is not None:
+        lines.append(
+            f"  best measured: {best.proposal.title} at {best.delta_percent:+.2f}% "
+            f"(verdict {best.verdict.value})"
+        )
+    else:
+        lines.append("  best measured: nothing produced a usable measurement")
+    return "\n".join(lines)
+
+
+def _run_optimize_loop(args, store, kernel, proposer, proposals, knowledge: str = "") -> int:
+    """Drive §13.5's loop from the CLI (gap G1), for one round or several.
 
     The agent has proposed; everything from here is programmatic. Each proposal is
     implemented in an isolated workspace *copy*, then applied through the journalled
     patcher and driven through the gates — novelty, sandbox, apply, correctness,
     measure — with Orbit owning every verdict. Only the winner stays on disk.
+
+    With `--rounds N` above 1 the plan -> implement -> trial cycle repeats, and each
+    round's measured verdicts — with their reasons — go back to the proposer as
+    session history (§13.7). That closes the "the agent never found out" seam
+    in-process, where `_prior_trials` closes it only across separate invocations. The
+    patcher and the novelty ledger are created once and shared by every round: novelty
+    is memory, and memory that resets each round would readmit in round 2 exactly what
+    round 1 already measured (§20.4).
     """
     from xe_forge.orbit.novelty import NoveltyLedger
     from xe_forge.orbit.optimize.harness import run_harness
     from xe_forge.orbit.optimize.loop import OptimizationLoop
+    from xe_forge.orbit.optimize.session import RoundOutcome, SessionHistory
     from xe_forge.orbit.patch.inplace import InPlacePatcher
 
     target = Path(kernel.source_file)
@@ -732,19 +815,15 @@ def _run_optimize_loop(args, store, kernel, proposer, proposals) -> int:
         print(f"--harness {harness} does not exist", file=sys.stderr)
         return 1
 
-    # IMPLEMENT: one workspace per proposal, on a copy, so a session that goes wrong
-    # cannot leave the tree broken and the agent sees its own tracebacks (§13.5).
+    # Callers that construct the namespace directly may omit `rounds`; that means the
+    # single-round default, not an error.
+    rounds = max(1, int(getattr(args, "rounds", 1) or 1))
+    multi_round = rounds > 1
+
     experiments = store.subdir("experiments", kernel.id)
-    implemented = 0
-    for index, proposal in enumerate(proposals):
-        workspace = experiments / f"proposal_{index}"
-        print(f"\nimplementing {index + 1}/{len(proposals)}: {proposal.title}")
-        proposal.new_source = proposer.implement(proposal, target, workspace, harness=harness)
-        if proposal.new_source is None:
-            print("  no edit produced; the loop will refuse this proposal")
-        else:
-            implemented += 1
-    if not implemented:
+    if multi_round:
+        print(f"\n--- round 1/{rounds} ---")
+    if not _implement_round(proposer, proposals, target, experiments, harness):
         print("\nno proposal produced an edit; nothing to trial")
         return 1
 
@@ -783,19 +862,54 @@ def _run_optimize_loop(args, store, kernel, proposer, proposals) -> int:
         min_improvement_percent=args.min_improvement,
         measure_samples=measure_samples,
     )
-    result = loop.run(proposals)
-    store.record_stage("optimize")
+
+    history = SessionHistory()
+    result = None
+    stopped_because = ""
+    for round_index in range(rounds):
+        if round_index > 0:
+            proposals = _plan_next_round(
+                proposer, kernel, target, knowledge, history, round_index, rounds, args.trials
+            )
+            if not proposals:
+                stopped_because = f"the proposer returned no proposals for round {round_index + 1}"
+                print(f"\n{stopped_because}; stopping the session")
+                break
+            if not _implement_round(proposer, proposals, target, experiments, harness, round_index):
+                stopped_because = f"round {round_index + 1} produced no implementable edit"
+                print(f"\n{stopped_because}; stopping the session")
+                break
+
+        result = loop.run(proposals)
+        store.record_stage("optimize")
+        history.rounds.append(RoundOutcome(index=round_index, trials=result.trials))
+        if multi_round:
+            _write_loop_result(experiments / f"loop_result_round{round_index + 1}.json", result)
+
+        print()
+        print(result.format())
+        if result.kept:
+            # The loop's own semantics leave the winner applied; a further round would
+            # only be spending budget to beat a result the operator has not yet seen.
+            stopped_because = f"round {round_index + 1} produced a KEPT verdict"
+            break
+    else:
+        stopped_because = f"all {rounds} round(s) exhausted without an accepted candidate"
+
+    # The final `loop_result.json` is the last round that ran, so `_prior_trials` — the
+    # cross-invocation memory — keeps reading the freshest evidence unchanged.
     result_path = experiments / "loop_result.json"
     _write_loop_result(result_path, result)
 
-    print()
-    print(result.format())
     print(f"\ntrial record: {result_path}")
     if result.kept:
         print(
             "the accepted patch is applied and journalled: `xe-orbit patch status` "
             "shows it, `xe-orbit patch recover` restores the original"
         )
+    if multi_round:
+        print()
+        print(_session_summary(history, stopped_because))
     return 0
 
 
@@ -1453,6 +1567,14 @@ Examples:
     p = sub.add_parser("optimize", help="agentic in-place optimization loop for one kernel (§13.5)")
     p.add_argument("kernel_id")
     p.add_argument("--trials", type=int, default=3, help="how many candidates to try")
+    p.add_argument(
+        "--rounds",
+        type=int,
+        default=1,
+        help="with --apply, run up to this many plan -> implement -> trial rounds, "
+        "feeding each round's measured verdicts and reasons back to the proposer; "
+        "stops early on a KEPT candidate or when the proposer has nothing to propose",
+    )
     p.add_argument("--run", help="run id (default: most recent)")
     p.add_argument(
         "--no-agent",
