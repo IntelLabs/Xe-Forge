@@ -2374,6 +2374,26 @@ patch for in-wheel Triton source, dispatch override for compiled kernels, build
 lane for kernel libraries, deterministic routing) — aligned with Intel, not far
 from AMD.
 
+**The small-model fleet (2026-08-28), every row through the same commands, no
+per-model code:**
+
+| Model | State | GPU busy | GEMM share | Regions (→ Xe-Fuse) | e2e verdict |
+| --- | --- | --- | --- | --- | --- |
+| Qwen2.5-0.5B | served | 91.8% | ~96% | 2, ~79% | **3× ACCEPT** (+0.56/+2.12/+0.33%) |
+| TinyLlama-1.1B | served | 91.4% | 96.3% | 2, 80.9% | **ACCEPT** +0.62% [0.33, 0.91] |
+| Qwen2.5-1.5B | served | 92.8% | 94.0% | 2, 76.3% | not yet run |
+| SmolLM2-1.7B | served | 92.7% | (Amdahl 42.9%) | 2, 74.0% | not yet run |
+| phi-2 (2.7B) | **enabled rung 1** | — | 86.3% | 1, 27.6% | n/a (bracket pending) |
+
+phi-2's row is the day-1 contract working end to end: blocked (SYCL head bucket
+missing) → diagnosed → served via `attention_backend=TRITON_ATTN` at 97 tok/s →
+profiled → cataloged, with vLLM's own SYCL ops and a genuine Triton kernel (E2)
+in the catalog. Its single region is honest architecture, not a pipeline gap:
+phi-2 is LayerNorm + plain-GELU MLP, so the RMSNorm/SwiGLU fusion the Llama
+lineage exposes does not exist there — a GELU-epilogue GEMM would be new preset
+territory, recorded as such. Llama-3.2-1B and gemma-2-2b remain 401-gated on this
+HF token (user-side license acceptance).
+
 ---
 
 ## 25. Definition of v0.1 success **[CHANGED]**

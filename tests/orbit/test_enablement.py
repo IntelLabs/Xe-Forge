@@ -267,3 +267,16 @@ class TestBuildLane:
         lane.lane_dir.mkdir(parents=True, exist_ok=True)
         (lane.lane_dir / "slot.lock").write_text(str(os.getpid()))  # a live "builder"
         assert lane.run_next() is None
+
+
+class TestBuildResolutionGap:
+    """Measured on the lane's first job: isolated resolver blind to the XPU wheel index."""
+
+    def test_unresolvable_platform_wheel_is_named(self):
+        stderr = (
+            "Failed to resolve requirements from `build-system.requires`\n"
+            "No solution found when resolving: torch==2.13.0+xpu"
+        )
+        gaps = diagnose(1, "", stderr)
+        assert gaps[0].kind == "build_resolution"
+        assert "no-build-isolation" in gaps[0].suggestion

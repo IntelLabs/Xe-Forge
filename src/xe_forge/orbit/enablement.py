@@ -181,6 +181,22 @@ _CLASSIFIERS: list[tuple[re.Pattern[str], str, Rung, str]] = [
         "configuration compiled in (off-loop build lane, deferred)",
     ),
     (
+        # A build-time dependency resolver that cannot see a platform wheel index,
+        # e.g. uv build isolation failing on `torch==2.13.0+xpu` — measured live on
+        # the lane's first vllm-xpu-kernels job. The wheel exists; the isolated
+        # resolver has no index for it. Not a code failure at all.
+        re.compile(
+            r"No solution found when resolving|Failed to resolve requirements from "
+            r"`build-system.requires`",
+            re.I,
+        ),
+        "build_resolution",
+        Rung.SERVE_FLAG,
+        "the isolated build env cannot resolve a platform-specific dependency; pass "
+        "the wheel index to the resolver or build with --no-build-isolation against "
+        "an environment that already has it",
+    ),
+    (
         re.compile(r"unrecognized arguments|invalid choice|error: argument", re.I),
         "config",
         Rung.SERVE_FLAG,
