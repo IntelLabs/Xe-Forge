@@ -87,6 +87,22 @@ Examples:
         default=None,
         help="Variant name from spec (default: bench-gpu, overridden by default_variant in spec)",
     )
+    parser.add_argument(
+        "--objective",
+        type=str,
+        default="single",
+        choices=["single", "weighted"],
+        help="'weighted' scores the winner across the whole variant family with a "
+        "hard no-regression constraint per variant (§9.1); requires --spec with "
+        "weight: on every family member (or none, for equal weights)",
+    )
+    parser.add_argument(
+        "--required-speedup",
+        type=float,
+        default=None,
+        help="Weighted-objective accept threshold; callers derive it from the Amdahl "
+        "ceiling (§9.2). Default: any weighted improvement.",
+    )
 
     # Stage selection
     parser.add_argument(
@@ -535,6 +551,18 @@ def _run_optimize(parser, args, config: Config) -> int:
     if engine_name == "dspy" and executor is not None:
         engine.executor = executor
 
+    # The weighted objective is threaded only where the engine accepts it: the DSPy
+    # engine forwards it to the pipeline, while ClaudeEngine's workspace generation
+    # has no measurement to weight (§9.9), so passing it there would be refused.
+    extra_kwargs = {}
+    if args.objective != "single":
+        if engine_name != "dspy":
+            parser.error(f"--objective {args.objective} is only supported by the dspy engine")
+        extra_kwargs = {
+            "objective": args.objective,
+            "required_speedup": args.required_speedup,
+        }
+
     result = engine.optimize(
         kernel_code=kernel_code,
         reference_code=reference_code,
@@ -546,6 +574,7 @@ def _run_optimize(parser, args, config: Config) -> int:
         target_dtype=args.target_dtype,
         rtol=args.rtol,
         atol=args.atol,
+        **extra_kwargs,
     )
 
     # Save output if requested

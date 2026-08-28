@@ -3,7 +3,23 @@ from collections.abc import Callable
 from typing import Any
 
 import dspy
-from dspy.predict.react import _fmt_exc
+
+try:
+    from dspy.predict.react import _fmt_exc
+except ImportError:
+    # Private helper removed upstream after dspy 3.3.0b1 (pyproject declares a floor,
+    # not a pin, so newer dspy resolves). Same rendering as the original: the
+    # exception with a bounded traceback, prefixed by a newline.
+    import traceback
+
+    def _fmt_exc(err: BaseException, *, limit: int = 5) -> str:
+        return (
+            "\n"
+            + "".join(
+                traceback.format_exception(type(err), err, err.__traceback__, limit=limit)
+            ).strip()
+        )
+
 
 try:
     from litellm.exceptions import ContextWindowExceededError

@@ -369,6 +369,25 @@ def _load_yaml_file(kb: KnowledgeBase, path: Path) -> None:
 
     fname = path.name
 
+    # Orbit's per-framework knowledge (a `framework:` header, `kernel_sources`,
+    # adapter config — plan §10.6) shares knowledge_base/common/ with this loader's
+    # pattern files but is consumed by xe_forge.orbit, not here. Without this guard
+    # those files loaded as silent no-ops: no patterns, no constraints, absent even
+    # from kb.skipped — indistinguishable from "loaded fine" while contributing
+    # nothing. Recording the skip keeps the two readers of the directory honest.
+    if ("framework" in data or "kernel_sources" in data) and not (
+        data.get("patterns") or data.get("constraints")
+    ):
+        kb.skipped.append(
+            {
+                "file": fname,
+                "id": str(data.get("framework", "?")),
+                "name": "orbit framework knowledge (consumed by xe_forge.orbit, not this loader)",
+                "stage": "-",
+            }
+        )
+        return
+
     for raw in data.get("constraints", []):
         c = _parse_constraint(raw, fname)
         if c:

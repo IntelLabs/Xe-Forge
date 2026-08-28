@@ -163,6 +163,12 @@ class OptimizationResult(BaseModel):
     original_memory_bw: float | None = None
     optimized_memory_bw: float | None = None
     token_usage: dict | None = None
+    # §9.1: which objective scored this result, and — for the weighted one — the
+    # per-variant table (`WeightedComparison.summary()`). When the weighted gate
+    # rejects, `success` is False and `error_message` carries the reason; the
+    # per-variant breakdown lives here so the trade is visible, never a single number.
+    objective: str = "single"
+    weighted: dict | None = None
 
 
 class KnowledgeEntry(BaseModel):

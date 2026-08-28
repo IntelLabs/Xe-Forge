@@ -46,6 +46,8 @@ class DSPyEngine(BaseEngine):
         rtol: float | None = None,
         atol: float | None = None,
         stages: list[OptimizationStage] | None = None,
+        objective: str = "single",
+        required_speedup: float | None = None,
     ) -> OptimizationResult:
         from xe_forge.pipeline import XeForgePipeline
 
@@ -67,6 +69,8 @@ class DSPyEngine(BaseEngine):
             target_dtype=target_dtype,
             rtol=rtol,
             atol=atol,
+            objective=objective,
+            required_speedup=required_speedup,
         )
 
         if self.trial_manager and kernel_name and result.optimized_code:

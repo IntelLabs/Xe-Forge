@@ -8,6 +8,7 @@ Parses YAML spec files to get:
 - Per-variant correctness tolerances (rtol, atol)
 """
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
@@ -67,6 +68,11 @@ class VariantSpec:
     dtype: str | None = None  # Override dtype
     rtol: float | None = None  # Relative tolerance for correctness
     atol: float | None = None  # Absolute tolerance for correctness
+    # Share of the weighted objective this variant carries (plan §9.1): the observed
+    # frequency of its shape in the target workload. None means "not declared", which
+    # is different from 0.0 ("declared irrelevant") — the weighted objective treats a
+    # family with no declared weights as equally weighted, and refuses a mix.
+    weight: float | None = None
 
 
 @dataclass
@@ -332,7 +338,28 @@ class KernelSpec:
             raw[VKey.RTOL] = v.rtol
         if v.atol is not None:
             raw[VKey.ATOL] = v.atol
+        if v.weight is not None:
+            raw["weight"] = v.weight
         return raw
+
+    def weighted_family(self, base: str = "bench-gpu") -> list[tuple[str, int, VariantSpec]]:
+        """Every variant of a family, as (variant_key, index, spec) triples (§9.1).
+
+        The family is the base key plus its numbered siblings — `bench-gpu`,
+        `bench-gpu-1`, `bench-gpu-2` — which is how Orbit emits a shape
+        distribution: one variant per observed shape, each carrying its measured
+        `weight:`. The (key, index) pair is what the per-variant getters
+        (`get_input_shapes`, `get_flop`, ...) take, so a caller can benchmark each
+        member exactly as the single-variant path would.
+        """
+        pattern = re.compile(rf"^{re.escape(base)}(?:-\d+)?$")
+        triples: list[tuple[str, int, VariantSpec]] = []
+        for key in self.list_variant_keys():
+            if not pattern.match(key):
+                continue
+            for index, variant in enumerate(self._variants(key)):
+                triples.append((key, index, variant))
+        return triples
 
     def list_variant_keys(self) -> list[str]:
         """Return all available variant keys (named + standard families)."""
@@ -357,7 +384,18 @@ def load_spec_from_string(yaml_string: str) -> KernelSpec:
 
 
 def _parse_variant_entry(vd: dict) -> VariantSpec:
-    """Parse a single variant dict into a VariantSpec."""
+    """Parse a single variant dict into a VariantSpec.
+
+    A malformed `weight:` raises rather than defaulting: this loader drops keys it
+    does not know, but a key it does know carrying a value it cannot use is a spec
+    error, and silently benchmarking with a different weight than the author wrote
+    would answer a different question than the one asked.
+    """
+    weight = vd.get("weight")
+    if weight is not None:
+        weight = float(weight)
+        if weight < 0:
+            raise ValueError(f"variant weight must be non-negative, got {weight}")
     return VariantSpec(
         params=vd.get(VKey.PARAMS, []),
         dims=vd.get(VKey.DIMS, {}),
@@ -365,6 +403,7 @@ def _parse_variant_entry(vd: dict) -> VariantSpec:
         dtype=vd.get(VKey.TYPE),
         rtol=get_rtol(vd) if VKey.RTOL in vd else None,
         atol=get_atol(vd) if VKey.ATOL in vd else None,
+        weight=weight,
     )
 
 

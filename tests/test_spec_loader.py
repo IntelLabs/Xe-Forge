@@ -228,3 +228,72 @@ class TestLoadFromFile:
         assert variant is not None
         assert variant.dims["M"] == 1024
         assert variant.dims["N"] == 2048
+
+
+WEIGHTED_SPEC = """\
+inputs:
+  X:
+    shape: [M, N]
+    dtype: float32
+
+bench-gpu:
+  - params: [X]
+    dims: {M: 4096, N: 8192}
+    weight: 0.61
+    flop: "2*M*N"
+bench-gpu-1:
+  - params: [X]
+    dims: {M: 2048, N: 8192}
+    weight: 0.23
+bench-gpu-2:
+  - params: [X]
+    dims: {M: 1024, N: 8192}
+    weight: 0.09
+"""
+
+
+class TestVariantWeights:
+    """`weight:` parsing and the family walk behind the §9.1 weighted objective."""
+
+    def test_weight_is_parsed_not_dropped(self):
+        spec = load_spec_from_string(WEIGHTED_SPEC)
+        assert spec.get_variant("bench-gpu").weight == 0.61
+        assert spec.get_variant("bench-gpu-2").weight == 0.09
+
+    def test_absent_weight_is_none_not_zero(self):
+        spec = load_spec_from_string(BASIC_SPEC)
+        assert spec.get_variant("bench-gpu").weight is None
+
+    def test_negative_weight_raises(self):
+        import pytest
+
+        bad = WEIGHTED_SPEC.replace("weight: 0.61", "weight: -0.5")
+        with pytest.raises(ValueError, match="non-negative"):
+            load_spec_from_string(bad)
+
+    def test_malformed_weight_raises_rather_than_defaulting(self):
+        import pytest
+
+        bad = WEIGHTED_SPEC.replace("weight: 0.61", "weight: heavy")
+        with pytest.raises(ValueError):
+            load_spec_from_string(bad)
+
+    def test_weighted_family_walks_base_and_numbered_keys(self):
+        spec = load_spec_from_string(WEIGHTED_SPEC)
+        triples = spec.weighted_family("bench-gpu")
+        assert [(key, v.weight) for key, _, v in triples] == [
+            ("bench-gpu", 0.61),
+            ("bench-gpu-1", 0.23),
+            ("bench-gpu-2", 0.09),
+        ]
+
+    def test_weighted_family_does_not_leak_other_families(self):
+        spec = load_spec_from_string(
+            WEIGHTED_SPEC + "\nci:\n  - params: [X]\n    dims: {M: 4, N: 8}\n"
+        )
+        assert all(key.startswith("bench-gpu") for key, _, _ in spec.weighted_family("bench-gpu"))
+
+    def test_weight_survives_the_raw_round_trip(self):
+        spec = load_spec_from_string(WEIGHTED_SPEC)
+        raw = spec.get_raw_variant("bench-gpu")
+        assert raw["weight"] == 0.61

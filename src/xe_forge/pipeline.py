@@ -219,6 +219,8 @@ class XeForgePipeline:
         *,
         triton_code=None,
         pytorch_code=None,
+        objective="single",
+        required_speedup=None,
     ):
         # Backward compat aliases
         if kernel_code is None:
@@ -672,6 +674,23 @@ class XeForgePipeline:
             result = max(
                 candidates, key=lambda r: r.total_speedup if r.total_speedup is not None else -1.0
             )
+
+            # §9.1: the weighted objective re-scores the winner across the whole
+            # variant family and applies the hard no-regression constraint. It runs
+            # after candidate selection because the staged loop iterates on one
+            # variant; the family sweep is the acceptance gate, not the search.
+            if objective == "weighted":
+                self._apply_weighted_objective(
+                    result,
+                    spec,
+                    kernel_code,
+                    kernel_name=kernel_name,
+                    variant_type=variant_type,
+                    required_speedup=required_speedup,
+                    is_sycl=_is_sycl,
+                    bench_executor=_bench_ex,
+                )
+
             self._save_results(result)
 
             logger.info("=" * 60 + "\nOPTIMIZATION COMPLETE\n" + "=" * 60)
@@ -703,6 +722,8 @@ class XeForgePipeline:
         spec_path=None,
         variant_type="bench-gpu",
         target_dtype=None,
+        objective="single",
+        required_speedup=None,
     ):
         with open(input_path) as f:
             kernel_code = f.read()
@@ -713,11 +734,73 @@ class XeForgePipeline:
             spec_path=spec_path,
             variant_type=variant_type,
             target_dtype=target_dtype,
+            objective=objective,
+            required_speedup=required_speedup,
         )
         if output_path and result.optimized_code:
             with open(output_path, "w") as f:
                 f.write(result.optimized_code)
         return result
+
+    def _apply_weighted_objective(
+        self,
+        result,
+        spec,
+        kernel_code,
+        *,
+        kernel_name=None,
+        variant_type="bench-gpu",
+        required_speedup=None,
+        is_sycl=False,
+        bench_executor=None,
+    ):
+        """Re-score the selected candidate across its variant family (§9.1).
+
+        Mutates `result` in place: `total_speedup` becomes the weighted figure (the
+        honest headline once more than one shape matters), `weighted` carries the
+        per-variant table, and a rejection — a regression on any family member, an
+        incorrect variant, or a miss on the required speedup — turns `success` off
+        with the reason in `error_message`. A candidate that wins the dominant shape
+        and loses the tail must not leave here looking accepted.
+        """
+        from xe_forge.core.weighted import compare_weighted, family_base
+
+        result.objective = "weighted"
+
+        if spec is None:
+            result.success = False
+            result.error_message = (
+                "objective=weighted requires a spec: the variant family carries the weights"
+            )
+            logger.warning(result.error_message)
+            return
+        if not result.optimized_code or result.optimized_code == result.original_code:
+            return
+        if is_sycl or bench_executor is None or not hasattr(bench_executor, "compare_kernels"):
+            result.success = False
+            result.error_message = (
+                "objective=weighted is not implemented for this executor; "
+                "the SYCL path benchmarks per-variant through its own harness"
+            )
+            logger.warning(result.error_message)
+            return
+
+        comparison = compare_weighted(
+            bench_executor,
+            spec,
+            kernel_code,
+            result.optimized_code,
+            kernel_name=kernel_name,
+            family=family_base(variant_type),
+            required_speedup=required_speedup,
+        )
+        result.weighted = comparison.summary()
+        logger.info("\n%s", comparison.format())
+        if comparison.weighted_speedup is not None:
+            result.total_speedup = comparison.weighted_speedup
+        if not comparison.accepted:
+            result.success = False
+            result.error_message = comparison.reason
 
     def _save_results(self, result):
         if not self.config.logging.save_intermediate:

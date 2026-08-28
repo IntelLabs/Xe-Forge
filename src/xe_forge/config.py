@@ -134,6 +134,8 @@ class EngineConfig:
     auto_launch: bool = False  # Claude engine: auto-launch claude CLI
     workspace: str = "./"  # Claude engine: workspace directory
     git_init: bool = False  # Claude engine: initialize workspace as git repo
+    synchronous: bool = False  # Claude engine: block on the claude run and read back the result
+    claude_timeout_s: float = 1800.0  # Claude engine: timeout for the synchronous run (seconds)
 
 
 @dataclass
@@ -254,6 +256,8 @@ class ConfigManager:
             auto_launch=self._get_env("AUTO_LAUNCH", False, bool),
             workspace=self._get_env("WORKSPACE", "./"),
             git_init=self._get_env("WORKSPACE_GIT_INIT", False, bool),
+            synchronous=self._get_env("CLAUDE_SYNCHRONOUS", False, bool),
+            claude_timeout_s=self._get_env("CLAUDE_TIMEOUT_S", 1800.0, float),
         )
 
         # Trial Configuration
