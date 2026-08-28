@@ -1512,13 +1512,20 @@ def cmd_build_lane(args: argparse.Namespace) -> int:
         print(f"queued: {job.format()}")
         return 0
     if args.action == "run":
-        job = lane.run_next(timeout=args.timeout)
-        if job is None:
-            print("nothing to run: queue empty, or the slot is held by a live builder")
-            return 0
-        print(job.format())
-        print(f"log: {job.log}")
-        return 0 if job.status == "SUCCEEDED" else 1
+        worst = 0
+        while True:
+            job = lane.run_next(timeout=args.timeout)
+            if job is None:
+                if worst == 0 and not args.all:
+                    print("nothing to run: queue empty, or the slot is held by a live builder")
+                break
+            print(job.format())
+            print(f"log: {job.log}")
+            if job.status != "SUCCEEDED":
+                worst = 1
+            if not args.all:
+                break
+        return worst
     if args.action == "mark":
         if not args.job or args.kept is None:
             print("mark needs --job and --kept/--discarded with --reason")
@@ -1552,14 +1559,21 @@ def cmd_fuse_apply(args: argparse.Namespace) -> int:
     from xe_forge.orbit.stats import Decision, compare
 
     arm_python = args.arm_python or sys.executable
-    journal_dir = Path.home() / ".cache/orbit-dev/fuse_apply_journal"
+    if not args.model and not args.revert:
+        print("--model is required (except with --revert, which needs it to pick the journal)")
+        return 2
+    # One journal per model: revert_all() on a shared journal would restore every
+    # model's patch at once — measured live when a Qwen INCONCLUSIVE revert also
+    # wiped TinyLlama's kept ACCEPT patch.
+    slug = (args.model or "all").replace("/", "--")
+    journal_dir = Path.home() / ".cache/orbit-dev/fuse_apply_journal" / slug
 
     if args.revert:
+        if not args.model:
+            print("--revert needs --model (journals are per-model)")
+            return 2
         print("revert:", fused_mlp.revert(journal_dir))
         return 0
-    if not args.model:
-        print("--model is required (except with --revert)")
-        return 2
 
     if args.vllm_root:
         vllm_root = Path(args.vllm_root)
@@ -1957,6 +1971,7 @@ Examples:
     p.add_argument("--component", help="submit: what is being built, in kernel_sources terms")
     p.add_argument("--cwd", help="submit: build working directory")
     p.add_argument("--timeout", type=float, default=14400.0, help="run: per-build timeout seconds")
+    p.add_argument("--all", action="store_true", help="run: drain the queue (still one at a time)")
     p.add_argument("--job", help="mark: job id")
     p.add_argument("--kept", dest="kept", action="store_true", default=None, help="mark: runnable gate passed")
     p.add_argument("--discarded", dest="kept", action="store_false", help="mark: runnable gate failed")

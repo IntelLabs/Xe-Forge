@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,6 +48,20 @@ SYCL_TLA_DIR_ENV = "SYCL_TLA_DIR"
 # The SPIR-V translator refuses sycl-tla's split barriers unless the extension is
 # named explicitly; found the hard way on the first compile (JIT spir64 path).
 _SPIRV_EXT_FLAGS = ("-Xspirv-translator", "--spirv-ext=+SPV_INTEL_split_barrier")
+
+
+def _setvars_for(compiler: str | Path) -> Path | None:
+    """The setvars.sh that owns this compiler, or None if it is not a oneAPI icpx.
+
+    Walk up from the compiler path looking for the oneAPI root's setvars.sh —
+    e.g. /opt/intel/oneapi/compiler/<ver>/bin/icpx -> /opt/intel/oneapi/setvars.sh.
+    """
+    path = Path(compiler).resolve()
+    for parent in path.parents:
+        candidate = parent / "setvars.sh"
+        if candidate.is_file():
+            return candidate
+    return None
 
 _MS_RE = re.compile(r"\(\s*([0-9.]+)\)ms")
 _TFLOPS_RE = re.compile(r"\[([0-9.]+)\]TFlop/s")
@@ -219,6 +234,15 @@ def run_preset(
         str(binary),
         str(cpp),
     ]
+    # A compiler resolved from a oneAPI root needs that root's environment too:
+    # icpx-by-absolute-path finds the binary but not MKL's headers (CPATH), so the
+    # compile would succeed or fail depending on the *caller's* shell — measured
+    # live: the same sweep passed from a setvars'd shell and failed from a clean
+    # one with `oneapi/mkl/rng/device.hpp not found`. Source setvars ourselves.
+    setvars = _setvars_for(compiler)
+    if setvars is not None:
+        quoted = " ".join(shlex.quote(part) for part in compile_cmd)
+        compile_cmd = ["bash", "-c", f"source {shlex.quote(str(setvars))} --force >/dev/null 2>&1 && {quoted}"]
     try:
         compiled = subprocess.run(
             compile_cmd, capture_output=True, text=True, timeout=timeout_s, check=False
@@ -231,15 +255,21 @@ def run_preset(
         return result
     result.binary = binary
 
+    run_cmd = [
+        str(binary),
+        f"--m={m}",
+        f"--n={n}",
+        f"--k={k}",
+        f"--iterations={iterations}",
+    ]
+    # The binary needs the same oneAPI runtime the compiler's environment names
+    # (libsycl et al. via LD_LIBRARY_PATH) — a clean shell aborts at load/init.
+    if setvars is not None:
+        quoted = " ".join(shlex.quote(part) for part in run_cmd)
+        run_cmd = ["bash", "-c", f"source {shlex.quote(str(setvars))} --force >/dev/null 2>&1 && {quoted}"]
     try:
         ran = subprocess.run(
-            [
-                str(binary),
-                f"--m={m}",
-                f"--n={n}",
-                f"--k={k}",
-                f"--iterations={iterations}",
-            ],
+            run_cmd,
             capture_output=True,
             text=True,
             timeout=timeout_s,
