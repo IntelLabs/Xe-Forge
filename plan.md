@@ -785,6 +785,17 @@ A new Tier-1 adapter should be one knowledge file plus one class implementing th
 
 **If SGLang requires a change to the core, the abstraction is wrong.** Treat that as the signal to fix the boundary, not to special-case the framework. Record it, because the second and third adapters are the only real evidence the layering works.
 
+**Status (v10): the test ran, and the boundary held — zero core lines changed.** The
+`SGLangAdapter` (Tier 1, 74 tests, runs without SGLang installed like its vLLM
+sibling) cost: 0 lines in orbit core, +1 line of pyproject registration, the
+knowledge file extended as data (§10.6 working as designed), and the adapter itself.
+Two framework-shaped differences stayed inside the adapter where they belong
+(store_true config flags needing a presence mode; a smaller honest
+`patchable_layers` set with no CustomOp registry), and every fact that could not be
+verified against a live install ships marked `confidence: unverified` as
+documentation the parser never consumes — the wrong-question failure class, refused
+at the schema level.
+
 ### 10.9 Roadmap
 
 - **v0.1** — `GenericTorchAdapter` (Tier 0) and `VLLMAdapter` (Tier 1). Both ship together deliberately: building the generic path alongside the specific one is what keeps vLLM assumptions out of the core.
