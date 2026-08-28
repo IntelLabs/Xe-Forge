@@ -142,6 +142,23 @@ _CLASSIFIERS: list[tuple[re.Pattern[str], str, Rung, str]] = [
         "attempt-scoped venv and re-runs the workload through the runnable gate",
     ),
     (
+        # A quantization method the installed kernel backend cannot execute, e.g.
+        # "Marlin does not support weight_bits = uint8b128. Only types = [uint4...]".
+        # Measured live: vLLM-XPU routed GPTQ-Int8 to a 4-bit-only Marlin path. The
+        # message names the supported set, so the suggestion sends the operator to a
+        # supported variant rather than to a rebuild that will not help.
+        re.compile(
+            r"does not support weight_bits|quantization.*not supported|"
+            r"Only types = \[.*\] are supported",
+            re.I,
+        ),
+        "quant_capability",
+        Rung.SERVE_FLAG,
+        "the kernel backend cannot execute this quantization format; the error names "
+        "the supported set — switch the model to a supported variant (e.g. 4-bit) or "
+        "select a different quantization backend, rather than rebuilding",
+    ),
+    (
         re.compile(r"unrecognized arguments|invalid choice|error: argument", re.I),
         "config",
         Rung.SERVE_FLAG,

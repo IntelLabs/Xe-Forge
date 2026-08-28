@@ -168,3 +168,17 @@ class TestWiredIntoTheBenchRunner:
         )
         measurement = BenchRunner().measure(spec)
         assert measurement.wall_time.n == 1
+
+
+class TestQuantCapabilityGap:
+    """The measured vLLM-XPU case: GPTQ-Int8 routed to a 4-bit-only Marlin path."""
+
+    def test_unsupported_weight_bits_is_named_not_unknown(self):
+        stderr = (
+            "ValueError: Marlin does not support weight_bits = uint8b128. "
+            "Only types = [ScalarType.uint4, ScalarType.uint4b8] are supported"
+        )
+        gaps = diagnose(1, "", stderr)
+        assert gaps[0].kind == "quant_capability"
+        assert gaps[0].rung is Rung.SERVE_FLAG
+        assert "supported" in gaps[0].suggestion and "4-bit" in gaps[0].suggestion

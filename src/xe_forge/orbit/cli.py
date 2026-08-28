@@ -226,12 +226,41 @@ def cmd_trace(args: argparse.Namespace) -> int:
         print(f"unitrace: unavailable — {unitrace_result.reason}")
 
     # The workload runs as a subprocess, so in-process torch profiling and launch
-    # interception do not apply here; a trace file is the handoff.
-    result = executor.run(spec.command, env=spec.env, cwd=spec.cwd, timeout=spec.timeout_s)
+    # interception do not apply here; a trace file is the handoff. With --wrap, the
+    # handoff is arranged for the workload: the command runs through the shipped
+    # profiler wrapper, which writes the trace exactly where this stage looks — the
+    # point-and-start path for single-process torch workloads. Framework engines
+    # that move GPU work into a subprocess (vLLM, SGLang) need their own profiler
+    # hook, and the wrapper says so rather than emitting an empty trace silently.
+    run_command, run_env = spec.command, spec.env
+    if getattr(args, "wrap", False):
+        import os
+
+        src_root = str(Path(trace_mod.__file__).resolve().parents[3])
+        run_env = dict(spec.env)
+        prior = run_env.get("PYTHONPATH", os.environ.get("PYTHONPATH", ""))
+        run_env["PYTHONPATH"] = src_root + (os.pathsep + prior if prior else "")
+        run_command = [
+            spec.command[0],
+            "-m",
+            "xe_forge.orbit.profiling.wrap",
+            "--out",
+            str(store.path(TORCH_TRACE)),
+            "--",
+            *spec.command,
+        ]
+
+    result = executor.run(run_command, env=run_env, cwd=spec.cwd, timeout=spec.timeout_s)
     if not result.ok:
         print(f"workload failed: exit {result.returncode}", file=sys.stderr)
         if result.stderr:
-            print(result.stderr[-2000:], file=sys.stderr)
+            print(result.stderr[-1500:], file=sys.stderr)
+        # The failure is an enablement finding, not only a dead end (§5.6): classify
+        # it and name the rung, the same wiring BenchRunner.measure carries.
+        from xe_forge.orbit.enablement import diagnose
+
+        for gap in diagnose(result.returncode, result.stdout, result.stderr):
+            print(gap.format(), file=sys.stderr)
         return 1
 
     trace_path = store.path(TORCH_TRACE)
@@ -1642,6 +1671,14 @@ Examples:
     p = sub.add_parser("trace", help="profile a workload and normalize its trace")
     _add_workload_args(p)
     p.add_argument("--from-trace", help="ingest an existing Chrome trace file instead of running")
+
+    p.add_argument(
+        "--wrap",
+        action="store_true",
+        help="run the workload under the shipped torch.profiler wrapper so it needs "
+        "no profiler code of its own (single-process torch workloads; framework "
+        "engines use their own hook)",
+    )
     p.add_argument("--replay", help="re-read a stored trace from this run id")
     p.set_defaults(func=cmd_trace)
 
