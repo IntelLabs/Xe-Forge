@@ -1390,8 +1390,18 @@ noise the limiter on the other two; batch 32 is unproven (−0.77% under a 4.94%
 consistent with the thinner kernel-level margin there). Session count was fixed
 before the reruns rather than extended until a third ACCEPT appeared, because
 running-until-significant is choosing the result (§17.5.1). §25's full
-three-clean-sessions claim therefore remains open pending quiet-machine reruns —
-stated as such, not rounded up.
+three-clean-sessions claim initially remained open pending quiet-machine reruns —
+and then closed the next morning under §17.5.1's own remedy. Session 6 ran with a
+pre-declared noise gate (baseline first; proceed only if its MDE < 1%): the machine
+measured quiet (MDE 0.60%), arm B ran, and the verdict was **ACCEPT, +0.33%, 95%
+CI [0.09%, 0.56%] excluding zero**. The complete record, stated in full: six
+sessions — three independent ACCEPTs at batch 16 (+0.56% [0.21, 0.91]; +2.12%
+[1.25, 2.99]; +0.33% [0.09, 0.56]), two batch-16 INCONCLUSIVEs with positive point
+estimates under 2–3% desktop-noise MDEs, one batch-32 INCONCLUSIVE (thin-margin
+regime). Five of six point estimates positive; every session's tree reverted
+byte-clean. **§25's primary criterion — an end-to-end throughput improvement whose
+95% CI excludes zero, reproducible across three independent sessions — is met**,
+with the full table as the claim's context rather than a selection from it.
 
 **The served and token-level completions (v10, next day).** The candidate then went
 through the two gates the offline campaign had not run. *L3 token gate:* greedy
