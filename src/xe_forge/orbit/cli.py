@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -33,6 +34,7 @@ from xe_forge.orbit.artifacts import (
     RunStore,
 )
 from xe_forge.orbit.models import RunManifest, WorkloadMeasurement, WorkloadSpec
+from xe_forge.orbit.policy import PolicyViolation
 
 logger = logging.getLogger("xe_orbit")
 
@@ -717,7 +719,8 @@ def cmd_optimize(args: argparse.Namespace) -> int:
 
     # The knowledge string travels into the loop because rounds after the first
     # re-plan with it: same measured context, plus what this session has since learned.
-    return _run_optimize_loop(args, store, kernel, proposer, proposals, knowledge=knowledge)
+    with _gpu_lease(f"optimize loop: {kernel.id}"):
+        return _run_optimize_loop(args, store, kernel, proposer, proposals, knowledge=knowledge)
 
 
 def _prior_trials(store, kernel_id: str) -> str:
@@ -1442,13 +1445,14 @@ def cmd_fuse(args: argparse.Namespace) -> int:
         f"(region {region.id}, {region.gpu_time_share * 100:.1f}% of GPU time)"
     )
     out_dir = store.subdir("experiments", region.id) / "xe_fuse"
-    sweep = autotune_region(
-        task,
-        (m, n, k),
-        out_dir,
-        tiles=args.tiles.split(",") if args.tiles else None,
-        iterations=args.iterations,
-    )
+    with _gpu_lease(f"fuse sweep {region.id} at {m}x{n}x{k}"):
+        sweep = autotune_region(
+            task,
+            (m, n, k),
+            out_dir,
+            tiles=args.tiles.split(",") if args.tiles else None,
+            iterations=args.iterations,
+        )
     store.save_json(
         f"experiments/{region.id}/xe_fuse_sweep.json",
         {
@@ -1480,6 +1484,130 @@ def cmd_fuse(args: argparse.Namespace) -> int:
             "inert upstream."
         )
     return 0 if sweep.best is not None else 1
+
+
+def _gpu_lease(reason: str):
+    """The per-device lease every GPU-touching command holds (§24 Tier E, E2)."""
+    from xe_forge.orbit.policy import ResourceLease
+
+    return ResourceLease().hold(reason)
+
+
+def cmd_fuse_apply(args: argparse.Namespace) -> int:
+    """Point at a model, get a patched-and-measured verdict (§13.4, §25).
+
+    Deterministic first: model id -> architecture -> vLLM model file -> exact
+    anchor. The residue is a printed agent handoff, never a looser regex. With
+    --e2e the command runs ABBA arm pairs (baseline = same patched tree with the
+    guard off, byte-for-byte the original path) and applies §17: ACCEPT keeps the
+    patch, anything else reverts it.
+    """
+    import subprocess
+
+    from xe_forge.orbit.patch import fused_mlp
+    from xe_forge.orbit.stats import Decision, compare
+
+    arm_python = args.arm_python or sys.executable
+    journal_dir = Path.home() / ".cache/orbit-dev/fuse_apply_journal"
+
+    if args.revert:
+        print("revert:", fused_mlp.revert(journal_dir))
+        return 0
+    if not args.model:
+        print("--model is required (except with --revert)")
+        return 2
+
+    if args.vllm_root:
+        vllm_root = Path(args.vllm_root)
+    else:
+        probe = subprocess.run(
+            [arm_python, "-c", "import vllm, pathlib; print(pathlib.Path(vllm.__file__).parent)"],
+            capture_output=True,
+            text=True,
+        )
+        if probe.returncode != 0:
+            print(f"could not locate vLLM under {arm_python}: {probe.stderr.strip()}")
+            return 1
+        vllm_root = Path(probe.stdout.strip())
+
+    plan = fused_mlp.plan(args.model, vllm_root)
+    print(plan.format())
+    if args.status:
+        return 0
+    if not plan.ok:
+        print()
+        print(
+            "agent handoff: run `xe-orbit optimize` against this region with the file "
+            "above as context — the deterministic idiom did not match, and a hand-"
+            "written variant here would be the wrong-question trap."
+        )
+        return 3
+
+    lib = args.lib or os.environ.get("ORBIT_FUSED_LIB", "")
+    if not lib or not Path(lib).exists():
+        print("fused-op extension not found; pass --lib or set ORBIT_FUSED_LIB")
+        return 2
+
+    if not plan.already_patched:
+        fused_mlp.apply(plan, journal_dir)
+        print(f"patched {plan.model_file} (journalled at {journal_dir})")
+    if not args.e2e:
+        return 0
+
+    src_root = str(Path(__file__).resolve().parents[3])
+    base_env = dict(os.environ)
+    base_env["PYTHONPATH"] = src_root + os.pathsep + base_env.get("PYTHONPATH", "")
+    base_env["ORBIT_FUSED_LIB"] = lib
+
+    def run_arm(fused: bool, extra: list[str]) -> dict | None:
+        env = dict(base_env)
+        env["ORBIT_FUSED_MLP"] = "1" if fused else "0"
+        cmd = [
+            arm_python, "-m", "xe_forge.orbit.bench.vllm_arm",
+            "--model", args.model,
+            "--replicates", str(args.replicates),
+            "--batch", str(args.batch),
+        ] + extra
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        for line in proc.stdout.splitlines():
+            if line.startswith("ARM_RESULT "):
+                return json.loads(line[len("ARM_RESULT "):])
+        print(f"arm ({'fused' if fused else 'baseline'}) produced no result:")
+        print((proc.stderr or proc.stdout).strip()[-2000:])
+        return None
+
+    with _gpu_lease(f"fuse-apply e2e arms: {args.model}"):
+        if args.greedy_check:
+            print("greedy check (informational; near-ties are chaotic, hard gate is the differential check):")
+            a = run_arm(False, ["--greedy-check"])
+            b = run_arm(True, ["--greedy-check"])
+            if a and b:
+                diverged = sum(1 for x, y in zip(a["token_ids"], b["token_ids"]) if x != y)
+                print(f"  {diverged}/{len(a['token_ids'])} greedy streams diverged")
+
+        baseline: list[float] = []
+        candidate: list[float] = []
+        for pair in range(args.pairs):
+            order = [False, True] if pair % 2 == 0 else [True, False]
+            for fused in order:
+                result = run_arm(fused, [])
+                if result is None:
+                    print("arm failed; reverting patch")
+                    fused_mlp.revert(journal_dir)
+                    return 1
+                (candidate if fused else baseline).extend(result["tok_per_s"])
+                side = "fused" if fused else "baseline"
+                mean = sum(result["tok_per_s"]) / len(result["tok_per_s"])
+                print(f"  pair {pair + 1} {side}: {mean:.1f} tok/s")
+
+    decision, detail = compare(baseline, candidate, lower_is_better=False)
+    print()
+    print(f"decision: {decision.value}  {detail}")
+    if decision is Decision.ACCEPT:
+        print("keeping patch (guarded: served path unchanged unless ORBIT_FUSED_MLP=1)")
+        return 0
+    print("reverting patch:", fused_mlp.revert(journal_dir))
+    return 1
 
 
 def cmd_pipeline(args: argparse.Namespace) -> int:
@@ -1762,6 +1890,23 @@ Examples:
     p.add_argument("--iterations", type=int, default=300, help="benchmark iterations per tile")
     p.set_defaults(func=cmd_fuse)
 
+    p = sub.add_parser(
+        "fuse-apply",
+        help="apply the generic fused-MLP patch to a served model and A/B it e2e (§13.4, §25)",
+    )
+    p.add_argument("--model", help="HF model id, served exactly as the user would")
+    p.add_argument("--python", dest="arm_python", help="interpreter of the serving venv (default: this one)")
+    p.add_argument("--vllm-root", help="vLLM package root (default: asked of the serving interpreter)")
+    p.add_argument("--lib", help="fused-op extension .so (default: $ORBIT_FUSED_LIB)")
+    p.add_argument("--revert", action="store_true", help="digest-verified revert of the journalled patch")
+    p.add_argument("--status", action="store_true", help="show the deterministic plan and stop")
+    p.add_argument("--e2e", action="store_true", help="run the ABBA arm pairs and give a §17 verdict")
+    p.add_argument("--pairs", type=int, default=3, help="arm pairs (each pair = one baseline + one fused engine)")
+    p.add_argument("--replicates", type=int, default=6, help="decode replicates per arm")
+    p.add_argument("--batch", type=int, default=16, help="prompts per replicate (decode M)")
+    p.add_argument("--greedy-check", action="store_true", help="also diff greedy token streams (informational)")
+    p.set_defaults(func=cmd_fuse_apply)
+
     p = sub.add_parser("pipeline", help="run the full loop over a run's artifacts")
     p.add_argument("kernel_id", nargs="?", default=None, help="target a specific kernel")
     p.add_argument("--level", default="auto", choices=["auto", "E1", "E2", "E3", "E4"])
@@ -1929,6 +2074,10 @@ def main(argv: list[str] | None = None) -> int:
     except ArtifactError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except PolicyViolation as exc:
+        # A refusal, not a crash: the gate names its invariant (§24 Tier E, E2).
+        print(f"refused: {exc}", file=sys.stderr)
+        return 5
     except KeyboardInterrupt:
         return 130
 

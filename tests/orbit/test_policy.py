@@ -234,3 +234,58 @@ class TestLoopIntegration:
         assert result.trials[0].verdict is TrialVerdict.REFUSED
         assert str(os.getpid()) in result.trials[0].reason
         assert target.read_bytes() == ORIGINAL
+
+
+class TestResourceLease:
+    """E2: the GPU lease — collisions impossible, not disciplined-against."""
+
+    def test_second_claimant_refused_by_name(self, tmp_path):
+        from xe_forge.orbit.policy import ResourceLease
+
+        lease = ResourceLease("xpu0", lease_dir=tmp_path)
+        with lease.hold("e2e arms"):
+            with pytest.raises(PolicyViolation, match="held by live pid.*e2e arms"):
+                with ResourceLease("xpu0", lease_dir=tmp_path).hold("sweep"):
+                    pass
+
+    def test_released_on_exit_and_reacquirable(self, tmp_path):
+        from xe_forge.orbit.policy import ResourceLease
+
+        lease = ResourceLease("xpu0", lease_dir=tmp_path)
+        with lease.hold("first"):
+            pass
+        with lease.hold("second"):  # no refusal: the first exit released it
+            pass
+
+    def test_stale_lease_broken_with_note(self, tmp_path, caplog):
+        import json
+
+        from xe_forge.orbit.policy import ResourceLease
+
+        stale = tmp_path / "xpu0.lease"
+        stale.write_text(json.dumps({"pid": 2**22 + 12345, "reason": "died", "since": "x"}))
+        with caplog.at_level("WARNING"):
+            with ResourceLease("xpu0", lease_dir=tmp_path).hold("after crash"):
+                pass
+        assert any("breaking stale lease" in r.message for r in caplog.records)
+
+    def test_probe_failure_refuses_and_releases(self, tmp_path):
+        from xe_forge.orbit.policy import ResourceLease
+
+        def noisy_machine():
+            raise RuntimeError("clock variance above threshold")
+
+        lease = ResourceLease("xpu0", lease_dir=tmp_path, probe=noisy_machine)
+        with pytest.raises(PolicyViolation, match="precondition probe refused"):
+            with lease.hold("measure"):
+                pass
+        # the failed probe must not leave the device held
+        with ResourceLease("xpu0", lease_dir=tmp_path).hold("retry"):
+            pass
+
+    def test_distinct_resources_do_not_contend(self, tmp_path):
+        from xe_forge.orbit.policy import ResourceLease
+
+        with ResourceLease("xpu0", lease_dir=tmp_path).hold("a"):
+            with ResourceLease("xpu1", lease_dir=tmp_path).hold("b"):
+                pass

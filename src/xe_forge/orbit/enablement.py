@@ -159,6 +159,25 @@ _CLASSIFIERS: list[tuple[re.Pattern[str], str, Rung, str]] = [
         "select a different quantization backend, rather than rebuilding",
     ),
     (
+        # A precompiled kernel library that lacks the instantiation this model's
+        # configuration needs, e.g. "Paged decode kernel not compiled for this
+        # configuration" — measured live: phi-2's head_dim=80 is outside the head
+        # sizes the XPU paged-attention build instantiates. Distinct from
+        # missing_op (no implementation at all) and from quant_capability (format
+        # unsupported by design): the kernel exists, this shape was not compiled.
+        re.compile(
+            r"not compiled for this configuration|"
+            r"unsupported head[_ ]?(dim|size)|head[_ ]?(dim|size).*not supported",
+            re.I,
+        ),
+        "kernel_capability",
+        Rung.SERVE_FLAG,
+        "the kernel library was built without this model's configuration; try "
+        "another backend for the op first (e.g. VLLM_ATTENTION_BACKEND) — if none "
+        "covers it, the real fix is rung 5: rebuild the kernel library with this "
+        "configuration compiled in (off-loop build lane, deferred)",
+    ),
+    (
         re.compile(r"unrecognized arguments|invalid choice|error: argument", re.I),
         "config",
         Rung.SERVE_FLAG,

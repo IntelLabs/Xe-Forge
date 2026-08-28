@@ -36,7 +36,7 @@ import hashlib
 import json
 import logging
 import os
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -211,3 +211,110 @@ def _pid_alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+class ResourceLease:
+    """Exclusive per-device lease (plan §24 Tier E, item E2).
+
+    §17.5 requires the GPU to be quiet during a measurement, and until now that
+    was discipline — a rule the operator follows — rather than a mechanism. The
+    measured motivation: a served arm was once launched while an eval still held
+    the GPU, and only a fast manual kill kept the numbers honest. This class
+    makes the collision impossible instead of disciplined-against: every
+    GPU-touching command holds the lease for the duration, and a second claimant
+    is refused with the holder's name, reason and start time.
+
+    The mechanism is the single-writer lock's, deliberately — one lock idiom in
+    this module, not two: ``O_CREAT|O_EXCL`` for atomicity, a JSON stamp naming
+    the holder, stale-holder breaking with a logged note, and every refusal
+    naming its invariant. An optional ``probe`` runs after acquisition and
+    before the caller proceeds (the §17.5 quiet-machine check is the intended
+    probe), so taking the lease and validating the measurement precondition are
+    one gesture; a probe failure releases the lease and refuses.
+    """
+
+    def __init__(
+        self,
+        resource: str = "xpu0",
+        lease_dir: Path | None = None,
+        probe: Callable[[], None] | None = None,
+    ) -> None:
+        self.resource = resource
+        self.lease_dir = Path(lease_dir) if lease_dir else Path.home() / ".cache/orbit-dev/leases"
+        self.probe = probe
+
+    @property
+    def _lease_path(self) -> Path:
+        return self.lease_dir / f"{self.resource}.lease"
+
+    @contextmanager
+    def hold(self, reason: str) -> Iterator[None]:
+        """Hold the device exclusively for the duration of the block."""
+        lease = self._acquire(reason)
+        try:
+            if self.probe is not None:
+                try:
+                    self.probe()
+                except Exception as exc:
+                    raise PolicyViolation(
+                        f"lease: acquired {self.resource} but the measurement "
+                        f"precondition probe refused: {exc}"
+                    ) from exc
+            yield
+        finally:
+            lease.unlink(missing_ok=True)
+
+    def _acquire(self, reason: str) -> Path:
+        self.lease_dir.mkdir(parents=True, exist_ok=True)
+        lease = self._lease_path
+        for _ in range(_ACQUIRE_ATTEMPTS):
+            try:
+                fd = os.open(str(lease), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            except FileExistsError:
+                stamp = self._read_stamp(lease)
+                pid = stamp.get("pid") if stamp else None
+                if isinstance(pid, int) and _pid_alive(pid):
+                    raise PolicyViolation(
+                        f"lease: {self.resource} is held by live pid {pid} "
+                        f"({stamp.get('reason', '?')}, since {stamp.get('since', '?')}); "
+                        f"two claimants on one device would corrupt both measurements "
+                        f"(§17.5) — wait, or investigate the holder"
+                    ) from None
+                logger.warning(
+                    "lease: breaking stale lease %s on %s; %s",
+                    lease,
+                    self.resource,
+                    f"holder pid {pid} is dead" if isinstance(pid, int) else "no readable holder stamped",
+                )
+                lease.unlink(missing_ok=True)
+                continue
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "pid": os.getpid(),
+                        "resource": self.resource,
+                        "reason": reason,
+                        "since": _now_iso(),
+                    },
+                    handle,
+                )
+            return lease
+        raise PolicyViolation(
+            f"lease: {self.resource} could not be acquired; a stale lease was broken "
+            f"but another claimant re-took it immediately, so a live contender is "
+            f"racing for this device"
+        )
+
+    @staticmethod
+    def _read_stamp(lease: Path) -> dict | None:
+        try:
+            raw = json.loads(lease.read_text(encoding="utf-8"))
+            return raw if isinstance(raw, dict) else None
+        except (OSError, ValueError):
+            return None
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

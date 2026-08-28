@@ -2257,12 +2257,68 @@ the failure §4.1 exists to prevent.
 portability test — its knowledge file already exists); `orbit/README.md`'s layout block
 still names `optimize.py`, which became the `optimize/` package.
 
-**v0.2, in this order:** the enablement ladder's climb — rungs 3–5 on the foundation
-`orbit/enablement.py` lays (Tier C), then `orbit-arena` (agent A/B on the task format
-the pipeline already emits), then `SGLangAdapter` — before the planner, before
-campaigns — with lines-changed-outside-`adapters/` reported as the portability metric.
-Then config/backend sweep executor, planner, campaign manager, budget accounting,
-learned experiment memory.
+**Tier E — the parity roadmap (2026-08-28): match Hyperloom where it still leads,
+stay better where we already are.** This supersedes the v0.2 ordering paragraph that
+stood here. Scope decision, recorded: **no multinode** — the target is any
+single-device Intel GPU, this box included; nothing below assumes more than one
+device, and nothing may start to. Where we already hold the higher ground —
+§17/§17.6 statistics, E1/E2 extraction verification, the in-loop fusion executor,
+and the point-and-start `fuse-apply` path (model id → architecture → decoder idiom →
+guarded patch → §17 verdict, agent handoff for the residue; landed 2026-08-28
+alongside the `kernel_capability` diagnosis class) — parity work must not trade any
+of it away.
+
+- **E1. The off-loop build lane — rungs 4 and 5, the headline.** Rung 4
+  (`climb_source_localize`): resolve the diagnosed component to its pinned source
+  tree — `kernel_sources` revision pins (G3) plus `languages/sources.py` already
+  carry the resolution; the climb is checkout + configuration-point location. Rung 5
+  (`BuildLane`): a single-slot, journalled, resumable build queue so a long compile
+  never blocks the loop — and one better than Hyperloom's KEEP: a build passes the
+  runnable gate (boot + eval) *and*, where a pre-climb baseline exists, §17
+  no-regression on token/s. Surface: `xe-orbit enable --model <id>` — diagnose,
+  climb as far as needed, queue the build off-loop, re-run the gate. Validation is
+  not synthetic: the two live rung-5 cases are sgl-kernel-xpu (serial `MAX_JOBS=1`
+  build; unblocks SGLang and with it §25 on a second framework) and
+  vllm-xpu-kernels with head_dim=80 instantiated (unblocks phi-2, completing the
+  small-model fleet table).
+- **E2. Resource leases now; phase declarations after.** A flock-based per-device
+  `ResourceLease` in `orbit/policy.py`: every GPU-touching command acquires it or
+  refuses, naming the current holder and since when; acquisition runs the §17.5
+  quiet-machine probe so the lease and the measurement precondition are one
+  gesture. Motivated by a real near-miss (a served arm launched while the L3 eval
+  held the GPU — caught by discipline, which is not a mechanism). Then: declared
+  stage/data dependencies on the run store, refusals naming the missing artifact.
+  The full PRELUDE→CLOSE machine stays deferred until agent-proposed writes exist
+  outside the loop's gate — building it before then would be invariants with no
+  writers to constrain.
+- **E3. Vendor-operator playbook + the rejection taxonomy.** Port Hyperloom's
+  patchability rejections to Intel terms as named classes with evidence (vendor
+  `.so`, dispatch wrapper with no kernel body, Inductor cache entry, `aten::`
+  backed by a vendor library, launcher-only host file) — `kernel_capability`
+  (phi-2, measured 2026-08-28) is the first entry, not the last. Then
+  `knowledge_base/common/vendor_ops.yaml`: curated, validated knob sets for closed
+  operators, starting with the two that dominate every trace here — oneDNN GEMM
+  and XPU paged attention — so E4/LIBRARY_CONFIG routes to a playbook instead of
+  dead-ending at a category name.
+- **E4. `xe-orbit campaign` — the minimal Arbor.** A campaign spec (workloads ×
+  framework × budget) executed serially under the lease: per workload the full
+  loop — trace → regions → `fuse-apply`/optimize → e2e verdict — with the novelty
+  ledger and session memory shared across entries, resumable through the run
+  store, and a generated report that *is* the fleet table, under §17.6 discipline
+  (a workload whose stack was never re-measured reports NOT ESTABLISHED, never a
+  projection).
+- **E5. Breadth, single-device.** SGLang e2e locally once E1 lands (the §25 bar on
+  both frameworks); the fleet table as the standing day-1-support artifact, phi-2
+  row included after E1. Larger single-GPU Intel hardware runs the same commands
+  unchanged — that claim is already partially measured (four architectures through
+  the untouched pipeline) and E1–E4 only widen it.
+
+**Execution order:** E2-lease first (small, and it protects every measurement that
+follows), then E1 (both live validation cases are waiting on it), then E5's SGLang
+and phi-2 runs as E1's acceptance tests, with E3 interleaved (CPU-side, never holds
+the lease), then E4, then E2's phase declarations. Campaign search beyond E4 —
+long-horizon planning over many campaigns — stays out until there is a fleet of
+results worth planning over.
 
 ---
 

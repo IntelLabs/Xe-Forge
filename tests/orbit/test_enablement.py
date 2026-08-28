@@ -182,3 +182,20 @@ class TestQuantCapabilityGap:
         assert gaps[0].kind == "quant_capability"
         assert gaps[0].rung is Rung.SERVE_FLAG
         assert "supported" in gaps[0].suggestion and "4-bit" in gaps[0].suggestion
+
+
+class TestKernelCapabilityGap:
+    """The measured vLLM-XPU case: phi-2's head_dim=80 outside the compiled set."""
+
+    def test_uncompiled_configuration_is_named_not_unknown(self):
+        stderr = "RuntimeError: Paged decode kernel not compiled for this configuration."
+        gaps = diagnose(1, "", stderr)
+        assert gaps[0].kind == "kernel_capability"
+        assert gaps[0].rung is Rung.SERVE_FLAG
+        assert "rung 5" in gaps[0].suggestion
+
+    def test_distinct_from_missing_op(self):
+        # missing_op means no implementation at all; this kernel exists, the shape
+        # was not instantiated — the climb differs (backend flag vs op override).
+        gaps = diagnose(1, "", "unsupported head_dim: 80")
+        assert gaps[0].kind == "kernel_capability"
