@@ -83,7 +83,14 @@ class TrialManager:
         parent: str | None = None,
         strategy: str = "",
     ) -> str:
-        """Save a trial by copying the kernel file into the trial directory.
+        """Save a trial by copying the kernel into the trial directory.
+
+        *trial_file* is a single source file, or a directory of them. A kernel split
+        across files -- a header, a few translation units, a wrapper -- is one trial and
+        has to be stored as one, or a later ``finalize`` hands back an entry point whose
+        companions are missing and the tree records a speedup nothing can rebuild. A
+        directory is stored whole, under ``t{N}/``, and every reader reaches it through
+        the same ``file`` field.
 
         Returns the assigned trial id (e.g. ``"t0"``).
         """
@@ -104,15 +111,26 @@ class TrialManager:
         trial_id = f"t{state['next_id']}"
         state["next_id"] += 1
 
-        dest = self._trial_dir(kernel_name) / f"{trial_id}.py"
-        try:
-            shutil.copy2(trial_file, dest)
-        except shutil.SameFileError:
-            pass
+        if trial_file.is_dir():
+            # A directory keeps its own layout: relative paths inside it are how the
+            # sources include each other, so flattening would break the build.
+            dest = self._trial_dir(kernel_name) / trial_id
+            if dest.resolve() != trial_file.resolve():
+                shutil.copytree(trial_file, dest, dirs_exist_ok=True)
+        else:
+            # Keep the trial's own extension: a SYCL trial stored as .py is not a
+            # cosmetic problem, since the extension is what a builder and an editor
+            # dispatch on.
+            suffix = trial_file.suffix or ".py"
+            dest = self._trial_dir(kernel_name) / f"{trial_id}{suffix}"
+            try:
+                shutil.copy2(trial_file, dest)
+            except shutil.SameFileError:
+                pass
 
         state["trials"][trial_id] = {
             "parent": parent,
-            "file": f"{trial_id}.py",
+            "file": dest.name,
             "strategy": strategy,
             "validation": None,
             "correctness": None,
@@ -275,7 +293,12 @@ class TrialManager:
         src = self._trial_dir(kernel_name) / best["file"]
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, output_path)
+        if src.is_dir():
+            # The winner of a multi-file trial is the whole directory. Handing back only
+            # its entry point would name a kernel that cannot be rebuilt.
+            shutil.copytree(src, output_path, dirs_exist_ok=True)
+        else:
+            shutil.copy2(src, output_path)
         logger.info(
             "Finalized %s (%.2fx) -> %s",
             best_id,

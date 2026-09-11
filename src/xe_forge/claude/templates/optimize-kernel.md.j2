@@ -1,19 +1,36 @@
 Optimize `$ARGUMENTS` into a {{ dsl | upper }} kernel.
 
-Resolve the argument to a file in `test_kernels/` — it could be a full filename, partial name, or just a number. Glob to find the match; if ambiguous, ask.
+Resolve the argument to a file in `test_kernels/` — it could be a full filename, partial
+name, or just a number. Glob to find the match; if ambiguous, pick the closest and say which
+you picked. Nobody is watching this session, so never stop to ask.
 
-First read `config.yaml` for session settings (max_trials, vtune_enabled).
-Follow the CLAUDE.md workflow exactly — every step, in order:
+First read `config.yaml` for session settings (max_trials, dsl, device, measurement,
+vtune_enabled). Follow the CLAUDE.md workflow exactly — every step, in order:
 
-1. Read the baseline kernel file in `test_kernels/` to understand the operations.
-2. Run `xe-forge-skill analyze test_kernels/<name>.py`.
-3. Read relevant knowledge_base/ files.
-4. Initialize: `xe-forge-skill trial init <kernel_name> test_kernels/<name>.py`
-5. Run ALL max_trials trials (from config.yaml). For EACH trial you MUST:
-   - Validate with `xe-forge-skill validate`
+1. Read the baseline kernel file in `test_kernels/` to understand the operations, and the
+   `_pytorch.py` reference beside it if present — that is the semantics to preserve. Read the
+   rest of `test_kernels/` too: the interface the trial must expose and any further baseline
+   sources are put there by the project that generated this workspace.
+2. Run `xe-forge-skill analyze <pytorch_file>` when there is a PyTorch source to analyze.
+3. Read relevant `knowledge_base/` files. Ignore their `expected_speedup` fields; `benchmark`
+   on this part is what settles whether a pattern is worth anything.
+4. Initialize: `xe-forge-skill trial init <kernel_name> <baseline_file>`
+5. Run trials. For EACH trial you MUST:
+   - Validate with `xe-forge-skill validate --dsl {{ dsl }}`
    - Save with `xe-forge-skill trial save`
-   - Benchmark with `xe-forge-skill benchmark` — NEVER create custom test scripts
+   - Benchmark with `xe-forge-skill benchmark` — NEVER create custom test scripts, and never
+     record a timing that did not come from it
    - Record with `xe-forge-skill trial result`
-6. Finalize the best correct trial
-
+   Stop when `max_trials` is exhausted, when the ideas this kernel's regime admits are
+   exhausted, or when the search has plateaued.
+6. Finalize the best correct trial, then write a summary naming: the best trial and its
+   measured speedup, which stopping condition fired, and what you tried that did not work.
+{% if measurement == "host" %}
+A benchmark that comes back with `speedup=none` and `VERDICT: BELOW_FLOOR` or
+`INDISTINGUISHABLE` is not a regression — it is no measurement at all. Do not branch away
+from a kernel on one; retry on a larger `--variant` or stop.
+A trial may be split across sources. When it is, put them in a directory and pass that
+directory to `validate`, `trial save` and `benchmark` alike — naming one file of a split
+kernel builds it against the baseline's other sources and times a mixture nobody wrote.
+{% endif %}
 CRITICAL: ONLY create kernel files — NO benchmark scripts, NO test scripts, NO helpers.

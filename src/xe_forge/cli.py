@@ -170,6 +170,33 @@ Examples:
     # Claude Code specific
     parser.add_argument("--workspace", type=str, help="Workspace dir for Claude Code engine")
     parser.add_argument("--auto-launch", action="store_true", help="Auto-launch claude CLI")
+    parser.add_argument(
+        "--max-turns", type=int, help="Turn limit for one headless claude session (default: 80)"
+    )
+
+    # Host-supplied toolchain and measurement (see xe_forge.core.build_backend
+    # and xe_forge.core.external). Unset, all three keep today's behaviour.
+    host_group = parser.add_argument_group(
+        "host integration",
+        "Delegate building, correctness and timing to a project that owns them",
+    )
+    host_group.add_argument(
+        "--build-backend",
+        type=str,
+        help="Build backend: a registered name, an entry point, or 'module:attr'",
+    )
+    host_group.add_argument(
+        "--external-benchmark",
+        type=str,
+        help="Command template run instead of the built-in benchmark; placeholders: "
+        "{kernel} {baseline} {trial} {spec} {variant} {device} {dsl} {workspace}",
+    )
+    host_group.add_argument(
+        "--external-validate",
+        type=str,
+        help="Command template run instead of the built-in validator; placeholders: "
+        "{kernel} {trial} {dsl} {stage} {workspace}",
+    )
 
     # Other options
     parser.add_argument("--debug", action="store_true", help="Enable debug output")
@@ -255,6 +282,14 @@ def _load_config(args) -> Config:
         os.environ["WORKSPACE"] = args.workspace
     if args.auto_launch:
         os.environ["AUTO_LAUNCH"] = "true"
+    if getattr(args, "max_turns", None) is not None:
+        os.environ["MAX_TURNS"] = str(args.max_turns)
+    if getattr(args, "build_backend", None):
+        os.environ["BUILD_BACKEND"] = args.build_backend
+    if getattr(args, "external_benchmark", None):
+        os.environ["EXTERNAL_BENCHMARK"] = args.external_benchmark
+    if getattr(args, "external_validate", None):
+        os.environ["EXTERNAL_VALIDATE"] = args.external_validate
 
     config = get_config()
     if overrides:

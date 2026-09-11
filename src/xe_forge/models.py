@@ -20,6 +20,15 @@ class DSL(StrEnum):
             return "cpp"
         return "python"
 
+    @property
+    def kernel_ext(self) -> str:
+        """Suffix a kernel in this DSL is written to.
+
+        A compiled DSL stored under ``.py`` is not cosmetic: the extension is
+        what a builder, an editor and a compiler driver dispatch on.
+        """
+        return ".cpp" if self in (DSL.SYCL, DSL.CUDA) else ".py"
+
 
 class DeviceType(StrEnum):
     XPU = "xpu"

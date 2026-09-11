@@ -46,6 +46,11 @@ def generate_workspace(
 
     dsl = config.device_config.dsl
     device = config.device_config.device
+    ext = _kernel_ext(dsl)
+    # What the session is told its numbers come from. The commands it runs are the
+    # same either way -- the delegation happens inside xe-forge-skill -- but the
+    # verdicts it may see, and so the rules it has to follow, are not.
+    measurement = "host" if config.external.benchmark else "builtin"
 
     (workspace / "CLAUDE.md").write_text(
         _render(
@@ -53,12 +58,17 @@ def generate_workspace(
             dsl=dsl,
             device=device,
             kernel_name=kernel_name,
+            ext=ext,
+            measurement=measurement,
         )
     )
     (workspace / "config.yaml").write_text(
         _render(
             "config.yaml.j2",
             max_trials=config.trial.max_trials,
+            dsl=dsl,
+            device=device,
+            measurement=measurement,
             vtune_enabled=config.profiler.vtune_enabled,
             vtune_bin=config.profiler.vtune_bin,
         )
@@ -66,17 +76,29 @@ def generate_workspace(
 
     cmd_dir = workspace / ".claude" / "commands"
     cmd_dir.mkdir(parents=True, exist_ok=True)
-    (cmd_dir / "optimize-kernel.md").write_text(_render("optimize-kernel.md.j2", dsl=dsl))
+    (cmd_dir / "optimize-kernel.md").write_text(
+        _render("optimize-kernel.md.j2", dsl=dsl, measurement=measurement)
+    )
 
     agent_dir = workspace / ".claude" / "agents"
     agent_dir.mkdir(parents=True, exist_ok=True)
     (agent_dir / "tool-runner.md").write_text(_render("tool-runner.md.j2"))
 
-    _write_kernel_files(workspace, kernel_name, kernel_code, reference_code, spec_path)
+    _write_kernel_files(workspace, kernel_name, kernel_code, reference_code, spec_path, ext)
     _symlink_knowledge_base(workspace)
 
     if config.engine.git_init:
         _git_init(workspace)
+
+
+def _kernel_ext(dsl: str) -> str:
+    """Suffix for a kernel written in *dsl*."""
+    from xe_forge.models import DSL
+
+    try:
+        return DSL(str(dsl)).kernel_ext
+    except ValueError:
+        return ".py"
 
 
 def _write_kernel_files(
@@ -85,11 +107,14 @@ def _write_kernel_files(
     kernel_code: str,
     reference_code: str,
     spec_path: str | None,
+    ext: str = ".py",
 ) -> None:
     tk_dir = workspace / "test_kernels"
     tk_dir.mkdir(parents=True, exist_ok=True)
 
-    (tk_dir / f"{kernel_name}.py").write_text(kernel_code)
+    (tk_dir / f"{kernel_name}{ext}").write_text(kernel_code)
+    # The reference stays .py whatever the kernel is written in: it is PyTorch,
+    # and it is what `analyze` can actually read.
     if reference_code:
         (tk_dir / f"{kernel_name}_pytorch.py").write_text(reference_code)
     if spec_path and Path(spec_path).exists():
