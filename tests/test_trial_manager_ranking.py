@@ -36,8 +36,9 @@ def test_gated_trial_outranks_a_measured_regression(mgr, tmp_path):
     Ranking on ``speedup`` alone makes the gated trial invisible, so the regression is
     the only candidate and becomes ``best_trial``.
     """
-    gated = _trial(mgr, tmp_path, "t0.cpp", baseline_us=255.2, triton_us=252.6,
-                   verdict="INDISTINGUISHABLE")
+    gated = _trial(
+        mgr, tmp_path, "t0.cpp", baseline_us=255.2, triton_us=252.6, verdict="INDISTINGUISHABLE"
+    )
     _trial(mgr, tmp_path, "t1.cpp", speedup=0.66, baseline_us=255.4, triton_us=390.2)
 
     assert mgr.get_best("k")["id"] == gated
@@ -45,8 +46,7 @@ def test_gated_trial_outranks_a_measured_regression(mgr, tmp_path):
 
 def test_a_gated_trial_records_no_speedup(mgr, tmp_path):
     """Ranking at parity must not put a ratio into the record the loop reads back."""
-    tid = _trial(mgr, tmp_path, "t0.cpp", baseline_us=255.2, triton_us=252.6,
-                 verdict="BELOW_FLOOR")
+    tid = _trial(mgr, tmp_path, "t0.cpp", baseline_us=255.2, triton_us=252.6, verdict="BELOW_FLOOR")
     best = mgr.get_best("k")
 
     assert best["id"] == tid
@@ -56,8 +56,7 @@ def test_a_gated_trial_records_no_speedup(mgr, tmp_path):
 
 
 def test_a_measured_win_outranks_parity(mgr, tmp_path):
-    _trial(mgr, tmp_path, "t0.cpp", baseline_us=255.2, triton_us=252.6,
-           verdict="INDISTINGUISHABLE")
+    _trial(mgr, tmp_path, "t0.cpp", baseline_us=255.2, triton_us=252.6, verdict="INDISTINGUISHABLE")
     win = _trial(mgr, tmp_path, "t1.cpp", speedup=1.4, baseline_us=255.2, triton_us=182.3)
 
     assert mgr.get_best("k")["id"] == win
@@ -65,10 +64,8 @@ def test_a_measured_win_outranks_parity(mgr, tmp_path):
 
 def test_a_measured_parity_outranks_a_gated_one(mgr, tmp_path):
     """Same rank, so the tie goes to the trial whose ratio was actually resolved."""
-    _trial(mgr, tmp_path, "t0.cpp", baseline_us=255.2, triton_us=252.6,
-           verdict="INDISTINGUISHABLE")
-    measured = _trial(mgr, tmp_path, "t1.cpp", speedup=1.0, baseline_us=255.2,
-                      triton_us=255.2)
+    _trial(mgr, tmp_path, "t0.cpp", baseline_us=255.2, triton_us=252.6, verdict="INDISTINGUISHABLE")
+    measured = _trial(mgr, tmp_path, "t1.cpp", speedup=1.0, baseline_us=255.2, triton_us=255.2)
 
     assert mgr.get_best("k")["id"] == measured
 
@@ -93,8 +90,9 @@ def test_finalize_refuses_a_regression(mgr, tmp_path):
 
 def test_finalize_keeps_parity(mgr, tmp_path):
     """A kernel that matches the baseline is a legitimate thing to keep."""
-    tid = _trial(mgr, tmp_path, "t0.cpp", baseline_us=255.2, triton_us=252.6,
-                 verdict="INDISTINGUISHABLE")
+    tid = _trial(
+        mgr, tmp_path, "t0.cpp", baseline_us=255.2, triton_us=252.6, verdict="INDISTINGUISHABLE"
+    )
     out = tmp_path / "out.cpp"
 
     assert mgr.finalize("k", out) == tid
