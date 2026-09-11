@@ -5,7 +5,7 @@ and for standalone ad-hoc testing.
 
 Usage:
     xe-forge-skill analyze <pytorch_file>
-    xe-forge-skill validate <kernel_file> [--dsl triton]
+    xe-forge-skill validate <kernel_file|kernel_dir> [--dsl triton]
     xe-forge-skill benchmark <baseline> <optimized> --spec <spec.yaml> [--baseline-us N]
     xe-forge-skill trial {init|save|result|status|best|baseline-us|finalize} [args]
     xe-forge-skill profile <kernel_file> --spec <spec.yaml> [--warmup 5] [--iters 20]
@@ -27,9 +27,16 @@ def main():
 
     # -- validate --
     p_validate = subparsers.add_parser("validate", help="Static kernel validation")
-    p_validate.add_argument("kernel_file", help="Path to kernel file")
+    p_validate.add_argument(
+        "kernel_file", help="Path to the kernel: one source file, or a directory of them"
+    )
     p_validate.add_argument("--dsl", default="triton", choices=["triton", "sycl", "gluon", "cuda"])
     p_validate.add_argument("--stage", default=None, help="Current optimization stage")
+    p_validate.add_argument(
+        "--external-validate",
+        default=None,
+        help="Host command to validate with instead (overrides EXTERNAL_VALIDATE)",
+    )
 
     # -- benchmark --
     p_bench = subparsers.add_parser("benchmark", help="Correctness + performance comparison")
@@ -41,6 +48,11 @@ def main():
     p_bench.add_argument("--device", default="xpu", help="Target device")
     p_bench.add_argument("--dsl", default="triton", choices=["triton", "sycl", "gluon", "cuda"])
     p_bench.add_argument("--triton-baseline", action="store_true", help="Baseline is Triton kernel")
+    p_bench.add_argument(
+        "--external-benchmark",
+        default=None,
+        help="Host command to benchmark with instead (overrides EXTERNAL_BENCHMARK)",
+    )
 
     # -- trial --
     p_trial = subparsers.add_parser("trial", help="Trial tree management")
@@ -54,7 +66,10 @@ def main():
 
     t_save = trial_sub.add_parser("save")
     t_save.add_argument("kernel_name")
-    t_save.add_argument("trial_file")
+    t_save.add_argument(
+        "trial_file",
+        help="The trial: one source file, or a directory holding all of its sources",
+    )
     t_save.add_argument("--parent", default=None)
     t_save.add_argument("--strategy", default="")
     t_save.add_argument("--trials-dir", default="./trials")
@@ -66,7 +81,13 @@ def main():
     t_result.add_argument("--correctness", choices=["pass", "fail"])
     t_result.add_argument("--speedup", type=float)
     t_result.add_argument("--baseline-us", type=float)
-    t_result.add_argument("--triton-us", type=float)
+    # Neutral name; the Triton spelling stays an alias because SYCL, CUDA and
+    # Gluon trials record the same field. The on-disk key is unchanged.
+    t_result.add_argument("--kernel-us", "--triton-us", type=float, dest="kernel_us")
+    # The gate a host named when it withheld `--speedup`. Recorded so the tree says why
+    # a trial carries no ratio; a trial with both times and no ratio ranks at parity
+    # whether or not the gate was named, so this is a record, not a control.
+    t_result.add_argument("--verdict")
     t_result.add_argument("--trials-dir", default="./trials")
 
     t_status = trial_sub.add_parser("status")

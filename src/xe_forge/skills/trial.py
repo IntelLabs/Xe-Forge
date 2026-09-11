@@ -30,14 +30,18 @@ def run(args):
                 correctness=args.correctness,
                 speedup=args.speedup,
                 baseline_us=args.baseline_us,
-                triton_us=args.triton_us,
+                triton_us=args.kernel_us,
+                verdict=getattr(args, "verdict", None),
             )
             status_icon = {"completed": "+", "failed": "X", "partial": "~", "saved": "?"}
             icon = status_icon.get(trial["status"], "?")
-            print(
-                f"[{icon}] {args.trial_id}: correctness={trial['correctness']}, "
-                f"speedup={trial['speedup']}"
-            )
+            # `speedup=None` reads like a missing measurement; it is a withheld one.
+            # Print the gate that withheld it so the loop is not tempted to fill it in.
+            if trial["speedup"] is None and trial["status"] == "completed":
+                outcome = f"speedup=none ({trial.get('verdict') or 'gated'}; ranks as parity)"
+            else:
+                outcome = f"speedup={trial['speedup']}"
+            print(f"[{icon}] {args.trial_id}: correctness={trial['correctness']}, {outcome}")
 
         case "status":
             print(mgr.get_status(args.kernel_name))
@@ -45,8 +49,12 @@ def run(args):
         case "best":
             best = mgr.get_best(args.kernel_name)
             if best:
+                speedup = best.get("speedup")
                 print(f"best_trial: {best['id']}")
-                print(f"speedup: {best.get('speedup')}")
+                if speedup is None:
+                    print(f"speedup: none ({best.get('verdict') or 'gated'}; parity)")
+                else:
+                    print(f"speedup: {speedup}")
                 print(f"strategy: {best.get('strategy')}")
                 print(f"file: {best.get('file_path')}")
             else:
@@ -66,5 +74,12 @@ def run(args):
             if best_id:
                 print(f"Finalized {best_id} -> {args.output_file}")
             else:
-                print("No correct trials to finalize.", file=sys.stderr)
+                # Two different outcomes, and a loop that cannot tell them apart will
+                # retry the wrong thing: nothing was ever correct, or the best correct
+                # trial was slower than the baseline and was refused.
+                print(
+                    "Nothing finalized: no correct trial, or the best one was a "
+                    "regression. Run `trial status` to see which.",
+                    file=sys.stderr,
+                )
                 sys.exit(1)

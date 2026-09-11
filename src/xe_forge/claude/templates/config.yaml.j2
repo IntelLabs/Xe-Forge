@@ -1,3 +1,10 @@
 max_trials: {{ max_trials }}
+dsl: "{{ dsl }}"
+device: "{{ device }}"
+# host: correctness and timing come from the project that generated this workspace,
+#       which owns the workload data and the calibrated timer, and which may return a
+#       gated verdict instead of a speedup.
+# builtin: Xe-Forge's own executor, measuring against tensors generated from the spec.
+measurement: "{{ measurement }}"
 vtune_enabled: {% if vtune_enabled %}true{% else %}false{% endif %}
 vtune_bin: "{{ vtune_bin }}"

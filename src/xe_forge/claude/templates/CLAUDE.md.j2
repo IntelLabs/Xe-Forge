@@ -1,3 +1,4 @@
+{%- set analyze_file = "test_kernels/" ~ kernel_name ~ (".py" if ext == ".py" else "_pytorch.py") %}
 # Xe-Forge Kernel Optimizer
 
 Optimize kernels into high-performance {{ dsl | upper }} implementations for {{ device | upper }}.
@@ -5,7 +6,10 @@ Optimize kernels into high-performance {{ dsl | upper }} implementations for {{ 
 ## CONFIGURATION — Read `config.yaml` first
 
 At the start of every session, read `config.yaml` in the workspace root. It controls:
-- **`max_trials`** — hard cap on optimization trials
+- **`max_trials`** — cap on optimization trials
+- **`dsl`** / **`device`** — what you are writing, and for what part
+- **`measurement`** — `host` when correctness and timing come from the project that
+  generated this workspace, `builtin` when they come from Xe-Forge's own executor
 - **`vtune_enabled`** — whether VTune profiling is available this session
 - **`vtune_bin`** — path to VTune binary
 
@@ -13,71 +17,175 @@ All runtime behavior below is gated by these values; re-read `config.yaml` if an
 
 ## RULES — NEVER VIOLATE
 
-1. **ONLY create** kernel files (trial files `t<N>.py` or output files).
+1. **ONLY create** kernel files (trial files `t<N>{{ ext }}` or output files){% if measurement == "host" %}, or a
+   trial *directory* `t<N>/` holding a kernel that is split across sources{% endif %}.
 2. **NEVER create** benchmark scripts, test scripts, helper utilities, or any other files.
-3. **NEVER write custom scripts** to measure performance — ONLY use `xe-forge-skill benchmark`.
+3. **NEVER write custom scripts** to measure performance — `xe-forge-skill benchmark` is the
+   only source of a timing. A number arrived at any other way is not comparable with the rest
+   of the trial tree and must be discarded, not recorded.
 4. If a tool fails, **STOP and report the error**. Do NOT work around it with custom scripts.
-5. Generated kernels must be **self-contained** — all helper functions inline.
-6. You **MUST run all `max_trials` trials** (as set in `config.yaml`). Do NOT stop early due to plateau. Only stop early if speedup > 5x.
+{%- if measurement == "host" %}
+5. A trial is built from **exactly the files you name**, and nothing else. One file is one
+   file; several files are a directory, passed as a directory to `validate`, `trial save`
+   and `benchmark` alike. Naming a single file of a split kernel builds it against the
+   *baseline's* other sources — a mixture nobody wrote, timed as if it were the trial.
+{%- else %}
+5. Generated kernels must be **self-contained** — all helper functions inline, because one
+   file is what gets compiled.
+{%- endif %}
+6. Do not stop at the first trial that improves. Keep going until one of the stopping
+   conditions below fires, and **say in the finalize summary which one did**. A run that
+   stops without naming its stopping condition cannot be read afterwards.
 
 ## MANDATORY TOOLS — Use these and ONLY these
 
 **Delegate all tool execution** to the `tool-runner` agent to keep the main context clean.
 
-**CRITICAL — Single-XPU serialization**: There is only ONE XPU. NEVER dispatch multiple tool-runner agents in parallel if any runs `benchmark` or `profile`. These GPU workloads must execute strictly one at a time.
+**CRITICAL — Single-{{ device | upper }} serialization**: There is only ONE {{ device | upper }}.
+NEVER dispatch multiple tool-runner agents in parallel if any runs `benchmark` or `profile`.
+These GPU workloads must execute strictly one at a time.
 
 | Task | Command |
 |------|---------|
-| **Analyze** | `xe-forge-skill analyze <pytorch_file>` |
-| **Validate** | `xe-forge-skill validate <kernel_file> --dsl {{ dsl }}` |
-| **Benchmark** | `xe-forge-skill benchmark <baseline> <optimized> --spec <spec.yaml> [--baseline-us <cached>]` |
+| **Analyze** (PyTorch sources only) | `xe-forge-skill analyze {{ analyze_file }}` |
+| **Validate** | `xe-forge-skill validate <kernel{% if measurement == "host" %}_file\|dir{% else %}_file{% endif %}> --dsl {{ dsl }}` |
+| **Benchmark** | `xe-forge-skill benchmark <baseline> <optimized> --spec <spec.yaml> [--variant <name>] [--baseline-us <cached>]` |
 | **Init trials** | `xe-forge-skill trial init <kernel_name> <baseline_file>` |
-| **Save trial** | `xe-forge-skill trial save <kernel_name> <file> [--parent <id>] [--strategy "..."]` |
-| **Record result** | `xe-forge-skill trial result <kernel_name> <trial_id> --correctness <pass\|fail> --speedup <float> --baseline-us <float> --triton-us <float>` |
+| **Save trial** | `xe-forge-skill trial save <kernel_name> <file{% if measurement == "host" %}\|dir{% endif %}> [--parent <id>] [--strategy "..."]` |
+| **Record result** | `xe-forge-skill trial result <kernel_name> <trial_id> --correctness <pass\|fail> --speedup <float> --baseline-us <float> --kernel-us <float>{% if measurement == "host" %} [--verdict <gate>]{% endif %}` |
 | **Check status** | `xe-forge-skill trial status <kernel_name>` |
 | **Best trial** | `xe-forge-skill trial best <kernel_name>` |
 | **Baseline time** | `xe-forge-skill trial baseline-us <kernel_name>` |
 | **Finalize** | `xe-forge-skill trial finalize <kernel_name> <output_file>` |
-| **Profile** (only when `vtune_enabled: true`) | `xe-forge-skill profile <triton_file> --spec <spec.yaml>` |
+| **Profile** (only when `vtune_enabled: true`) | `xe-forge-skill profile <kernel_file> --spec <spec.yaml>` |
 
 ## WORKFLOW — Follow these steps in order
 
 ### Step 1: Analyze
-- Read the baseline source file `test_kernels/{{ kernel_name }}.py`. Identify shapes, dtypes, operations.
-- Run `xe-forge-skill analyze test_kernels/{{ kernel_name }}.py` to get AST-based analysis.
-- Read relevant knowledge_base/ files for optimization patterns.
+- Read the baseline source file `test_kernels/{{ kernel_name }}{{ ext }}`. Identify shapes, dtypes, operations.
+- Read `test_kernels/{{ kernel_name }}_pytorch.py` if present — it is the semantics to preserve.
+- **List `test_kernels/` and read every other file there for this kernel.** The project that
+  generated this workspace puts the interface the trial must expose, the benchmark spec and
+  any further sources of the baseline there; they are part of the brief, not decoration, and
+  nothing repeats them here.
+- Run `xe-forge-skill analyze {{ analyze_file }}` for AST-based analysis (it reads PyTorch
+  sources; skip it if that file is absent).
+- Read relevant `knowledge_base/` files for optimization patterns. Read each entry's
+  `description`, `rationale`, `pattern_before`, `pattern_after`, `applies_to` and any
+  prerequisites. **Do not read `expected_speedup`** — it is what a pattern was worth on the
+  machine it was recorded on, and whether it is worth anything here is settled by `benchmark`
+  on this part and by nothing else.
 
 ### Step 2: Initialize
 ```bash
-xe-forge-skill trial init {{ kernel_name }} test_kernels/{{ kernel_name }}.py
+xe-forge-skill trial init {{ kernel_name }} test_kernels/{{ kernel_name }}{{ ext }}
 ```
 
-### Step 3: Trial Loop (always run all `max_trials` trials from `config.yaml`)
+### Step 3: Trial Loop
 For each trial:
-1. **Write kernel** — start from template or modify previous trial.
-2. **Validate** — `xe-forge-skill validate <file> --dsl {{ dsl }}` (fix until passing).
-3. **Save** — `xe-forge-skill trial save {{ kernel_name }} <file> --parent <id> --strategy "description"`.
+1. **Write kernel** — start from the baseline or modify the previous trial.
+2. **Validate** — `xe-forge-skill validate <path> --dsl {{ dsl }}` (fix until passing).
+3. **Save** — `xe-forge-skill trial save {{ kernel_name }} <path> --parent <id> --strategy "description"`.
 4. **Benchmark** (MANDATORY every trial):
-   - **Trial t0:** `xe-forge-skill benchmark test_kernels/{{ kernel_name }}.py <triton_file> --spec test_kernels/{{ kernel_name }}.yaml`
-   - **Trials t1+:** Get cached baseline via `xe-forge-skill trial baseline-us {{ kernel_name }}`, then `xe-forge-skill benchmark test_kernels/{{ kernel_name }}.py <triton_file> --spec test_kernels/{{ kernel_name }}.yaml --baseline-us <cached>`
-5. **Record** — `xe-forge-skill trial result {{ kernel_name }} <trial_id> --correctness <pass|fail> --speedup <float> --baseline-us <float> --triton-us <float>`
-6. **Profile** — if `vtune_enabled: true` in `config.yaml` and this is trial t1 or later, run `xe-forge-skill profile <triton_file> --spec <spec.yaml>` and use the output to guide the next trial. If `vtune_enabled: false`, skip this step.
-7. **Decide next action**:
-   - Speedup > 5x -> stop, finalize
-   - Speedup improved -> continue on this branch
-   - Speedup regressed -> branch back to best trial, try different strategy
-   - Correctness failed -> fix on same branch
-   - Plateau -> try fundamentally different approach
+   - **Trial t0:** `xe-forge-skill benchmark test_kernels/{{ kernel_name }}{{ ext }} <trial_path> --spec test_kernels/{{ kernel_name }}.yaml`
+   - **Trials t1+:** get the cached baseline via `xe-forge-skill trial baseline-us {{ kernel_name }}`, then the same command with `--baseline-us <cached>`
+5. **Record** — `xe-forge-skill trial result {{ kernel_name }} <trial_id> --correctness <pass|fail> --speedup <float> --baseline-us <float> --kernel-us <float>`
+{%- if measurement == "host" %}
+   When the benchmark gated the comparison it reports no speedup. Omit `--speedup`
+   entirely and pass `--verdict <the gate it named>` instead. Omitting it is not a
+   half-recorded trial: a trial with both times and no ratio ranks **at parity**, above
+   every measured regression, so nothing is lost by leaving it out and a number written
+   there would be one you did not measure.
+{%- endif %}
+6. **Profile** — if `vtune_enabled: true` in `config.yaml` and this is trial t1 or later, run
+   `xe-forge-skill profile <kernel_file> --spec <spec.yaml>` and use the output to guide the
+   next trial. If `vtune_enabled: false`, skip this step.
+7. **Decide next action** — from the benchmark output:
+   - Correctness FAILED → fix on the same branch. Read the `Output:` block; it carries the
+     compiler diagnostic or the mismatch that says what to fix.
+   - Speedup improved → continue on this branch.
+   - Speedup regressed → branch back to the best trial and try a different strategy.
+   - Plateau (several trials on a branch with no improvement) → try a fundamentally
+     different approach, not another variation of the same one.
+{% if measurement == "host" %}
+   - `VERDICT: BELOW_FLOOR` or `VERDICT: INDISTINGUISHABLE`, and `speedup=none` → **this is
+     not a regression and not an improvement**. The two arms were closer together than the
+     part's measured timing floor, so there is no result. Record it with `--verdict` and no
+     `--speedup`, and do not branch away from the kernel on it. Either re-benchmark on a larger
+     shape with `--variant <name>` (the spec lists them) or stop and say the shape is
+     unmeasurable here.
+   - `VERDICT: NO_CALIBRATION` or `VERDICT: EXTERNAL_ERROR` → STOP and report. The gate could
+     not be evaluated, so no trial after this one means anything.
+{% endif %}
+
+**Stop when one of these fires, and name it in the finalize summary:**
+- `max_trials` from `config.yaml` is exhausted;
+- you have exhausted the ideas this kernel's regime admits — say which you tried and why
+  nothing remains;
+- the search has plateaued — several consecutive trials, on more than one branch, with no
+  measured improvement.
 
 ### Step 4: Finalize
 ```bash
-xe-forge-skill trial finalize {{ kernel_name }} output/{{ kernel_name }}_optimized.py
+xe-forge-skill trial finalize {{ kernel_name }} output/{{ kernel_name }}_optimized{{ ext }}
 ```
+{% if measurement == "host" %}
+If the best trial is a directory, drop the extension — `output/{{ kernel_name }}_optimized` —
+and it is written out as a directory holding all of that trial's sources.
+{% endif %}
+`finalize` refuses to write out a trial slower than the baseline, so a failure here means
+either nothing was correct or nothing reached parity — `trial status` says which. That is a
+result to report, not a thing to work around.
+
+Then write a short summary: the best trial, its measured speedup — or the gate that withheld
+one, said as parity rather than as a win — which stopping condition fired, and what you tried
+that did not work.
 
 ## CRITICAL CORRECTNESS CONSTRAINTS
-
+{% if dsl in ("triton", "gluon") %}
 - NO default values for `@triton.autotune` meta-parameters in kernel signature
 - Use 1D grid when applying tile swizzling (GROUP_SIZE_M)
 - `boundary_check` uses dimension indices (0, 1), not booleans
 - Cast batch indices to `int64` before stride multiplication
-- Model class must be compatible with ai-bench (nn.Module with get_inputs/get_init_inputs)
+- The kernel module must expose the same entry point as the baseline file it replaces
+{% elif dsl == "sycl" %}
+- **Use the caller's queue.** Do not create a `sycl::queue`. Obtain the one the framework
+  already runs on — for a TVM-FFI entry point that is
+  `static_cast<sycl::queue*>(TVMFFIEnvGetStream(dev.device_type, dev.device_id))`. A kernel
+  that submits to its own queue runs correctly, out of order with everything around it, and
+  its measured time is not the time it would take in the model.
+- **Do not synchronize inside the kernel function.** No `queue.wait()`, no host-side barrier
+  per call: the harness owns synchronization, and a wait inside the call is measured as part
+  of the kernel.
+- **Sub-group size is declared, not assumed.** Annotate with
+  `[[sycl::reqd_sub_group_size(N)]]` and use a size this part actually supports; a
+  sub-group reduction written for one width is silently wrong on another.
+- **Vectorized access has preconditions.** A `sycl::vec` load or a `sub_group` block read
+  requires the pointer to be aligned to the access width and the extent to be a whole
+  multiple of it. Guard the tail rather than assuming the shape divides evenly — a shape
+  that divides on the benchmarked variant may not on another.
+- **Accumulate in a wider type.** Reductions over `half`/`bfloat16` accumulate in `float`;
+  accumulating in the storage type passes on small shapes and drifts out of tolerance on
+  large ones.
+- **Local memory is a resource, not free storage.** Every `local_accessor` byte reduces
+  occupancy; a work-group size that fits at one tile size may not at the next.
+{%- if measurement == "host" %}
+- **Split the kernel when it helps, and pass the directory.** A header of tile parameters
+  or a second translation unit is fine; every source you name is compiled. Keep the
+  exported symbol in the entry-point file.
+{%- else %}
+- **The kernel must be self-contained.** All helpers inline in the one file, because that
+  file is what is compiled.
+{%- endif %}
+{% elif dsl == "cuda" %}
+- Use the caller's stream; do not create one, and do not synchronize inside the kernel call.
+- Declare launch bounds rather than relying on the compiler's occupancy guess.
+- Accumulate reductions over `half`/`bfloat16` in `float`.
+- Guard tails explicitly; a vectorized load requires the alignment and extent to permit it.
+{%- if measurement == "host" %}
+- Split the kernel across files when it helps, and pass the directory; keep the exported
+  symbol in the entry-point file.
+{%- else %}
+- The kernel must be self-contained — all helpers inline in the one file.
+{%- endif %}
+{% endif %}

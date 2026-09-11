@@ -9,6 +9,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from xe_forge.external import DEFAULT_TIMEOUT
 from xe_forge.models import OptimizationStage
 
 
@@ -134,6 +135,28 @@ class EngineConfig:
     auto_launch: bool = False  # Claude engine: auto-launch claude CLI
     workspace: str = "./"  # Claude engine: workspace directory
     git_init: bool = False  # Claude engine: initialize workspace as git repo
+    max_turns: int = 80  # Claude engine: turn limit for one headless session
+    # Name, ``module:attr`` reference, or entry point of a build backend
+    # (see xe_forge.core.build_backend). None keeps the default ai_bench path.
+    build_backend: str | None = None
+
+
+@dataclass
+class ExternalConfig:
+    """Commands a host supplies for correctness and timing.
+
+    Xe-Forge's own answers to "is it correct" and "how fast is it" come from
+    random tensors and an unfloored wall-clock measurement. A host with real
+    workload data and a calibrated timer supplies a command instead; see
+    :mod:`xe_forge.external` for the contract it must print and for why the
+    default is worth replacing.
+
+    Both are None by default, which leaves today's behaviour in place.
+    """
+
+    benchmark: str | None = None
+    validate: str | None = None
+    timeout: int = DEFAULT_TIMEOUT
 
 
 @dataclass
@@ -168,6 +191,7 @@ class Config:
     engine: EngineConfig = field(default_factory=EngineConfig)
     trial: TrialConfig = field(default_factory=TrialConfig)
     profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
+    external: ExternalConfig = field(default_factory=ExternalConfig)
 
     @property
     def xpu(self) -> XPUConfig:
@@ -254,6 +278,15 @@ class ConfigManager:
             auto_launch=self._get_env("AUTO_LAUNCH", False, bool),
             workspace=self._get_env("WORKSPACE", "./"),
             git_init=self._get_env("WORKSPACE_GIT_INIT", False, bool),
+            max_turns=self._get_env("MAX_TURNS", 80, int),
+            build_backend=self._get_env("BUILD_BACKEND", None),
+        )
+
+        # External correctness/timing commands
+        external_cfg = ExternalConfig(
+            benchmark=self._get_env("EXTERNAL_BENCHMARK", None),
+            validate=self._get_env("EXTERNAL_VALIDATE", None),
+            timeout=self._get_env("EXTERNAL_TIMEOUT", DEFAULT_TIMEOUT, int),
         )
 
         # Trial Configuration
@@ -281,6 +314,7 @@ class ConfigManager:
             engine=engine_cfg,
             trial=trial_cfg,
             profiler=profiler_cfg,
+            external=external_cfg,
         )
 
     def _build_device_config(self, device_type: str, dsl: str) -> DeviceConfig:
