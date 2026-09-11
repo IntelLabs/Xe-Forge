@@ -118,7 +118,13 @@ def _write_kernel_files(
     if reference_code:
         (tk_dir / f"{kernel_name}_pytorch.py").write_text(reference_code)
     if spec_path and Path(spec_path).exists():
-        shutil.copy2(spec_path, tk_dir / f"{kernel_name}.yaml")
+        # A host that generates the workspace layout itself -- writing the kernel, the
+        # reference and the spec into `test_kernels/` and then naming those paths on the
+        # command line -- hands us a source that is already the destination. That is the
+        # arrangement working as intended, not an error to raise on.
+        dest = tk_dir / f"{kernel_name}.yaml"
+        if Path(spec_path).resolve() != dest.resolve():
+            shutil.copy2(spec_path, dest)
 
 
 def _symlink_knowledge_base(workspace: Path) -> None:

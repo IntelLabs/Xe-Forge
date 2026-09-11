@@ -84,6 +84,10 @@ def main():
     # Neutral name; the Triton spelling stays an alias because SYCL, CUDA and
     # Gluon trials record the same field. The on-disk key is unchanged.
     t_result.add_argument("--kernel-us", "--triton-us", type=float, dest="kernel_us")
+    # The gate a host named when it withheld `--speedup`. Recorded so the tree says why
+    # a trial carries no ratio; a trial with both times and no ratio ranks at parity
+    # whether or not the gate was named, so this is a record, not a control.
+    t_result.add_argument("--verdict")
     t_result.add_argument("--trials-dir", default="./trials")
 
     t_status = trial_sub.add_parser("status")

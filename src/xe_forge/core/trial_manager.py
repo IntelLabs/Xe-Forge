@@ -15,6 +15,33 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def _rank(trial: dict) -> tuple[float, int] | None:
+    """How this trial orders against the others, or ``None`` if it does not order.
+
+    A host that gates its comparison reports both arms' times and withholds the ratio
+    (``xe_forge.external``): the two arms ran, and the difference between them was
+    smaller than what the part can resolve. Ranking on ``speedup`` alone makes such a
+    trial invisible, so a *measured regression* outranks it and ``finalize`` ships the
+    slower kernel -- which is the opposite of what the gate exists to prevent.
+
+    So the order is taken from the shape of the contract rather than from a verdict
+    vocabulary this module would have to keep in step with its hosts: a gated trial
+    ranks at parity. The number here is an ordering key and never becomes a reported
+    measurement -- ``speedup`` stays ``None`` in the record, because a loop handed a
+    ratio will branch on it.
+
+    Returns ``(rank, measured)``; on equal rank a measured result wins, so a kernel
+    timed at parity is preferred to one that could not be resolved.
+    """
+    if trial.get("correctness") != "pass" or trial.get("validation") == "fail":
+        return None
+    if trial.get("speedup") is not None:
+        return (float(trial["speedup"]), 1)
+    if trial.get("baseline_us") is not None and trial.get("triton_us") is not None:
+        return (1.0, 0)
+    return None
+
+
 class TrialManager:
     """Persistent tree-structured trial state manager.
 
@@ -153,8 +180,14 @@ class TrialManager:
         speedup: float | None = None,
         baseline_us: float | None = None,
         triton_us: float | None = None,
+        verdict: str | None = None,
     ) -> dict:
-        """Record benchmark results for a trial. Returns the trial dict."""
+        """Record benchmark results for a trial. Returns the trial dict.
+
+        *speedup* is absent when the host gated the comparison; *verdict* is the gate
+        it named. Both are recorded as given -- no ratio is invented for a gate. See
+        :func:`_rank` for how a gated trial still orders against the others.
+        """
         state = self._load_state(kernel_name)
 
         if trial_id not in state["trials"]:
@@ -177,20 +210,25 @@ class TrialManager:
         if baseline_us is not None and state.get("baseline_us") is None:
             state["baseline_us"] = [baseline_us]
 
+        if verdict is not None:
+            trial["verdict"] = verdict
+
         if trial["validation"] == "fail" or trial["correctness"] == "fail":
             trial["status"] = "failed"
-        elif trial["correctness"] == "pass" and trial["speedup"] is not None:
+        elif _rank(trial) is not None:
+            # A gated comparison is a finished measurement, not a half-recorded one:
+            # both arms ran and the answer was "not resolvable here".
             trial["status"] = "completed"
         else:
             trial["status"] = "partial"
 
-        best_speedup = -1.0
+        best_rank: tuple[float, int] | None = None
         best_id = None
         for tid, t in state["trials"].items():
-            if t.get("correctness") == "pass" and t.get("speedup") is not None:
-                if t["speedup"] > best_speedup:
-                    best_speedup = t["speedup"]
-                    best_id = tid
+            rank = _rank(t)
+            if rank is not None and (best_rank is None or rank > best_rank):
+                best_rank = rank
+                best_id = tid
         state["best_trial"] = best_id
 
         self._save_state(kernel_name, state)
@@ -281,7 +319,14 @@ class TrialManager:
     ) -> str | None:
         """Copy the best correct trial to *output_path*.
 
-        Returns the best trial id, or None if no correct trials exist.
+        Returns the best trial id, or None if there is nothing worth finalizing.
+
+        A trial slower than the baseline is never finalized, even when it is the only
+        one that ranks: the point of the run is a kernel to keep, and shipping a
+        measured regression because nothing else was rankable is a worse outcome than
+        reporting that the search found nothing. Parity *is* finalized -- a kernel that
+        matches the baseline is a legitimate result, and the caller can see from the
+        absent ``speedup`` that it is not a win.
         """
         state = self._load_state(kernel_name)
         best_id = state.get("best_trial")
@@ -290,6 +335,16 @@ class TrialManager:
             return None
 
         best = state["trials"][best_id]
+        rank = _rank(best)
+        if rank is not None and rank[0] < 1.0:
+            logger.warning(
+                "Best trial %s for '%s' is a regression (%.2fx); nothing finalized",
+                best_id,
+                kernel_name,
+                rank[0],
+            )
+            return None
+
         src = self._trial_dir(kernel_name) / best["file"]
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -299,12 +354,11 @@ class TrialManager:
             shutil.copytree(src, output_path, dirs_exist_ok=True)
         else:
             shutil.copy2(src, output_path)
-        logger.info(
-            "Finalized %s (%.2fx) -> %s",
-            best_id,
-            best.get("speedup", 0),
-            output_path,
-        )
+        speedup = best.get("speedup")
+        # `%.2f` on the None a gate leaves behind would raise here, at the end of a run
+        # that otherwise succeeded. Say which gate decided instead of printing a ratio.
+        measured = f"{speedup:.2f}x" if speedup is not None else (best.get("verdict") or "parity")
+        logger.info("Finalized %s (%s) -> %s", best_id, measured, output_path)
         return best_id
 
     def exists(self, kernel_name: str) -> bool:

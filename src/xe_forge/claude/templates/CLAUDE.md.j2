@@ -52,7 +52,7 @@ These GPU workloads must execute strictly one at a time.
 | **Benchmark** | `xe-forge-skill benchmark <baseline> <optimized> --spec <spec.yaml> [--variant <name>] [--baseline-us <cached>]` |
 | **Init trials** | `xe-forge-skill trial init <kernel_name> <baseline_file>` |
 | **Save trial** | `xe-forge-skill trial save <kernel_name> <file{% if measurement == "host" %}\|dir{% endif %}> [--parent <id>] [--strategy "..."]` |
-| **Record result** | `xe-forge-skill trial result <kernel_name> <trial_id> --correctness <pass\|fail> --speedup <float> --baseline-us <float> --kernel-us <float>` |
+| **Record result** | `xe-forge-skill trial result <kernel_name> <trial_id> --correctness <pass\|fail> --speedup <float> --baseline-us <float> --kernel-us <float>{% if measurement == "host" %} [--verdict <gate>]{% endif %}` |
 | **Check status** | `xe-forge-skill trial status <kernel_name>` |
 | **Best trial** | `xe-forge-skill trial best <kernel_name>` |
 | **Baseline time** | `xe-forge-skill trial baseline-us <kernel_name>` |
@@ -90,6 +90,13 @@ For each trial:
    - **Trial t0:** `xe-forge-skill benchmark test_kernels/{{ kernel_name }}{{ ext }} <trial_path> --spec test_kernels/{{ kernel_name }}.yaml`
    - **Trials t1+:** get the cached baseline via `xe-forge-skill trial baseline-us {{ kernel_name }}`, then the same command with `--baseline-us <cached>`
 5. **Record** — `xe-forge-skill trial result {{ kernel_name }} <trial_id> --correctness <pass|fail> --speedup <float> --baseline-us <float> --kernel-us <float>`
+{%- if measurement == "host" %}
+   When the benchmark gated the comparison it reports no speedup. Omit `--speedup`
+   entirely and pass `--verdict <the gate it named>` instead. Omitting it is not a
+   half-recorded trial: a trial with both times and no ratio ranks **at parity**, above
+   every measured regression, so nothing is lost by leaving it out and a number written
+   there would be one you did not measure.
+{%- endif %}
 6. **Profile** — if `vtune_enabled: true` in `config.yaml` and this is trial t1 or later, run
    `xe-forge-skill profile <kernel_file> --spec <spec.yaml>` and use the output to guide the
    next trial. If `vtune_enabled: false`, skip this step.
@@ -103,9 +110,10 @@ For each trial:
 {% if measurement == "host" %}
    - `VERDICT: BELOW_FLOOR` or `VERDICT: INDISTINGUISHABLE`, and `speedup=none` → **this is
      not a regression and not an improvement**. The two arms were closer together than the
-     part's measured timing floor, so there is no result. Record no speedup for that trial
-     and do not branch away from the kernel on it. Either re-benchmark on a larger shape with
-     `--variant <name>` (the spec lists them) or stop and say the shape is unmeasurable here.
+     part's measured timing floor, so there is no result. Record it with `--verdict` and no
+     `--speedup`, and do not branch away from the kernel on it. Either re-benchmark on a larger
+     shape with `--variant <name>` (the spec lists them) or stop and say the shape is
+     unmeasurable here.
    - `VERDICT: NO_CALIBRATION` or `VERDICT: EXTERNAL_ERROR` → STOP and report. The gate could
      not be evaluated, so no trial after this one means anything.
 {% endif %}
@@ -125,8 +133,13 @@ xe-forge-skill trial finalize {{ kernel_name }} output/{{ kernel_name }}_optimiz
 If the best trial is a directory, drop the extension — `output/{{ kernel_name }}_optimized` —
 and it is written out as a directory holding all of that trial's sources.
 {% endif %}
-Then write a short summary: the best trial, its measured speedup, which stopping condition
-fired, and what you tried that did not work.
+`finalize` refuses to write out a trial slower than the baseline, so a failure here means
+either nothing was correct or nothing reached parity — `trial status` says which. That is a
+result to report, not a thing to work around.
+
+Then write a short summary: the best trial, its measured speedup — or the gate that withheld
+one, said as parity rather than as a win — which stopping condition fired, and what you tried
+that did not work.
 
 ## CRITICAL CORRECTNESS CONSTRAINTS
 {% if dsl in ("triton", "gluon") %}
