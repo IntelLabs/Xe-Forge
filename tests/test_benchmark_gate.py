@@ -467,6 +467,7 @@ def test_no_spec_requires_reference_and_rejects_variant(capsys, reference, varia
 def _paths_not_taken(monkeypatch):
     """Both measurement paths replaced by markers, so a test sees which was chosen."""
     taken = []
+    monkeypatch.setenv(benchmark._CHILD_ENV, "1")
     monkeypatch.setattr(benchmark, "_run_builtin", lambda args: taken.append("builtin") or 0)
     monkeypatch.setattr(
         benchmark, "_run_external", lambda args, template: taken.append(template) or 0
@@ -504,6 +505,20 @@ def test_the_flag_runs_the_builtin(_paths_not_taken):
 
     assert exit_info.value.code == 0
     assert _paths_not_taken == ["builtin"]
+
+
+def test_a_hung_builtin_is_killed_with_a_verdict(monkeypatch, capsys):
+    """A kernel that never completes blocks in the driver; the parent ends it and says so."""
+    import subprocess
+
+    popen = subprocess.Popen
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: popen(["sleep", "60"], **kw))
+    monkeypatch.setattr(get_config().external, "timeout", 1)
+
+    assert benchmark._run_builtin_watched() == 1
+    out = capsys.readouterr().out
+    assert "VERDICT: TIMEOUT" in out
+    assert "Performance:" not in out
 
 
 @pytest.mark.parametrize("value", ["1", "true", "yes", "ON"])
@@ -679,6 +694,38 @@ def test_generated_commands_share_semantic_reference(tmp_path, with_spec):
             "--reference test_kernels/decode_pytorch.py --spec test_kernels/decode.yaml"
             in path.read_text()
         ) is with_spec
+
+
+def test_without_a_reference_the_baseline_copy_is_the_oracle(tmp_path):
+    from xe_forge.claude.generator import generate_workspace
+    from xe_forge.config import Config
+
+    config = Config()
+    config.device_config.dsl = "triton"
+    config.device_config.device = "xpu"
+    config.external.kernel_repo = str(tmp_path / "repo")
+    spec = tmp_path / "source.yaml"
+    spec.write_text("name: decode\n")
+    workspace = tmp_path / "workspace"
+    generate_workspace(workspace, config, "decode", "", spec_path=str(spec), variant_type="bench-x")
+
+    for path in ("CLAUDE.md", ".claude/agents/tool-runner.md"):
+        text = (workspace / path).read_text()
+        for skill in ("benchmark <", "profile <"):
+            commands = [line for line in text.splitlines() if f"xe-forge-skill {skill}" in line]
+            assert commands
+            for command in commands:
+                assert "--reference test_kernels/decode.py" in command
+                assert "--variant bench-x" in command
+    instructions = (workspace / "CLAUDE.md").read_text()
+    assert "There is no PyTorch reference" in instructions
+    assert "decode_pytorch.py" not in instructions
+    locator = (workspace / ".claude/agents/kernel-locator.md").read_text()
+    assert "you write none" in locator
+    assert "decode_pytorch.py`. Nothing else" not in locator
+    assert "[--variant <name>]" in instructions and "default to variant `bench-x`" in instructions
+    assert (workspace / ".claude/agents/port-back.md").exists()
+    assert "dispatch the **port-back** agent" in instructions
 
 
 def test_spec_with_inputs_keeps_its_own_path(tmp_path):

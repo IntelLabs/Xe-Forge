@@ -288,4 +288,41 @@ def run(args):
             "which is the caller's to state."
         )
         sys.exit(1)
-    sys.exit(_run_builtin(args))
+    if os.getenv(_CHILD_ENV):
+        sys.exit(_run_builtin(args))
+    sys.exit(_run_builtin_watched())
+
+
+_CHILD_ENV = "XE_FORGE_BENCHMARK_CHILD"
+
+
+def _run_builtin_watched() -> int:
+    """Run the built-in benchmark in a child that is killed after the benchmark timeout.
+
+    A kernel that never completes leaves the process blocked inside the driver, where no
+    signal handler runs; only a parent can end it and say why.
+    """
+    import signal
+    import subprocess
+
+    from xe_forge.config import get_config
+
+    timeout = get_config().external.timeout
+    child = subprocess.Popen(
+        [sys.executable, "-c", "from xe_forge.skills import main; main()", *sys.argv[1:]],
+        env={**os.environ, _CHILD_ENV: "1"},
+        start_new_session=True,
+    )
+    try:
+        return child.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(child.pid, signal.SIGKILL)
+        child.wait()
+        print("Correctness: FAILED")
+        print("VERDICT: TIMEOUT")
+        print(
+            f"Error: the benchmark did not finish within {timeout}s (EXTERNAL_TIMEOUT) and was "
+            "killed; a kernel that never completes -- a missing barrier, a deadlock, an "
+            "out-of-bounds loop -- hangs the device this way."
+        )
+        return 1

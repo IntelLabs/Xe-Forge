@@ -124,13 +124,25 @@ Do not leave a benchmark or diagnostic running in the background when returning 
 | **Baseline time** | `xe-forge-skill trial baseline-us <kernel_name>` |
 | **Finalize** | `xe-forge-skill trial finalize <kernel_name> <output_file>` |
 | **Profile** (only when `unitrace_enabled: true` or `vtune_enabled: true`) | `xe-forge-skill profile <kernel_file> {{ profile_options }}{% if require_profiles %} --trial-id <trial_id>{% endif %}{% if has_spec %} [--variant <name>]{% endif %}` |
-{% if reference_workload %}
+{% if baseline_oracle %}
+There is no PyTorch reference. `--reference` names the baseline
+`test_kernels/{{ kernel_name }}{{ ext }}` -- the copy of the repository's kernel -- and it is
+the correctness oracle: every trial's outputs and buffers must match it. Once the Step 2
+gate passes, never modify it; a trial that disagrees with it is wrong. Its
+`get_init_inputs()` and `get_inputs()` define the workload.
+{% endif %}
+{% if has_spec %}
+The commands above default to variant `{{ variant }}`, the one this run was started with.
+Append `--variant <name>` to measure another variant the spec lists; the last `--variant`
+wins. Pass the same variant to benchmark and profile, compare timings only within one
+variant, and never pass a `--baseline-us` cached on a different variant.
+{% endif %}
+{% if reference_workload and not baseline_oracle %}
 The supplied `_pytorch.py` file is the immutable semantic reference. Do not modify it
 or replace `--reference` with the generated baseline. Its `get_init_inputs()` and
 `get_inputs()` define the workload, including scalar arguments and per-input dtypes.
 {% if has_spec %}The YAML spec's variant supplies the dims (as keyword arguments to those two
-functions), dtype and tolerances; do not edit either file. Pass the same `--variant` to
-benchmark and profile, and compare timings only within one variant.
+functions), dtype and tolerances; do not edit either file.
 {% else %}No YAML spec is required; do not invent one or pass `--variant`.
 {% endif %}Both the baseline and every trial must pass reference validation before timing,
 including when `--baseline-us` is used. Timing measures repeated calls with fixed
@@ -228,8 +240,10 @@ came from `xe-forge-skill benchmark` here.
 ## WORKFLOW — Follow these steps in order
 
 ### Step 1: Analyze
+{%- if not baseline_oracle %}
 - Read `test_kernels/{{ kernel_name }}_pytorch.py` — the semantic reference. Identify the
   operations, shapes, dtypes and interface there.
+{%- endif %}
 - Read `test_kernels/{{ kernel_name }}{{ ext }}` if it exists — that is the baseline to
   optimize.
 {%- if kernel_repo %} If it does not exist, write it before Step 2 as a self-contained copy
@@ -243,6 +257,13 @@ came from `xe-forge-skill benchmark` here.
   reduction it instantiates -- is copied into the file; from the repository only headers of
   the libraries it builds on (CUTLASS/CuTe, SYCL, oneDNN, torch) may be included by `-I`,
   never the op's own kernel headers.
+{%- if baseline_oracle %} The file also defines `get_init_inputs()` and `get_inputs()`,
+  taking exactly the spec variant's dims as keyword arguments, and builds every input the
+  way the repository's own test or call site does -- cite its file:line for each
+  structured input (index or block tables, offsets, lengths, scales, routing); random
+  values only where the repository uses random values. `Model` keeps its state in
+  registered buffers, set from `get_init_inputs()`.
+{%- endif %}
 {%- if dsl == "sycl" %} `load_inline` gives `extra_sycl_cflags` to the device compile only:
   include directories go in `extra_include_paths` and defines in `extra_cflags` as well,
   or the host pass cannot see them; `-L`/`-l` go in `extra_ldflags`. Device-link flags have
@@ -299,8 +320,13 @@ came from `xe-forge-skill benchmark` here.
   on this part and by nothing else.
 
 ### Step 2: Initialize
-{% if reference_workload %}
+{% if baseline_oracle %}
+Before initializing trials, check that the baseline builds, runs on the device and
+repeats deterministically -- it is the oracle, so nothing else checks it:
+{% elif reference_workload %}
 Before initializing trials, verify the generated baseline against the immutable reference:
+{% endif %}
+{%- if reference_workload %}
 ```bash
 xe-forge-skill benchmark test_kernels/{{ kernel_name }}{{ ext }} test_kernels/{{ kernel_name }}{{ ext }} {{ benchmark_options }}
 ```
@@ -394,6 +420,11 @@ and it is written out as a directory holding all of that trial's sources.
 either nothing was correct or nothing reached parity — `trial status` says which. That is a
 result to report, not a thing to work around.
 
+{% if kernel_repo %}
+If finalize wrote `output/`, dispatch the **port-back** agent once. It turns the winner into
+`output/upstream.patch` against `{{ kernel_repo }}` without touching the repository. Name
+the patch, or the reason there is none, in the summary.
+{% endif %}
 Then write a short summary: the best trial, its measured speedup — or the gate that withheld
 one, said as parity rather than as a win — which stopping condition fired, and what you tried
 that did not work.

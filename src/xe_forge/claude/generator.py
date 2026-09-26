@@ -74,25 +74,41 @@ def generate_workspace(
     # The kernel-locator agent explores the repo itself, once.
     kernel_repo = config.external.kernel_repo
 
+    spec_has_inputs = bool(spec_path and load_spec(spec_path).inputs)
+    # Without a PyTorch reference, the baseline -- a copy of the repo's kernel that also
+    # builds the inputs the repo's own test builds -- is what every trial must agree with.
+    baseline_oracle = (
+        measurement == "builtin"
+        and bool(kernel_repo)
+        and not reference_code
+        and not spec_has_inputs
+    )
+    reference_file = (
+        f"test_kernels/{kernel_name}{ext}"
+        if baseline_oracle
+        else f"test_kernels/{kernel_name}_pytorch.py"
+    )
+    variant_args = ["--variant", variant_type] if spec_path and variant_type else []
+
     benchmark_args = ["--device", str(device), "--dsl", str(dsl)]
     if spec_path:
         benchmark_args.extend(["--spec", f"test_kernels/{kernel_name}.yaml"])
     if measurement == "builtin":
         benchmark_args.append("--builtin-benchmark")
-        if reference_code:
-            benchmark_args.extend(["--reference", f"test_kernels/{kernel_name}_pytorch.py"])
+        if reference_code or baseline_oracle:
+            benchmark_args.extend(["--reference", reference_file])
+    benchmark_args.extend(variant_args)
     benchmark_options = shlex.join(benchmark_args)
     # A spec without inputs gives the reference its dims; one with inputs builds its own.
     reference_workload = (
-        measurement == "builtin"
-        and bool(reference_code)
-        and not (spec_path and load_spec(spec_path).inputs)
-    )
+        measurement == "builtin" and bool(reference_code) and not spec_has_inputs
+    ) or baseline_oracle
     profile_args = []
     if reference_workload:
-        profile_args.extend(["--reference", f"test_kernels/{kernel_name}_pytorch.py"])
+        profile_args.extend(["--reference", reference_file])
     if spec_path:
         profile_args.extend(["--spec", f"test_kernels/{kernel_name}.yaml"])
+    profile_args.extend(variant_args)
     if config.profiler.unitrace_enabled:
         profile_args.extend(["--unitrace-bin", config.profiler.unitrace_bin])
         profile_args.extend(["--metric-group", config.profiler.unitrace_metric_group])
@@ -134,6 +150,8 @@ def generate_workspace(
             require_profiles=require_profiles,
             reference_workload=reference_workload,
             has_spec=bool(spec_path),
+            variant=variant_type,
+            baseline_oracle=baseline_oracle,
             dataset=dataset,
             lessons=lessons,
             compiler_flags=compiler_flags,
@@ -197,6 +215,16 @@ def generate_workspace(
                 kernel_name=kernel_name,
                 kernel_repo=kernel_repo,
                 profile_path=KERNEL_LOCATOR_PROFILE_PATH,
+                baseline_oracle=baseline_oracle,
+            )
+        )
+        (agent_dir / "port-back.md").write_text(
+            _render(
+                "port-back.md.j2",
+                kernel_name=kernel_name,
+                kernel_repo=kernel_repo,
+                profile_path=KERNEL_LOCATOR_PROFILE_PATH,
+                ext=ext,
             )
         )
 

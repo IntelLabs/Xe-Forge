@@ -54,6 +54,15 @@ the convention; read the actual files.
 6. **If no benchmark exists.** Say so plainly. Point at the closest sibling benchmark in
    the same family, if one exists, as the pattern to follow -- do not write the missing
    benchmark yourself here; that is the optimizing session's job, using what you found.
+{%- if baseline_oracle %}
+7. **How the inputs are built -- there is no reference, and you write none.** The
+   optimizing session's baseline copy of the kernel is the correctness oracle, and it
+   builds its inputs the way this repository does. From the existing test (point 4) and
+   the call site that launches the kernel, report for every argument how it is
+   constructed: shape, dtype, layout and, for every structured input (index or block
+   tables, offsets, sequence lengths, scales, routing), the invariants it satisfies --
+   each with file:line.
+{%- else %}
 7. **A standard reference, if one exists -- verified against the real kernel, not
    memory.** Many ops here are ordinary, well-known functions -- a normalization, an
    activation, a softmax, a GEMM epilogue. "Standard" describes the mathematical form
@@ -77,6 +86,7 @@ the convention; read the actual files.
    fused, attention-specific, or otherwise bespoke logic with no universal definition --
    say so, and name the project's own test as the correctness oracle instead of
    inventing a reference.
+{%- endif %}
 
 ## Rules
 
@@ -98,8 +108,8 @@ the convention; read the actual files.
 
 ## Output
 
-Write `{{ profile_path }}`, and -- only for a standard op, per point 7 above --
-`test_kernels/{{ kernel_name }}_pytorch.py`. Nothing else. Create parent directories if
+Write `{{ profile_path }}`{% if not baseline_oracle %}, and -- only for a standard op, per point 7 above --
+`test_kernels/{{ kernel_name }}_pytorch.py`{% endif %}. Nothing else. Create parent directories if
 needed.
 
 Answer, in this order, from what is on disk:
@@ -120,6 +130,10 @@ Answer, in this order, from what is on disk:
 - **Anything the schema alone does not say**: special tensor semantics (masks, sentinel
   values, packed layouts, optional arguments) that a kernel author must know to call this
   correctly.
+{%- if baseline_oracle %}
+- **Inputs**: point 7 -- how each argument is constructed, with file:line.
+{%- else %}
 - **Reference**: whether you wrote `test_kernels/{{ kernel_name }}_pytorch.py` (a standard
   op) or not (bespoke logic) -- and if not, that the project's own test is the correctness
   oracle to use instead.
+{%- endif %}
