@@ -1,0 +1,24 @@
+# Lessons — `{{ kernel_name }}` ({{ dsl }}, {{ device }})
+
+What optimization runs on this part measured while working on this kernel. Every line
+here came from `xe-forge-skill benchmark`; nothing here is a prediction, and nothing here
+is a timing for the run reading it.
+
+Appended to at the end of a run, newest entry last. Entries are never rewritten or
+deleted — a lesson that turns out to be wrong is corrected by a later entry saying so and
+saying why, which is worth more than either entry alone.
+
+<!--
+One entry per run, in this shape:
+
+## <date> — <how the run ended>
+
+Context: <kernel> / <dsl> / <device>, timer <what `TIMER:` said>, baseline <µs> on
+<variant>.
+
+- <strategy tried> → <what `benchmark` returned: speedup, or the gate that withheld one>.
+- ...
+
+About this part, not this kernel: <anything a different kernel would also run into>.
+Not tried: <what was left, and why>.
+-->

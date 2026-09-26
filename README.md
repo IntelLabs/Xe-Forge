@@ -241,8 +241,10 @@ xe-forge-skill analyze kernel.py
 # Validate a Triton kernel (static checks)
 xe-forge-skill validate kernel.py --dsl triton
 
-# Benchmark baseline vs optimized
-xe-forge-skill benchmark baseline.py optimized.py --spec spec.yaml
+# Benchmark baseline vs optimized. Either a host command answers (EXTERNAL_BENCHMARK),
+# or the built-in executor is asked for by name -- it times random tensors at the
+# spec's shapes, so which of the two measured is never left implicit.
+xe-forge-skill benchmark baseline.py optimized.py --spec spec.yaml --builtin-benchmark
 
 # Trial management
 xe-forge-skill trial init my_kernel baseline.py

@@ -8,6 +8,7 @@ rendered from Jinja templates under ``templates/``.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -15,8 +16,15 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from xe_forge.config import Config
+from xe_forge.core.dataset_record import load_dataset_record
+from xe_forge.core.lessons import load_lessons_log
+from xe_forge.core.spec_loader import load_spec
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
+
+# Durable for the whole session, like dataset.profile_path: the kernel-locator agent
+# writes it once, and every later step reads it instead of re-exploring the repo.
+KERNEL_LOCATOR_PROFILE_PATH = "experiments/kernel_profile.md"
 
 _env = Environment(
     loader=FileSystemLoader(str(_TEMPLATES_DIR)),
@@ -51,7 +59,68 @@ def generate_workspace(
     # same either way -- the delegation happens inside xe-forge-skill -- but the
     # verdicts it may see, and so the rules it has to follow, are not.
     measurement = "host" if config.external.benchmark else "builtin"
+    # The data behind the spec's variants, when the host attached a record of it.
+    # None leaves every template below rendering exactly what it rendered before.
+    dataset = load_dataset_record(config.external.dataset_record)
+    # Where this session records what it measures, and reads what earlier ones did.
+    # Deliberately outside the workspace, which is scratch.
+    lessons = load_lessons_log(config.external.lessons, kernel_name)
+    if lessons is not None and not Path(lessons.own_file).exists():
+        # Seeded with its own format, so entries stay comparable across sessions
+        # without CLAUDE.md having to restate the shape of one.
+        Path(lessons.own_file).write_text(
+            _render("lessons.md.j2", kernel_name=kernel_name, dsl=dsl, device=device)
+        )
+    # The kernel-locator agent explores the repo itself, once.
+    kernel_repo = config.external.kernel_repo
 
+    benchmark_args = ["--device", str(device), "--dsl", str(dsl)]
+    if spec_path:
+        benchmark_args.extend(["--spec", f"test_kernels/{kernel_name}.yaml"])
+    if measurement == "builtin":
+        benchmark_args.append("--builtin-benchmark")
+        if reference_code:
+            benchmark_args.extend(["--reference", f"test_kernels/{kernel_name}_pytorch.py"])
+    benchmark_options = shlex.join(benchmark_args)
+    # A spec without inputs gives the reference its dims; one with inputs builds its own.
+    reference_workload = (
+        measurement == "builtin"
+        and bool(reference_code)
+        and not (spec_path and load_spec(spec_path).inputs)
+    )
+    profile_args = []
+    if reference_workload:
+        profile_args.extend(["--reference", f"test_kernels/{kernel_name}_pytorch.py"])
+    if spec_path:
+        profile_args.extend(["--spec", f"test_kernels/{kernel_name}.yaml"])
+    if config.profiler.unitrace_enabled:
+        profile_args.extend(["--unitrace-bin", config.profiler.unitrace_bin])
+        profile_args.extend(["--metric-group", config.profiler.unitrace_metric_group])
+    require_profiles = (
+        config.profiler.unitrace_enabled and config.profiler.unitrace_metric_group == "all"
+    )
+    if require_profiles:
+        profile_args.extend(["--kernel-name", kernel_name])
+    if config.profiler.vtune_enabled:
+        profile_args.extend(["--vtune-bin", config.profiler.vtune_bin])
+    if config.profiler.unitrace_enabled != config.profiler.vtune_enabled:
+        profile_args.extend(["--tool", "unitrace" if config.profiler.unitrace_enabled else "vtune"])
+    profile_options = shlex.join(profile_args)
+
+    compiler_flags = config.engine.compiler_flags
+    # With a kernel repo the baseline is a copy of the repo's kernel, never a from-scratch seed.
+    if (
+        not kernel_code
+        and dsl == "sycl"
+        and measurement == "builtin"
+        and reference_code
+        and not kernel_repo
+    ):
+        kernel_code = _render(
+            "sycl_torch_extension_seed.py.j2",
+            kernel_name=kernel_name,
+            compiler_flags=compiler_flags,
+        )
     (workspace / "CLAUDE.md").write_text(
         _render(
             "CLAUDE.md.j2",
@@ -60,6 +129,16 @@ def generate_workspace(
             kernel_name=kernel_name,
             ext=ext,
             measurement=measurement,
+            benchmark_options=benchmark_options,
+            profile_options=profile_options,
+            require_profiles=require_profiles,
+            reference_workload=reference_workload,
+            has_spec=bool(spec_path),
+            dataset=dataset,
+            lessons=lessons,
+            compiler_flags=compiler_flags,
+            kernel_repo=kernel_repo,
+            kernel_locator_profile_path=KERNEL_LOCATOR_PROFILE_PATH,
         )
     )
     (workspace / "config.yaml").write_text(
@@ -71,18 +150,55 @@ def generate_workspace(
             measurement=measurement,
             vtune_enabled=config.profiler.vtune_enabled,
             vtune_bin=config.profiler.vtune_bin,
+            unitrace_enabled=config.profiler.unitrace_enabled,
+            unitrace_bin=config.profiler.unitrace_bin,
+            compiler_flags=compiler_flags,
         )
     )
 
     cmd_dir = workspace / ".claude" / "commands"
     cmd_dir.mkdir(parents=True, exist_ok=True)
     (cmd_dir / "optimize-kernel.md").write_text(
-        _render("optimize-kernel.md.j2", dsl=dsl, measurement=measurement)
+        _render(
+            "optimize-kernel.md.j2",
+            dsl=dsl,
+            require_profiles=require_profiles,
+            measurement=measurement,
+            benchmark_options=benchmark_options,
+            dataset=dataset,
+            lessons=lessons,
+            kernel_repo=kernel_repo,
+            kernel_locator_profile_path=KERNEL_LOCATOR_PROFILE_PATH,
+        )
     )
 
     agent_dir = workspace / ".claude" / "agents"
     agent_dir.mkdir(parents=True, exist_ok=True)
-    (agent_dir / "tool-runner.md").write_text(_render("tool-runner.md.j2"))
+    (agent_dir / "tool-runner.md").write_text(
+        _render(
+            "tool-runner.md.j2",
+            measurement=measurement,
+            benchmark_options=benchmark_options,
+            reference_workload=reference_workload,
+            profile_options=profile_options,
+        )
+    )
+    if dataset is not None:
+        # Only when there is something to inspect. An agent offered a dataset that
+        # is not there would be a step the session runs, fails, and reports.
+        (agent_dir / "workload-inspector.md").write_text(
+            _render("workload-inspector.md.j2", dataset=dataset, kernel_name=kernel_name)
+        )
+    if kernel_repo:
+        # Only when there is a repo to explore -- same reasoning as workload-inspector.
+        (agent_dir / "kernel-locator.md").write_text(
+            _render(
+                "kernel-locator.md.j2",
+                kernel_name=kernel_name,
+                kernel_repo=kernel_repo,
+                profile_path=KERNEL_LOCATOR_PROFILE_PATH,
+            )
+        )
 
     _write_kernel_files(workspace, kernel_name, kernel_code, reference_code, spec_path, ext)
     _symlink_knowledge_base(workspace)
@@ -112,7 +228,9 @@ def _write_kernel_files(
     tk_dir = workspace / "test_kernels"
     tk_dir.mkdir(parents=True, exist_ok=True)
 
-    (tk_dir / f"{kernel_name}{ext}").write_text(kernel_code)
+    # Empty means from-scratch: Claude creates this file itself as its first action.
+    if kernel_code:
+        (tk_dir / f"{kernel_name}{ext}").write_text(kernel_code)
     # The reference stays .py whatever the kernel is written in: it is PyTorch,
     # and it is what `analyze` can actually read.
     if reference_code:

@@ -5,26 +5,56 @@ name, or just a number. Glob to find the match; if ambiguous, pick the closest a
 you picked. Nobody is watching this session, so never stop to ask.
 
 First read `config.yaml` for session settings (max_trials, dsl, device, measurement,
-vtune_enabled). Follow the CLAUDE.md workflow exactly — every step, in order:
+unitrace_enabled, vtune_enabled). Follow the CLAUDE.md workflow exactly — every step, in order:
 
-1. Read the baseline kernel file in `test_kernels/` to understand the operations, and the
-   `_pytorch.py` reference beside it if present — that is the semantics to preserve. Read the
-   rest of `test_kernels/` too: the interface the trial must expose and any further baseline
-   sources are put there by the project that generated this workspace.
+1. Read the `_pytorch.py` reference in `test_kernels/` — that is the semantics to preserve.
+   Read the baseline kernel file beside it if it exists; if it contains `TODO` markers it
+   is a from-scratch harness (SYCL) — fill in the kernel and `Model.forward`, copying
+   constants from the reference rather than importing them, before initializing trials.
+   If no baseline file exists at all, write the initial implementation there yourself
+   before initializing trials. Read the rest of `test_kernels/` too: the interface the
+   trial must expose and any further sources are put there by the project that
+   generated this workspace.
 2. Run `xe-forge-skill analyze <pytorch_file>` when there is a PyTorch source to analyze.
+{%- if dataset %}
+   Then dispatch the `workload-inspector` agent **once** and read the
+   `{{ dataset.profile_path }}` it writes. The dataset behind the spec's variants is on
+   disk at `{{ dataset.path }}`; the profile says which shapes the model actually runs and
+   what the tensors hold. Read it before choosing a first strategy. If the file is already
+   there, read it instead of re-running the agent.
+{%- endif %}
+{%- if kernel_repo %}
+   Then dispatch the `kernel-locator` agent **once** and read the
+   `{{ kernel_locator_profile_path }}` it writes. This kernel already exists in
+   `{{ kernel_repo }}`; the profile says how it is registered, built, tested and
+   benchmarked today. If no benchmark exists, write one yourself first, following the
+   sibling pattern the profile points at, before starting the trial loop.
+{%- endif %}
+{%- if lessons %}
+   Read every `*.md` under `{{ lessons.dir }}` too — what earlier runs measured on this
+   part, for this kernel and for others. It says which experiments not to repeat; it never
+   says what this run will measure.
+{%- endif %}
 3. Read relevant `knowledge_base/` files. Ignore their `expected_speedup` fields; `benchmark`
    on this part is what settles whether a pattern is worth anything.
-4. Initialize: `xe-forge-skill trial init <kernel_name> <baseline_file>`
+4. Complete the baseline correctness gate in CLAUDE.md Step 2 before initializing:
+   `xe-forge-skill trial init <kernel_name> <baseline_file>{% if require_profiles %} --require-profiles ComputeBasic EuStallSampling{% endif %}`.
 5. Run trials. For EACH trial you MUST:
    - Validate with `xe-forge-skill validate --dsl {{ dsl }}`
    - Save with `xe-forge-skill trial save`
-   - Benchmark with `xe-forge-skill benchmark` — NEVER create custom test scripts, and never
+   - Benchmark with `xe-forge-skill benchmark <baseline> <optimized> {{ benchmark_options }}` — NEVER create custom test scripts, and never
      record a timing that did not come from it
    - Record with `xe-forge-skill trial result`
    Stop when `max_trials` is exhausted, when the ideas this kernel's regime admits are
    exhausted, or when the search has plateaued.
 6. Finalize the best correct trial, then write a summary naming: the best trial and its
    measured speedup, which stopping condition fired, and what you tried that did not work.
+{%- if lessons %}
+7. Append one entry to `{{ lessons.own_file }}` — every strategy tried and what `benchmark`
+   returned for it, what you learned about this part rather than this kernel, and what you
+   did not get to. Measurements only: no predictions, and no number you did not measure.
+   Do this even if the run went badly, and append only to that one file.
+{%- endif %}
 {% if measurement == "host" %}
 A benchmark that comes back with `speedup=none` and `VERDICT: BELOW_FLOOR` or
 `INDISTINGUISHABLE` is not a regression — it is no measurement at all. Do not branch away
@@ -33,4 +63,8 @@ A trial may be split across sources. When it is, put them in a directory and pas
 directory to `validate`, `trial save` and `benchmark` alike — naming one file of a split
 kernel builds it against the baseline's other sources and times a mixture nobody wrote.
 {% endif %}
-CRITICAL: ONLY create kernel files — NO benchmark scripts, NO test scripts, NO helpers.
+{% if dataset %}The dataset is read-only, and reading it is not measuring: no inspection of
+it produces a timing, a speedup or a correctness verdict — `xe-forge-skill benchmark` still
+produces those and nothing else does. Specialize the kernel on the distribution the profile
+describes; never detect a particular benchmark variant and take a different path for it.
+{% endif %}CRITICAL: ONLY create kernel files{% if dataset %}, `{{ dataset.profile_path }}`{% endif %}{% if lessons %} and `{{ lessons.own_file }}`{% endif %} — NO benchmark scripts, NO test scripts, NO helpers.

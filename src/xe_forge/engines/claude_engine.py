@@ -139,6 +139,7 @@ class ClaudeEngine(BaseEngine):
             # litellm prefixes a provider ("openai/gpt-4o"); the CLI wants the
             # bare model id.
             env.setdefault("ANTHROPIC_MODEL", llm.model.split("/")[-1])
+        env.setdefault("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "1")
         return env
 
     def _launch_claude(self, workspace: Path, kernel_name: str) -> tuple[int, str | None]:
@@ -167,13 +168,16 @@ class ClaudeEngine(BaseEngine):
             "--dangerously-skip-permissions",
             "--max-turns",
             str(max_turns),
+            "--output-format",
+            "stream-json",
+            "--verbose",
         ]
 
         print(f"\nLaunching Claude Code in {workspace} (max {max_turns} turns)...")
         print(f"  session log: {log_path}")
 
         try:
-            with open(log_path, "w") as log:
+            with open(log_path, "w", buffering=1) as log:
                 proc = subprocess.Popen(
                     cmd,
                     cwd=str(workspace),

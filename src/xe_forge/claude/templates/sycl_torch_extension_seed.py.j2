@@ -1,0 +1,79 @@
+"""Seed for {{ kernel_name }}: a from-scratch SYCL kernel wrapped for `xe-forge-skill benchmark`.
+
+Compiles SYCL device code via ``torch.utils.cpp_extension.load_inline`` and exposes it
+through a ``Model`` in the same shape KernelBench modules already use, so every tool this
+workspace has -- ``analyze``, ``validate``, ``benchmark``, ``trial`` -- already knows how
+to read it.
+
+This file must be self-contained (Rule 5): copy ``get_inputs``, ``get_init_inputs`` and
+any dimension constants from ``{{ kernel_name }}_pytorch.py`` into this file rather than
+importing them -- each trial, this file included, is compiled and run in an isolated temp
+directory with no access to sibling files.
+
+Fill in the two blocks marked TODO -- the SYCL source and ``Model.forward`` -- and leave
+the rest of this file as it is. This file is the fixed point every trial is measured
+against; write a correct, working kernel here, not a placeholder.
+
+Baseline and trial extensions coexist in one process. Give every named SYCL kernel
+type an implementation-specific namespace or prefix, and change it for each new
+implementation. A unique load_inline module name alone does not isolate device kernels.
+"""
+{%- set fn = kernel_name if not kernel_name[0].isdigit() else "k_" ~ kernel_name %}
+
+import os
+
+# The XPU AOT arch list defaults to every architecture torch's runtime knows;
+# pin it to what is actually here.
+os.environ.setdefault("TORCH_XPU_ARCH_LIST", os.environ.get("XE_FORGE_XPU_ARCH", "bmg"))
+
+import torch
+import torch.nn as nn
+from torch.utils.cpp_extension import load_inline
+
+{%- if compiler_flags %}
+# From config.yaml's `compiler_flags`: passed on every compile, additional to
+# whatever -fsycl invocation load_inline builds on its own.
+_EXTRA_SYCL_CFLAGS = {{ compiler_flags.split() }}
+{%- else %}
+_EXTRA_SYCL_CFLAGS = []
+{%- endif %}
+
+_CPP = r"""
+// TODO: declare the entry point(s), e.g.:
+// at::Tensor {{ fn }}_forward(at::Tensor x, ...);
+"""
+
+_SYCL = r"""
+#include <torch/extension.h>
+#include <c10/xpu/XPUStream.h>
+#include <sycl/sycl.hpp>
+
+// TODO: the SYCL kernel(s) and the host-side entry point declared in _CPP above.
+// Use the caller's queue (c10::xpu::getCurrentXPUStream()), not a new sycl::queue.
+"""
+
+_mod = load_inline(
+    name="{{ fn }}_ext",
+    cpp_sources=_CPP,
+    sycl_sources=_SYCL,
+    functions=["{{ fn }}_forward"],  # TODO: match the name(s) declared above
+    extra_sycl_cflags=_EXTRA_SYCL_CFLAGS,
+    # The host pass sees only these two: without them a -I/-D above reaches device code alone.
+    extra_include_paths=[f[2:] for f in _EXTRA_SYCL_CFLAGS if f.startswith("-I")],
+    extra_cflags=[f for f in _EXTRA_SYCL_CFLAGS if f.startswith("-D")],
+    verbose=False,
+)
+
+
+# TODO: copy get_inputs(), get_init_inputs() and any dimension constants from
+# {{ kernel_name }}_pytorch.py here -- this file is compiled and run on its own.
+
+
+class Model(nn.Module):
+    def __init__(self, *init_args):
+        super().__init__()
+        # TODO: mirror {{ kernel_name }}_pytorch.py's Model.__init__.
+
+    def forward(self, *args):
+        # TODO: call _mod.{{ fn }}_forward(...).
+        raise NotImplementedError("fill in Model.forward before running benchmark")

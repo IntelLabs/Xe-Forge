@@ -7,6 +7,7 @@ branching back to the best ancestor when a trial regresses.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import shutil
@@ -15,7 +16,19 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def _rank(trial: dict) -> tuple[float, int] | None:
+def _digest(path: Path) -> str | None:
+    """sha256 of a trial's sources: one file, or every file under a trial directory."""
+    if path.is_file():
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    if not path.is_dir():
+        return None
+    digest = hashlib.sha256()
+    for item in sorted(p for p in path.rglob("*") if p.is_file()):
+        digest.update(item.relative_to(path).as_posix().encode() + b"\0" + item.read_bytes())
+    return digest.hexdigest()
+
+
+def _rank(trial: dict) -> tuple[float, int, float] | None:
     """How this trial orders against the others, or ``None`` if it does not order.
 
     A host that gates its comparison reports both arms' times and withholds the ratio
@@ -30,15 +43,18 @@ def _rank(trial: dict) -> tuple[float, int] | None:
     measurement -- ``speedup`` stays ``None`` in the record, because a loop handed a
     ratio will branch on it.
 
-    Returns ``(rank, measured)``; on equal rank a measured result wins, so a kernel
-    timed at parity is preferred to one that could not be resolved.
+    Returns ``(rank, measured, -time)``; on equal rank a measured result wins, so a kernel
+    timed at parity is preferred to one that could not be resolved, and a recorded speedup
+    is rounded, so the faster measured time breaks the remaining tie.
     """
     if trial.get("correctness") != "pass" or trial.get("validation") == "fail":
         return None
+    us = trial.get("triton_us")
+    neg_us = -float(us) if us is not None else float("-inf")
     if trial.get("speedup") is not None:
-        return (float(trial["speedup"]), 1)
-    if trial.get("baseline_us") is not None and trial.get("triton_us") is not None:
-        return (1.0, 0)
+        return (float(trial["speedup"]), 1, neg_us)
+    if trial.get("baseline_us") is not None and us is not None:
+        return (1.0, 0, neg_us)
     return None
 
 
@@ -83,9 +99,12 @@ class TrialManager:
         baseline_file: str | Path,
         *,
         triton_baseline: bool = False,
+        required_profile_groups: tuple[str, ...] = (),
     ) -> None:
         """Initialize a new trial tree for *kernel_name*."""
         trial_dir = self._trial_dir(kernel_name)
+        if set(required_profile_groups) - {"ComputeBasic", "EuStallSampling", "VTune"}:
+            raise ValueError("Unsupported required profile group")
         if self._state_path(kernel_name).exists():
             logger.warning("Trial tree for '%s' already exists. Reusing.", kernel_name)
             return
@@ -98,6 +117,8 @@ class TrialManager:
             "best_trial": None,
             "next_id": 0,
             "baseline_us": None,
+            "required_profile_groups": list(required_profile_groups),
+            "baseline_sha256": _digest(Path(baseline_file)),
         }
         self._save_state(kernel_name, state)
         logger.info("Initialized trial tree for '%s'", kernel_name)
@@ -135,6 +156,16 @@ class TrialManager:
                     f"Parent trial '{parent}' not found. Available: {list(state['trials'].keys())}"
                 )
 
+        self._require_profiles(kernel_name, state)
+        if (
+            state.get("required_profile_groups")
+            and not strategy.strip()
+            and any(t.get("profiles") for t in state["trials"].values())
+        ):
+            raise ValueError(
+                "--strategy must name the profiled measurement this trial targets"
+                " (kernel, metric, value, source trial)"
+            )
         trial_id = f"t{state['next_id']}"
         state["next_id"] += 1
 
@@ -169,6 +200,73 @@ class TrialManager:
         self._save_state(kernel_name, state)
         logger.info("Saved trial %s: %s", trial_id, strategy)
         return trial_id
+
+    def profile_source_hash(self, kernel_name: str, trial_id: str, source: str | Path) -> str:
+        state = self._load_state(kernel_name)
+        trial = state["trials"][trial_id]
+        digest = _digest(Path(source))
+        if digest is None or _digest(self._trial_dir(kernel_name) / trial["file"]) != digest:
+            raise ValueError("Profile source does not match the saved trial")
+        return digest
+
+    def recorded_profile(
+        self, kernel_name: str, trial_id: str, group: str, source_hash: str
+    ) -> dict | None:
+        """The attempt already recorded for *group* on this exact source, if any."""
+        profile = self._load_state(kernel_name)["trials"][trial_id].get("profiles", {}).get(group)
+        return profile if profile and profile.get("source_sha256") == source_hash else None
+
+    def record_profile(
+        self,
+        kernel_name: str,
+        trial_id: str,
+        group: str,
+        source_hash: str,
+        *,
+        artifacts_dir: str | None,
+        error: str | None,
+        warnings: list[str],
+    ) -> None:
+        state = self._load_state(kernel_name)
+        trial = state["trials"][trial_id]
+        if _digest(self._trial_dir(kernel_name) / trial["file"]) != source_hash:
+            raise ValueError("Saved trial changed during profiling")
+        trial.setdefault("profiles", {})[group] = {
+            "source_sha256": source_hash,
+            "status": "failed" if error else "collected",
+            "artifacts_dir": artifacts_dir,
+            "error": error,
+            "warnings": warnings,
+        }
+        self._save_state(kernel_name, state)
+
+    def _require_profiles(self, kernel_name: str, state: dict) -> None:
+        required = state.get("required_profile_groups", [])
+        if not required:
+            return
+        missing = []
+        baseline = state.get("baseline_sha256")
+        for trial_id, trial in state["trials"].items():
+            if trial.get("correctness") != "pass" or trial.get("validation") == "fail":
+                continue
+            digest = _digest(self._trial_dir(kernel_name) / trial["file"])
+            if digest is not None and digest == baseline:
+                continue
+            for group in required:
+                profile = trial.get("profiles", {}).get(group, {})
+                if (
+                    digest is None
+                    or profile.get("source_sha256") != digest
+                    or profile.get("status") not in ("collected", "failed")
+                ):
+                    missing.append(f"{trial_id}:{group}")
+        if missing:
+            raise ValueError(
+                "Required profiling attempts missing or stale: "
+                + ", ".join(missing)
+                + ". Run xe-forge-skill profile <trial_file> --kernel-name <name> --trial-id <id>"
+                " on the saved trial; a failed attempt is recorded and counts, do not fabricate results."
+            )
 
     def record_result(
         self,
@@ -222,7 +320,7 @@ class TrialManager:
         else:
             trial["status"] = "partial"
 
-        best_rank: tuple[float, int] | None = None
+        best_rank: tuple[float, int, float] | None = None
         best_id = None
         for tid, t in state["trials"].items():
             rank = _rank(t)
@@ -334,6 +432,7 @@ class TrialManager:
             logger.warning("No correct trials to finalize for '%s'", kernel_name)
             return None
 
+        self._require_profiles(kernel_name, state)
         best = state["trials"][best_id]
         rank = _rank(best)
         if rank is not None and rank[0] < 1.0:

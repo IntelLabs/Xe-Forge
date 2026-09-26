@@ -10,7 +10,12 @@ def run(args):
 
     match args.trial_command:
         case "init":
-            mgr.init(args.kernel_name, args.baseline_file, triton_baseline=args.triton_baseline)
+            mgr.init(
+                args.kernel_name,
+                args.baseline_file,
+                triton_baseline=args.triton_baseline,
+                required_profile_groups=tuple(getattr(args, "require_profiles", None) or ()),
+            )
             print(f"Initialized trial tree for '{args.kernel_name}'")
 
         case "save":

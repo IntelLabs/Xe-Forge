@@ -18,7 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 intel = [
-  "torch==2.11+xpu",
+  "torch==2.19+xpu",
   "pytorch-triton-xpu",
 ]
 nvidia = [

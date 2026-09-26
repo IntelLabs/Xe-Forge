@@ -4,7 +4,12 @@ device: "{{ device }}"
 # host: correctness and timing come from the project that generated this workspace,
 #       which owns the workload data and the calibrated timer, and which may return a
 #       gated verdict instead of a speedup.
-# builtin: Xe-Forge's own executor, measuring against tensors generated from the spec.
+# builtin: Xe-Forge's executor using a supplied spec or reference input factories.
 measurement: "{{ measurement }}"
+unitrace_enabled: {% if unitrace_enabled %}true{% else %}false{% endif %}
+unitrace_bin: "{{ unitrace_bin }}"
 vtune_enabled: {% if vtune_enabled %}true{% else %}false{% endif %}
 vtune_bin: "{{ vtune_bin }}"
+{%- if compiler_flags %}
+compiler_flags: "{{ compiler_flags }}"
+{%- endif %}

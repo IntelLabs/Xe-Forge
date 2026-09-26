@@ -9,8 +9,6 @@ _CAST_REQUIRED_DTYPES = {
     torch.float8_e5m2,
     torch.float8_e4m3fnuz,
     torch.float8_e5m2fnuz,
-    torch.int8,
-    torch.uint8,
 }
 
 
@@ -20,6 +18,9 @@ def make_rand_tensor(
     device: str = "xpu",
 ) -> torch.Tensor:
     """Create a random tensor, casting when the target dtype lacks an RNG kernel."""
+    if dtype in {torch.bool, torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64}:
+        high = 2 if dtype == torch.bool else 10
+        return torch.randint(high, shape, dtype=dtype, device=device)
     if dtype in _CAST_REQUIRED_DTYPES:
         return torch.randn(shape, dtype=torch.float32, device=device).to(dtype)
     return torch.randn(shape, dtype=dtype, device=device)

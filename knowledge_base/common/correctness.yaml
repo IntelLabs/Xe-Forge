@@ -1,113 +1,57 @@
-# Correctness Constraints — generic (applies to Triton, SYCL, and all XPU kernels)
-#
-# Triton-specific constraints are in knowledge_base/triton/xpu/correctness.yaml
-
 constraints:
 - id: outputs_must_match
-  name: Outputs must match original
-  severity: info
-  description: 'The verification tool will check that outputs match the original.
+  name: Preserve the reference computation and interface
+  severity: critical
+  description: |
+    Preserve required output values, shapes, dtypes, devices, container structure,
+    and any specified layout, aliasing or mutation behavior. Match the workload's
+    numerical contract, including tolerances and handling of special values.
+    Validate every candidate before accepting its timing. A passing check on one
+    input is not proof for other supported shapes, strides, dtypes or edge cases.
+    Do not relax tolerances or change the reference to make an optimization pass.
 
-    If it fails, try a different optimization approach.
-
-    '
 - id: kernel_launch_must_use_device_moved_tensors
-  name: Always pass device-moved tensor variables to kernel launch, not original args
+  name: Launch with the actual prepared tensors and their metadata
   severity: critical
-  description: 'When kernel_function() creates local copies (x_xpu, b_xpu, wt_xpu) to move
+  description: |
+    When preparation creates a converted or contiguous tensor, pass that tensor
+    to the kernel and derive strides, dtype and other addressing metadata from it.
+    Do not combine a copied tensor's pointer with the original tensor's strides.
+    Check the exact device, including its index, against the launch context and
+    the kernel's memory-access requirements. Keep operands alive until asynchronous
+    work completes and respect the caller's stream or queue ordering.
 
-    tensors to XPU, the kernel launch MUST use those copies — not the original
-
-    argument names (x, bias, weight_t). Passing originals silently feeds CPU
-
-    tensors to the XPU kernel, causing "Expected all tensors to be on the same
-
-    device" errors at runtime.
-
-
-    WRONG:
-
-    ```python
-
-    x_xpu  = x.to("xpu", dtype=torch.float16).contiguous()
-
-    b_xpu  = bias.to("xpu", dtype=torch.float32).contiguous()
-
-    _kernel[grid](x, b_xpu, ...)          # x is still CPU!
-
-    ```
-
-
-    CORRECT:
-
-    ```python
-
-    x_xpu  = x.to("xpu", dtype=torch.float16).contiguous()
-
-    b_xpu  = bias.to("xpu", dtype=torch.float32).contiguous()
-
-    _kernel[grid](x_xpu, b_xpu, ...)      # all tensors on XPU
-
-    ```
-
-
-    Also applies to strides: use x_xpu.stride(0) not x.stride(0) after the copy.
-
-    '
-- id: forward_must_move_x_to_xpu_before_dtype_cast
-  name: Move tensor to XPU and cast dtype in one call to avoid CPU intermediate
-  severity: warning
-  description: "In forward(), always move to device AND cast dtype in a single .to() call.\nSplitting into two operations\
-    \ creates a CPU intermediate of the wrong dtype.\n\nWRONG:\n```python\nif x.dtype != torch.float16:\n    x = x.to(dtype=torch.float16)\
-    \       # stays on CPU as fp16!\nif x.device.type != \"xpu\":\n    x = x.to(\"xpu\")                     # now moves,\
-    \ but wasteful\n```\n\nCORRECT:\n```python\nif x.device.type != \"xpu\" or x.dtype != torch.float16:\n    x = x.to(\"\
-    xpu\", dtype=torch.float16)\n```\n"
-- id: model_forward_must_not_rely_on_model_to_for_device
-  name: forward() must not assume model.to(device) was called; move tensors explicitly
+- id: preserve_input_precision
+  name: Convert dtype or layout only when the workload permits it
   severity: critical
-  description: "KernelBench and similar frameworks may not call model.to(\"xpu\") before\nforward(). Always move self.weight,\
-    \ self.bias, and input x to XPU\nexplicitly in forward() or in a lazy init method called from forward().\n\nWRONG:\n```python\n\
-    def forward(self, x):\n    # assumes model.to(\"xpu\") was called — not safe in KernelBench\n    return kernel_function(x,\
-    \ self.weight, self.bias)\n```\n\nCORRECT:\n```python\ndef forward(self, x):\n    if x.device.type != \"xpu\" or x.dtype\
-    \ != torch.float16:\n        x = x.to(\"xpu\", dtype=torch.float16)\n    if self.weight.device.type != \"xpu\":\n    \
-    \    self.weight.data = self.weight.data.to(\"xpu\", dtype=torch.float16).contiguous()\n    return kernel_function(x,\
-    \ self.weight, self.bias)\n```\n"
-- id: no_cpu_return_from_xpu_kernel
-  name: kernel_function must NOT return a CPU tensor — output must stay on XPU
+  description: |
+    Do not force inputs, weights or outputs to a preferred dtype merely because
+    it is faster. Input, accumulation and output precision are separate choices;
+    each must satisfy the reference contract. Preserve required intermediate
+    rounding when fusing operations. Respect noncontiguous inputs or provide a
+    correct conversion path whose cost is included in the measured operation.
+    Combining device and dtype conversion can be an optimization, but separate
+    conversions are not inherently incorrect. Measure the relevant execution path.
+
+- id: respect_workload_preparation
+  name: Follow the harness ownership of model and input preparation
   severity: critical
-  description: 'kernel_function and forward() must return tensors on XPU, not CPU.
+  description: |
+    Inspect the active harness before adding device transfers inside forward().
+    Xe-Forge's KernelBenchExecutor moves models to the configured device;
+    prepare_workload also moves tensor inputs. External harnesses may differ.
+    Use registered parameters and buffers for model state that must follow module
+    conversions; ordinary tensor attributes do not automatically follow them.
+    Do not mutate parameter .data to repair placement during execution. Preserve
+    parameter identity and any required gradient or optimizer behavior. Additional
+    preparation and cache invalidation must follow the workload's lifecycle.
 
-    The executor expects XPU output and will raise a device mismatch error
-
-    if a CPU tensor is returned.
-
-
-    NOTE: tensor.xpu() IS a valid PyTorch method (moves tensor to XPU,
-
-    equivalent to tensor.to(''xpu'')). It is tensor.cpu() in a return
-
-    statement that is wrong here.
-
-
-    WRONG:
-
-    ```python
-
-    return y.cpu()   # moves output to CPU — executor expects XPU
-
-    ```
-
-
-    CORRECT:
-
-    ```python
-
-    return y          # already on XPU, no move needed
-
-    # or if needed: return y.to(''xpu'')  # same as y.xpu()
-
-    # or, if dtype conversion also needed:
-
-    return y.to(torch.float32).cpu()
-
-    ```'
+- id: preserve_output_placement
+  name: Return outputs on the device required by the interface
+  severity: critical
+  description: |
+    Keep device-resident outputs on the required device when that is the contract.
+    Do not add .cpu(), a device transfer or a dtype conversion to the return path
+    unless the reference interface requires it. Conversely, do not change a
+    required host output into a device output simply to improve kernel timing.
+    Include required output conversion and transfer costs in the benchmark scope.
