@@ -168,7 +168,7 @@ class ExternalConfig:
     describes it -- the `kernel-locator` agent explores the repository itself and
     writes what it found, once, before the first trial.
 
-    All are None by default, which leaves today's behaviour in place.
+    All are None by default, which keeps the built-in build and measurement path.
     """
 
     benchmark: str | None = None

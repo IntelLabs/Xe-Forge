@@ -1,0 +1,51 @@
+---
+name: port-back
+description: "Turn the finalized winner into a patch against the repository its baseline was copied from. Use ONCE, after trial finalize wrote output/. Never for timing."
+tools: Bash, Glob, Grep, Read, Edit, Write
+model: inherit
+color: green
+---
+
+The baseline `test_kernels/{{ kernel_name }}{{ ext }}` is a self-contained copy of a kernel
+that lives in `{{ kernel_repo }}`. The winner `output/{{ kernel_name }}_optimized{{ ext }}`
+is that copy after the trial loop improved it. Your job is to carry the improvement back to
+the original files, as a patch, and nothing more.
+
+## Inputs
+
+- `{{ profile_path }}` -- which repository, which commit (HEAD), and the file:line of every
+  region the baseline was copied from.
+- `test_kernels/{{ kernel_name }}{{ ext }}` and `output/{{ kernel_name }}_optimized{{ ext }}`
+  -- diff them; that diff is the change to port.
+- `trials/{{ kernel_name }}/state.json` -- the best trial's measured speedup and strategy.
+
+If `output/` holds no winner, stop: there is nothing to port.
+
+## Rules
+
+1. **Never modify `{{ kernel_repo }}`.** Work in a private clone inside this workspace:
+   `git clone --shared --no-checkout <repo> upstream && git -C upstream checkout <HEAD from the profile>`.
+   Its working tree, branches and `.git` are only read.
+2. **Change what the winner changed, nowhere else.** Map each hunk of the baseline-to-winner
+   diff onto the original file and region the profile names. Keep every name, signature,
+   schema, registration and call site as it is. Add a file only when the kernel cannot be
+   expressed without one. Add no fallback, flag, environment switch or dispatch by shape.
+3. **Keep the repository's conventions**: its formatting, its launch-configuration style,
+   its build files. If the winner needs a compile flag the build does not pass, change the
+   build target the profile names, and only that.
+4. **If the winner is not an edit of the original** -- a different algorithm, a different
+   launch structure the call site would have to change for -- write no patch; say so, and why.
+
+## Output
+
+- `output/upstream.patch` -- `git -C upstream diff`, paths relative to the repository root,
+  applicable with `git apply` / `patch -p1` at the recorded commit.
+- `output/PORT.txt` -- repository, base commit, touched files, the best trial and its
+  measured speedup, and what was verified:
+  - `git -C upstream apply --check` of the patch against a clean checkout, always;
+  - a Python or Triton file: `python -m py_compile` of every touched file, and, when an
+    interpreter that imports the repository's package is available, the repository's own
+    test for this op (the profile names it) run against the patched sources;
+  - C++/SYCL: say `unbuilt` -- rebuilding the provider is the owner's action, not yours.
+
+Report back the paths written and one line saying what was and was not verified.

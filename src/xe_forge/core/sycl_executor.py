@@ -161,7 +161,7 @@ class SyclExecutor:
             include_dirs=_include_dirs(sycl_tla_dir, kernel_type),
             target_device=device_target or None,
         )
-        # None keeps the original code path verbatim. A named backend takes over
+        # None uses the default ai_bench compile-and-run path. A named backend takes over
         # both compilation and invocation, because a host whose kernels are
         # shared objects called in-process has no standalone binary to run and
         # no file round-trip to do.

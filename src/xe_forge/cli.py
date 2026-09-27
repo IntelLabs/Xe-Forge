@@ -195,7 +195,7 @@ Examples:
     )
 
     # Host-supplied toolchain and measurement (see xe_forge.core.build_backend
-    # and xe_forge.core.external). Unset, all three keep today's behaviour.
+    # and xe_forge.core.external). Unset, all three keep the built-in ai_bench build and measurement.
     host_group = parser.add_argument_group(
         "host integration",
         "Delegate building, correctness and timing to a project that owns them",

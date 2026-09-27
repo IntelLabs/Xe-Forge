@@ -11,7 +11,7 @@ from xe_forge.core.profiler import ProfileMetrics, ProfileResult, UnitraceXPUPro
 
 # unitrace right-aligns the "Kernel" column to the width of the longest name
 # in the table by padding with spaces *before* the first comma (no comma
-# separates the padding from the header/short names), which silently broke
+# separates the padding from the header/short names), which breaks
 # naive csv.DictReader lookups on "Kernel" and "<Cause>Stall[Events]" keys.
 PADDED_METRICS_REPORT = """\
 === Device #0 Metrics ===

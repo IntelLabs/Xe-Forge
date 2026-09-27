@@ -88,7 +88,7 @@ def test_workspace_without_record_is_unchanged(tmp_path):
     claude_md = (ws / "CLAUDE.md").read_text()
     assert "THE WORKLOAD DATA" not in claude_md
     assert DEFAULT_PROFILE_PATH not in claude_md
-    # No agent offering a dataset that is not there.
+    # Without a dataset record, no workload-inspector agent is generated.
     assert not (ws / ".claude" / "agents" / "workload-inspector.md").exists()
 
 
@@ -110,7 +110,7 @@ def test_workspace_with_record_states_the_boundary(tmp_path):
     assert "read-only" in claude_md.lower()
     assert "inspection is not a measurement" in claude_md.lower()
     assert "special-case" in claude_md
-    # Rule 3 survives: benchmark is still the only source of a timing.
+    # CLAUDE.md rule 3 is still rendered: benchmark is the only source of a timing.
     assert "`xe-forge-skill benchmark` is the\n   only source of a timing" in claude_md
 
 

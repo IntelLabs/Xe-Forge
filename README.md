@@ -214,6 +214,24 @@ Two ways to run it:
 - **Interactive (default)** — xe-forge prints the `cd` + `claude` command; you run it and watch/steer the session live.
 - **Headless** — set `AUTO_LAUNCH=true` and xe-forge spawns `claude -p "/optimize-kernel <name>" --max-turns 80` for you. No user input; useful for CI or batch runs.
 
+### Host integration — SYCL runner and external projects
+
+A host project (e.g. flashinfer-bench) can drive a Claude session with its own toolchain, data and measurements:
+
+```bash
+xe-forge -i kernel.py -s spec.yaml --dsl sycl --engine claude --workspace ./ws \
+    --build-backend ai_bench \
+    --external-benchmark "host-bench {trial} {baseline} {variant}" \
+    --dataset-record record.json --lessons ~/xe-forge-lessons \
+    --kernel-repo ../vllm-xpu-kernels
+```
+
+- `--build-backend` — a named backend compiles and runs the kernel (default: built-in ai_bench path).
+- `--external-benchmark` / `--external-validate` — host commands decide correctness and timing. A result with no correctness verdict is never a pass.
+- `--dataset-record` — describes the real workloads behind the spec's variants and adds a `workload-inspector` agent.
+- `--lessons` — per-kernel notes kept outside the workspace and re-read by later sessions.
+- `--kernel-repo` — optimize a kernel inside an existing repo; a `kernel-locator` agent finds it once, and its copy is the baseline.
+
 ### Tile Search — CUTLASS SYCL tile tuning
 
 ```bash
@@ -589,9 +607,24 @@ xe-forge --input KERNEL --spec SPEC [OPTIONS]
 | `--max-trials` | Max optimization trials (default: 10) |
 | `--trials-dir` | Trial state directory (default: `./trials`) |
 | `--no-trials` | Disable trial tracking |
+| `--unitrace` | Enable unitrace EU-stall profiling (no OA counter permissions needed) |
+| `--unitrace-bin` | Path to unitrace binary |
 | `--vtune` | Enable VTune GPU profiling (see [docs/VTUNE.md](docs/VTUNE.md)) |
 | `--vtune-bin` | Path to VTune binary |
 | `--workspace` | Workspace directory (Claude engine only) |
+| `--max-turns` | Turn limit for one headless Claude session (default: 80) |
+| `--compiler-flags` | Extra target compiler flags (e.g. icpx), rendered into the workspace |
+
+### Host Integration
+
+| Flag | Env var | Description |
+|------|---------|-------------|
+| `--build-backend` | `BUILD_BACKEND` | Build backend: registered name, entry point, or `module:attr` |
+| `--external-benchmark` | `EXTERNAL_BENCHMARK` | Command template used instead of the built-in benchmark |
+| `--external-validate` | `EXTERNAL_VALIDATE` | Command template used instead of the built-in validator |
+| `--dataset-record` | `DATASET_RECORD` | JSON record of the dataset behind the spec's variants |
+| `--lessons` | `LESSONS_DIR` | Lessons directory, outside the workspace |
+| `--kernel-repo` | `KERNEL_REPO` | External repo holding the kernel (repeatable) |
 
 ### Other
 
@@ -643,6 +676,8 @@ All settings can be controlled via environment variables or a `.env` file.
 | `ENGINE` | `dspy` | Optimization engine (`dspy`, `claude`) |
 | `MAX_TRIALS` | `10` | Trial tree max trials |
 | `TRIALS_DIR` | `./trials` | Trial state directory |
+| `UNITRACE_ENABLED` | `false` | Enable unitrace EU-stall profiling |
+| `UNITRACE_BIN` | `unitrace` | unitrace binary path |
 | `VTUNE_ENABLED` | `false` | Enable VTune GPU profiling |
 | `VTUNE_BIN` | `vtune` | VTune binary path |
 | `VTUNE_WARMUP` | `5` | Warmup iterations before profiling |

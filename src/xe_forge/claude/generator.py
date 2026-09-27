@@ -60,7 +60,7 @@ def generate_workspace(
     # verdicts it may see, and so the rules it has to follow, are not.
     measurement = "host" if config.external.benchmark else "builtin"
     # The data behind the spec's variants, when the host attached a record of it.
-    # None leaves every template below rendering exactly what it rendered before.
+    # None: no dataset record attached, so the templates omit every workload-data section.
     dataset = load_dataset_record(config.external.dataset_record)
     # Where this session records what it measures, and reads what earlier ones did.
     # Deliberately outside the workspace, which is scratch.

@@ -39,7 +39,7 @@ def test_ledger_directory_is_created_and_absolute(tmp_path):
     log = load_lessons_log(tmp_path / "nested" / "lessons", "gemm_n2048")
     assert log is not None
     assert (tmp_path / "nested" / "lessons").is_dir()
-    # The session's cwd is the workspace, which is somewhere else entirely.
+    # Paths must be absolute: the session runs with the workspace as cwd, not the ledger dir.
     assert log.dir.startswith("/") and log.own_file.startswith("/")
     assert log.own_file.endswith("/gemm_n2048.md")
 
@@ -107,7 +107,7 @@ def test_workspace_with_ledger_states_the_boundary(tmp_path):
 
     assert "never a substitute for one" in claude_md
     assert "no prediction" in claude_md
-    # Rule 3 survives: benchmark is still the only source of a timing.
+    # CLAUDE.md rule 3 is still rendered: benchmark is the only source of a timing.
     assert "`xe-forge-skill benchmark` is the\n   only source of a timing" in claude_md
 
 
