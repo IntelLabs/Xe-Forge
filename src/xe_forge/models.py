@@ -27,7 +27,11 @@ class DSL(StrEnum):
         A compiled DSL stored under ``.py`` is not cosmetic: the extension is
         what a builder, an editor and a compiler driver dispatch on.
         """
-        return ".cpp" if self in (DSL.SYCL, DSL.CUDA) else ".py"
+        if self == DSL.SYCL:
+            return ".cpp"
+        if self == DSL.CUDA:
+            return ".cu"
+        return ".py"
 
 
 class DeviceType(StrEnum):
