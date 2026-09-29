@@ -354,8 +354,8 @@ For each trial:
    every measured regression, so nothing is lost by leaving it out and a number written
    there would be one you did not measure.
 {%- endif %}
-6. **Profile** — if `unitrace_enabled: true` or `vtune_enabled: true` in `config.yaml` and
-  this is trial t1 or later, run `xe-forge-skill profile <kernel_file> {{ profile_options }}{% if require_profiles %} --trial-id <trial_id>{% endif %}`
+6. **Profile** — if `unitrace_enabled: true` or `vtune_enabled: true` in `config.yaml`,
+  run `xe-forge-skill profile <kernel_file> {{ profile_options }}{% if require_profiles %} --trial-id <trial_id>{% endif %}`
   and use the output to guide the next trial.{% if has_spec %} Use the same `--variant` as the benchmark.{% endif %}
 {%- if require_profiles %}
   Pass the saved trial file. Every correct trial that differs from the baseline, including

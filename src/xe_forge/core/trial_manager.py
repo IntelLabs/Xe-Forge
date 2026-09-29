@@ -447,10 +447,23 @@ class TrialManager:
         src = self._trial_dir(kernel_name) / best["file"]
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        # A previous finalization's files would otherwise survive beside this winner's
+        # and be built as part of it.
+        if output_path.is_dir() and not output_path.is_symlink():
+            resolved = output_path.resolve()
+            for inside in (Path.cwd().resolve(), self._trial_dir(kernel_name).resolve()):
+                if inside == resolved or resolved in inside.parents:
+                    raise ValueError(
+                        f"refusing to replace {output_path}: it contains {inside}; "
+                        "name an output path of its own"
+                    )
+            shutil.rmtree(output_path)
+        elif output_path.exists() or output_path.is_symlink():
+            output_path.unlink()
         if src.is_dir():
             # The winner of a multi-file trial is the whole directory. Handing back only
             # its entry point would name a kernel that cannot be rebuilt.
-            shutil.copytree(src, output_path, dirs_exist_ok=True)
+            shutil.copytree(src, output_path)
         else:
             shutil.copy2(src, output_path)
         speedup = best.get("speedup")

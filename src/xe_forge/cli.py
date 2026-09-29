@@ -508,9 +508,13 @@ def _run_tune_config(args, config: Config) -> int:
 
 def _run_optimize(parser, args, config: Config) -> int:
     """Run the optimization pipeline (original path)."""
-    # Validate input (required unless an external repo supplies the kernel at runtime)
-    if not args.input and not args.kernel_repo:
-        parser.error("--input is required (or use --kernel-repo, --tile-tune / --tune-config)")
+    # Validate input. Only the Claude engine can locate a kernel in --kernel-repo at
+    # runtime; every other engine would be handed an empty kernel.
+    if not args.input and not (args.kernel_repo and config.engine.engine == "claude"):
+        parser.error(
+            "--input is required (or use --kernel-repo with --engine claude, "
+            "--tile-tune / --tune-config)"
+        )
     if args.input and not Path(args.input).exists():
         print(f"Error: Input file '{args.input}' not found", file=sys.stderr)
         sys.exit(1)
@@ -677,6 +681,22 @@ def _run_optimize(parser, args, config: Config) -> int:
     if args.output and result.optimized_code:
         with open(args.output, "w") as f:
             f.write(result.optimized_code)
+    elif args.output and result.optimized_path and Path(result.optimized_path).is_dir():
+        import shutil
+
+        out = Path(args.output)
+        cwd = Path.cwd().resolve()
+        if out.resolve() == cwd or out.resolve() in cwd.parents:
+            print(
+                f"Error: refusing to replace {out}: it contains the working directory",
+                file=sys.stderr,
+            )
+            return 1
+        if out.is_dir() and not out.is_symlink():
+            shutil.rmtree(out)
+        elif out.exists() or out.is_symlink():
+            out.unlink()
+        shutil.copytree(result.optimized_path, out)
 
     # Print results
     print("\n" + "=" * 60)

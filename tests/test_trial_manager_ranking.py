@@ -175,3 +175,27 @@ def test_required_profiles_gate_an_optimized_t0(tmp_path):
     assert trial == "t0"
     with pytest.raises(ValueError, match="Required profiling"):
         manager.finalize("k", tmp_path / "output.cpp")
+
+
+def test_finalize_replaces_a_previous_output(tmp_path):
+    """A second finalization leaves only the new winner's files behind."""
+    manager = TrialManager(tmp_path / "trials")
+    source = tmp_path / "kernel"
+    source.mkdir()
+    (source / "main.cpp").write_text("baseline")
+    manager.init("k", source)
+    out = tmp_path / "output"
+    out.mkdir()
+    (out / "stale.cpp").write_text("from an earlier winner")
+    (source / "main.cpp").write_text("candidate")
+    trial = manager.save_trial("k", source)
+    manager.record_result("k", trial, correctness="pass", speedup=1.1)
+    assert manager.finalize("k", out) == trial
+    assert sorted(p.name for p in out.iterdir()) == ["main.cpp"]
+
+
+def test_finalize_refuses_to_replace_a_directory_holding_the_trials(mgr, tmp_path):
+    _trial(mgr, tmp_path, "t.cpp", speedup=1.1)
+    with pytest.raises(ValueError, match="refusing to replace"):
+        mgr.finalize("k", tmp_path)
+    assert (tmp_path / "trials").is_dir()

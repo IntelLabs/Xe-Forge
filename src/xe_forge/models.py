@@ -160,6 +160,8 @@ class OptimizationResult(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
     original_code: str
     optimized_code: str | None = None
+    # Set when the winner is a multi-file trial directory; optimized_code is then None.
+    optimized_path: str | None = None
     stages_applied: list[StageResult] = Field(default_factory=list)
     total_speedup: float | None = None
     analysis: KernelAnalysis | None = None

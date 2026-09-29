@@ -73,6 +73,16 @@ def _run_external(args, template: str) -> int:
 
     print(f"Correctness: {'PASSED' if result.correctness else 'FAILED'}")
     if result.correctness and result.measured:
+        # A ratio without both times behind it cannot be recorded or checked.
+        missing = [
+            name
+            for name, value in (("BASELINE_US", result.baseline_us), ("TRIAL_US", result.trial_us))
+            if value is None
+        ]
+        if missing:
+            print("VERDICT: INCOMPLETE_TIMING")
+            print(f"Error: external benchmark reported a speedup but no {', '.join(missing)}")
+            return 1
         print(
             f"Performance: baseline_us={result.baseline_us:.2f}, "
             f"kernel_us={result.trial_us:.2f}, speedup={result.speedup:.2f}x"

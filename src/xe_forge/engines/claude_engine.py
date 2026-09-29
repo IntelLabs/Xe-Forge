@@ -90,6 +90,8 @@ class ClaudeEngine(BaseEngine):
             kernel_name=kernel_name,
             original_code=kernel_code,
             optimized_code=(best or {}).get("code"),
+            # A multi-file winner is a directory with no single source to return.
+            optimized_path=(best or {}).get("file_path"),
             total_speedup=(best or {}).get("speedup"),
             success=returncode == 0 and (best is not None or not observable),
             error_message=error,
@@ -116,7 +118,7 @@ class ClaudeEngine(BaseEngine):
         if best is None:
             return None
         path = best.get("file_path")
-        if path and Path(path).exists():
+        if path and Path(path).is_file():
             best["code"] = Path(path).read_text()
         return best
 

@@ -25,7 +25,8 @@ If `output/` holds no winner, stop: there is nothing to port.
 
 1. **Never modify `{{ kernel_repo }}`.** Work in a private clone inside this workspace:
    `git clone --shared --no-checkout <repo> upstream && git -C upstream checkout <HEAD from the profile>`.
-   Its working tree, branches and `.git` are only read.
+   `{{ kernel_repo }}` stays read-only; the porting edits go into the private clone's
+   working tree (`upstream/`) and nowhere else.
 2. **Change what the winner changed, nowhere else.** Map each hunk of the baseline-to-winner
    diff onto the original file and region the profile names. Keep every name, signature,
    schema, registration and call site as it is. Add a file only when the kernel cannot be

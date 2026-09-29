@@ -1,5 +1,5 @@
 """
-SYCL Kernel Executor - Compiles and benchmarks SYCL/XeTLA C++ kernels.
+SYCL Kernel Executor - Compiles and benchmarks SYCL/Sycl-tla C++ kernels.
 
 Wraps ai_bench.sycl.compiler.SYCLCompiler for compile/run/parse, adding:
 - Source string → temp file conversion
@@ -94,6 +94,11 @@ def _include_dirs(sycl_tla_dir: str, kernel_type: KernelType = KernelType.GEMM) 
     if Path(MKL_INCLUDE).exists():
         dirs.append(MKL_INCLUDE)
     return dirs
+
+
+def _fmt_tflops(tflops: float | None) -> str:
+    """`` (x.xxx TFlop/s)`` when throughput was reported, nothing when it was not."""
+    return f" ({tflops:.3f} TFlop/s)" if tflops is not None else ""
 
 
 def _save_tensor(t: torch.Tensor, path: str) -> None:
@@ -389,7 +394,9 @@ class SyclExecutor:
             return kernel(
                 dims=dict(dims) if dims else {"M": m, "N": n, "K": k},
                 iterations=self.iterations,
-                verify=0 if input_dir else (1 if self.verify else 0),
+                # No file comparison follows a backend run, so the backend is
+                # asked to verify even when inputs come from a directory.
+                verify=1 if self.verify else 0,
                 input_dir=input_dir,
                 output_dir=output_dir,
             )
@@ -650,9 +657,28 @@ class SyclExecutor:
                 ),
             )
 
-        orig_ms = orig_result.execution_time_ms or float("inf")
-        opt_ms = opt_result.execution_time_ms or float("inf")
-        speedup = orig_ms / opt_ms if opt_ms > 0 else 0.0
+        orig_ms = orig_result.execution_time_ms
+        opt_ms = opt_result.execution_time_ms
+        missing = [
+            label
+            for label, ms in (("original", orig_ms), ("optimized", opt_ms))
+            if ms is None or ms <= 0
+        ]
+        if missing:
+            shutil.rmtree(io_dir, ignore_errors=True)
+            # A run that succeeded without a usable time cannot be ranked: a
+            # substituted inf or zero turns into a 0x or NaN speedup downstream.
+            return SyclComparisonResult(
+                original_time_ms=orig_ms if orig_ms and orig_ms > 0 else float("inf"),
+                optimized_time_ms=opt_ms if opt_ms and opt_ms > 0 else float("inf"),
+                speedup=0.0,
+                optimized_correct=False,
+                feedback_message=(
+                    f"FAILURE: no usable execution time reported for the "
+                    f"{' and '.join(missing)} kernel; the comparison cannot be ranked."
+                ),
+            )
+        speedup = orig_ms / opt_ms
 
         is_slower = speedup < 1.0
         orig_tflops = orig_result.tflops
@@ -711,15 +737,15 @@ class SyclExecutor:
             slowdown = 1.0 / speedup if speedup > 0 else float("inf")
             msg = (
                 f"PERFORMANCE REGRESSION: Optimized kernel is {slowdown:.2f}x SLOWER. "
-                f"Original: {orig_ms:.4f}ms ({orig_tflops:.3f} TFlop/s), "
-                f"Optimized: {opt_ms:.4f}ms ({opt_tflops:.3f} TFlop/s). "
+                f"Original: {orig_ms:.4f}ms{_fmt_tflops(orig_tflops)}, "
+                f"Optimized: {opt_ms:.4f}ms{_fmt_tflops(opt_tflops)}. "
                 f"{correctness_msg.strip()} Try a different approach."
             )
         elif speedup >= 2.0:
             msg = (
                 f"SUCCESS: Excellent! {speedup:.2f}x speedup. "
-                f"Original: {orig_ms:.4f}ms ({orig_tflops:.3f} TFlop/s), "
-                f"Optimized: {opt_ms:.4f}ms ({opt_tflops:.3f} TFlop/s)."
+                f"Original: {orig_ms:.4f}ms{_fmt_tflops(orig_tflops)}, "
+                f"Optimized: {opt_ms:.4f}ms{_fmt_tflops(opt_tflops)}."
                 f"{correctness_msg}"
             )
         elif speedup >= 1.2:

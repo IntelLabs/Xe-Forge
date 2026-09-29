@@ -759,3 +759,43 @@ def test_time_forward_off_gpu_times_the_whole_call(monkeypatch):
 
     assert KernelBenchExecutor(device="cpu").time_forward(call, args) == 10.0
     timer.assert_called_once_with(call, args)
+
+
+@pytest.mark.parametrize(
+    "times,missing",
+    [
+        ({"trial_us": 10.0}, "BASELINE_US"),
+        ({"baseline_us": 15.0}, "TRIAL_US"),
+        ({}, "BASELINE_US, TRIAL_US"),
+    ],
+)
+def test_a_speedup_without_both_times_is_refused(monkeypatch, capsys, times, missing):
+    """A ratio the host could not back with both times prints no Performance line."""
+    import xe_forge.external as external
+
+    monkeypatch.setattr(
+        external,
+        "run_external",
+        lambda template, **kw: external.ExternalResult(correctness=True, speedup=1.5, **times),
+    )
+    assert benchmark._run_external(_args(), "host-bench {trial}") == 1
+    out = capsys.readouterr().out
+    assert "VERDICT: INCOMPLETE_TIMING" in out
+    assert f"no {missing}" in out
+    assert "Performance:" not in out
+
+
+def test_the_generated_workspace_profiles_t0_and_ports_back_in_its_clone(tmp_path):
+    from xe_forge.claude.generator import generate_workspace
+    from xe_forge.config import Config
+
+    config = Config()
+    config.external.kernel_repo = str(tmp_path / "repo")
+    ws = tmp_path / "ws"
+    generate_workspace(ws, config, "k", "// kernel\n", reference_code="x = 1\n")
+    claude_md = (ws / "CLAUDE.md").read_text()
+    assert "**Profile**" in claude_md
+    assert "t1 or later" not in claude_md
+    port_back = (ws / ".claude" / "agents" / "port-back.md").read_text()
+    assert "are only read" not in port_back
+    assert "private clone's\n   working tree" in port_back

@@ -160,6 +160,18 @@ def _entry_points():
         return []
 
 
+def _instantiate(obj):
+    """Call *obj* if it is a class or a factory; return it as-is if it is a backend.
+
+    The class check comes first: a runtime-checkable Protocol accepts the class
+    object itself (it has ``name`` and ``build``), and returning it would leave
+    ``build`` unbound.
+    """
+    if isinstance(obj, type) or (callable(obj) and not isinstance(obj, BuildBackend)):
+        return obj()
+    return obj
+
+
 def _load_reference(ref: str) -> BuildBackend:
     """Load ``module:attr``, calling *attr* if it is a factory."""
     module_name, _, attr = ref.partition(":")
@@ -179,7 +191,7 @@ def _load_reference(ref: str) -> BuildBackend:
     except AttributeError:
         raise BuildError(f"module {module_name!r} has no attribute {attr!r}") from None
 
-    backend = obj() if callable(obj) and not isinstance(obj, BuildBackend) else obj
+    backend = _instantiate(obj)
     if not isinstance(backend, BuildBackend):
         raise BuildError(
             f"{ref!r} resolved to {type(backend).__name__}, which does not implement "
@@ -211,7 +223,7 @@ def resolve_build_backend(ref: str | BuildBackend | None) -> BuildBackend:
     for ep in _entry_points():
         if ep.name == ref:
             obj = ep.load()
-            backend = obj() if callable(obj) and not isinstance(obj, BuildBackend) else obj
+            backend = _instantiate(obj)
             if not isinstance(backend, BuildBackend):
                 raise BuildError(
                     f"entry point {ref!r} resolved to {type(backend).__name__}, "
