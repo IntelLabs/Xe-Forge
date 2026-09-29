@@ -81,8 +81,8 @@ class ClaudeEngine(BaseEngine):
             # baseline. Exiting zero is what the CLI does when it runs out of
             # things to say; it is not evidence that anything was optimized.
             error = (
-                f"claude session completed but no correct trial was recorded for "
-                f"{kernel_name!r}; see {workspace / LOG_NAME}"
+                f"claude session completed but recorded no correct trial at or above "
+                f"baseline for {kernel_name!r}; see {workspace / LOG_NAME}"
             )
             logger.error(error)
 
@@ -116,6 +116,16 @@ class ClaudeEngine(BaseEngine):
             logger.warning("Could not read trial tree for %r: %s", kernel_name, exc)
             return None
         if best is None:
+            return None
+        if not mgr.keepable(best):
+            # The best correct trial is slower than the baseline. finalize refuses
+            # it, so handing it back here would ship what finalize would not.
+            logger.error(
+                "Best trial %s for %r is a regression (%sx); no kernel returned",
+                best.get("id"),
+                kernel_name,
+                best.get("speedup"),
+            )
             return None
         path = best.get("file_path")
         if path and Path(path).is_file():

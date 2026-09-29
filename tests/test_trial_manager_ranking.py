@@ -199,3 +199,31 @@ def test_finalize_refuses_to_replace_a_directory_holding_the_trials(mgr, tmp_pat
     with pytest.raises(ValueError, match="refusing to replace"):
         mgr.finalize("k", tmp_path)
     assert (tmp_path / "trials").is_dir()
+
+
+@pytest.mark.parametrize(
+    "result,kept",
+    [
+        ({"speedup": 0.66, "baseline_us": 255.4, "triton_us": 390.2}, False),
+        ({"speedup": 1.3, "baseline_us": 255.4, "triton_us": 196.5}, True),
+        ({"baseline_us": 255.2, "triton_us": 252.6, "verdict": "INDISTINGUISHABLE"}, True),
+    ],
+)
+def test_the_claude_engine_returns_only_what_finalize_would_keep(tmp_path, result, kept):
+    """A session whose best trial is a regression returns no kernel, as finalize writes none."""
+    from xe_forge.config import Config
+    from xe_forge.engines.claude_engine import ClaudeEngine
+
+    config = Config()
+    config.trial.trials_dir = str(tmp_path / "trials")
+    m = TrialManager(config.trial.trials_dir)
+    baseline = tmp_path / "base.cpp"
+    baseline.write_text("// baseline\n")
+    m.init("k", baseline)
+    _trial(m, tmp_path, "t0.cpp", **result)
+
+    best = ClaudeEngine(config)._best_trial(tmp_path, "k")
+    assert (best is not None) is kept
+    assert (m.finalize("k", tmp_path / "out.cpp") is not None) is kept
+    if kept:
+        assert best["code"] == "// t0.cpp\n"

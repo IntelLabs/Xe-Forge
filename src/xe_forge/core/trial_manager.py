@@ -405,6 +405,15 @@ class TrialManager:
         trial["file_path"] = str(self._trial_dir(kernel_name) / trial["file"])
         return trial
 
+    @staticmethod
+    def keepable(trial: dict) -> bool:
+        """Whether *trial* is something :meth:`finalize` would write out.
+
+        A measured regression is not; parity, measured or gated, is.
+        """
+        rank = _rank(trial)
+        return rank is not None and rank[0] >= 1.0
+
     def get_baseline_us(self, kernel_name: str) -> list[float] | None:
         """Return cached baseline time(s) or None."""
         state = self._load_state(kernel_name)
@@ -434,13 +443,12 @@ class TrialManager:
 
         self._require_profiles(kernel_name, state)
         best = state["trials"][best_id]
-        rank = _rank(best)
-        if rank is not None and rank[0] < 1.0:
+        if not self.keepable(best):
             logger.warning(
                 "Best trial %s for '%s' is a regression (%.2fx); nothing finalized",
                 best_id,
                 kernel_name,
-                rank[0],
+                _rank(best)[0],
             )
             return None
 
