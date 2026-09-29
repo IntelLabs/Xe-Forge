@@ -624,7 +624,7 @@ xe-forge --input KERNEL --spec SPEC [OPTIONS]
 | `--external-validate` | `EXTERNAL_VALIDATE` | Command template used instead of the built-in validator |
 | `--dataset-record` | `DATASET_RECORD` | JSON record of the dataset behind the spec's variants |
 | `--lessons` | `LESSONS_DIR` | Lessons directory, outside the workspace |
-| `--kernel-repo` | `KERNEL_REPO` | External repo holding the kernel (repeatable) |
+| `--kernel-repo` | `KERNEL_REPO` | External repo holding the kernel |
 
 ### Other
 

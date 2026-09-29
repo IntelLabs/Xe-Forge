@@ -235,11 +235,10 @@ Examples:
     host_group.add_argument(
         "--kernel-repo",
         type=str,
-        action="append",
         metavar="PATH",
         help="Path to an external repository holding a kernel this workspace did not "
         "write; the kernel-locator agent explores it once and writes findings before "
-        "the first trial. Repeat for a kernel chain that spans repositories",
+        "the first trial",
     )
 
     # Other options
@@ -348,7 +347,7 @@ def _load_config(args) -> Config:
     if getattr(args, "lessons", None):
         os.environ["LESSONS_DIR"] = args.lessons
     if getattr(args, "kernel_repo", None):
-        os.environ["KERNEL_REPO"] = ", ".join(args.kernel_repo)
+        os.environ["KERNEL_REPO"] = args.kernel_repo
     if getattr(args, "compiler_flags", None):
         os.environ["COMPILER_FLAGS"] = args.compiler_flags
 
