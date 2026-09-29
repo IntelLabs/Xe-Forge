@@ -30,10 +30,10 @@ import torch
 import torch.nn as nn
 from torch.utils.cpp_extension import load_inline
 
-{%- if compiler_flags %}
+{%- if compiler_flag_list %}
 # From config.yaml's `compiler_flags`: passed on every compile, additional to
 # whatever -fsycl invocation load_inline builds on its own.
-_EXTRA_SYCL_CFLAGS = {{ compiler_flags.split() }}
+_EXTRA_SYCL_CFLAGS = {{ compiler_flag_list }}
 {%- else %}
 _EXTRA_SYCL_CFLAGS = []
 {%- endif %}

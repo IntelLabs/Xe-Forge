@@ -11,5 +11,5 @@ unitrace_bin: "{{ unitrace_bin }}"
 vtune_enabled: {% if vtune_enabled %}true{% else %}false{% endif %}
 vtune_bin: "{{ vtune_bin }}"
 {%- if compiler_flags %}
-compiler_flags: "{{ compiler_flags }}"
+compiler_flags: {{ compiler_flags | tojson }}
 {%- endif %}

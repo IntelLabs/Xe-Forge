@@ -799,3 +799,26 @@ def test_the_generated_workspace_profiles_t0_and_ports_back_in_its_clone(tmp_pat
     port_back = (ws / ".claude" / "agents" / "port-back.md").read_text()
     assert "are only read" not in port_back
     assert "private clone's\n   working tree" in port_back
+
+
+def test_compiler_flags_reach_the_seed_and_config_whole(tmp_path):
+    """A quoted flag stays one argument, and quotes survive into config.yaml."""
+    import ast
+
+    import yaml
+
+    from xe_forge.claude.generator import generate_workspace
+    from xe_forge.config import Config
+
+    flags = "-O3 -DNAME='hello world' -DQ=\"x\""
+    config = Config()
+    config.device_config.dsl = "sycl"
+    config.external.benchmark = None
+    config.engine.compiler_flags = flags
+    ws = tmp_path / "ws"
+    generate_workspace(ws, config, "k", "", reference_code="x = 1\n")
+
+    seed = next((ws / "test_kernels").glob("k.*")).read_text()
+    line = next(ln for ln in seed.splitlines() if ln.startswith("_EXTRA_SYCL_CFLAGS ="))
+    assert ast.literal_eval(line.split("=", 1)[1].strip()) == ["-O3", "-DNAME=hello world", "-DQ=x"]
+    assert yaml.safe_load((ws / "config.yaml").read_text())["compiler_flags"] == flags

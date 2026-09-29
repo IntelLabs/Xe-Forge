@@ -124,6 +124,12 @@ def generate_workspace(
     profile_options = shlex.join(profile_args)
 
     compiler_flags = config.engine.compiler_flags
+    # Parsed the way a shell would, so a quoted flag (-DNAME='a b') reaches the
+    # compiler as one argument.
+    try:
+        compiler_flag_list = shlex.split(compiler_flags) if compiler_flags else []
+    except ValueError as exc:
+        raise ValueError(f"cannot parse compiler_flags {compiler_flags!r}: {exc}") from None
     # With a kernel repo the baseline is a copy of the repo's kernel, never a from-scratch seed.
     if (
         not kernel_code
@@ -135,7 +141,7 @@ def generate_workspace(
         kernel_code = _render(
             "sycl_torch_extension_seed.py.j2",
             kernel_name=kernel_name,
-            compiler_flags=compiler_flags,
+            compiler_flag_list=compiler_flag_list,
         )
     (workspace / "CLAUDE.md").write_text(
         _render(
