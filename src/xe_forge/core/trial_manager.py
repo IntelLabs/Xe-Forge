@@ -310,6 +310,9 @@ class TrialManager:
 
         if verdict is not None:
             trial["verdict"] = verdict
+            if speedup is None:
+                # Gated comparison: drop any stale ratio from an earlier measurement.
+                trial["speedup"] = None
 
         if trial["validation"] == "fail" or trial["correctness"] == "fail":
             trial["status"] = "failed"
@@ -455,16 +458,24 @@ class TrialManager:
         src = self._trial_dir(kernel_name) / best["file"]
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        # A previous finalization's files would otherwise survive beside this winner's
-        # and be built as part of it.
+        # The old output is removed first, so it must not hold the workspace or the
+        # trial tree, nor be a recorded trial or state.json.
+        resolved = output_path.parent.resolve() / output_path.name
+        trial_dir = self._trial_dir(kernel_name).resolve()
+        for holds in (Path.cwd().resolve(), trial_dir):
+            if holds == resolved or resolved in holds.parents:
+                raise ValueError(
+                    f"refusing to replace {output_path}: it contains {holds}; "
+                    "name an output path of its own"
+                )
+        recorded = [trial_dir / t["file"] for t in state["trials"].values() if t.get("file")]
+        for kept in (*recorded, self._state_path(kernel_name).resolve()):
+            if kept == resolved or kept in resolved.parents:
+                raise ValueError(
+                    f"refusing to write {output_path}: it is part of the recorded trial "
+                    f"{kept}; name an output path of its own"
+                )
         if output_path.is_dir() and not output_path.is_symlink():
-            resolved = output_path.resolve()
-            for inside in (Path.cwd().resolve(), self._trial_dir(kernel_name).resolve()):
-                if inside == resolved or resolved in inside.parents:
-                    raise ValueError(
-                        f"refusing to replace {output_path}: it contains {inside}; "
-                        "name an output path of its own"
-                    )
             shutil.rmtree(output_path)
         elif output_path.exists() or output_path.is_symlink():
             output_path.unlink()

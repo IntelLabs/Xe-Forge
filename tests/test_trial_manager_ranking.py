@@ -227,3 +227,31 @@ def test_the_claude_engine_returns_only_what_finalize_would_keep(tmp_path, resul
     assert (m.finalize("k", tmp_path / "out.cpp") is not None) is kept
     if kept:
         assert best["code"] == "// t0.cpp\n"
+
+
+def test_finalize_refuses_to_overwrite_the_winner_itself(mgr, tmp_path):
+    tid = _trial(mgr, tmp_path, "t.cpp", speedup=1.2)
+    winner = tmp_path / "trials" / "k" / mgr.get_best("k")["file"]
+    before = winner.read_text()
+    with pytest.raises(ValueError, match="part of the recorded trial"):
+        mgr.finalize("k", winner)
+    assert winner.read_text() == before
+    assert mgr.get_best("k")["id"] == tid
+
+
+def test_finalize_into_the_trial_dir_beside_the_trials_still_works(mgr, tmp_path):
+    """The DSPy engine finalizes to ``trials/<kernel>/best_output.py``."""
+    tid = _trial(mgr, tmp_path, "t.cpp", speedup=1.2)
+    out = tmp_path / "trials" / "k" / "best_output.py"
+    assert mgr.finalize("k", out) == tid
+    assert out.read_text() == "// t.cpp\n"
+
+
+def test_a_gated_re_measurement_clears_the_earlier_ratio(mgr, tmp_path):
+    tid = _trial(mgr, tmp_path, "t.cpp", speedup=0.5, baseline_us=100.0, triton_us=200.0)
+    mgr.record_result(
+        "k", tid, correctness="pass", baseline_us=100.0, triton_us=99.0, verdict="INDISTINGUISHABLE"
+    )
+    best = mgr.get_best("k")
+    assert best["speedup"] is None
+    assert mgr.keepable(best)

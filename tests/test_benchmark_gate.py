@@ -822,3 +822,29 @@ def test_compiler_flags_reach_the_seed_and_config_whole(tmp_path):
     line = next(ln for ln in seed.splitlines() if ln.startswith("_EXTRA_SYCL_CFLAGS ="))
     assert ast.literal_eval(line.split("=", 1)[1].strip()) == ["-O3", "-DNAME=hello world", "-DQ=x"]
     assert yaml.safe_load((ws / "config.yaml").read_text())["compiler_flags"] == flags
+
+
+def test_a_relative_kernel_repo_is_rendered_absolute(tmp_path, monkeypatch):
+    from xe_forge.claude.generator import generate_workspace
+    from xe_forge.config import Config
+
+    (tmp_path / "repo").mkdir()
+    monkeypatch.chdir(tmp_path)
+    config = Config()
+    config.external.kernel_repo = "repo"
+    generate_workspace(tmp_path / "ws", config, "k", "// kernel\n", reference_code="x = 1\n")
+    locator = (tmp_path / "ws" / ".claude" / "agents" / "kernel-locator.md").read_text()
+    assert f"`{(tmp_path / 'repo').resolve()}`" in locator
+
+
+def test_a_second_session_does_not_reseed_the_lessons_ledger(tmp_path):
+    from xe_forge.claude.generator import generate_workspace
+    from xe_forge.config import Config
+
+    config = Config()
+    config.external.lessons = str(tmp_path / "lessons")
+    generate_workspace(tmp_path / "ws1", config, "k", "// kernel\n", reference_code="x = 1\n")
+    ledger = next((tmp_path / "lessons").iterdir())
+    ledger.write_text(ledger.read_text() + "\nentry from session one\n")
+    generate_workspace(tmp_path / "ws2", config, "k", "// kernel\n", reference_code="x = 1\n")
+    assert ledger.read_text().endswith("entry from session one\n")

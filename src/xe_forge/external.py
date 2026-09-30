@@ -175,10 +175,13 @@ def run_external(
         raise ExternalCommandError(f"could not run external command {argv[0]!r}: {exc}") from exc
 
     output = proc.stdout + proc.stderr
-    if not any(line.strip() == "DONE" for line in output.splitlines()):
+    # DONE must be the last stdout line; stderr (e.g. shutdown warnings) is ignored.
+    stdout_lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    if not stdout_lines or stdout_lines[-1] != "DONE":
         raise ExternalCommandError(
-            f"external command did not complete (no DONE marker, exit {proc.returncode}). "
-            f"Nothing in its output can be read as a measurement.\n{output[-2000:]}"
+            f"external command did not complete (DONE is not the last line of its stdout, "
+            f"exit {proc.returncode}). Nothing in its output can be read as a measurement."
+            f"\n{output[-2000:]}"
         )
 
     parsed = _parse(output)

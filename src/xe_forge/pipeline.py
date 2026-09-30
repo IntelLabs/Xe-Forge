@@ -55,11 +55,10 @@ class XeForgePipeline:
 
         if executor is None:
             if self.config.device_config.dsl == DSL.SYCL:
-                from xe_forge.core import SyclExecutor
+                from xe_forge.core import create_executor_from_config
 
-                executor = SyclExecutor(
-                    verify=self.config.optimization.require_correctness,
-                )
+                # Through the factory, so --build-backend reaches this path too.
+                executor = create_executor_from_config(self.config)
             else:
                 from xe_forge.core import KernelBenchExecutor
 

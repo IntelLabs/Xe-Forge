@@ -693,8 +693,8 @@ class SyclExecutor:
         if self._backend is not None:
             # A backend owns its own execution model, so it -- not a file left
             # behind on disk -- is what says whether the kernel was correct.
-            # An unstated verdict is not a pass: a backend that checks nothing
-            # would otherwise hand the loop a speedup for a wrong kernel.
+            # Candidate must report True. The baseline is the oracle, so only an
+            # explicit False disqualifies it (as in KernelBenchExecutor).
             orig_correct = orig_result.output_correct is not False
             opt_correct = opt_result.output_correct is True
             if opt_result.output_correct is None:

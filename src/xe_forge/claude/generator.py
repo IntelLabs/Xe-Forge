@@ -65,14 +65,20 @@ def generate_workspace(
     # Where this session records what it measures, and reads what earlier ones did.
     # Deliberately outside the workspace, which is scratch.
     lessons = load_lessons_log(config.external.lessons, kernel_name)
-    if lessons is not None and not Path(lessons.own_file).exists():
-        # Seeded with its own format, so entries stay comparable across sessions
-        # without CLAUDE.md having to restate the shape of one.
-        Path(lessons.own_file).write_text(
-            _render("lessons.md.j2", kernel_name=kernel_name, dsl=dsl, device=device)
-        )
-    # The kernel-locator agent explores the repo itself, once.
-    kernel_repo = config.external.kernel_repo
+    if lessons is not None:
+        # Seeded with its own format so entries stay comparable across sessions.
+        # Exclusive create: a second session must not truncate the first's entries.
+        try:
+            with open(lessons.own_file, "x") as f:
+                f.write(_render("lessons.md.j2", kernel_name=kernel_name, dsl=dsl, device=device))
+        except FileExistsError:
+            pass
+    # Absolute: the session's cwd is the workspace.
+    kernel_repo = (
+        str(Path(config.external.kernel_repo).expanduser().resolve())
+        if config.external.kernel_repo
+        else None
+    )
 
     spec_has_inputs = bool(spec_path and load_spec(spec_path).inputs)
     # Without a PyTorch reference, the baseline -- a copy of the repo's kernel that also
