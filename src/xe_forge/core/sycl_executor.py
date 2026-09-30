@@ -464,6 +464,10 @@ class SyclExecutor:
         (converted to --key=value) or a raw argument string.
         """
         if self._backend is not None:
+            if args_str:
+                return ExecutionResult(
+                    success=False, error_message="build backend takes args, not args_str"
+                )
             kernel, err = self._build_via_backend(kernel_code, kernel_path, output_name)
             if kernel is None:
                 return ExecutionResult(success=False, error_message=err)
@@ -693,11 +697,13 @@ class SyclExecutor:
         if self._backend is not None:
             # A backend owns its own execution model, so it -- not a file left
             # behind on disk -- is what says whether the kernel was correct.
-            # Candidate must report True. The baseline is the oracle, so only an
-            # explicit False disqualifies it (as in KernelBenchExecutor).
+            # Candidate must report True. The baseline is the oracle: None is allowed,
+            # an explicit False disqualifies the whole comparison.
             orig_correct = orig_result.output_correct is not False
-            opt_correct = opt_result.output_correct is True
-            if opt_result.output_correct is None:
+            opt_correct = orig_correct and opt_result.output_correct is True
+            if not orig_correct:
+                correctness_msg = " CORRECTNESS FAILED: baseline failed the backend's check."
+            elif opt_result.output_correct is None:
                 correctness_msg = (
                     f" CORRECTNESS UNVERIFIED: build backend "
                     f"{getattr(self._backend, 'name', '?')!r} reported no correctness verdict."

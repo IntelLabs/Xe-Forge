@@ -505,6 +505,26 @@ def _run_tune_config(args, config: Config) -> int:
     return 0
 
 
+def _copy_winner_dir(src: Path, out: Path) -> str | None:
+    """Replace *out* with a copy of the directory winner *src*; return an error or None."""
+    import shutil
+
+    dst = out.parent.resolve() / out.name
+    cwd = Path.cwd().resolve()
+    if dst == cwd or dst in cwd.parents:
+        return f"refusing to replace {out}: it contains the working directory"
+    # out is removed before the copy, so it must not overlap the winner.
+    src = src.resolve()
+    if src == dst or dst in src.parents or src in dst.parents:
+        return f"refusing to replace {out}: it is, holds or is inside the winner {src}"
+    if out.is_dir() and not out.is_symlink():
+        shutil.rmtree(out)
+    elif out.exists() or out.is_symlink():
+        out.unlink()
+    shutil.copytree(src, out)
+    return None
+
+
 def _run_optimize(parser, args, config: Config) -> int:
     """Run the optimization pipeline (original path)."""
     # Validate input. Only the Claude engine can locate a kernel in --kernel-repo at
@@ -681,21 +701,10 @@ def _run_optimize(parser, args, config: Config) -> int:
         with open(args.output, "w") as f:
             f.write(result.optimized_code)
     elif args.output and result.optimized_path and Path(result.optimized_path).is_dir():
-        import shutil
-
-        out = Path(args.output)
-        cwd = Path.cwd().resolve()
-        if out.resolve() == cwd or out.resolve() in cwd.parents:
-            print(
-                f"Error: refusing to replace {out}: it contains the working directory",
-                file=sys.stderr,
-            )
+        error = _copy_winner_dir(Path(result.optimized_path), Path(args.output))
+        if error:
+            print(f"Error: {error}", file=sys.stderr)
             return 1
-        if out.is_dir() and not out.is_symlink():
-            shutil.rmtree(out)
-        elif out.exists() or out.is_symlink():
-            out.unlink()
-        shutil.copytree(result.optimized_path, out)
 
     # Print results
     print("\n" + "=" * 60)
