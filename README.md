@@ -219,7 +219,7 @@ Two ways to run it:
 A host project (e.g. flashinfer-bench) can drive a Claude session with its own toolchain, data and measurements:
 
 ```bash
-xe-forge -i kernel.py -s spec.yaml --dsl sycl --engine claude --workspace ./ws \
+xe-forge --reference ref.py -s spec.yaml --dsl sycl --engine claude --workspace ./ws \
     --build-backend ai_bench \
     --external-benchmark "host-bench {trial} {baseline} {variant}" \
     --dataset-record record.json --lessons ~/xe-forge-lessons \
@@ -230,7 +230,9 @@ xe-forge -i kernel.py -s spec.yaml --dsl sycl --engine claude --workspace ./ws \
 - `--external-benchmark` / `--external-validate` — host commands decide correctness and timing. A result with no correctness verdict is never a pass.
 - `--dataset-record` — describes the real workloads behind the spec's variants and adds a `workload-inspector` agent.
 - `--lessons` — per-kernel notes kept outside the workspace and re-read by later sessions.
-- `--kernel-repo` — optimize a kernel inside an existing repo; a `kernel-locator` agent finds it once, and its copy is the baseline.
+- `--kernel-repo` — optimize a kernel inside an existing repo; a `kernel-locator` agent finds it once, and its copy is the baseline. `-i` is the baseline instead when it is already in the target DSL.
+
+A kernel from another repo, step by step: [docs/KERNEL_REPO.md](docs/KERNEL_REPO.md). What decides correctness in each mode: [docs/CORRECTNESS.md](docs/CORRECTNESS.md).
 
 ### Tile Search — CUTLASS SYCL tile tuning
 
