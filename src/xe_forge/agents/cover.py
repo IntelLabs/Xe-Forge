@@ -1,9 +1,9 @@
 import logging
+import traceback
 from collections.abc import Callable
 from typing import Any
 
 import dspy
-from dspy.predict.react import _fmt_exc
 
 try:
     from litellm.exceptions import ContextWindowExceededError
@@ -14,6 +14,12 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _fmt_exc(err: BaseException, *, limit: int = 5) -> str:
+    """Newline-prefixed traceback summary; dspy's private helper of this name was removed."""
+    tb = traceback.format_exception(type(err), err, err.__traceback__, limit=limit)
+    return "\n" + "".join(tb).strip()
 
 
 class CoVeR(dspy.Module):
