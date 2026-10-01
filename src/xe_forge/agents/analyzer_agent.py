@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 _DSL_NAMES: dict[str, str] = {
     "triton": "Triton",
     "gluon": "Gluon",
-    "sycl": "SYCL/XeTLA",
+    "sycl": "SYCL/Sycl-tla",
     "cuda": "CUDA C++",
 }
 

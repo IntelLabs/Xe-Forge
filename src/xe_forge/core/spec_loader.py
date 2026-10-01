@@ -67,6 +67,7 @@ class VariantSpec:
     dtype: str | None = None  # Override dtype
     rtol: float | None = None  # Relative tolerance for correctness
     atol: float | None = None  # Absolute tolerance for correctness
+    bytes_formula: str | None = None  # e.g., "2*(M*K + K*N + M*N)"
 
 
 @dataclass
@@ -221,19 +222,41 @@ class KernelSpec:
         variant_index: int = 0,
     ) -> float | None:
         """Calculate FLOP count for variant."""
+        return self._eval_formula("flop_formula", variant_type, variant_index)
+
+    def get_bytes(
+        self,
+        variant_type: str = "bench-gpu",
+        variant_index: int = 0,
+    ) -> float | None:
+        """Calculate bytes moved per call for variant."""
+        return self._eval_formula("bytes_formula", variant_type, variant_index)
+
+    def get_reference_workload(self, variant_type: str = "bench-gpu") -> dict:
+        """Keyword arguments a reference's get_init_inputs/get_inputs build the variant from."""
+        variant = self.get_variant(variant_type)
+        if variant is None:
+            raise ValueError(f"Unknown spec variant: {variant_type}")
+        workload = dict(variant.dims)
+        if variant.dtype:
+            workload["dtype"] = get_torch_dtype(variant.dtype)
+        return workload
+
+    def _eval_formula(self, attr: str, variant_type: str, variant_index: int) -> float | None:
         vl = self._variants(variant_type)
         if not vl or variant_index >= len(vl):
             return None
 
         variant = vl[variant_index]
-        if not variant.flop_formula:
+        raw = getattr(variant, attr)
+        if not raw:
             return None
 
-        if isinstance(variant.flop_formula, (int, float)):
-            return float(variant.flop_formula)
+        if isinstance(raw, (int, float)):
+            return float(raw)
 
         # Substitute dimension values into formula, then evaluate via ai_bench
-        formula = str(variant.flop_formula)
+        formula = str(raw)
         for key in sorted(variant.dims.keys(), key=len, reverse=True):
             formula = formula.replace(key, str(variant.dims[key]))
         return eval_eq(formula)
@@ -365,6 +388,7 @@ def _parse_variant_entry(vd: dict) -> VariantSpec:
         dtype=vd.get(VKey.TYPE),
         rtol=get_rtol(vd) if VKey.RTOL in vd else None,
         atol=get_atol(vd) if VKey.ATOL in vd else None,
+        bytes_formula=vd.get("bytes"),
     )
 
 

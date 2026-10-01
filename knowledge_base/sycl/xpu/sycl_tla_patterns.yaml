@@ -1,0 +1,389 @@
+# SYCL optimization guidance, not hardware or performance guarantees.
+# Source checks used local vllm-xpu-kernels at HEAD
+# d7c35d281cf50564996fb0b9c41676b64f13f970 and its .deps/cutlass-sycl-src
+# at HEAD 87f6850680a580654b9ea2c80dbc01aeb36ad231. Dependency worktree
+# cleanliness was not established. No benchmark or assembly certification.
+
+constraints:
+  - id: sycl_dpas_requires_simd16
+    name: Match subgroup size to the selected matrix API and target
+    severity: critical
+    description: |
+      Subgroup requirements depend on the matrix API, selected MMA atom, dtype,
+      compiler and device. An atom that requires SIMD16 must use that width;
+      this is not a universal requirement for every DPAS path on Arc or Xe2.
+      Check the selected library implementation and supported matrix combinations,
+      then compile and validate the exact kernel. A supported device subgroup size
+      alone does not prove that a particular matrix operation supports it.
+
+  - id: sycl_fp32_accumulator_required
+    name: Match accumulation precision to the numerical contract
+    severity: critical
+    description: |
+      FP32 accumulation can reduce rounding error relative to FP16 accumulation
+      for FP16/BF16 inputs. Select a combination supported by the matrix API and
+      required by the reference computation. Do not change input, accumulator or
+      output precision solely for throughput without validating permitted error.
+      Preserve intermediate rounding when fusing operations if the contract needs it.
+
+  - id: sycl_dpas_tile_shapes_per_generation
+    name: Derive matrix tile constraints from the selected implementation
+    severity: critical
+    description: |
+      Hardware instructions, library MMA atoms and logical workgroup tiles are
+      different levels of representation. Inspect the selected atom's shape,
+      dtype, layout and subgroup constraints in the installed library revision.
+      Do not infer legal API tile shapes from a GPU-family name. Handle boundary
+      tiles and K remainders explicitly.
+
+  - id: sycl_slm_size_limits
+    name: Account for actual local-memory allocation
+    severity: critical
+    description: |
+      Check device and kernel limits for per-workgroup local memory. Core capacity
+      and per-workgroup allocation limits are not interchangeable, and fitting
+      within a limit does not establish residency or performance.
+      For equally staged A and B tiles, staging bytes are:
+      stages * (TILE_M * TILE_K * sizeof(A_element)
+      + TILE_K * TILE_N * sizeof(B_element)). Include padding and all other local
+      allocations. Use SYCL local-memory facilities appropriate to the implementation.
+
+  - id: sycl_slm_bank_conflict_padding
+    name: Test padding against the actual local-memory access pattern
+    severity: high
+    description: |
+      Padding or changing layout may reduce bank conflicts but increases allocation.
+      Derive bank accesses from the target's documented mapping, element width,
+      instruction width and lane-to-element mapping. Account for broadcast behavior.
+      Do not infer conflict degree solely from a power-of-two array dimension.
+      Validate correctness and benchmark the layout change.
+
+  - id: sycl_k_loop_unroll_for_dpas_latency
+    name: Test K-loop unrolling against dependency and register costs
+    severity: high
+    description: |
+      Unrolling can expose independent work, but repeated updates of the same
+      accumulator remain dependent. No universal instruction latency, unroll depth,
+      GRF increment or occupancy result follows from source-level unrolling.
+      Preserve loads for every operand, synchronization and remainder handling.
+      Inspect generated resources and benchmark candidates with matched inputs.
+
+  - id: sycl_register_pressure_occupancy
+    name: Measure register-mode and residency tradeoffs
+    severity: high
+    description: |
+      More registers may avoid spills while reducing residency. Neither spill
+      elimination nor a fixed occupancy change is guaranteed. Subgroup size,
+      workgroup size and GRF-size requests are separate controls.
+      The inspected vllm-xpu-kernels csrc/xpu/attn/xe_2/chunk_prefill.hpp launch
+      uses sub_group_size and grf_size properties independently. Check support
+      in the current toolchain and device. See resource_feedback.yaml for reported
+      field units and provenance. Test shorter live ranges, less unrolling, smaller
+      tiles or supported register modes; lower allocation is not always faster.
+
+  - id: sycl_use_subgroup_reduction_not_slm
+    name: Preserve scope when replacing a reduction
+    severity: critical
+    description: |
+      reduce_over_group on a subgroup only combines that subgroup's values.
+      A workgroup reduction requires a workgroup collective or an explicit
+      combination of subgroup partial results with appropriate synchronization.
+      All required group members must participate in the collective consistently.
+      Do not replace a workgroup reduction with a subgroup sum unless one subgroup
+      owns the entire reduction. Latency and local-memory use depend on lowering.
+      Reference: vllm-xpu-kernels csrc/layernorm.cpp, workgroup variance reduction.
+
+  - id: sycl_coalesced_access_required
+    name: Improve memory access without changing logical indexing
+    severity: high
+    description: |
+      Map neighboring work-items to nearby addresses where the operation permits.
+      Preserve the logical tensor indices when changing work assignment or layout.
+      Transaction counts depend on addresses, alignment, access width, caches and
+      compiler lowering. Scalar source loads can coalesce; do not assign a fixed
+      traffic multiplier from subgroup size alone.
+
+patterns:
+  - id: sycl_gemm_tile_hierarchy
+    name: Separate workgroup, subgroup and MMA tiles
+    stage: device_specific
+    description: Construct the tile hierarchy from a supported matrix implementation
+    rationale: |
+      Workgroup tiles partition the output, subgroup tiles divide that work, and
+      MMA atoms constrain instruction-level operations. Their dimensions need not
+      match, and no fixed hierarchy guarantees peak throughput.
+    pattern_after: |
+      Start from the selected library's supported atom and layouts. Derive output
+      ownership and operand movement, then account for registers, local memory,
+      workgroup limits and boundary handling before benchmarking.
+    applies_to: [gemm, conv, attention]
+
+  - id: sycl_tile_size_selection_by_shape
+    name: Search tile sizes under correctness and resource constraints
+    stage: device_specific
+    description: Use actual workload dimensions and measured resources
+    rationale: |
+      Tiles trade data reuse against allocation, remainder work and available
+      parallelism. M and N alone do not establish an optimal configuration.
+    pattern_after: |
+      Consider M, N, K, batch, dtype, layout, strides and masks. Check legal atom
+      shapes and launch limits. Change a small number of parameters and compare
+      correctness-gated, uninstrumented timings on the same workload.
+    applies_to: [gemm, conv, attention]
+
+  - id: sycl_slm_double_buffering
+    name: Overlap staging only with explicit completion and lifetime rules
+    stage: memory_access
+    description: Evaluate multiple staging buffers without introducing data races
+    rationale: |
+      Multiple buffers can enable overlap if the copy mechanism and generated
+      schedule support it. Additional allocation can reduce residency.
+    pattern_after: |
+      Establish producer completion and visibility before consuming each buffer.
+      Finish all consumers before reusing it. Use the copy mechanism's required
+      waits and synchronization; a generic barrier is not a substitute for an
+      unspecified asynchronous-copy completion event. Handle pipeline fill,
+      drain and partial tiles, then verify actual overlap rather than assuming it.
+    applies_to: [gemm, conv, attention]
+
+  - id: sycl_block_load_intrinsics
+    name: Evaluate block loads with verified layout and alignment
+    stage: memory_access
+    description: Compare supported block operations with ordinary loads
+    rationale: |
+      Block operations may change instruction count and data layout. One source
+      operation does not imply one cache or DRAM transaction.
+    pattern_after: |
+      Verify API availability, address space, alignment, access size and lane
+      mapping. Preserve element ownership and guard boundaries. Compare generated
+      instructions and benchmark; scalar loads do not necessarily issue one
+      independent memory transaction per work-item.
+    applies_to: [gemm, reduction, elementwise]
+
+  - id: sycl_prefetch_hints
+    name: Test prefetch distance and resource costs
+    stage: memory_access
+    description: Prefetch only supported addresses with a measured benefit
+    rationale: |
+      Prefetch can bring data closer to use, but can also consume bandwidth,
+      instructions and cache capacity. A hint does not guarantee cache residency.
+    pattern_after: |
+      Use a supported prefetch operation and valid address range. Compare several
+      distances in loop iterations with prefetch disabled as a baseline. Do not
+      assume a fixed cycle latency or that prefetch always improves performance.
+    applies_to: [gemm, attention]
+
+  - id: sycl_joint_matrix_gemm
+    name: Use a supported matrix API implementation
+    stage: device_specific
+    description: Verify joint_matrix combinations before constructing a kernel
+    rationale: |
+      Supported shapes, types and layouts depend on the API revision, compiler
+      and target. A source-level API call does not establish the generated ISA.
+    pattern_after: |
+      Begin with an example supported by the installed implementation. Validate
+      subgroup participation, operand layout, per-tile offsets, initialization,
+      accumulation, conversion and stores. Handle boundary tiles. Inspect the
+      compiled kernel before claiming a specific instruction was emitted.
+    applies_to: [gemm, conv, attention]
+
+  - id: sycl_fused_gemm_epilogue
+    name: Fuse an epilogue while preserving the reference computation
+    stage: fusion
+    description: Avoid unnecessary intermediates without changing the operation
+    rationale: |
+      Fusion can avoid intermediate stores, reads and launches, but may increase
+      live state or change intermediate rounding and scheduling.
+    pattern_after: |
+      Preserve bias placement, activation order, scaling, output types and required
+      intermediate rounding. Do not introduce bias or another operation absent
+      from the reference. Validate numerical equivalence and benchmark the complete
+      operation, including any conversion or fallback costs.
+    applies_to: [gemm, fused_gemm_epilogue, mlp, conv]
+
+  - id: sycl_epilogue_sigmoid_gelu_silu
+    name: Match activation semantics before fusing
+    stage: fusion
+    description: Fuse only the activation specified by the workload
+    rationale: |
+      SiLU and GELU are different operations; exact GELU and tanh-approximate GELU
+      are also different numerical contracts. Alternatives must not be interpreted
+      as a chain of activations.
+    pattern_after: |
+      Select the reference activation and approximation mode. Preserve its input
+      dtype and required rounding, test representative extremes and special values,
+      and benchmark fusion against the original operation.
+    notes: "Reference: vllm-xpu-kernels csrc/activation.cpp, tanh-GELU and activation kernels."
+    applies_to: [mlp, transformer_ffn, fused_gemm_epilogue]
+
+  - id: sycl_quantized_gemm_epilogue
+    name: Preserve quantization rounding, saturation and scaling
+    stage: fusion
+    description: Fuse conversion only under the reference quantization contract
+    rationale: |
+      A plain float-to-INT8 cast is not saturating quantization. Scale granularity,
+      zero points, rounding and clipping affect the result.
+    pattern_after: |
+      Match scale and zero-point semantics, including zero-scale handling. Apply
+      the required rounding and clamp before integer conversion. The inspected
+      symmetric INT8 path rounds with rint and clamps to [-128, 127]; do not
+      generalize that rounding or range to other formats. Preserve bias and
+      activation order and validate boundary and tie cases.
+    notes: "Reference: vllm-xpu-kernels csrc/layernorm_quant.cpp, INT8 output conversion."
+    applies_to: [gemm, quantized, int8, inference]
+
+  - id: sycl_flash_attention_tiling
+    name: Preserve the complete online attention recurrence
+    stage: device_specific
+    description: Accumulate attention over blocks without materializing full scores
+    rationale: |
+      Online attention maintains a running row maximum, exponential sum and
+      unnormalized output accumulator. Changing the maximum requires rescaling
+      both prior sum and prior output into the new reference frame.
+    pattern_after: |
+      Apply reference score scaling and masks. For each block, combine its row
+      maximum with the running maximum. Construct weights exp(score - new_max),
+      multiply the previous sum and output by exp(old_max - new_max), and add
+      the new weight sum and weighted V contribution. Update the running maximum.
+      Normalize output by the final sum. Handle initialization, fully masked rows,
+      tails, head mapping and any split-workgroup merge explicitly. If exp2 is
+      used, convert scaling consistently rather than substituting it for exp.
+    notes: |
+      Reference: vllm-xpu-kernels csrc/xpu/attn/xe_2/collective/chunk_prefill_mainloop.hpp,
+      softmax and output rescaling.
+    applies_to: [attention, flash_attention]
+
+  - id: sycl_online_softmax
+    name: Separate online statistics from final softmax output
+    stage: device_specific
+    description: Compute stable running statistics with complete row coverage
+    rationale: |
+      Maximum and exponential sum can be accumulated online. Standalone softmax
+      still needs access to each value when producing normalized outputs, either
+      from retained storage or a later read.
+    pattern_after: |
+      Define which work-items own every row element, including tails. Combine
+      partial statistics across the full required scope. Preserve max/sum rescaling
+      and handle fully masked rows according to the reference. Count actual reads,
+      writes and retained state before claiming a traffic reduction.
+    applies_to: [softmax, attention, normalization]
+
+  - id: sycl_vectorized_loads
+    name: Evaluate vectorization with alignment and tail handling
+    stage: memory_access
+    description: Use vector widths supported by the actual memory layout
+    rationale: |
+      Vectorization can reduce instruction overhead but may increase live state
+      or complicate boundary handling. A vector's byte size is not a GRF size.
+    pattern_after: |
+      Verify alignment, stride, row boundaries and valid element count before
+      vector access. Provide scalar or masked tails as appropriate. Compare
+      supported widths with scalar access; inspect lowering and benchmark.
+    applies_to: [elementwise, reduction]
+
+  - id: sycl_nhwc_layout_for_conv
+    name: Choose convolution layout from actual accesses and conversion costs
+    stage: memory_access
+    description: Compare layouts without assuming one is universally faster
+    rationale: |
+      Contiguous NCHW stores W innermost; contiguous NHWC stores C innermost.
+      Which access pattern benefits depends on the convolution implementation.
+      A spatial slice at a fixed kernel offset is not generally a contiguous
+      flattened matrix when strides, padding or row boundaries intervene.
+    pattern_after: |
+      Derive addresses from actual strides and convolution parameters. Include
+      layout-conversion costs unless inputs already satisfy the required layout.
+      Validate outputs and benchmark the complete workflow.
+    applies_to: [conv, spatial, depthwise]
+
+  - id: sycl_ilp_parallel_accumulation
+    name: Test independent accumulation chains
+    stage: algorithmic
+    description: Expose independent work while respecting numerical constraints
+    rationale: |
+      Separate accumulators remove some dependencies between updates but increase
+      live state. Combining them changes floating-point addition order.
+    pattern_after: |
+      Use independent accumulators only where reassociation is permitted. Combine
+      every partial result and handle remainders. Validate tolerances and compare
+      generated register use and measured time against the original accumulation.
+    applies_to: [reduction, dot_product, accumulation]
+
+  - id: cutlass_epilogue_per_row_bias
+    name: Match CUTLASS bias types and broadcast dimensions
+    stage: fusion
+    description: Use the selected library revision's bias operation contract
+    rationale: |
+      The inspected XeLinCombPerRowBiasEltAct and XeLinCombPerColBiasEltAct
+      declarations distinguish output, compute, bias and source types. The
+      parameter after ElementBias is ElementSource, not ElementAccumulator.
+    pattern_after: |
+      Read the declaration and visitor implementation together. Verify broadcast
+      strides instead of inferring output-feature orientation from row/column
+      names. Test non-square outputs with distinct bias values and nonzero beta.
+    notes: "Reference: cutlass-sycl-src include/cutlass/epilogue/fusion/operations.hpp."
+    applies_to: [gemm, linear_layer, fused_gemm_epilogue]
+
+  - id: cutlass_epilogue_bias_act_aux
+    name: Preserve auxiliary-output and source semantics
+    stage: fusion
+    description: Match the auxiliary visitor's signature and saved-value contract
+    rationale: |
+      The inspected LinCombPerRowBiasEltActAux declaration includes ElementAux
+      before ElementBias. Its pre-activation expression includes alpha*acc,
+      beta*C and bias. Saved values required by backward depend on the activation.
+    pattern_after: |
+      Verify auxiliary layout, dtype and conversion separately from the main
+      output. Preserve beta*C and test nonzero source contributions. Match the
+      backward operation's expected saved values instead of assuming all
+      activations require the same representation.
+    notes: "Reference: cutlass-sycl-src include/cutlass/epilogue/fusion/operations.hpp."
+    applies_to: [gemm, training, backward_pass, fused_gemm_epilogue]
+
+  - id: cutlass_epilogue_softmax
+    name: Verify full-row coverage for softmax epilogues
+    stage: fusion
+    description: Check reduction ownership and dispatch before using a softmax visitor
+    rationale: |
+      LinCombSoftmaxRow exists in the inspected library and requires a CopyOpR2G
+      type as its third required template argument. Its declaration alone does
+      not establish whether a tiled launch covers an entire normalization row.
+    pattern_after: |
+      Verify the visitor implementation, dispatch policy and full-row reduction
+      coverage. Combine partial statistics and outputs correctly when rows span
+      tiles. Tile-local normalization is not a substitute for full-row softmax.
+    notes: "Reference: cutlass-sycl-src include/cutlass/epilogue/fusion/operations.hpp."
+    applies_to: [attention, softmax, normalization]
+
+  - id: cutlass_epilogue_topk_softmax
+    name: Match routing normalization and selection order
+    stage: fusion
+    description: Verify top-k softmax semantics against the routing operation
+    rationale: |
+      LinCombTopKSoftmaxCol exists in the inspected library, but type existence
+      does not establish a valid dispatch or equivalence to a model's routing.
+      Softmax over selected logits differs from selecting values from a full
+      softmax without renormalization.
+    pattern_after: |
+      Verify normalization order, selected-weight renormalization, ties, indices
+      and any bias or group-selection rules. Check dispatch support and test the
+      exact model's routing contract before replacing separate operations.
+    notes: "Reference: cutlass-sycl-src include/cutlass/epilogue/fusion/operations.hpp."
+    applies_to: [gemm, moe, routing, gating]
+
+  - id: cutlass_epilogue_splitk
+    name: Verify Split-K reduction and epilogue ordering
+    stage: fusion
+    description: Distribute K only with a correct partial-result merge
+    rationale: |
+      Split-K creates partial products that must be combined. It can add
+      parallelism but also adds reduction work and may change rounding.
+      The inspected LinCombSplitK declaration's third required template parameter
+      is CopyOpR2G, not ElementAccumulator.
+    pattern_after: |
+      Follow a supported visitor and dispatch implementation. Ensure bias and
+      beta*C are applied with the required multiplicity and nonlinear activation
+      occurs at the correct point relative to reduction. Validate workspace,
+      synchronization, tails and numerical error before benchmarking.
+    notes: "Reference: cutlass-sycl-src include/cutlass/epilogue/fusion/operations.hpp."
+    applies_to: [gemm, attention, split_k]

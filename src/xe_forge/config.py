@@ -9,6 +9,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from xe_forge.external import DEFAULT_TIMEOUT
 from xe_forge.models import OptimizationStage
 
 
@@ -134,6 +135,48 @@ class EngineConfig:
     auto_launch: bool = False  # Claude engine: auto-launch claude CLI
     workspace: str = "./"  # Claude engine: workspace directory
     git_init: bool = False  # Claude engine: initialize workspace as git repo
+    max_turns: int = 80  # Claude engine: turn limit for one headless session
+    # Name, ``module:attr`` reference, or entry point of a build backend
+    # (see xe_forge.core.build_backend). None keeps the default ai_bench path.
+    build_backend: str | None = None
+    # Extra flags for the target compiler (e.g. icpx for SYCL); rendered into the
+    # generated workspace for Claude's own build step. xe_forge never compiles it itself.
+    compiler_flags: str | None = None
+
+
+@dataclass
+class ExternalConfig:
+    """Commands a host supplies for correctness and timing.
+
+    Xe-Forge's own answers to "is it correct" and "how fast is it" come from
+    random tensors and an unfloored wall-clock measurement. A host with real
+    workload data and a calibrated timer supplies a command instead; see
+    :mod:`xe_forge.external` for the contract it must print and for why the
+    default is worth replacing.
+
+    ``dataset_record`` is the third of the same kind: a JSON file describing the
+    data behind the spec's benchmark variants, so the session can read the real
+    workload distribution instead of inferring one from the shapes it was given.
+    See :mod:`xe_forge.core.dataset_record`.
+
+    ``lessons`` is the fourth: a directory outside the workspace where sessions
+    record what they measured, so a run can start from what earlier runs on this
+    part found instead of rediscovering it. See :mod:`xe_forge.core.lessons`.
+
+    ``kernel_repo`` the path to an external repository holding a kernel
+    this session did not write. Unlike the others, no host-supplied structured record
+    describes it -- the `kernel-locator` agent explores the repository itself and
+    writes what it found, once, before the first trial.
+
+    All are None by default, which keeps the built-in build and measurement path.
+    """
+
+    benchmark: str | None = None
+    validate: str | None = None
+    dataset_record: str | None = None
+    lessons: str | None = None
+    kernel_repo: str | None = None
+    timeout: int = DEFAULT_TIMEOUT
 
 
 @dataclass
@@ -147,10 +190,13 @@ class TrialConfig:
 
 @dataclass
 class ProfilerConfig:
-    """VTune profiler configuration"""
+    """GPU profiler configuration (unitrace and/or VTune)"""
 
     vtune_enabled: bool = False
     vtune_bin: str = "vtune"
+    unitrace_enabled: bool = False
+    unitrace_bin: str = "unitrace"
+    unitrace_metric_group: str = "ComputeBasic"
     warmup_iters: int = 5
     profile_iters: int = 20
 
@@ -168,6 +214,7 @@ class Config:
     engine: EngineConfig = field(default_factory=EngineConfig)
     trial: TrialConfig = field(default_factory=TrialConfig)
     profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
+    external: ExternalConfig = field(default_factory=ExternalConfig)
 
     @property
     def xpu(self) -> XPUConfig:
@@ -254,6 +301,19 @@ class ConfigManager:
             auto_launch=self._get_env("AUTO_LAUNCH", False, bool),
             workspace=self._get_env("WORKSPACE", "./"),
             git_init=self._get_env("WORKSPACE_GIT_INIT", False, bool),
+            max_turns=self._get_env("MAX_TURNS", 80, int),
+            build_backend=self._get_env("BUILD_BACKEND", None),
+            compiler_flags=self._get_env("COMPILER_FLAGS", None),
+        )
+
+        # External correctness/timing commands
+        external_cfg = ExternalConfig(
+            benchmark=self._get_env("EXTERNAL_BENCHMARK", None),
+            validate=self._get_env("EXTERNAL_VALIDATE", None),
+            dataset_record=self._get_env("DATASET_RECORD", None),
+            lessons=self._get_env("LESSONS_DIR", None),
+            kernel_repo=self._get_env("KERNEL_REPO", None),
+            timeout=self._get_env("EXTERNAL_TIMEOUT", DEFAULT_TIMEOUT, int),
         )
 
         # Trial Configuration
@@ -267,6 +327,9 @@ class ConfigManager:
         profiler_cfg = ProfilerConfig(
             vtune_enabled=self._get_env("VTUNE_ENABLED", False, bool),
             vtune_bin=self._get_env("VTUNE_BIN", "vtune"),
+            unitrace_enabled=self._get_env("UNITRACE_ENABLED", False, bool),
+            unitrace_bin=self._get_env("UNITRACE_BIN", "unitrace"),
+            unitrace_metric_group=self._get_env("UNITRACE_METRIC_GROUP", "ComputeBasic"),
             warmup_iters=self._get_env("VTUNE_WARMUP", 5, int),
             profile_iters=self._get_env("VTUNE_ITERS", 20, int),
         )
@@ -281,6 +344,7 @@ class ConfigManager:
             engine=engine_cfg,
             trial=trial_cfg,
             profiler=profiler_cfg,
+            external=external_cfg,
         )
 
     def _build_device_config(self, device_type: str, dsl: str) -> DeviceConfig:

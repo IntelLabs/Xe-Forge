@@ -6,9 +6,9 @@
 
 tile_configurations:
   - id: cutlass_bmg_gemm_256x256x32
-    name: "Standard BF16 GEMM tile: 256x256x32 (optimal for large shapes)"
+    name: "BF16 GEMM example tile: 256x256x32"
     description: |
-      The default high-performance tile for BF16 GEMM on Battlemage.
+      A candidate tile for BF16 GEMM on Battlemage, not a universal default.
       Used by examples 00-05, 08, 11, 13 in sycl-tla.
 
       ```cpp
@@ -23,6 +23,8 @@ tile_configurations:
       ```
 
       Performance: ~37.9 TFLOPS on B580 at M=N=K=4096 (32% peak).
+      This historical figure lacks complete driver/compiler/timing provenance
+      here; treat it as unverified context, not a target or a portable baseline.
       Each subgroup handles 32x64 output (256/8 x 256/4).
       SLM double-buffer: 2*(256*32 + 32*256)*2 = 64 KB (fits 128 KB budget).
     applies_to: [gemm, large_shapes, M_ge_256, N_ge_256]
@@ -46,7 +48,8 @@ tile_configurations:
 
       Performance: ~3.8 TFLOPS on B580 (8% peak) — significantly lower than
       standard GEMM due to smaller tiles and double memory reads (B0+B1).
-      This is the baseline to optimize against for SwiGLU kernels.
+      This historical result lacks complete shape and build provenance here.
+      Establish a local baseline before drawing performance or causal conclusions.
 
       OPTIMIZATION OPPORTUNITIES:
       - Try larger tiles if register pressure allows (e.g., 256x128x32)
@@ -140,8 +143,8 @@ tile_configurations:
         - qk_m must be divisible by 8 (DPAS atom M)
         - sg_q <= 32 (max subgroups per workgroup)
         - head_dim must be divisible by pv_n (VTiles = head_dim / pv_n)
-        - qk_m values that are NOT multiples of 8 (e.g. 192) will fail
-          because sg_tile_q = qk_m/sg_q must align with DPAS atom M=8
+        - verify that sg_tile_q = qk_m/sg_q aligns with the selected atom's M
+          requirement; qk_m divisibility alone does not establish this
         - pv_k must be a power of 2 (16, 32, 64, 128, 256, 512)
         - qk_k should be 16, 32, or 64
 
@@ -152,11 +155,11 @@ tile_configurations:
 
 dispatch_policies:
   - id: cutlass_mainloop_xe_l1_staged
-    name: "MainloopXeL1Staged — best for standard GEMM on BMG"
+    name: "MainloopXeL1Staged - candidate for standard GEMM on BMG"
     description: |
       L1-staged data movement using DPAS atoms (XE_DPAS_TT) and 2D block
-      copy atoms. This is the highest-performance dispatch policy for
-      standard BF16 GEMM on Battlemage.
+      copy atoms. Compare this policy with supported alternatives on the actual
+      shape, dtype, library revision and device; no universal winner is assumed.
 
       ```cpp
       using DispatchPolicy = MainloopXeL1Staged<2>;  // 2 pipeline stages
@@ -349,12 +352,6 @@ fused_kernel_patterns:
 
       The MoE tile scheduler maps tiles across variable-sized expert groups
       efficiently, avoiding load imbalance from experts with few tokens.
-
-      Model shapes:
-        DeepSeekV2: 160 experts, dim 3072/1536, router gate 160
-        Qwen3-235B: 128 experts, dim 3072/1536, router gate 128
-        LLaMA4 Scout: 16 experts, dim 16384/8192, router gate 16
-        GPT_OSS_120B: 128 experts, dim 5760/2880, router gate 128
 
   - id: cutlass_topk_softmax_moe_router
     name: "GEMM + TopK + Softmax (MoE router gating)"

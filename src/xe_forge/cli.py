@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 from xe_forge.config import Config, get_config, override_config
-from xe_forge.models import OptimizationStage
+from xe_forge.models import DSL, OptimizationStage
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +70,13 @@ Examples:
 
     # Input (required for optimization pipeline, not for tile tuning)
     parser.add_argument("--input", "-i", type=str, help="Input kernel file")
+    parser.add_argument(
+        "--reference",
+        type=str,
+        default=None,
+        help="Explicit path to the semantic reference (e.g. PyTorch) this kernel must "
+        "match; overrides the sibling <name>_pytorch.py lookup next to --input",
+    )
     parser.add_argument(
         "--name", "-n", type=str, default="kernel", help="Kernel function name (default: kernel)"
     )
@@ -162,7 +169,13 @@ Examples:
     parser.add_argument("--trials-dir", type=str, help="Directory for trial state")
     parser.add_argument("--no-trials", action="store_true", help="Disable trial tracking")
 
-    # VTune profiling
+    # GPU profiling: unitrace (Level Zero EU stall sampling, no GPU OA counter
+    # permissions needed) and/or VTune (gpu-offload, needs /dev/dri/card0 access)
+    parser.add_argument(
+        "--unitrace", action="store_true", default=None, help="Enable unitrace profiling"
+    )
+    parser.add_argument("--no-unitrace", action="store_true", help="Disable unitrace profiling")
+    parser.add_argument("--unitrace-bin", type=str, help="Path to unitrace binary")
     parser.add_argument("--vtune", action="store_true", default=None, help="Enable VTune profiling")
     parser.add_argument("--no-vtune", action="store_true", help="Disable VTune profiling")
     parser.add_argument("--vtune-bin", type=str, help="Path to VTune binary")
@@ -170,6 +183,63 @@ Examples:
     # Claude Code specific
     parser.add_argument("--workspace", type=str, help="Workspace dir for Claude Code engine")
     parser.add_argument("--auto-launch", action="store_true", help="Auto-launch claude CLI")
+    parser.add_argument(
+        "--max-turns", type=int, help="Turn limit for one headless claude session (default: 80)"
+    )
+    parser.add_argument(
+        "--compiler-flags",
+        type=str,
+        default=None,
+        help="Extra flags for the target compiler (e.g. icpx for SYCL); rendered into "
+        "the generated workspace for Claude's own build step, not consumed by xe_forge",
+    )
+
+    # Host-supplied toolchain and measurement (see xe_forge.core.build_backend
+    # and xe_forge.core.external). Unset, all three keep the built-in ai_bench build and measurement.
+    host_group = parser.add_argument_group(
+        "host integration",
+        "Delegate building, correctness and timing to a project that owns them",
+    )
+    host_group.add_argument(
+        "--build-backend",
+        type=str,
+        help="Build backend: a registered name, an entry point, or 'module:attr'",
+    )
+    host_group.add_argument(
+        "--external-benchmark",
+        type=str,
+        help="Command template run instead of the built-in benchmark; placeholders: "
+        "{kernel} {baseline} {trial} {spec} {variant} {device} {dsl} {workspace}",
+    )
+    host_group.add_argument(
+        "--external-validate",
+        type=str,
+        help="Command template run instead of the built-in validator; placeholders: "
+        "{kernel} {trial} {dsl} {stage} {workspace}",
+    )
+    host_group.add_argument(
+        "--dataset-record",
+        type=str,
+        help="JSON record of the dataset behind the spec's benchmark variants; its "
+        "facts are rendered into the workspace so the session can inspect the real "
+        "workload distribution (see xe_forge.core.dataset_record)",
+    )
+    host_group.add_argument(
+        "--lessons",
+        type=str,
+        metavar="DIR",
+        help="Directory, outside the workspace, where sessions record what they "
+        "measured on this part; a session reads every file in it and appends to "
+        "its own (see xe_forge.core.lessons)",
+    )
+    host_group.add_argument(
+        "--kernel-repo",
+        type=str,
+        metavar="PATH",
+        help="Path to an external repository holding a kernel this workspace did not "
+        "write; the kernel-locator agent explores it once and writes findings before "
+        "the first trial",
+    )
 
     # Other options
     parser.add_argument("--debug", action="store_true", help="Enable debug output")
@@ -251,10 +321,35 @@ def _load_config(args) -> Config:
         os.environ["VTUNE_ENABLED"] = "false"
     if args.vtune_bin:
         os.environ["VTUNE_BIN"] = args.vtune_bin
+    if args.unitrace:
+        os.environ["UNITRACE_ENABLED"] = "true"
+    if args.no_unitrace:
+        os.environ["UNITRACE_ENABLED"] = "false"
+    if args.unitrace_bin:
+        os.environ["UNITRACE_BIN"] = args.unitrace_bin
     if args.workspace:
         os.environ["WORKSPACE"] = args.workspace
+        os.environ.setdefault(
+            "TORCH_EXTENSIONS_DIR", str(Path(args.workspace).resolve() / ".torch_extensions")
+        )
     if args.auto_launch:
         os.environ["AUTO_LAUNCH"] = "true"
+    if getattr(args, "max_turns", None) is not None:
+        os.environ["MAX_TURNS"] = str(args.max_turns)
+    if getattr(args, "build_backend", None):
+        os.environ["BUILD_BACKEND"] = args.build_backend
+    if getattr(args, "external_benchmark", None):
+        os.environ["EXTERNAL_BENCHMARK"] = args.external_benchmark
+    if getattr(args, "external_validate", None):
+        os.environ["EXTERNAL_VALIDATE"] = args.external_validate
+    if getattr(args, "dataset_record", None):
+        os.environ["DATASET_RECORD"] = args.dataset_record
+    if getattr(args, "lessons", None):
+        os.environ["LESSONS_DIR"] = args.lessons
+    if getattr(args, "kernel_repo", None):
+        os.environ["KERNEL_REPO"] = args.kernel_repo
+    if getattr(args, "compiler_flags", None):
+        os.environ["COMPILER_FLAGS"] = args.compiler_flags
 
     config = get_config()
     if overrides:
@@ -410,12 +505,36 @@ def _run_tune_config(args, config: Config) -> int:
     return 0
 
 
+def _copy_winner_dir(src: Path, out: Path) -> str | None:
+    """Replace *out* with a copy of the directory winner *src*; return an error or None."""
+    import shutil
+
+    dst = out.parent.resolve() / out.name
+    cwd = Path.cwd().resolve()
+    if dst == cwd or dst in cwd.parents:
+        return f"refusing to replace {out}: it contains the working directory"
+    # out is removed before the copy, so it must not overlap the winner.
+    src = src.resolve()
+    if src == dst or dst in src.parents or src in dst.parents:
+        return f"refusing to replace {out}: it is, holds or is inside the winner {src}"
+    if out.is_dir() and not out.is_symlink():
+        shutil.rmtree(out)
+    elif out.exists() or out.is_symlink():
+        out.unlink()
+    shutil.copytree(src, out)
+    return None
+
+
 def _run_optimize(parser, args, config: Config) -> int:
     """Run the optimization pipeline (original path)."""
-    # Validate input (required for optimization pipeline)
-    if not args.input:
-        parser.error("--input is required (or use --tile-tune / --tune-config)")
-    if not Path(args.input).exists():
+    # Validate input. Only the Claude engine can locate a kernel in --kernel-repo at
+    # runtime; every other engine would be handed an empty kernel.
+    if not args.input and not (args.kernel_repo and config.engine.engine == "claude"):
+        parser.error(
+            "--input is required (or use --kernel-repo with --engine claude, "
+            "--tile-tune / --tune-config)"
+        )
+    if args.input and not Path(args.input).exists():
         print(f"Error: Input file '{args.input}' not found", file=sys.stderr)
         sys.exit(1)
 
@@ -505,20 +624,47 @@ def _run_optimize(parser, args, config: Config) -> int:
         )
         print(f"Executor: KernelBenchExecutor (device={config.device_config.device})")
 
-    # Read input file
-    with open(args.input) as f:
-        kernel_code = f.read()
+    try:
+        target_ext = DSL(str(dsl)).kernel_ext
+    except ValueError:
+        target_ext = ".py"
 
-    # Read reference implementation (Python DSLs only)
+    kernel_code = ""
     reference_code = ""
-    if dsl not in ("sycl", "cuda"):
+    if args.input:
+        input_path = Path(args.input)
+        with open(input_path) as f:
+            input_code = f.read()
+
+        # The input is a baseline to optimize only if it is already written in the target
+        # language; a file in another language cannot compile as one, so it is instead the
+        # semantic reference, and Claude writes the target file itself.
+        is_target_language = input_path.suffix == target_ext
+        kernel_code = input_code if is_target_language else ""
+
+        if args.reference:
+            try:
+                with open(args.reference) as f:
+                    reference_code = f.read()
+            except FileNotFoundError:
+                parser.error(f"--reference file not found: {args.reference}")
+        elif is_target_language:
+            sibling = input_path.with_name(f"{input_path.stem}_pytorch.py")
+            try:
+                with open(sibling) as f:
+                    reference_code = f.read()
+            except FileNotFoundError:
+                print(f"No PyTorch reference file found at {sibling}")
+        else:
+            reference_code = input_code
+    elif args.reference:
+        # No --input at all (e.g. --kernel-repo): the reference can still be named
+        # explicitly even with no local baseline file to optimize yet.
         try:
-            with open(f"{os.path.splitext(args.input)[0]}_pytorch.py") as f:
+            with open(args.reference) as f:
                 reference_code = f.read()
         except FileNotFoundError:
-            print(
-                f"No PyTorch reference file found at {os.path.splitext(args.input)[0]}_pytorch.py"
-            )
+            parser.error(f"--reference file not found: {args.reference}")
 
     # Create engine and optimize
     from xe_forge.engines import create_engine
@@ -528,6 +674,8 @@ def _run_optimize(parser, args, config: Config) -> int:
     print(f"Engine: {engine_name}")
     if config.trial.enabled:
         print(f"Trials: enabled (max={config.trial.max_trials}, dir={config.trial.trials_dir})")
+    if config.profiler.unitrace_enabled:
+        print(f"Unitrace: enabled (bin={config.profiler.unitrace_bin})")
     if config.profiler.vtune_enabled:
         print(f"VTune: enabled (bin={config.profiler.vtune_bin})")
 
@@ -552,6 +700,11 @@ def _run_optimize(parser, args, config: Config) -> int:
     if args.output and result.optimized_code:
         with open(args.output, "w") as f:
             f.write(result.optimized_code)
+    elif args.output and result.optimized_path and Path(result.optimized_path).is_dir():
+        error = _copy_winner_dir(Path(result.optimized_path), Path(args.output))
+        if error:
+            print(f"Error: {error}", file=sys.stderr)
+            return 1
 
     # Print results
     print("\n" + "=" * 60)

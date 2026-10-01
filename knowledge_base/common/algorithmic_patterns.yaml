@@ -1,68 +1,61 @@
-# Algorithmic Patterns — generic (applies to Triton, SYCL, and all XPU kernels)
-# Stage: algorithmic
-#
-# These patterns cover algorithmic-level optimizations that are independent
-# of the underlying kernel DSL (Triton, SYCL, etc.).
-#
-# Triton-specific algorithmic patterns are in knowledge_base/triton/xpu/algorithmic_patterns.yaml
-
 patterns:
 - id: weight_statistic_precomputation
-  name: Precompute weight-derived statistics once in __init__, not every forward()
+  name: Cache weight-derived state only under an explicit lifecycle contract
   stage: algorithmic
-  description: 'When a kernel computes a statistic of a frozen weight tensor on every
-
-    forward() call (column sums, row norms, packed transposes, etc.) and
-
-    that statistic depends only on the weight (not the input), it should
-
-    be computed once in __init__ and cached. Recomputing it every call
-
-    wastes bandwidth proportional to the weight size.
-
-
-    This is the model-level analogue of cacheable_intermediate.
-
-    '
-  pattern_before: "def forward(self, x):\n    # Recomputes w_colsum = W.sum(dim=0) every call\n    # W is [N, K] = [8192,\
-    \ 8192] → reads 134MB of W every forward()\n    w_colsum = compute_colsum(self.weight)   # O(N*K) every call\n    return\
-    \ dot_with_colsum(x, w_colsum)\n"
-  pattern_after: "def __init__(self, ...):\n    super().__init__()\n    self.weight = nn.Parameter(...)\n    self._w_colsum:\
-    \ Optional[torch.Tensor] = None\n    self._w_colsum_version = -1\n\ndef _ensure_colsum(self):\n    cur_ver = int(self.weight._version)\n\
-    \    if self._w_colsum is None or self._w_colsum_version != cur_ver:\n        self._w_colsum = compute_colsum(self.weight.data)\n\
-    \        self._w_colsum_version = cur_ver\n\ndef forward(self, x):\n    self._ensure_colsum()\n    # W never read in hot\
-    \ path — only x and w_colsum (~16KB)\n    return dot_with_colsum(x, self._w_colsum)\n"
-  expected_speedup: Up to 83x for W=[8192,8192], batch=100 (eliminates 134MB W read)
+  description: |
+    A statistic or packed representation depending only on unchanged weights may
+    be reused across calls when the workload permits preprocessing and caching.
+  rationale: |
+    Reuse can avoid repeated work, but adds initialization, storage and invalidation
+    costs. Its benefit depends on the number of calls and the benchmark scope.
+  pattern_before: |
+    Each invocation recomputes a weight-derived quantity even though its complete
+    set of dependencies remains unchanged across those invocations.
+  pattern_after: |
+    Identify every dependency and establish when it may change. Build derived
+    state after weight loading and required device/dtype preparation, or lazily
+    after those steps. Invalidate on weight mutation, replacement, checkpoint
+    loading and relevant device, dtype or layout changes. A weight's _version
+    alone is not a complete cache key: replacement can reuse a version value,
+    and .data mutation can bypass the original tensor's version counter.
+    Register a cache as a buffer when it should follow module conversions, but
+    still recompute when converting a cached result is not equivalent to deriving
+    it from the converted weights. Do not detach or reuse an autograd graph when
+    gradients through the derived quantity are required. Test invalidation and
+    repeated calls, not only the initial output. Include preprocessing costs or
+    amortize them only as explicitly allowed by the benchmark contract.
   applies_to:
   - gemm_reduction
   - sum_scaling
-  - any kernel with weight_statistic
+  - weight_statistic
+
 - id: sum_matmul_reorder
-  name: Reorder sum(A@B, dim) as A @ B.sum(dim) to reduce total FLOPs
+  name: Reduce before matmul when numerical reassociation is permitted
   stage: algorithmic
-  description: "When computing sum(A @ B, dim=1) where A=[M,K] and B=[K,N]:\n  - Naive: compute full [M,N] product then sum\
-    \ rows → O(M*N*K + M*N)\n  - Optimal: precompute b_colsum = B.sum(dim=0) [K], then A @ b_colsum → O(N*K + M*K)\n\nThis\
-    \ reduces FLOPs from M*N*K to (N+M)*K — for M=N=K=8192 that's 8192x fewer ops.\nValid by distributivity of matrix multiplication\
-    \ over addition.\n"
-  pattern_before: '# Naive: full GEMM then reduce
-
-    out = (x @ W.T)          # [M, N] — O(M*N*K) FLOPs
-
-    out = out.sum(dim=1)     # [M]   — O(M*N) FLOPs
-
-    out = out * scale
-
-    '
-  pattern_after: '# Optimal: reduce W first, then single dot per row
-
-    w_colsum = W.sum(dim=0)  # [K]   — O(N*K) FLOPs, cache in __init__
-
-    out = x @ w_colsum       # [M]   — O(M*K) FLOPs
-
-    out = out * scale
-
-    '
-  expected_speedup: 'O(M*N*K) → O((N+M)*K): ~N/2 = 4096x fewer FLOPs for square matrices'
+  description: |
+    For A with shape [M, K] and B with shape [K, N], summing A @ B along
+    dimension 1 is algebraically equivalent over real arithmetic to
+    A @ B.sum(dim=1). The reduced B has shape [K] and the output has shape [M].
+    If B is written as W.T for W of shape [N, K], reduce W along dimension 0.
+  rationale: |
+    The rewrite avoids materializing [M, N] and changes arithmetic complexity
+    from O(M*N*K + M*N) to O(K*N + M*K). This is not a measured speedup:
+    throughput, memory traffic and launch overhead still matter.
+    Floating-point distributivity does not hold in general. Different summation
+    order, intermediate rounding, overflow and cancellation can change outputs.
+  pattern_before: |
+    out = (A @ B).sum(dim=1)
+  pattern_after: |
+    out = A @ B.sum(dim=1)
+  notes: |
+    Use only when the workload permits reassociation and the result passes its
+    numerical checks. For example, FP32 A=[[1, 1]] and
+    B=[[100000000, 1], [-100000000, 1]] can give [2] before the rewrite and [0]
+    afterward. Check accumulation and intermediate dtypes, representative value
+    ranges, cancellation and supported shapes. Nonlinear operations between
+    matmul and reduction generally prevent this identity from applying directly.
+    Caching the reduced operand additionally requires the lifecycle conditions
+    in weight_statistic_precomputation; it is not automatically allowed.
   applies_to:
   - gemm_row_reduction
   - linear_sum

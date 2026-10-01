@@ -20,6 +20,19 @@ class DSL(StrEnum):
             return "cpp"
         return "python"
 
+    @property
+    def kernel_ext(self) -> str:
+        """Suffix a kernel in this DSL is written to.
+
+        A compiled DSL stored under ``.py`` is not cosmetic: the extension is
+        what a builder, an editor and a compiler driver dispatch on.
+        """
+        if self == DSL.SYCL:
+            return ".cpp"
+        if self == DSL.CUDA:
+            return ".cu"
+        return ".py"
+
 
 class DeviceType(StrEnum):
     XPU = "xpu"
@@ -151,6 +164,8 @@ class OptimizationResult(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
     original_code: str
     optimized_code: str | None = None
+    # Set when the winner is a multi-file trial directory; optimized_code is then None.
+    optimized_path: str | None = None
     stages_applied: list[StageResult] = Field(default_factory=list)
     total_speedup: float | None = None
     analysis: KernelAnalysis | None = None

@@ -1,5 +1,5 @@
 """
-SYCL Kernel Executor - Compiles and benchmarks SYCL/XeTLA C++ kernels.
+SYCL Kernel Executor - Compiles and benchmarks SYCL/Sycl-tla C++ kernels.
 
 Wraps ai_bench.sycl.compiler.SYCLCompiler for compile/run/parse, adding:
 - Source string → temp file conversion
@@ -24,6 +24,7 @@ import torch
 from ai_bench.harness.runner.benchmark_compare import set_all_seeds
 from ai_bench.sycl.compiler import SYCLCompiler, SYCLRunResult
 
+from xe_forge.core.build_backend import BuildError, BuildSpec, resolve_build_backend
 from xe_forge.models import ExecutionResult
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,11 @@ def _include_dirs(sycl_tla_dir: str, kernel_type: KernelType = KernelType.GEMM) 
     return dirs
 
 
+def _fmt_tflops(tflops: float | None) -> str:
+    """`` (x.xxx TFlop/s)`` when throughput was reported, nothing when it was not."""
+    return f" ({tflops:.3f} TFlop/s)" if tflops is not None else ""
+
+
 def _save_tensor(t: torch.Tensor, path: str) -> None:
     """Write a tensor to a binary file, handling bfloat16 (unsupported by NumPy)."""
     t = t.contiguous()
@@ -144,16 +150,28 @@ class SyclExecutor:
         iterations: int = 20,
         verify: bool = True,
         kernel_type: KernelType | str = KernelType.GEMM,
+        build_backend=None,
+        dependencies: tuple[str, ...] = (),
+        device: str = "xpu",
     ):
         if isinstance(kernel_type, str):
             kernel_type = KernelType(kernel_type)
         self.kernel_type = kernel_type
         if device_target is None:
             device_target = _detect_device_target()
+        self.device_target = device_target
+        self.device = device
+        self.dependencies = tuple(dependencies)
         self._compiler = SYCLCompiler(
             include_dirs=_include_dirs(sycl_tla_dir, kernel_type),
             target_device=device_target or None,
         )
+        # None uses the default ai_bench compile-and-run path. A named backend takes over
+        # both compilation and invocation, because a host whose kernels are
+        # shared objects called in-process has no standalone binary to run and
+        # no file round-trip to do.
+        self._backend = resolve_build_backend(build_backend) if build_backend else None
+        self._built: dict[str, object] = {}
         self.iterations = iterations
         self.verify = verify
         self._build_dir = None
@@ -201,6 +219,48 @@ class SyclExecutor:
             return False, "", err
         logger.info(f"Compilation succeeded: {binary}")
         return True, str(binary), ""
+
+    def _build_via_backend(
+        self,
+        source_code: str | None,
+        source_path: str | None,
+        output_name: str,
+    ):
+        """Build through the configured backend, caching per (name, source).
+
+        Returns ``(kernel, error)`` -- exactly one of which is None. Caching is
+        by source text rather than by name because the loop rewrites the same
+        trial file in place, and a stale artefact would be timed as if it were
+        the edit.
+        """
+        if source_code is None:
+            if source_path is None:
+                return None, "No source code or path provided"
+            source_code = Path(source_path).read_text()
+
+        cache_key = f"{output_name}:{hash(source_code)}"
+        cached = self._built.get(cache_key)
+        if cached is not None:
+            return cached, None
+
+        spec = BuildSpec(
+            name=output_name,
+            language="sycl",
+            dependencies=self.dependencies,
+            include_dirs=tuple(self._compiler.include_dirs),
+            workdir=self.build_dir,
+            extra={"device_target": self.device_target, "kernel_type": self.kernel_type.value},
+        )
+        try:
+            kernel = self._backend.build(source_code, spec, self.device)
+        except BuildError as exc:
+            return None, str(exc)
+        except Exception as exc:  # a backend is third-party code; do not let it escape
+            logger.exception("Build backend %r raised", getattr(self._backend, "name", "?"))
+            return None, f"Build backend error: {exc}"
+
+        self._built[cache_key] = kernel
+        return kernel, None
 
     @staticmethod
     def _dims_to_mnk(
@@ -327,6 +387,20 @@ class SyclExecutor:
         Returns:
             ExecutionResult with timing and correctness info
         """
+        if self._backend is not None:
+            kernel, err = self._build_via_backend(kernel_code, kernel_path, output_name)
+            if kernel is None:
+                return ExecutionResult(success=False, error_message=err)
+            return kernel(
+                dims=dict(dims) if dims else {"M": m, "N": n, "K": k},
+                iterations=self.iterations,
+                # No file comparison follows a backend run, so the backend is
+                # asked to verify even when inputs come from a directory.
+                verify=1 if self.verify else 0,
+                input_dir=input_dir,
+                output_dir=output_dir,
+            )
+
         success, binary_path, err = self.compile(
             source_code=kernel_code,
             source_path=kernel_path,
@@ -389,6 +463,16 @@ class SyclExecutor:
         (e.g. Flash Attention, dual GEMM). Pass args as a dict
         (converted to --key=value) or a raw argument string.
         """
+        if self._backend is not None:
+            if args_str:
+                return ExecutionResult(
+                    success=False, error_message="build backend takes args, not args_str"
+                )
+            kernel, err = self._build_via_backend(kernel_code, kernel_path, output_name)
+            if kernel is None:
+                return ExecutionResult(success=False, error_message=err)
+            return kernel(**(args or {}))
+
         success, binary_path, err = self.compile(
             source_code=kernel_code,
             source_path=kernel_path,
@@ -577,9 +661,28 @@ class SyclExecutor:
                 ),
             )
 
-        orig_ms = orig_result.execution_time_ms or float("inf")
-        opt_ms = opt_result.execution_time_ms or float("inf")
-        speedup = orig_ms / opt_ms if opt_ms > 0 else 0.0
+        orig_ms = orig_result.execution_time_ms
+        opt_ms = opt_result.execution_time_ms
+        missing = [
+            label
+            for label, ms in (("original", orig_ms), ("optimized", opt_ms))
+            if ms is None or ms <= 0
+        ]
+        if missing:
+            shutil.rmtree(io_dir, ignore_errors=True)
+            # A run that succeeded without a usable time cannot be ranked: a
+            # substituted inf or zero turns into a 0x or NaN speedup downstream.
+            return SyclComparisonResult(
+                original_time_ms=orig_ms if orig_ms and orig_ms > 0 else float("inf"),
+                optimized_time_ms=opt_ms if opt_ms and opt_ms > 0 else float("inf"),
+                speedup=0.0,
+                optimized_correct=False,
+                feedback_message=(
+                    f"FAILURE: no usable execution time reported for the "
+                    f"{' and '.join(missing)} kernel; the comparison cannot be ranked."
+                ),
+            )
+        speedup = orig_ms / opt_ms
 
         is_slower = speedup < 1.0
         orig_tflops = orig_result.tflops
@@ -591,7 +694,25 @@ class SyclExecutor:
         correctness_msg = ""
         orig_d2 = os.path.join(orig_output_dir, "D2.bin")
         opt_d2 = os.path.join(opt_output_dir, "D2.bin")
-        if os.path.exists(orig_d2) and os.path.exists(opt_d2):
+        if self._backend is not None:
+            # A backend owns its own execution model, so it -- not a file left
+            # behind on disk -- is what says whether the kernel was correct.
+            # Candidate must report True. The baseline is the oracle: None is allowed,
+            # an explicit False disqualifies the whole comparison.
+            orig_correct = orig_result.output_correct is not False
+            opt_correct = orig_correct and opt_result.output_correct is True
+            if not orig_correct:
+                correctness_msg = " CORRECTNESS FAILED: baseline failed the backend's check."
+            elif opt_result.output_correct is None:
+                correctness_msg = (
+                    f" CORRECTNESS UNVERIFIED: build backend "
+                    f"{getattr(self._backend, 'name', '?')!r} reported no correctness verdict."
+                )
+            elif opt_correct:
+                correctness_msg = " Correctness: PASSED."
+            else:
+                correctness_msg = f" CORRECTNESS FAILED: {opt_result.error_message or 'backend reported failure'}."
+        elif os.path.exists(orig_d2) and os.path.exists(opt_d2):
             orig_out = self.load_output(orig_d2)
             opt_out = self.load_output(opt_d2)
             passed, detail = self.compare_outputs(orig_out, opt_out, rtol=rtol, atol=atol)
@@ -622,15 +743,15 @@ class SyclExecutor:
             slowdown = 1.0 / speedup if speedup > 0 else float("inf")
             msg = (
                 f"PERFORMANCE REGRESSION: Optimized kernel is {slowdown:.2f}x SLOWER. "
-                f"Original: {orig_ms:.4f}ms ({orig_tflops:.3f} TFlop/s), "
-                f"Optimized: {opt_ms:.4f}ms ({opt_tflops:.3f} TFlop/s). "
+                f"Original: {orig_ms:.4f}ms{_fmt_tflops(orig_tflops)}, "
+                f"Optimized: {opt_ms:.4f}ms{_fmt_tflops(opt_tflops)}. "
                 f"{correctness_msg.strip()} Try a different approach."
             )
         elif speedup >= 2.0:
             msg = (
                 f"SUCCESS: Excellent! {speedup:.2f}x speedup. "
-                f"Original: {orig_ms:.4f}ms ({orig_tflops:.3f} TFlop/s), "
-                f"Optimized: {opt_ms:.4f}ms ({opt_tflops:.3f} TFlop/s)."
+                f"Original: {orig_ms:.4f}ms{_fmt_tflops(orig_tflops)}, "
+                f"Optimized: {opt_ms:.4f}ms{_fmt_tflops(opt_tflops)}."
                 f"{correctness_msg}"
             )
         elif speedup >= 1.2:

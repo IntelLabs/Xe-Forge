@@ -105,7 +105,7 @@ branches in `pipeline.py`.
 ```python
 _DSL_NAMES = {
     "triton": "Triton",
-    "sycl": "SYCL/XeTLA",
+    "sycl": "SYCL/Sycl-tla",
     "mojo": "Mojo",  # new
 }
 ```

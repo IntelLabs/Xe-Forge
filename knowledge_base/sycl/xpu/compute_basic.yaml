@@ -1,0 +1,64 @@
+patterns:
+  - id: unitrace_compute_basic_collection
+    name: Discover counters before collecting ComputeBasic
+    applies_to: [sycl, xpu, unitrace, profiling]
+    description: |
+      Xe-Forge defaults to ComputeBasic. Request --metric-group EuStallSampling
+      for a separate stall-event collection when investigating a stall hypothesis.
+      EU event shares are not elapsed-time utilization or occupancy. Sampled IPs
+      require verified ISA mapping before instruction or source attribution.
+      Run unitrace --metric-list on the allocated GPU. Group availability depends
+      on the device, driver, metrics library and permissions. Do not infer it from
+      a GPU-family name. The collector sets ZE_FLAT_DEVICE_HIERARCHY=FLAT.
+      scripts/build_unitrace.sh builds a private unitrace with a companion Metrics
+      Library (libigdml.so.1); the profiler loads it from the binary's adjacent lib
+      directory. A missing library can hide ComputeBasic even when permissions allow it.
+      If unavailable, report the problem; do not substitute fabricated counters.
+      Counter access may require an administrator to configure the active driver's
+      observation_paranoid or perf_stream_paranoid setting. Never modify it silently.
+      Use --sampling-interval-us only when needed; check the installed unitrace
+      help for units. The reviewed unitrace documents microseconds, not milliseconds.
+      Check free space and inodes: unitrace may spool in /tmp independently of TMPDIR.
+    rationale: "A listed group is necessary but does not guarantee collection permission or complete samples."
+    pattern_before: "Assume one metric group and sampling interval work on every Intel GPU."
+    pattern_after: "Discover support, collect, retain logs, and verify records before interpreting them."
+
+  - id: unitrace_compute_basic_interpretation
+    name: Report measured amounts and rates without a hardcoded classifier
+    applies_to: [sycl, xpu, memory, compute, profiling]
+    description: |
+      Report DRAM bytes per sampled launch and GB/s together. Unchanged bytes with
+      higher GB/s means faster delivery, not reduced traffic; it does not alone
+      establish why delivery improved. Compare with a measured, applicable bandwidth
+      reference before claiming saturation. GPU_MEMORY_ACTIVE is not that reference, and
+      bytes divided by a bandwidth from the same run reproducing elapsed time is circular.
+      Missing counters remain unknown, not zero. Percentages are duration-weighted
+      only when durations and values are available for all samples.
+      Keep device and full kernel name separate. Never use substring matches that
+      also select wrappers containing the target as a template argument.
+      Do not discard short launches solely because their sample count is below a
+      fixed fraction of the median. Check capture boundaries and workload variation.
+      Compare sampled launch counts with timed launches. Sparse captures require
+      a deliberate longer run or smaller sampling interval, not a zero-activity claim.
+      Summed sample durations cover sampled intervals; they need not equal complete
+      kernel latency. Use the standard uninstrumented benchmark to judge speedup.
+    rationale: "Amounts, rates, sampled activity and resource allocations answer different questions."
+    pattern_before: "Activity thresholds alone prove a kernel is bandwidth-bound."
+    pattern_after: "State counters, applicable calibrated limits, missing evidence, and a falsifiable hypothesis."
+
+  - id: unitrace_compute_basic_limits
+    name: Keep hardware-specific interpretations explicitly conditional
+    applies_to: [sycl, xpu, occupancy, assembly]
+    description: |
+      Do not assume issue width, XVE count, cacheline size, cache capacity, DPAS
+      events per MAC, register width, occupancy ceiling or peak throughput.
+      Verify their definitions from device/compiler documentation and the actual
+      binary, or mark them unknown. Validate byte/event identities against those
+      definitions; an identity alone does not prove time attribution is correct.
+      ComputeBasic does not provide a per-IP stall-reason breakdown. Do not map
+      aggregate XVE_STALL to barriers, loads, source lines or assembly instructions.
+      Decode/prefill names do not establish memory/compute boundedness.
+      Distinguish measured observations, assumptions and inferred causes.
+    rationale: "A hardware-specific case study is a hypothesis source, not a portable rule."
+    pattern_before: "Copy one BMG FMHA trace's constants and classify every kernel with them."
+    pattern_after: "Attach provenance to constants and retain unknowns when evidence is absent."

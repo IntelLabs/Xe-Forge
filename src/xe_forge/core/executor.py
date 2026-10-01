@@ -22,6 +22,7 @@ from ai_bench.harness.runner.benchmark_compare import (
 from ai_bench.utils import count_torch_flop, import_from_path
 
 from xe_forge.core.dtype_utils import make_rand_tensor
+from xe_forge.core.reference_workload import ReferenceWorkload
 from xe_forge.models import ExecutionResult
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,37 @@ class KernelBenchExecutor:
 
         return bench_time(fn, args, warmup=warmup, rep=rep, device=torch.device(self.device))
 
+    def time_forward(self, call, args: tuple) -> float:
+        """Device time of ``call.forward`` alone; buffer restore and cache flush run untimed.
+
+        Off GPU this is :meth:`time` on the whole call (restore plus forward).
+        """
+        device = torch.device(self.device)
+        if device.type not in ("xpu", "cuda"):
+            return self.time(call, args)
+        flush = torch.empty(256 * 1024 * 1024, dtype=torch.int8, device=device)
+        for _ in range(self.warmup_iters):
+            call(*args)
+        events = [
+            (
+                torch.Event(device=device, enable_timing=True),
+                torch.Event(device=device, enable_timing=True),
+            )
+            for _ in range(self.benchmark_iters)
+        ]
+        for start, end in events:
+            call.reset()
+            flush.zero_()
+            start.record()
+            call.forward(*args)
+            end.record()
+        torch.accelerator.synchronize()
+        times = sorted(start.elapsed_time(end) * 1e3 for start, end in events)
+        if len(times) >= 10:
+            times = times[1:-1]
+        return sum(times) / len(times)
+
+    @torch.no_grad()
     def execute(
         self,
         kernel_code: str,
@@ -148,37 +180,15 @@ class KernelBenchExecutor:
                     error_message="Failed to compile kernel module",
                 )
 
-            # Get the callable (either kernel function or Model.forward)
-            fn, model = self._get_callable(module, kernel_name, init_args=init_args)
-            if fn is None:
-                return ExecutionResult(
-                    success=False,
-                    error_message=f"Could not find callable (no Model class or function '{kernel_name}')",
-                )
-
-            # Create inputs if not provided
-            if inputs is None:
-                if _has_callable_attr(model, "get_example_inputs"):
-                    inputs = model.get_example_inputs(input_shapes, self.device)
-                elif input_shapes:
-                    inputs = self._create_inputs(
-                        input_shapes, dtype=dtype, input_dtypes=input_dtypes
-                    )
-                else:
-                    return ExecutionResult(
-                        success=False,
-                        error_message="No inputs or input_shapes provided",
-                    )
-
-            # Move model and inputs to device if needed
-            device = torch.device(self.device)
-            if model is not None and hasattr(model, "to"):
-                model = model.to(device)
-                if dtype is not None:
-                    model = model.to(dtype)
-                    logger.info(f"Moved model to {device} with dtype {dtype}")
-                fn = model.forward
-            inputs = [inp.to(device) if hasattr(inp, "to") else inp for inp in inputs]
+            fn, _model, inputs = self.prepare_workload(
+                module,
+                kernel_name=kernel_name,
+                input_shapes=input_shapes,
+                inputs=inputs,
+                dtype=dtype,
+                init_args=init_args,
+                input_dtypes=input_dtypes,
+            )
 
             # Run once to check for errors
             try:
@@ -231,6 +241,41 @@ class KernelBenchExecutor:
                 error_message=str(e),
                 error_traceback=traceback.format_exc(),
             )
+
+    def prepare_workload(
+        self,
+        module,
+        kernel_name: str | None = None,
+        input_shapes: list[tuple[int, ...]] | None = None,
+        inputs: list | None = None,
+        dtype=None,
+        init_args: list | None = None,
+        input_dtypes: list | None = None,
+    ) -> tuple[Callable, Any, list]:
+        """Prepare the same model and inputs for benchmarking and profiling."""
+        fn, model = self._get_callable(module, kernel_name, init_args=init_args)
+        if fn is None:
+            raise ValueError(
+                f"Could not find callable (no Model class or function '{kernel_name}')"
+            )
+
+        if inputs is None:
+            if _has_callable_attr(model, "get_example_inputs"):
+                inputs = model.get_example_inputs(input_shapes, self.device)
+            elif input_shapes:
+                inputs = self._create_inputs(input_shapes, dtype=dtype, input_dtypes=input_dtypes)
+            else:
+                raise ValueError("No inputs or input_shapes provided")
+
+        device = torch.device(self.device)
+        if model is not None and hasattr(model, "to"):
+            model = model.to(device)
+            if dtype is not None:
+                model = model.to(dtype)
+            model.eval()
+            fn = model.forward
+        inputs = [inp.to(device) if hasattr(inp, "to") else inp for inp in inputs]
+        return fn, model, inputs
 
     def _check_correctness(
         self,
@@ -380,7 +425,25 @@ class KernelBenchExecutor:
             ComparisonResult with speedup and feedback message for CoVeR
         """
 
-        # Execute original kernel
+        outputs_match = self._check_correctness(
+            original_code=original_code,
+            optimized_code=optimized_code,
+            kernel_name=kernel_name or "Model",
+            input_shapes=input_shapes,
+            dtype=dtype,
+            init_args=init_args,
+            input_dtypes=input_dtypes,
+        )
+
+        if not outputs_match:
+            return ComparisonResult(
+                original_time_us=0.0,
+                optimized_time_us=0.0,
+                speedup=0.0,
+                optimized_correct=False,
+                feedback_message="CORRECTNESS FAILURE: reference validation failed",
+            )
+
         original_result = self.execute(
             original_code,
             kernel_name,
@@ -392,8 +455,15 @@ class KernelBenchExecutor:
             init_args=init_args,
             input_dtypes=input_dtypes,
         )
-
-        # Execute optimized kernel
+        if not original_result.success:
+            return ComparisonResult(
+                original_time_us=0.0,
+                optimized_time_us=0.0,
+                speedup=0.0,
+                original_correct=False,
+                optimized_correct=False,
+                feedback_message=f"FAILURE: Original kernel failed: {original_result.error_message}",
+            )
         optimized_result = self.execute(
             optimized_code,
             kernel_name,
@@ -405,61 +475,14 @@ class KernelBenchExecutor:
             init_args=init_args,
             input_dtypes=input_dtypes,
         )
-
-        # Handle failures
-        if not original_result.success:
-            return ComparisonResult(
-                original_time_us=float("inf"),
-                optimized_time_us=float("inf"),
-                speedup=0.0,
-                original_correct=False,
-                feedback_message=f"FAILURE: Original kernel failed: {original_result.error_message}",
-            )
-
         if not optimized_result.success:
             return ComparisonResult(
                 original_time_us=original_result.execution_time_ms * 1000,
-                optimized_time_us=float("inf"),
+                optimized_time_us=0.0,
                 speedup=0.0,
                 optimized_correct=False,
-                feedback_message=f"FAILURE: Optimized kernel failed to compile or run: {optimized_result.error_message}. "
-                f"Please fix the syntax or runtime errors in the optimized code.",
+                feedback_message=f"FAILURE: Optimized kernel failed: {optimized_result.error_message}",
             )
-
-        # Correctness validation using ai-bench utilities
-        if self.require_correctness and input_shapes:
-            outputs_match = self._check_correctness(
-                original_code=original_code,
-                optimized_code=optimized_code,
-                kernel_name=kernel_name or "Model",
-                input_shapes=input_shapes,
-                dtype=dtype,
-                init_args=init_args,
-                input_dtypes=input_dtypes,
-            )
-
-            if not outputs_match:
-                return ComparisonResult(
-                    original_time_us=original_result.execution_time_ms * 1000,
-                    optimized_time_us=optimized_result.execution_time_ms * 1000,
-                    speedup=0.0,
-                    original_correct=True,
-                    optimized_correct=False,
-                    is_slower=False,
-                    feedback_message=(
-                        "CORRECTNESS FAILURE: Optimized kernel produces WRONG outputs. "
-                        "This is a CRITICAL error - the optimization MUST be numerically equivalent to the original. "
-                        "Common causes:\n"
-                        "- Wrong matrix dimensions or strides in block pointers\n"
-                        "- Transposed matrices loaded incorrectly (check shape=(K,N) vs shape=(N,K))\n"
-                        "- Missing or reordered operations (bias, activation)\n"
-                        "- Wrong accumulator dtype causing overflow/underflow\n"
-                        "- Tile boundary errors (check boundary_check=(0,1))\n"
-                        "Please carefully compare your kernel logic against the original and fix the computation."
-                    ),
-                )
-        elif not self.require_correctness:
-            logger.info("Correctness validation SKIPPED (require_correctness=False)")
 
         # Calculate times and speedup
         original_time_us = original_result.execution_time_ms * 1000
@@ -515,10 +538,60 @@ class KernelBenchExecutor:
             original_tflops=original_result.tflops,
             optimized_tflops=optimized_result.tflops,
             original_correct=original_correct,
-            optimized_correct=True,  # Passed validation or skipped
+            optimized_correct=True,
             is_slower=is_slower,
             feedback_message=feedback_message,
         )
+
+    def compare_reference_workload(
+        self,
+        reference_code: str,
+        original_code: str,
+        optimized_code: str,
+        baseline_us: float | None = None,
+        spec_workload: dict | None = None,
+    ) -> ComparisonResult:
+        """Validate reference-owned inputs and state before timing repeated calls."""
+        try:
+            with torch.no_grad():
+                workload = ReferenceWorkload.prepare(
+                    self._compile_module,
+                    reference_code,
+                    original_code,
+                    optimized_code,
+                    self.device,
+                    self.rtol,
+                    self.atol,
+                    spec_workload,
+                )
+                workload.validate()
+                original_time = baseline_us
+                if original_time is None:
+                    original_time = workload.measure(workload.original, self.time_forward)
+                optimized_time = workload.measure(workload.optimized, self.time_forward)
+                if original_time <= 0 or optimized_time <= 0:
+                    raise ValueError("Benchmark timings must be positive")
+                return ComparisonResult(
+                    original_time_us=original_time,
+                    optimized_time_us=optimized_time,
+                    speedup=original_time / optimized_time,
+                    is_slower=optimized_time > original_time,
+                    feedback_message=(
+                        "Reference outputs and updated buffers verified for two calls "
+                        "from restored initial buffers. On GPU, timing is forward only with "
+                        "fixed inputs (buffer restore and cache flush run untimed); off GPU it "
+                        "is reset plus forward."
+                    ),
+                )
+        except Exception as exc:
+            return ComparisonResult(
+                original_time_us=0.0,
+                optimized_time_us=0.0,
+                speedup=0.0,
+                original_correct=False,
+                optimized_correct=False,
+                feedback_message=f"Reference workload validation failed: {exc}",
+            )
 
     def _compile_module(self, kernel_code: str):
         """Compile Triton kernel module from source code.

@@ -130,6 +130,8 @@ def create_executor_from_config(
         return SyclExecutor(
             verify=config.optimization.require_correctness,
             kernel_type=kernel_type,
+            build_backend=getattr(config.engine, "build_backend", None),
+            device=config.device_config.device,
         )
     return KernelBenchExecutor(
         device=config.device_config.device,

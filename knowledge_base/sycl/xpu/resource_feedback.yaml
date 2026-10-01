@@ -1,0 +1,93 @@
+patterns:
+  - id: sycl_resource_evidence_contract
+    name: Interpret reported resources before choosing an optimization
+    applies_to: [sycl, xpu, unitrace, profiling]
+    description: |
+      Use when unitrace reports kernel properties, spills, SIMD, SLM, or register
+      file size. Read the profile's retained counters.json and build_provenance.json.
+      The properties are runtime driver reports, not source-level estimates.
+      Preserve unknown values; never substitute a GPU-family constant.
+    rationale: |
+      Legacy EuStallSampling event shares do not measure occupancy or elapsed-time
+      utilization. That collection path is paused; see compute_basic.yaml for the
+      active metric group's interpretation. Resource allocations constrain possible execution but do not
+      establish the bottleneck or an optimal launch configuration.
+    evidence_sources:
+      - "intel/pti-gpu: tools/unitrace/src/levelzero/ze_collector.h, kernel property reporting and zeKernelGetProperties"
+      - "Level Zero: ze_kernel_properties_t (maxSubgroupSize, localMemSize, privateMemSize, spillMemSize)"
+      - "unitrace registerFileSize experimental extension; unavailable values print unknown"
+    field_semantics:
+      Compiled: "AOT or JIT, not the compiler version."
+      SIMD: "unitrace reports maxSubgroupSize; ANY is not a measured SIMD width."
+      SLM Per Work Group: "Driver-reported local memory size in bytes per workgroup."
+      Private Memory Per Thread: "Private-memory size; do not equate it with spill traffic."
+      Spill Memory Per Thread: "Spill-memory size in bytes per thread, not dynamic spill/fill traffic or instruction count."
+      Register File Size Per Thread: "Driver extension value; do not convert to a GRF count without verifying its units and the target's register width."
+    prerequisites:
+      - Match the timed operation to the property record by its exact name.
+      - Check source/spec identity, device, variant, collection settings, and build commands.
+      - Read all records if a name occurs more than once; do not silently pick one.
+    pattern_before: "High stalled-sample share implies low occupancy; force a larger GRF mode."
+    pattern_after: "Treat sample shares and allocations as separate observations; choose and benchmark one falsifiable experiment."
+
+  - id: sycl_resource_guided_experiments
+    name: Test resource tradeoffs against measured kernel time
+    applies_to: [sycl, xpu, gemm, reduction, attention]
+    description: |
+      If spill allocation increases after enlarging a tile or unrolling, test
+      shorter live ranges, less unrolling, a smaller accumulator tile, or a
+      supported register mode. Do not mandate any one choice or numeric threshold.
+      If SLM allocation rises, test fewer staging buffers or a different tile;
+      check whether lost data reuse costs more than the saved resources.
+      If SIMD or register allocation changes, inspect generated code before
+      attributing the timing difference to occupancy.
+    rationale: |
+      Resource reductions can make a kernel slower. More registers may avoid
+      spills while reducing residency. A faster result still requires reference
+      correctness and the standard uninstrumented benchmark, not profiler timing.
+    prerequisites:
+      - Read the semantic workload and existing hardware-specific guidance.
+      - Use actual benchmark shapes and dtypes, not the kernel's name.
+    pattern_before: "Apply a universal register threshold or a remembered winning tile."
+    pattern_after: "Record observation -> hypothesis -> one change -> predicted evidence -> measured result."
+
+  - id: sycl_parent_resource_comparison
+    name: Compare a candidate with a retained parent profile
+    applies_to: [sycl, xpu, unitrace, trial_search]
+    description: |
+      Use xe-forge-skill profile <trial> --spec <spec> --tool unitrace
+      --parent-profile <parent-artifact-directory>. Keep variant, device and
+      collection settings matched. Automatic deltas require the same kernel name
+      and one property record per profile. Renamed kernels or changed hot spots
+      require manual semantic mapping; never strip trial suffixes to guess it.
+      Inspect build_provenance.json in both profiles: actual extension arguments,
+      retained build.ninja and compile_commands.json when available, and compile
+      driver --version output. A tool found today is not proof of which compiler
+      originally produced a cached binary; clear that uncertainty before claiming
+      a compiler regression. Environment entries alone do not prove effective flags.
+      Build and device capture is best effort. Missing metadata means unknown.
+    rationale: "A resource delta is evidence for an experiment, not a performance verdict."
+    pattern_before: "Compare arbitrary profiles and select the smallest resource usage."
+    pattern_after: "Match provenance, inspect differences, benchmark the hypothesis, retain failed experiments."
+
+  - id: sycl_targeted_isa_followup
+    name: Request assembly only to answer a specific unresolved question
+    applies_to: [sycl, xpu, assembly, profiling]
+    description: |
+      Use the exact compiled binary and debug mappings for the reported kernel.
+      Verify how sampled IP addresses map to binary offsets before annotating ISA.
+      Request the hot loop and relevant loads, stores, waits, barriers, or DPAS
+      instructions, plus a parent diff. Do not dump an entire binary into context.
+      Workgroup dimensions, exact GRF counts, and dynamic spill/fill traffic are
+      unknown unless independently captured; unitrace's property table does not
+      provide all of them. No assembly extraction is implied by a resource report.
+      With --assembly, Xe-Forge requests IGC shader dumps in the retained assembly
+      directory, disables persistent JIT caches for collection, and writes a hashed
+      assembly_manifest.json. Inspect its captured/unavailable status; a request
+      does not guarantee the installed compiler/runtime emitted assembly.
+      Source mapping additionally requires suitable compiler debug information.
+      Captured files alone do not establish kernel or IP correspondence, and
+      ComputeBasic has no per-IP stall samples to annotate.
+    rationale: "Assembly can explain lowering and scheduling, not fix an invalid workload or establish speedup by itself."
+    pattern_before: "Infer DPAS use or memory bandwidth saturation from stall percentages alone."
+    pattern_after: "Inspect source-correlated ISA for the hypothesis, then verify with the standard benchmark."
