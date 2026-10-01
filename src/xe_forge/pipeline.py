@@ -2,6 +2,9 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+import dspy
+
+
 from xe_forge.agents import AnalyzerAgent, Optimizer, OptimizerAgent, OptimizerReActAgent
 from xe_forge.agents.utils import extract_gemm_dims
 from xe_forge.config import Config, get_config
