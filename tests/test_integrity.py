@@ -147,7 +147,7 @@ def test_the_skill_prints_the_integrity_verdict(tmp_path, capsys):
     from xe_forge.skills import benchmark
 
     (tmp_path / "baseline.py").write_text(_HONEST)
-    (tmp_path / "trial.py").write_text(_HONEST + "# torch.xpu.Event(enable_timing=True)\n")
+    (tmp_path / "trial.py").write_text(_HONEST + "# torch.xpu.Event (enable_timing=True)\n")
     args = argparse.Namespace(
         baseline=str(tmp_path / "baseline.py"),
         optimized=str(tmp_path / "trial.py"),
@@ -160,6 +160,48 @@ def test_the_skill_prints_the_integrity_verdict(tmp_path, capsys):
     assert benchmark._run_builtin(args) == 1
     out = capsys.readouterr().out
     assert "Correctness: FAILED\nVERDICT: INTEGRITY\nError: HARNESS_ACCESS" in out
+
+
+_CACHES_BY_SHAPE = (
+    "import torch\n_cache = {}\nclass Model(torch.nn.Module):\n    def forward(self, x):\n"
+    "        return _cache.setdefault(x.shape, x * 2)\n"
+)
+
+
+def test_with_a_reference_the_trial_is_held_to_it_not_to_the_baseline(
+    tmp_path, monkeypatch, capsys
+):
+    """A defect the baseline shares with the trial still fails when a reference is given."""
+    from unittest.mock import Mock
+
+    from xe_forge.core import spec_loader
+    from xe_forge.skills import benchmark
+
+    spec = Mock()
+    spec.resolve_variant.return_value = "bench"
+    spec.get_input_shapes.return_value = [(64,)]
+    spec.get_flop.return_value = None
+    spec.get_dtype.return_value = torch.float32
+    spec.get_input_dtypes.return_value = None
+    spec.get_init_args.return_value = []
+    monkeypatch.setattr(spec_loader, "load_spec", Mock(return_value=spec))
+    for name, code in (
+        ("ref", _HONEST),
+        ("baseline", _CACHES_BY_SHAPE),
+        ("trial", _CACHES_BY_SHAPE),
+    ):
+        (tmp_path / f"{name}.py").write_text(code)
+    args = argparse.Namespace(
+        baseline=str(tmp_path / "baseline.py"),
+        optimized=str(tmp_path / "trial.py"),
+        spec="spec.yaml",
+        reference=str(tmp_path / "ref.py"),
+        variant=None,
+        baseline_us="10",
+        device="cpu",
+    )
+    assert benchmark._run_builtin(args) == 1
+    assert "VERDICT: INTEGRITY\nError: STALE_RESULT" in capsys.readouterr().out
 
 
 @pytest.mark.skipif(GPU is None, reason="needs a GPU caching allocator")

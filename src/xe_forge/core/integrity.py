@@ -27,7 +27,7 @@ REPEATS = 3
 # Names with no use in a kernel file; each reads or alters the measurement or the harness.
 _HARNESS_ACCESS = re.compile(
     r"\bxe_forge\b|\bai_bench\b|\bset_all_seeds\b|\b_getframe\b|\binspect\.stack\b"
-    r"|\bgc\.get_objects\b|\belapsed_time\b|\bEvent\("
+    r"|\bgc\.get_objects\b|\belapsed_time\b|\bEvent\s*\("
 )
 
 

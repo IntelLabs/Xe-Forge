@@ -222,7 +222,11 @@ def _run_builtin(args) -> int:
                 dtype=dtype,
                 init_args=init_args,
                 input_dtypes=input_dtypes,
+                # The semantic reference is the oracle the trial's integrity is held to.
+                integrity=candidate is optimized_code,
             ):
+                if executor.integrity_failures:
+                    return _integrity_failed(executor.integrity_failures)
                 print("Correctness: FAILED")
                 print("Error: baseline or trial differs from the semantic reference")
                 return 1
@@ -238,7 +242,7 @@ def _run_builtin(args) -> int:
             dtype=dtype,
             init_args=init_args,
             input_dtypes=input_dtypes,
-            integrity=True,
+            integrity=reference_code is None,
         )
         if executor.integrity_failures:
             return _integrity_failed(executor.integrity_failures)
@@ -277,7 +281,7 @@ def _run_builtin(args) -> int:
             dtype=dtype,
             init_args=init_args,
             input_dtypes=input_dtypes,
-            integrity=True,
+            integrity=reference_code is None,
         )
         if executor.integrity_failures:
             return _integrity_failed(executor.integrity_failures)

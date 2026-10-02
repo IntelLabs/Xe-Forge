@@ -58,8 +58,8 @@ oracle (`src/xe_forge/core/integrity.py`). A failure prints `Correctness: FAILED
 | `NONDETERMINISTIC` | one of three repeated calls disagreeing with the oracle: a race |
 | `OFF_STREAM` | an output still incomplete when the caller's stream has finished: work on another queue, outside what the timer sees (GPU only) |
 
-A defect the oracle has itself (it aliases, or reuses its output) is not held against the
-trial. `UNWRITTEN_OUTPUT`, `NONDETERMINISTIC` and `OFF_STREAM` are probabilistic: a pass
+If the oracle itself aliases or reuses its output, the trial may too. With `--reference`, the
+reference is the oracle. `UNWRITTEN_OUTPUT`, `NONDETERMINISTIC` and `OFF_STREAM` are probabilistic: a pass
 means the defect did not show, not that it is absent. `OFF_STREAM` was verified against a SYCL
 kernel submitting to a `sycl::queue` of its own (caught on every run); a torch op issued on
 another torch stream was not caught, so do not read a pass as covering that case. A wrong value fails every value check that runs after it, so read
