@@ -1,9 +1,9 @@
 import logging
-import traceback
 from collections.abc import Callable
 from typing import Any
 
 import dspy
+from dspy.utils.exceptions import format_error_for_lm
 
 try:
     from litellm.exceptions import ContextWindowExceededError
@@ -14,12 +14,6 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
-
-
-def _fmt_exc(err: BaseException, *, limit: int = 5) -> str:
-    """Newline-prefixed traceback summary; dspy's private helper of this name was removed."""
-    tb = traceback.format_exception(type(err), err, err.__traceback__, limit=limit)
-    return "\n" + "".join(tb).strip()
 
 
 class CoVeR(dspy.Module):
@@ -149,7 +143,7 @@ class CoVeR(dspy.Module):
                 )
             except ValueError as err:
                 logger.warning(
-                    f"Ending the trajectory: Agent failed to select a valid tool: {_fmt_exc(err)}"
+                    f"Ending the trajectory: Agent failed to select a valid tool: {format_error_for_lm(err, traceback_frames=5)}"
                 )
                 break
 
@@ -170,7 +164,9 @@ class CoVeR(dspy.Module):
                 try:
                     feedback = self.tools[name].func(**local_args)
                 except Exception as err:
-                    feedback = f"Execution error in {name}: {_fmt_exc(err)}"
+                    feedback = (
+                        f"Execution error in {name}: {format_error_for_lm(err, traceback_frames=5)}"
+                    )
 
                 observations.append(feedback)
 
