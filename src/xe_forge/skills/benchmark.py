@@ -108,10 +108,20 @@ def _run_external(args, template: str) -> int:
     return result.returncode
 
 
+def _integrity_failed(failures: list[str]) -> int:
+    """Print the integrity verdict; the trial matched the oracle once but is not a valid kernel."""
+    print("Correctness: FAILED")
+    print("VERDICT: INTEGRITY")
+    for failure in failures:
+        print(f"Error: {failure}")
+    return 1
+
+
 def _run_builtin(args) -> int:
     from pathlib import Path
 
     from xe_forge.core.executor import KernelBenchExecutor
+    from xe_forge.core.integrity import scan_source
     from xe_forge.core.spec_loader import load_spec
 
     reference_path = getattr(args, "reference", None)
@@ -135,6 +145,8 @@ def _run_builtin(args) -> int:
 
     baseline_code = Path(args.baseline).read_text()
     optimized_code = Path(args.optimized).read_text()
+    if failures := scan_source(optimized_code):
+        return _integrity_failed(failures)
 
     executor = KernelBenchExecutor(device=args.device)
     reference_code = Path(reference_path).read_text() if reference_path else None
@@ -162,6 +174,8 @@ def _run_builtin(args) -> int:
             baseline_us=args.baseline_us,
             spec_workload=spec_workload,
         )
+        if executor.integrity_failures:
+            return _integrity_failed(executor.integrity_failures)
         correct = result.original_correct and result.optimized_correct
         print(f"Correctness: {'PASSED' if correct else 'FAILED'}")
         if not correct:
@@ -224,7 +238,10 @@ def _run_builtin(args) -> int:
             dtype=dtype,
             init_args=init_args,
             input_dtypes=input_dtypes,
+            integrity=True,
         )
+        if executor.integrity_failures:
+            return _integrity_failed(executor.integrity_failures)
         if not outputs_match:
             print("Correctness: FAILED")
             print("Error: optimized kernel did not pass reference correctness validation")
@@ -260,7 +277,10 @@ def _run_builtin(args) -> int:
             dtype=dtype,
             init_args=init_args,
             input_dtypes=input_dtypes,
+            integrity=True,
         )
+        if executor.integrity_failures:
+            return _integrity_failed(executor.integrity_failures)
         correct = result.original_correct and result.optimized_correct
         print(f"Correctness: {'PASSED' if correct else 'FAILED'}")
         if not result.original_correct or not result.optimized_correct:

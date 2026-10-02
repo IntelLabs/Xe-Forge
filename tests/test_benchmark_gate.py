@@ -216,7 +216,8 @@ def test_reference_models_are_offloaded_between_validation_and_timing(fail):
 
     def timer(model, inputs):
         assert len(active) == 1
-        assert events.count(("trial", "forward")) == 2
+        # Two validation calls, then six integrity calls (the CPU set; see integrity.py).
+        assert events.count(("trial", "forward")) == 8
         events.append((next(iter(active)), "time"))
         model(*inputs)
         return 10.0
@@ -231,7 +232,7 @@ def test_reference_models_are_offloaded_between_validation_and_timing(fail):
     assert [name for name, event in events if event == "load"] == (
         ["reference", "baseline", "trial"]
         if fail
-        else ["reference", "baseline", "trial", "baseline", "trial"]
+        else ["reference", "baseline", "trial", "reference", "trial", "baseline", "trial"]
     )
     assert executor.time.call_count == (0 if fail else 2)
 
@@ -276,7 +277,8 @@ def test_stateful_reference_resets_before_validation_and_each_timed_call(wrong_u
     else:
         assert executor.time.call_count == 2
         assert "reset plus forward" in result.feedback_message
-        assert len(starts) == 12
+        # validate 6, integrity 6 oracle + 6 trial, timing 6; every one from a reset buffer.
+        assert len(starts) == 24
 
 
 @pytest.fixture(autouse=True)
@@ -600,6 +602,7 @@ def test_cached_baseline_requires_reference_correctness(
 
     executor = Mock()
     executor._check_correctness.return_value = outputs_match
+    executor.integrity_failures = []
     executor.execute.return_value = SimpleNamespace(
         success=execution_success, execution_time_ms=0.005, error_message="execution failed"
     )
@@ -620,6 +623,7 @@ def test_cached_baseline_requires_reference_correctness(
         dtype="float32",
         init_args=[8],
         input_dtypes=["float32"],
+        integrity=True,
     )
     executor.compare_kernels.assert_not_called()
     if outputs_match:

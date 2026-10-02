@@ -22,6 +22,7 @@ from ai_bench.harness.runner.benchmark_compare import (
 from ai_bench.utils import count_torch_flop, import_from_path
 
 from xe_forge.core.dtype_utils import make_rand_tensor
+from xe_forge.core.integrity import check_trial, record_oracle
 from xe_forge.core.reference_workload import ReferenceWorkload
 from xe_forge.models import ExecutionResult
 
@@ -83,6 +84,8 @@ class KernelBenchExecutor:
         self.atol = atol
         self._temp_dir = None
         self._module_counter = 0
+        # Set by the last comparison that ran the integrity checks; empty when they passed.
+        self.integrity_failures: list[str] = []
 
     def time(
         self,
@@ -286,9 +289,14 @@ class KernelBenchExecutor:
         dtype=None,
         init_args: list | None = None,
         input_dtypes: list | None = None,
+        integrity: bool = False,
     ) -> bool:
         """
         Check if optimized kernel produces same outputs as original.
+
+        With ``integrity``, the optimized kernel must also pass
+        :func:`xe_forge.core.integrity.check_trial` against the original; failures are
+        left in ``self.integrity_failures``.
 
         Uses ai-bench utilities (check_correctness, copy_model_weights,
         set_all_seeds) — the same code path used by the benchmark harness.
@@ -303,6 +311,7 @@ class KernelBenchExecutor:
         Returns:
             True if outputs match within tolerance
         """
+        self.integrity_failures = []
         try:
             device = torch.device(self.device)
 
@@ -356,12 +365,14 @@ class KernelBenchExecutor:
                 if not weights_copied:
                     logger.warning("Could not copy weights - using seed-based initialization")
 
+            def make_inputs(seed: int):
+                set_all_seeds(seed)
+                if _has_callable_attr(original_model, "get_example_inputs"):
+                    return original_model.get_example_inputs(input_shapes, self.device)
+                return self._create_inputs(input_shapes, dtype=dtype, input_dtypes=input_dtypes)
+
             # Shared inputs with deterministic seed
-            set_all_seeds(123)
-            if _has_callable_attr(original_model, "get_example_inputs"):
-                inputs = original_model.get_example_inputs(input_shapes, self.device)
-            else:
-                inputs = self._create_inputs(input_shapes, dtype=dtype, input_dtypes=input_dtypes)
+            inputs = make_inputs(123)
 
             inputs_orig = [inp.clone() for inp in inputs]
             inputs_opt = [inp.clone() for inp in inputs]
@@ -381,9 +392,26 @@ class KernelBenchExecutor:
                     original_output = original_output.to(optimized_output.dtype)
 
             # Compare using ai-bench's check_correctness
-            return check_correctness(
+            if not check_correctness(
                 original_output, optimized_output, rtol=self.rtol, atol=self.atol
+            ):
+                return False
+            if not integrity:
+                return True
+
+            def match(expected, actual):
+                if isinstance(actual, torch.Tensor) and expected.dtype != actual.dtype:
+                    expected = expected.to(actual.dtype)
+                return check_correctness(expected, actual, rtol=self.rtol, atol=self.atol)
+
+            self.integrity_failures = check_trial(
+                record_oracle(original_fn, make_inputs),
+                optimized_fn,
+                make_inputs,
+                match,
+                self.device,
             )
+            return not self.integrity_failures
 
         except Exception as e:
             logger.error(f"Correctness validation error: {e}")
@@ -404,6 +432,7 @@ class KernelBenchExecutor:
         dtype=None,
         init_args: list | None = None,
         input_dtypes: list | None = None,
+        integrity: bool = False,
     ) -> ComparisonResult:
         """
         Compare performance AND correctness of original vs optimized kernel.
@@ -433,6 +462,7 @@ class KernelBenchExecutor:
             dtype=dtype,
             init_args=init_args,
             input_dtypes=input_dtypes,
+            integrity=integrity,
         )
 
         if not outputs_match:
@@ -441,7 +471,11 @@ class KernelBenchExecutor:
                 optimized_time_us=0.0,
                 speedup=0.0,
                 optimized_correct=False,
-                feedback_message="CORRECTNESS FAILURE: reference validation failed",
+                feedback_message=(
+                    "INTEGRITY FAILURE: " + "; ".join(self.integrity_failures)
+                    if self.integrity_failures
+                    else "CORRECTNESS FAILURE: reference validation failed"
+                ),
             )
 
         original_result = self.execute(
@@ -552,6 +586,7 @@ class KernelBenchExecutor:
         spec_workload: dict | None = None,
     ) -> ComparisonResult:
         """Validate reference-owned inputs and state before timing repeated calls."""
+        self.integrity_failures = []
         try:
             with torch.no_grad():
                 workload = ReferenceWorkload.prepare(
@@ -565,6 +600,16 @@ class KernelBenchExecutor:
                     spec_workload,
                 )
                 workload.validate()
+                self.integrity_failures = workload.check_integrity()
+                if self.integrity_failures:
+                    return ComparisonResult(
+                        original_time_us=0.0,
+                        optimized_time_us=0.0,
+                        speedup=0.0,
+                        optimized_correct=False,
+                        feedback_message="Integrity checks failed: "
+                        + "; ".join(self.integrity_failures),
+                    )
                 original_time = baseline_us
                 if original_time is None:
                     original_time = workload.measure(workload.original, self.time_forward)
