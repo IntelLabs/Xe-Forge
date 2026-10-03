@@ -9,6 +9,8 @@ from typing import Any
 import torch
 from ai_bench.harness.runner.benchmark_compare import set_all_seeds
 
+from xe_forge.core.integrity import check_trial, record_oracle
+
 
 @dataclass
 class PreparedCall:
@@ -37,6 +39,8 @@ class ReferenceWorkload:
     rtol: float
     atol: float
     device: str = "cpu"
+    get_inputs: Callable | None = None
+    workload: dict | None = None
 
     @classmethod
     def prepare(
@@ -87,7 +91,17 @@ class ReferenceWorkload:
 
         set_all_seeds(123)
         inputs = _snapshot(_call_with(reference_module.get_inputs, workload))
-        return cls(reference, original, optimized, inputs, rtol, atol, device)
+        return cls(
+            reference,
+            original,
+            optimized,
+            inputs,
+            rtol,
+            atol,
+            device,
+            get_inputs=reference_module.get_inputs,
+            workload=workload,
+        )
 
     def copy_inputs(self) -> Any:
         return deepcopy(self.inputs)
@@ -105,6 +119,28 @@ class ReferenceWorkload:
         inputs = _move_inputs(self.copy_inputs(), self.device)
         initial_buffers = {name: buffer.detach().clone() for name, buffer in model.named_buffers()}
         return PreparedCall(model, inputs, initial_buffers)
+
+    def check_integrity(self) -> list[str]:
+        """The trial's integrity failures against the reference; see :mod:`integrity`."""
+
+        def make_inputs(seed: int):
+            set_all_seeds(seed)
+            return _move_inputs(_call_with(self.get_inputs, self.workload or {}), self.device)
+
+        # One model on the device at a time, and each left with the buffers it started
+        # with, as validate() does: timing snapshots them as the initial state.
+        call = self.prepare_call(self.reference)
+        try:
+            record = record_oracle(call, make_inputs)
+        finally:
+            call.reset()
+            self.reference.cpu()
+        call = self.prepare_call(self.optimized)
+        try:
+            return check_trial(record, call, make_inputs, self._values_match, self.device)
+        finally:
+            call.reset()
+            self.optimized.cpu()
 
     def validate(self) -> None:
         models = (

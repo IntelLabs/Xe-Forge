@@ -455,6 +455,12 @@ worth more to the next one than a run that finished and said nothing.
 {% endif %}
 
 ## CRITICAL CORRECTNESS CONSTRAINTS
+- **Each call computes its result from its inputs.** Return newly allocated outputs, never
+  an input or a buffer kept across calls; write every output element; cache nothing between
+  calls, by shape, address or anything else; and do not touch the timer, the seeds or the
+  harness.{% if measurement != "host" %} `benchmark` checks each of these on every trial and
+  rejects a violation with `VERDICT: INTEGRITY` and the rule's name: a trial that fails it
+  is wrong however close its outputs are.{% endif %}
 {% if dsl in ("triton", "gluon") %}
 - NO default values for `@triton.autotune` meta-parameters in kernel signature
 - Use 1D grid when applying tile swizzling (GROUP_SIZE_M)

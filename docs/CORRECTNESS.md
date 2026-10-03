@@ -39,6 +39,34 @@ with `-i` is therefore the baseline: pass a reference with `--reference`.
    `--kernel-repo`, `output/upstream.patch` is the change against the repo, unbuilt:
    rebuilding and testing the repo is the owner's step.
 
+## Integrity checks (built-in benchmark)
+
+Matching the oracle once does not make a trial valid: the timed calls all see the same
+inputs at the same addresses, so a trial that caches or skips work can match and look fast.
+After a trial matches, `benchmark --builtin-benchmark` runs it a few more times against the
+oracle (`src/xe_forge/core/integrity.py`). A failure prints `Correctness: FAILED`,
+`VERDICT: INTEGRITY` and one `Error: <NAME>: ...` line per rule broken:
+
+| Name | Catches |
+|---|---|
+| `HARNESS_ACCESS` | trial source naming the harness, the seeding or the timer (`xe_forge`, `ai_bench`, `elapsed_time`, `Event(`, ...) |
+| `OUTPUT_ALIASES_INPUT` | an output sharing storage with an input |
+| `OUTPUT_REUSED` | a later call overwriting an earlier call's output (a persistent buffer) |
+| `STALE_RESULT` | a wrong output on new inputs: a result cached by shape or from an earlier call |
+| `CACHED_BY_ADDRESS` | a wrong output after new values are written into the same input tensors |
+| `UNWRITTEN_OUTPUT` | a wrong output when freshly allocated memory is poisoned first (GPU only) |
+| `NONDETERMINISTIC` | one of three repeated calls disagreeing with the oracle: a race |
+| `OFF_STREAM` | an output still incomplete when the caller's stream has finished: work on another queue, outside what the timer sees (GPU only) |
+
+If the oracle itself aliases or reuses its output, the trial may too. With `--reference`, the
+reference is the oracle. `UNWRITTEN_OUTPUT`, `NONDETERMINISTIC` and `OFF_STREAM` are probabilistic: a pass
+means the defect did not show, not that it is absent. `OFF_STREAM` was verified against a SYCL
+kernel submitting to a `sycl::queue` of its own (caught on every run); a torch op issued on
+another torch stream was not caught, so do not read a pass as covering that case. A wrong value fails every value check that runs after it, so read
+the names together: `UNWRITTEN_OUTPUT` among them points at unwritten elements,
+`OFF_STREAM` alone at the queue. A host command
+(`--external-benchmark`) owns its own checks; none of these run on that path.
+
 ## A kernel from another repo with no reference
 
 A baseline oracle proves "the same as before", never "correct": a bug the repo kernel already
