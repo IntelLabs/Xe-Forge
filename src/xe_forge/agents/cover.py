@@ -3,7 +3,7 @@ from collections.abc import Callable
 from typing import Any
 
 import dspy
-from dspy.predict.react import _fmt_exc
+from dspy.utils.exceptions import format_error_for_lm
 
 try:
     from litellm.exceptions import ContextWindowExceededError
@@ -143,7 +143,7 @@ class CoVeR(dspy.Module):
                 )
             except ValueError as err:
                 logger.warning(
-                    f"Ending the trajectory: Agent failed to select a valid tool: {_fmt_exc(err)}"
+                    f"Ending the trajectory: Agent failed to select a valid tool: {format_error_for_lm(err, traceback_frames=5)}"
                 )
                 break
 
@@ -164,7 +164,9 @@ class CoVeR(dspy.Module):
                 try:
                     feedback = self.tools[name].func(**local_args)
                 except Exception as err:
-                    feedback = f"Execution error in {name}: {_fmt_exc(err)}"
+                    feedback = (
+                        f"Execution error in {name}: {format_error_for_lm(err, traceback_frames=5)}"
+                    )
 
                 observations.append(feedback)
 
