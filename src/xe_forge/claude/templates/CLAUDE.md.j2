@@ -120,7 +120,7 @@ Do not leave a benchmark or diagnostic running in the background when returning 
 | **Benchmark** | `xe-forge-skill benchmark <baseline> <optimized> {{ benchmark_options }}{% if has_spec %} [--variant <name>]{% endif %} [--baseline-us <cached>] --kernel-name <kernel_name> --trial-id <trial_id>` (records the result) |
 | **Init trials** | `xe-forge-skill trial init <kernel_name> <baseline_file>{% if require_profiles %} --require-profiles ComputeBasic EuStallSampling{% endif %}` |
 | **Save trial** | `xe-forge-skill trial save <kernel_name> <file{% if measurement == "host" %}\|dir{% endif %}> [--parent <id>] {% if require_profiles %}--strategy "<kernel metric value (trial)>"{% else %}[--strategy "..."]{% endif %}` |
-| **Record a validation failure** | `xe-forge-skill trial result <kernel_name> <trial_id> --correctness <pass\|fail> --speedup <float> --baseline-us <float> --kernel-us <float>{% if measurement == "host" %} [--verdict <gate>]{% endif %}` |
+| **Record a validation failure** | `xe-forge-skill trial result <kernel_name> <trial_id> --validation fail` (only for a trial never benchmarked) |
 | **Check status** | `xe-forge-skill trial status <kernel_name>` |
 | **Best trial** | `xe-forge-skill trial best <kernel_name>` |
 | **Baseline time** | `xe-forge-skill trial baseline-us <kernel_name>` |
