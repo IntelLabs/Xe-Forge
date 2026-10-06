@@ -70,7 +70,11 @@ def _port_one(clone: Path) -> tuple[list[str], bool] | None:
         return None
     base = _git("-C", str(clone), "rev-parse", "HEAD").stdout.strip()
     origin = _git("-C", str(clone), "remote", "get-url", "origin", check=False).stdout.strip()
-    touched = _git("-C", str(clone), "diff", "--name-only").stdout.split()
+    touched = [
+        name
+        for name in _git("-C", str(clone), "diff", "--name-only", "-z").stdout.split("\0")
+        if name
+    ]
     patch = (OUTPUT / f"{clone.name}.patch").resolve()
     patch.write_text(diff)
 
