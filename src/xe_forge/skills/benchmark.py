@@ -355,6 +355,17 @@ def _trial_target(args):
         manager.profile_source_hash(kernel_name, trial_id, args.optimized)
     except (FileNotFoundError, KeyError, ValueError) as exc:
         raise SystemExit(f"Benchmark refused: {exc}") from exc
+    # A cached baseline is a number the caller typed; the speedup is divided by it. It
+    # must be the one this tree measured, as `trial baseline-us` prints it.
+    cached = getattr(args, "baseline_us", None)
+    if cached is not None:
+        recorded = manager.get_baseline_us(kernel_name) or []
+        if round(float(cached), 2) not in {round(v, 2) for v in recorded}:
+            raise SystemExit(
+                f"Benchmark refused: --baseline-us {cached} is not this tree's cached "
+                f"baseline ({', '.join(f'{v:.2f}' for v in recorded) or 'none yet'}); "
+                "omit it to time the baseline afresh"
+            )
     return manager, kernel_name, trial_id
 
 

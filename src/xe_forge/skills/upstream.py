@@ -66,13 +66,15 @@ def _clone(args) -> None:
     print(f"Cloned {repo} at {rev} into {target}/. Edit files there, then run `upstream patch`.")
 
 
-def _best_trial(kernel_name: str, trials_dir: str) -> str:
+def _best_trial(kernel_name: str, trials_dir: str) -> str | None:
+    """The measured winner a port carries, or ``None`` when there is none to carry."""
     from xe_forge.core.trial_manager import TrialManager
 
     mgr = TrialManager(trials_dir)
     best = mgr.best_measured(kernel_name) if mgr.exists(kernel_name) else None
-    if best is None:
-        return "none measured"
+    # The same test `finalize` applies: a measured regression is not a winner.
+    if best is None or not mgr.keepable(best):
+        return None
     return f"{best['id']}: speedup {best.get('speedup') or best.get('verdict') or 'parity'}"
 
 
@@ -127,6 +129,10 @@ def _patch(args) -> int:
     if not clones:
         print("No upstream/ clone; run `upstream clone <repo>` first.")
         return 1
+    best = _best_trial(args.kernel_name, args.trials_dir)
+    if best is None:
+        print(f"No measured winner for {args.kernel_name} (none, or a regression); nothing to port.")
+        return 1
     OUTPUT.mkdir(exist_ok=True)
     ported = [(c, _port_one(c)) for c in clones]
     ported = [(c, r) for c, r in ported if r is not None]
@@ -141,7 +147,7 @@ def _patch(args) -> int:
             if args.kind == "serving-only"
             else ""
         ),
-        f"best trial: {_best_trial(args.kernel_name, args.trials_dir)}",
+        f"best trial: {best}",
     ]
     for _, (block, _) in ported:
         lines += block
