@@ -12,6 +12,7 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -241,6 +242,31 @@ Examples:
         "the first trial",
     )
 
+    # Experimental AI lowering (see xe_forge.lowering and docs/VISA_LOWERING.md)
+    lower_group = parser.add_argument_group(
+        "AI lowering", "Lower a Triton kernel to Intel vISA with an LLM (experimental)"
+    )
+    lower_group.add_argument("--lower", choices=["visa"], default=None,
+                             help="Lower the kernel instead of optimizing it as source; with --stages, "
+                                  "source optimization runs first and its result is lowered")
+    lower_group.add_argument("--lower-target", choices=["xe2"], default=None, help="Lowering target (default: xe2)")
+    lower_group.add_argument("--lower-max-trials", type=int, default=None,
+                             help="Attempt budget: finalize-and-verify calls (default: 12)")
+    lower_group.add_argument("--lower-optimize", action="store_true", default=None,
+                             help="After a correct kernel, continue with performance rounds")
+    lower_group.add_argument("--lower-knowledge", default=None,
+                             choices=["none", "contracts", "docs", "docs+examples", "docs+corpus", "all"],
+                             help="vISA knowledge in the prompt: experimental modes A, B', B, C, D, C+D "
+                                  "(default: docs+examples)")
+    lower_group.add_argument("--lower-no-compiler-seed", action="store_true", default=None,
+                             help="Forbid compiler-generated lowering of the target kernel in any prompt "
+                                  "(the default and the only mode implemented)")
+    lower_group.add_argument("--lower-allow-compiler-seed", action="store_true",
+                             help="Reserved control arm; not implemented")
+    lower_group.add_argument("--lower-kernel", default=None,
+                             help="Which @triton.jit kernel to lower when the module launches several")
+    lower_group.add_argument("--lower-out", default=None, help="Directory for lowering runs (default: ./lowering_runs)")
+
     # Other options
     parser.add_argument("--debug", action="store_true", help="Enable debug output")
 
@@ -351,6 +377,15 @@ def _load_config(args) -> Config:
     if getattr(args, "compiler_flags", None):
         os.environ["COMPILER_FLAGS"] = args.compiler_flags
 
+    for flag, env in (("lower", "LOWER"), ("lower_target", "LOWER_TARGET"),
+                      ("lower_max_trials", "LOWER_MAX_TRIALS"), ("lower_knowledge", "LOWER_KNOWLEDGE"),
+                      ("lower_kernel", "LOWER_KERNEL")):
+        value = getattr(args, flag, None)
+        if value is not None:
+            os.environ[env] = str(value)
+    if getattr(args, "lower_optimize", None):
+        os.environ["LOWER_OPTIMIZE"] = "true"
+
     config = get_config()
     if overrides:
         config = override_config(**overrides)
@@ -376,7 +411,67 @@ def main():
         return _run_tune_config(args, config)
     if args.tile_tune:
         return _run_tile_tune(args, config)
+    if config.lowering.target:
+        return _run_lower(parser, args, config)
     return _run_optimize(parser, args, config)
+
+
+def _run_lower(parser, args, config: Config) -> int:
+    """Experimental: lower a Triton kernel to Intel vISA (see xe_forge.lowering)."""
+    if args.lower_allow_compiler_seed:
+        parser.error("--lower-allow-compiler-seed is a reserved control arm and is not implemented")
+    if not config.lowering.no_compiler_seed:
+        parser.error("only --lower-no-compiler-seed is implemented")
+    if not args.input or not Path(args.input).exists():
+        parser.error("--lower needs --input pointing at a Triton kernel module")
+    if config.device_config.dsl != "triton":
+        parser.error("--lower currently lowers Triton kernels only (--dsl triton)")
+
+    module_path = args.input
+    if args.stages:
+        # Composition: optimize as source first, then lower the optimized kernel.
+        out_dir = Path(args.lower_out or "lowering_runs")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        args.output = args.output or str(out_dir / f"{Path(args.input).stem}_source_optimized.py")
+        rc = _run_optimize(parser, args, config)
+        if rc != 0 or not Path(args.output).exists():
+            print("Source optimization produced no kernel; lowering the original instead.")
+        else:
+            module_path = args.output
+
+    from xe_forge.lowering.pipeline import LoweringPipeline
+
+    lw = config.lowering
+    print("=" * 60)
+    print("XE-FORGE AI LOWERING (experimental)")
+    print("=" * 60)
+    print(f"Kernel module: {module_path}")
+    print(f"Target: {lw.target} / {lw.lower_target}; knowledge: {lw.knowledge}; budget: {lw.max_trials}")
+    print(f"Agent: Claude Code (headless); model: {config.llm.model}")
+    pipeline = LoweringPipeline(
+        module_path, args.spec, variant=args.variant, kernel=lw.kernel, target=lw.lower_target,
+        knowledge=lw.knowledge, max_attempts=lw.max_trials, optimize=lw.optimize,
+        char_budget=lw.char_budget, finalizer_igc=lw.finalizer_igc, timeout_s=lw.timeout_s,
+        max_turns=config.engine.max_turns, out_dir=args.lower_out, llm=config.llm,
+        rtol=args.rtol, atol=args.atol,
+    )
+    result = pipeline.run()
+    r = result.record
+    print("=" * 60)
+    print(f"Correct: {'yes' if r.correct else 'no'}  attempts: {r.attempts}  stopped: {r.stopped}")
+    if r.attempts_to_valid:
+        print(f"First correct attempt: #{r.attempts_to_valid} after {r.time_to_valid_s}s")
+    if r.best_speedup:
+        print(f"Speedup vs Triton: {r.best_speedup:.3f}x")
+    print(f"Tokens: {r.tokens}  cost: {r.cost_usd}  turns: {r.num_turns}")
+    if r.error:
+        print(f"Error: {r.error}")
+    print(f"Run directory: {result.run_dir}")
+    if result.visa_path:
+        print(f"Kernel: {result.visa_path}")
+        if args.output and not args.stages:
+            shutil.copy(result.visa_path, args.output)
+    return 0 if result.success else 1
 
 
 def _run_tile_tune(args, config: Config) -> int:

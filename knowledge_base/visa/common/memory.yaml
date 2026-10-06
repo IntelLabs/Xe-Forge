@@ -1,0 +1,82 @@
+entries:
+  - id: visa-lsc-load-store
+    title: Global memory access with lsc_load / lsc_store
+    topics: [lsc, memory_addressing]
+    source: documentation/visa/instructions/LSC_UNTYPED.md; observed
+    body: |
+      Gather/scatter through 64-bit flat addresses, one address per channel:
+
+          (P) lsc_load.ugm (M1, 32)  DST:d32  flat[ADDR]:a64
+          (P) lsc_store.ugm (M1, 32) flat[ADDR]:a64  SRC:d32
+
+      - `.ugm` = untyped global memory. ADDR is a uq vector (one 64-bit byte address per
+        channel), DST/SRC are vectors of the data (declare them `align=wordx32`).
+      - Data size: `d32` (4 bytes per channel, use for f/d/ud), `d64` (8 bytes),
+        `d8u32` / `d16u32` (load 1 or 2 bytes per channel, zero-extended into a 32-bit
+        slot; store writes only the low 1 or 2 bytes of each 32-bit slot). For bf16/fp16
+        or byte data per channel use d16u32 / d8u32 with a 32-bit-per-channel register
+        variable, then view the low half with an alias or move it into a bf/hf variable
+        with a stride-2 region.
+      - Vector per address: `:d32x4` loads 4 consecutive dwords per address; the result
+        is structure-of-arrays (component 0 of all channels, then component 1, ...).
+      - Immediate byte offset: `flat[ADDR+0x100]:a64`. Scale: `flat[0x4*OFF]:a32`.
+      - Caching hints follow the SFID: `lsc_load.ugm.ca.ca` (cache in L1 and L3),
+        `.uc.uc` (bypass), default when omitted.
+      - Loads write their destination asynchronously; the finalizer inserts the waits.
+        A predicated-off channel neither reads nor writes memory.
+      - Addresses must be aligned to the data size (4 bytes for d32).
+
+  - id: visa-block-loads
+    title: Block (transposed) loads for contiguous data
+    topics: [lsc, memory_addressing, perf_rules]
+    source: documentation/visa/instructions/LSC_UNTYPED.md
+    body: |
+      A transposed load reads consecutive elements from one address into one variable:
+
+          lsc_load.ugm (M1_NM, 1) DST:d32x64t flat[ADDR]:a64
+
+      `t` = transpose; exec size must be 1 and ADDR a single 64-bit address (scalar). It
+      loads 64 dwords (256 bytes) into DST; vector sizes are 1,2,3,4,8,16,32,64. This is
+      one message instead of a gather of 64 addresses -- valuable for contiguous tiles,
+      but the whole block is read regardless of masks, so only use it where the full
+      range is in bounds. `lsc_store.ugm (M1_NM, 1) flat[ADDR]:a64 SRC:d32x64t` is the
+      store counterpart. Block addresses should be aligned (at least 4 bytes; 8+ for d64).
+
+  - id: visa-send-operand-alignment
+    kind: contract
+    title: Memory-message operands must be register-aligned, scalars included
+    topics: [lsc, memory_addressing, declarations, finalizer_errors]
+    source: observed; compiler corpus probe p1_scalar_store (IGC's own vISA for a generic MLIR kernel)
+    body: |
+      Every variable used as an address or data operand of lsc_load / lsc_store must be
+      declared register-aligned (`align=wordx32`, or `GRF`), even when it holds a single
+      value. A scalar declared `align=qword`/`dword` may be placed in the middle of a
+      register, while the message reads from the start of that register: the store then
+      goes to whatever address happens to be there (observed: a write landing in another
+      input buffer), with no error from the finalizer.
+
+      Single-value store, as IGC itself emits it:
+
+          .decl ADDR v_type=G type=uq num_elts=1 align=wordx32
+          .decl VAL  v_type=G type=f  num_elts=1 align=wordx32
+          ...
+          lsc_store.ugm (M1_NM, 1) flat[ADDR]:a64 VAL:d32t
+
+      (`d32t` = one dword, transposed: one address, executed once regardless of the mask.)
+
+  - id: visa-slm-barrier
+    title: Shared local memory and barriers
+    topics: [lsc, memory_addressing, reduction, control_flow]
+    source: documentation/visa/instructions/LSC_UNTYPED.md, BARRIER.md (not yet exercised by a verified example)
+    body: |
+      With `slm_bytes > 0` in `@launch`, each work-group gets that much shared local memory,
+      visible to all its sub-groups, and its base offset arrives as a 4-byte `.input`.
+      Access it with 32-bit offsets through the `.slm` SFID:
+
+          lsc_store.slm (M1, 32) flat[OFF]:a32 VAL:d32
+          lsc_load.slm  (M1, 32) VAL:d32 flat[OFF]:a32
+
+      where OFF = base + byte offset (ud). Make writes from other sub-groups visible before
+      reading them with a fence and a barrier: `lsc_fence.slm.none.none` then `barrier`
+      (every thread of the work-group must reach the barrier). Cache-control suffixes must be
+      default for `.slm`.

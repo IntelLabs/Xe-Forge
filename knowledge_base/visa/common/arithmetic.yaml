@@ -1,0 +1,73 @@
+entries:
+  - id: visa-integer-arithmetic
+    title: Integer arithmetic and address computation
+    topics: [arithmetic_int, memory_addressing]
+    source: documentation/visa/instructions/{ADD,MUL,MAD,ADD3,SHL,SHR,ASR,AND,DIV}.md
+    body: |
+      - `add`, `mul`, `mad dst a b c` (= a*b + c), `add3 dst a b c` (= a+b+c; d/ud/w/uw only),
+        `and`/`or`/`xor`/`not`, `shl`, `shr` (logical, unsigned dst/src0), `asr` (arithmetic, signed),
+        `min`/`max`, `div`, `mod`.
+      - Integer sources may mix widths; the result is converted to the destination type.
+        An unsigned d->uq move zero-extends, a signed one sign-extends.
+      - Byte offsets of 64-bit pointers: compute the element index in d/ud, move it to
+        a uq (or q) vector, scale it with `shl` (log2 of the element size) and add the
+        base pointer:
+
+            mov (M1, 32) OFF(0,0)<1> IDX(0,0)<1;1,0>          // d -> uq
+            shl (M1, 32) OFF(0,0)<1> OFF(0,0)<1;1,0> 0x2:uq     // * 4 bytes
+            add (M1, 32) ADDR(0,0)<1> OFF(0,0)<1;1,0> PTR(0,0)<0;1,0>
+
+        Do 64-bit address arithmetic in uq/q: an index times an element size can
+        overflow 32 bits on large tensors.
+      - `mul` of two d values into a d keeps the low 32 bits; use a q destination for
+        the full product.
+
+  - id: visa-float-arithmetic
+    title: Floating-point arithmetic
+    topics: [arithmetic_fp]
+    source: documentation/visa/instructions/{ADD,MUL,MAD,MIN_MAX,DIV,INV}.md, 2_datatypes.md
+    body: |
+      - `add`, `mul`, `mad` (fused multiply-add: rounding differs slightly from mul then add),
+        `min`, `max` (IEEE: a NaN operand yields the other operand), `div` (f, hf, df),
+        `inv` (1/x).
+      - For floating-point execution the destination type must equal the execution
+        type: add two `f` into an `f`; convert with `mov` before or after.
+      - Triton `tl.maximum(x, 0.0)` is `max (M1, N) D X(0,0)<1;1,0> 0x0:f`.
+      - `a / b` in Triton (fp32) is IEEE-rounded division; `div` matches it closely,
+        `mul a, (inv b)` is faster but less exact.
+
+  - id: visa-conversions
+    title: Type conversion with mov
+    topics: [conversions, bf16_fp16]
+    source: documentation/visa/2_datatypes.md, instructions/MOV.md
+    body: |
+      `mov` converts when source and destination types differ:
+      - float -> integer truncates toward zero and saturates at the integer range; NaN -> 0.
+      - integer -> float rounds to nearest even.
+      - f -> hf / bf rounds to nearest even; hf / bf -> f is exact.
+      - narrower -> wider integer: zero-extend from unsigned, sign-extend from signed.
+      - wider -> narrower integer keeps the low bits.
+      Example (bf16 in memory, f32 arithmetic, bf16 out):
+
+          mov (M1, 32) AF(0,0)<1> AB(0,0)<1;1,0>      // bf -> f
+          ...
+          mov (M1, 32) OB(0,0)<1> OF(0,0)<1;1,0>      // f -> bf
+      Arithmetic on bf values directly is not generally available; compute in f.
+      To reinterpret bits without converting, declare an alias of another type.
+
+  - id: visa-math
+    kind: contract
+    title: Transcendental math (exp, log, sqrt, rsqrt, inv)
+    topics: [math, arithmetic_fp]
+    source: documentation/visa/instructions/{EXP,LOG,SQRT,RSQRT,INV}.md
+    body: |
+      `exp` is **base 2** (2^x) and `log` is **base 2**. Triton's `tl.exp(x)` (e^x) is
+      therefore `exp(x * log2(e))`:
+
+          mul (M1, 32) T(0,0)<1> X(0,0)<1;1,0> 0x3fb8aa3b:f    // log2(e) = 1.44269504
+          exp (M1, 32) E(0,0)<1> T(0,0)<1;1,0>
+
+      and `tl.log(x)` is `log(x) * ln(2)` (ln 2 = 0x3f317218:f). `sqrt`, `rsqrt` (1/sqrt),
+      `inv` (1/x) operate on f/hf. These are approximations of a few ulp; Triton's own
+      `tl.exp` is approximate too, so results agree within the contract's tolerance.
+      Sigmoid: 1 / (1 + 2^(-x*log2 e)); silu(x) = x * sigmoid(x).

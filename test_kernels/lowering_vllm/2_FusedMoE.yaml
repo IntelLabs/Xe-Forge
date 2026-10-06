@@ -1,0 +1,52 @@
+# Lowering copy of examples/vllm/2_FusedMoE.yaml: unquantized bf16, explicit verification shapes.
+inputs:
+  A:
+    shape:
+    - M
+    - K
+    dtype: bfloat16
+  B:
+    shape:
+    - E
+    - N
+    - K
+    dtype: bfloat16
+  topk_ids:
+    shape:
+    - M
+    - TOPK
+    dtype: int32
+    range:
+    - 0
+    - E
+inits:
+- dim: M
+- dim: N
+- dim: K
+- dim: E
+- dim: TOPK
+- dim: QUANT
+ci:
+- params:
+  - A
+  - B
+  - topk_ids
+  dtype: bfloat16
+  dims:
+    M: 80
+    TOPK: 1
+    N: 384
+    K: 2048
+    E: 16
+    QUANT: 0
+  flop: M*TOPK*N*K*2
+default_variant: ci
+lowering:
+  family: fused_moe
+  sweep: false
+  shapes:
+  - M: 1
+  - M: 7
+  - M: 129
+  - M: 80
+    TOPK: 2

@@ -1,0 +1,12 @@
+default_variant: ci
+inputs:
+  X: {shape: [N], dtype: float32}
+ci:
+  - params: [X]
+    dtype: float32
+    dims: {N: 1048576}
+    flop: "N"
+lowering:
+  family: copy
+  sweep: false
+  shapes: [{N: 1024}, {N: 3072}, {N: 7168}, {N: 1048576}]

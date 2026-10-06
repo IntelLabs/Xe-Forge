@@ -1,0 +1,8 @@
+default_variant: ci
+inputs:
+  X: {shape: [N], dtype: bfloat16}
+ci:
+  - params: [X]
+    dtype: bfloat16
+    dims: {N: 10001}
+lowering: {}

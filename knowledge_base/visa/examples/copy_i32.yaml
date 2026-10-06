@@ -1,0 +1,9 @@
+default_variant: ci
+inputs:
+  X: {shape: [N], dtype: int32}
+ci:
+  - params: [X]
+    dims: {N: 65536}
+lowering:
+  sweep: false
+  shapes: [{N: 128}, {N: 1280}]

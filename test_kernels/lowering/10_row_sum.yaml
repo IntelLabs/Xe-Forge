@@ -1,0 +1,15 @@
+default_variant: ci
+inputs:
+  X: {shape: [M, N], dtype: float32}
+ci:
+  - params: [X]
+    dtype: float32
+    dims: {M: 129, N: 1531}
+    flop: "M*N"
+    # A sum of ~1500 terms in another order differs in the last bits of fp32.
+    rtol: 0.0001
+    atol: 0.0001
+lowering:
+  family: reduction_sum
+  # One block covers a row: columns may not exceed BLOCK_N.
+  max_dims: {N: 2048}

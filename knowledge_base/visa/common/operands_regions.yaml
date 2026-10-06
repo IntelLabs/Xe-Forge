@@ -1,0 +1,34 @@
+entries:
+  - id: visa-regions
+    title: Operands and regions
+    topics: [regions, syntax, simd]
+    source: documentation/visa/5_operands.md
+    body: |
+      A source operand is `V(row, col)<VertStride; Width, HorzStride>`; a destination
+      is `V(row, col)<HorzStride>`. Strides and width count elements of V's type; row
+      counts registers (64 bytes on Xe2), so V(1,0) of a `f` variable is element 16.
+
+      The elements an instruction with exec size N reads from a source are:
+          for i in 0 .. N/Width-1, j in 0 .. Width-1:
+              V[row*elems_per_reg + col + i*VertStride + j*HorzStride]
+
+      Common regions:
+      - `<1;1,0>` contiguous vector (one element per channel)
+      - `<0;1,0>` scalar broadcast: every channel reads element (row,col)
+      - `<2;1,0>` every other element (e.g. low halves of 64-bit values viewed as 32-bit)
+      - `<16;8,1>`-style 2-D regions read rows of a matrix held in registers
+      - destination `<1>` contiguous, `<2>` every other element
+
+      Reading a region that runs past the end of a variable is undefined. Operands
+      need not have the same type; integer sources may mix integer types, but an
+      instruction cannot mix integer and floating-point sources (convert with mov).
+
+  - id: visa-source-modifiers
+    title: Source modifiers and saturation
+    topics: [regions, arithmetic_fp, arithmetic_int]
+    source: documentation/visa/8_appendix_visa_assembly_syntax.md
+    body: |
+      A source may be prefixed with `(-)` negate, `(abs)` absolute value, or `(-abs)`:
+      `add (M1, 32) D(0,0)<1> X(0,0)<1;1,0> (-)Y(0,0)<1;1,0>` computes X - Y.
+      `.sat` after the mnemonic clamps a float result to [0, 1] (integers: to the
+      destination type's range): `mad.sat (M1, 32) ...`.

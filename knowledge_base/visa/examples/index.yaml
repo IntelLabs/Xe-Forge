@@ -1,0 +1,40 @@
+# Hand-written vISA examples. Each is admitted only after
+# tests/gpu/test_visa_examples.py finalizes it and verifies it against its Triton twin.
+# `family` drives hold-out: an example is never shown when lowering a kernel of the same family.
+examples:
+  - id: copy_i32
+    family: copy
+    topics: [lsc, kernel_args_abi, memory_addressing]
+    summary: int32 copy, one element per work-item, no mask
+  - id: vector_add_256
+    family: vector_add
+    topics: [lsc, kernel_args_abi, memory_addressing, perf_rules]
+    summary: fp32 add, two elements per work-item (unrolled), loads issued before use
+  - id: masked_add_tail
+    family: masked_vector_add
+    topics: [predicates_execmask, lsc, memory_addressing]
+    summary: fp32 add with a tail mask via a predicate on loads and stores
+  - id: scaled_mul
+    family: vector_mul
+    topics: [arithmetic_fp, kernel_args_abi, predicates_execmask]
+    summary: fp32 product times a runtime float scalar input
+  - id: relu_masked
+    family: relu
+    topics: [predicates_execmask, arithmetic_fp]
+    summary: where(x > 0, x, 0) with cmp + predicated sel, tail-masked
+  - id: scale_rows_2d
+    family: index_2d
+    topics: [kernel_args_abi, memory_addressing, arithmetic_int]
+    summary: 2-D grid (row, column block), row stride input, 64-bit offsets
+  - id: reduction_sum_subgroup
+    family: reduction_sum
+    topics: [reduction, simd, predicates_execmask, control_flow, regions]
+    summary: one sub-group does the row (no shared memory), per-lane partial sums, cross-lane tree with regions, scalar store
+  - id: bf16_scale
+    family: conversions
+    topics: [conversions, bf16_fp16, lsc, predicates_execmask]
+    summary: bf16 load (d16u32 + bf alias), f32 arithmetic with mad, bf16 store
+  - id: exp_fp32
+    family: exp
+    topics: [math, predicates_execmask, lsc]
+    summary: natural exponential through base-2 exp

@@ -1,0 +1,63 @@
+entries:
+  - id: xe2-dpas
+    kind: contract
+    title: DPAS and 2-D block loads on Xe2 (as IGC itself emits them)
+    topics: [dpas, bf16_fp16, grf, lsc, memory_addressing]
+    source: compiler corpus dpas_gemm_bf16 / dpas_gemm_f16 (IGC output for generic MLIR GEMMs, verified); documentation/visa/instructions/DPAS.md, LSC_UNTYPED.md
+    body: |
+      One sub-group (SIMD16) computes an 8x16 f32 tile C += A(8x16) x B(16x16), 16-bit inputs:
+
+          .decl A  v_type=G type=w  num_elts=128 align=wordx32               // 8 rows x 16 k, bf16/hf
+          .decl AU v_type=G type=ud num_elts=64  align=wordx32 alias=<A, 0>   // DPAS reads A as dwords
+          .decl B  v_type=G type=d  num_elts=128 align=wordx32               // 16 k x 16 n, VNNI-packed
+          .decl C  v_type=G type=f  num_elts=128 align=wordx32               // 8 x 16 accumulator
+          lsc_load_block2d.ugm (M1, 1) A:d16.16x8nn  flat[ABASE, AW, AH, AP, k, row]
+          lsc_load_block2d.ugm (M1, 1) B:d16.16x16nt flat[BBASE, BW, BH, BP, col, k]
+          dpas.bf.bf.8.8 (M1, 16) C.0 C.0 B.0 AU(0,0)        // dst, src0 = acc, src1 = B, src2 = A
+          lsc_store_block2d.ugm (M1, 1) flat[CBASE, CW, CH, CP, col, row] C:d32.16x8nn
+
+      - `dpas.<B-prec>.<A-prec>.8.<rows>`: `bf.bf` or `hf.hf`; depth 8; `<rows>` = M of the tile
+        (8 here). Exec size is 16. Operands dst/src0/src1 are raw (`V.0`), src2 is `V(0,0)`.
+      - 2-D block address list: `[base(uq), width_bytes-1, height_rows-1, pitch_bytes-1, x, y]`;
+        width/height/pitch describe the whole 2-D surface (matrix), x is the column in elements,
+        y the row. Constants may be immediates; any value may be a scalar variable.
+      - Block shape `dSIZE.WxH` + two flags: first `t`/`n` = transposed or not, second `t`/`n` =
+        VNNI transform or not. `d16.16x16nt` loads a 16x16 16-bit tile already packed for DPAS's B.
+      - **Transposed block loads exist only for 32- and 64-bit elements** (`d32`/`d64`). A
+        16-bit matrix stored [N, K] (e.g. a weight read as B^T) can be loaded as d32 pairs,
+        which is itself the packed (VNNI) layout B needs.
+      - The C/D tile of 8x16 f32 is 8 registers; keep several tiles live to reuse A or B.
+      - Reads outside the declared surface are documented to return zero (not yet exercised by
+        a verified example here): verify edge tiles rather than relying on it.
+  - id: xe2-bf16-fp16
+    title: BF16 and FP16 on Xe2
+    topics: [bf16_fp16, conversions]
+    source: documentation/visa/2_datatypes.md, instructions/MOV.md
+    body: |
+      - bf (1-8-7) and hf (1-5-10) are 16-bit; registers hold 32 of them.
+      - Convert bf/hf <-> f with `mov`. f -> bf/hf rounds to nearest even, which is
+        what Triton's `.to(tl.bfloat16)` does.
+      - hf denormals are flushed to zero in arithmetic.
+      - To load 16-bit data with one element per channel use `:d16u32` (each value
+        lands in the low half of a 32-bit slot): read it through a `bf`/`hf` alias with
+        a stride-2 region, e.g. `mov (M1, 32) F(0,0)<1> RAWBF(0,0)<2;1,0>` where RAWBF is
+        a bf alias of the d16u32 destination.
+      - To store, place each bf in the low half of a 32-bit slot (a bf alias written
+        with destination stride 2) and store with `:d16u32`.
+
+  - id: xe2-finalizer
+    kind: contract
+    title: What the finalizer reports and how to read it
+    topics: [finalizer_errors, syntax]
+    source: observed with this finalizer
+    body: |
+      - Parse errors name a line: `near line 44: syntax error, unexpected IDENT` usually
+        means an unknown mnemonic or a misspelled modifier on that line;
+        `near line 43: YV: undefined raw operand variable` means a variable used but
+        never declared (or misspelled).
+      - The finalizer performs register allocation; heavy register pressure shows up as
+        spills, not as an error.
+      - An `.input` whose offset or size disagrees with the payload compiles but reads
+        garbage: copy offsets from the contract exactly.
+      - A runtime crash or hang usually means an address computed from the wrong
+        input, a 32-bit address overflow, or a loop whose exit condition never holds.

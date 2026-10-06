@@ -1,0 +1,11 @@
+default_variant: ci
+inputs:
+  X: {shape: [M, N], dtype: float32}
+ci:
+  - params: [X]
+    dtype: float32
+    dims: {M: 33, N: 100}
+    rtol: 0.0001
+    atol: 0.0001
+lowering:
+  max_dims: {N: 128}

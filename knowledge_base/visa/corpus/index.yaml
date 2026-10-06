@@ -1,0 +1,577 @@
+provenance: IGC v2.41.5 dumps of generic MLIR kernels (tools/visa_corpus), validated against numpy
+entries:
+- id: p1_scalar_store
+  family: corpus_scalar_store
+  related: []
+  features:
+  - scalar_store
+  - lane_guard
+  topics:
+  - lsc
+  - memory_addressing
+  - control_flow
+  - declarations
+  summary: work-item 0 of each work-group stores one float to out[group_id]
+  visa: p1_scalar_store.visaasm
+  source: p1_scalar_store.mlir
+  simd: 16
+  validated: true
+- id: p2_one_subgroup
+  family: corpus_scale
+  related:
+  - vector_mul
+  - axpy
+  features:
+  - elementwise
+  - single_subgroup
+  topics:
+  - kernel_args_abi
+  - lsc
+  - memory_addressing
+  summary: out[i] = 2 * in[i], work-group of one sub-group (16 work-items)
+  visa: p2_one_subgroup.visaasm
+  source: p2_one_subgroup.mlir
+  simd: 16
+  validated: true
+- id: p3_two_subgroups
+  family: corpus_scale
+  related:
+  - vector_mul
+  - axpy
+  features:
+  - elementwise
+  topics:
+  - kernel_args_abi
+  - lsc
+  - memory_addressing
+  summary: out[i] = 2 * in[i], work-group of two sub-groups (32 work-items)
+  visa: p3_two_subgroups.visaasm
+  source: p3_two_subgroups.mlir
+  simd: 16
+  validated: true
+- id: p4_subgroup_sum
+  family: corpus_sg_sum
+  related:
+  - reduction_sum
+  features:
+  - subgroup_shuffle
+  - reduction
+  - sum
+  topics:
+  - reduction
+  - simd
+  - regions
+  - predicates_execmask
+  summary: sub-group sum of 16 values with xor shuffles; lane 0 stores
+  visa: p4_subgroup_sum.visaasm
+  source: p4_subgroup_sum.mlir
+  simd: 16
+  validated: true
+- id: convert_bf16
+  family: corpus_convert_bf16
+  related:
+  - swiglu
+  features:
+  - conversion
+  - bf16
+  topics:
+  - conversions
+  - bf16_fp16
+  summary: f32 -> bf16 -> f32 round trip (bf16)
+  visa: convert_bf16.visaasm
+  source: convert_bf16.mlir
+  simd: 16
+  validated: true
+- id: convert_f16
+  family: corpus_convert_f16
+  related: []
+  features:
+  - conversion
+  - f16
+  topics:
+  - conversions
+  - bf16_fp16
+  summary: f32 -> f16 -> f32 round trip (np.float16)
+  visa: convert_f16.visaasm
+  source: convert_f16.mlir
+  simd: 16
+  validated: true
+- id: ew_add
+  family: corpus_ew_add
+  related:
+  - vector_add
+  - masked_vector_add
+  - broadcast
+  - index_2d
+  features:
+  - elementwise
+  - add
+  topics:
+  - arithmetic_fp
+  - kernel_args_abi
+  - lsc
+  summary: elementwise add, work-group 32, 1/work-item
+  visa: ew_add.visaasm
+  source: ew_add.mlir
+  simd: 16
+  validated: true
+- id: ew_add_masked
+  family: corpus_ew_add
+  related:
+  - vector_add
+  - masked_vector_add
+  - broadcast
+  - index_2d
+  features:
+  - elementwise
+  - add
+  - mask
+  topics:
+  - arithmetic_fp
+  - kernel_args_abi
+  - lsc
+  - predicates_execmask
+  summary: elementwise add with tail mask, work-group 64, 1/work-item
+  visa: ew_add_masked.visaasm
+  source: ew_add_masked.mlir
+  simd: 16
+  validated: true
+- id: ew_div
+  family: corpus_ew_div
+  related:
+  - swiglu
+  features:
+  - elementwise
+  - div
+  topics:
+  - arithmetic_fp
+  - kernel_args_abi
+  - lsc
+  summary: elementwise div, work-group 32, 1/work-item
+  visa: ew_div.visaasm
+  source: ew_div.mlir
+  simd: 16
+  validated: true
+- id: ew_div_masked
+  family: corpus_ew_div
+  related:
+  - swiglu
+  features:
+  - elementwise
+  - div
+  - mask
+  topics:
+  - arithmetic_fp
+  - kernel_args_abi
+  - lsc
+  - predicates_execmask
+  summary: elementwise div with tail mask, work-group 64, 1/work-item
+  visa: ew_div_masked.visaasm
+  source: ew_div_masked.mlir
+  simd: 16
+  validated: true
+- id: ew_exp
+  family: corpus_ew_exp
+  related:
+  - swiglu
+  features:
+  - elementwise
+  - exp
+  - per_item_loop
+  topics:
+  - control_flow
+  - kernel_args_abi
+  - lsc
+  - math
+  summary: elementwise exp, work-group 16, 2/work-item
+  visa: ew_exp.visaasm
+  source: ew_exp.mlir
+  simd: 16
+  validated: true
+- id: ew_exp_masked_loop
+  family: corpus_ew_exp
+  related:
+  - swiglu
+  features:
+  - elementwise
+  - exp
+  - mask
+  - per_item_loop
+  topics:
+  - control_flow
+  - kernel_args_abi
+  - lsc
+  - math
+  - predicates_execmask
+  summary: elementwise exp with tail mask, work-group 16, 4/work-item
+  visa: ew_exp_masked_loop.visaasm
+  source: ew_exp_masked_loop.mlir
+  simd: 16
+  validated: true
+- id: ew_floor_int
+  family: corpus_ew_floor_int
+  related: []
+  features:
+  - elementwise
+  - floor_int
+  - per_item_loop
+  topics:
+  - control_flow
+  - conversions
+  - kernel_args_abi
+  - lsc
+  summary: elementwise floor_int, work-group 16, 2/work-item
+  visa: ew_floor_int.visaasm
+  source: ew_floor_int.mlir
+  simd: 16
+  validated: true
+- id: ew_fma
+  family: corpus_ew_fma
+  related:
+  - axpy
+  features:
+  - elementwise
+  - fma
+  topics:
+  - arithmetic_fp
+  - kernel_args_abi
+  - lsc
+  summary: elementwise fma, work-group 32, 1/work-item
+  visa: ew_fma.visaasm
+  source: ew_fma.mlir
+  simd: 16
+  validated: true
+- id: ew_fma_masked
+  family: corpus_ew_fma
+  related:
+  - axpy
+  features:
+  - elementwise
+  - fma
+  - mask
+  topics:
+  - arithmetic_fp
+  - kernel_args_abi
+  - lsc
+  - predicates_execmask
+  summary: elementwise fma with tail mask, work-group 64, 1/work-item
+  visa: ew_fma_masked.visaasm
+  source: ew_fma_masked.mlir
+  simd: 16
+  validated: true
+- id: ew_log
+  family: corpus_ew_log
+  related: []
+  features:
+  - elementwise
+  - log
+  - per_item_loop
+  topics:
+  - control_flow
+  - kernel_args_abi
+  - lsc
+  - math
+  summary: elementwise log, work-group 16, 2/work-item
+  visa: ew_log.visaasm
+  source: ew_log.mlir
+  simd: 16
+  validated: true
+- id: ew_max
+  family: corpus_ew_max
+  related:
+  - relu
+  features:
+  - elementwise
+  - max
+  topics:
+  - arithmetic_fp
+  - kernel_args_abi
+  - lsc
+  summary: elementwise max, work-group 32, 1/work-item
+  visa: ew_max.visaasm
+  source: ew_max.mlir
+  simd: 16
+  validated: true
+- id: ew_max_masked
+  family: corpus_ew_max
+  related:
+  - relu
+  features:
+  - elementwise
+  - max
+  - mask
+  topics:
+  - arithmetic_fp
+  - kernel_args_abi
+  - lsc
+  - predicates_execmask
+  summary: elementwise max with tail mask, work-group 64, 1/work-item
+  visa: ew_max_masked.visaasm
+  source: ew_max_masked.mlir
+  simd: 16
+  validated: true
+- id: ew_mul
+  family: corpus_ew_mul
+  related:
+  - vector_mul
+  - axpy
+  features:
+  - elementwise
+  - mul
+  topics:
+  - arithmetic_fp
+  - kernel_args_abi
+  - lsc
+  summary: elementwise mul, work-group 32, 1/work-item
+  visa: ew_mul.visaasm
+  source: ew_mul.mlir
+  simd: 16
+  validated: true
+- id: ew_mul_masked
+  family: corpus_ew_mul
+  related:
+  - vector_mul
+  - axpy
+  features:
+  - elementwise
+  - mul
+  - mask
+  topics:
+  - arithmetic_fp
+  - kernel_args_abi
+  - lsc
+  - predicates_execmask
+  summary: elementwise mul with tail mask, work-group 64, 1/work-item
+  visa: ew_mul_masked.visaasm
+  source: ew_mul_masked.mlir
+  simd: 16
+  validated: true
+- id: ew_mul_scalar_loop
+  family: corpus_ew_mul
+  related:
+  - vector_mul
+  - axpy
+  features:
+  - elementwise
+  - mul
+  - mask
+  - scalar_arg
+  - per_item_loop
+  topics:
+  - arithmetic_fp
+  - control_flow
+  - kernel_args_abi
+  - lsc
+  - predicates_execmask
+  summary: elementwise mul with tail mask times scalar, work-group 32, 4/work-item
+  visa: ew_mul_scalar_loop.visaasm
+  source: ew_mul_scalar_loop.mlir
+  simd: 16
+  validated: true
+- id: ew_neg_abs
+  family: corpus_ew_neg_abs
+  related: []
+  features:
+  - elementwise
+  - neg_abs
+  - per_item_loop
+  topics:
+  - arithmetic_fp
+  - control_flow
+  - kernel_args_abi
+  - lsc
+  - regions
+  summary: elementwise neg_abs, work-group 16, 2/work-item
+  visa: ew_neg_abs.visaasm
+  source: ew_neg_abs.mlir
+  simd: 16
+  validated: true
+- id: ew_rsqrt
+  family: corpus_ew_rsqrt
+  related: []
+  features:
+  - elementwise
+  - rsqrt
+  - per_item_loop
+  topics:
+  - control_flow
+  - kernel_args_abi
+  - lsc
+  - math
+  summary: elementwise rsqrt, work-group 16, 2/work-item
+  visa: ew_rsqrt.visaasm
+  source: ew_rsqrt.mlir
+  simd: 16
+  validated: true
+- id: ew_select_neg
+  family: corpus_ew_select_neg
+  related:
+  - relu
+  features:
+  - elementwise
+  - select_neg
+  - per_item_loop
+  topics:
+  - arithmetic_fp
+  - control_flow
+  - kernel_args_abi
+  - lsc
+  - predicates_execmask
+  summary: elementwise select_neg, work-group 16, 2/work-item
+  visa: ew_select_neg.visaasm
+  source: ew_select_neg.mlir
+  simd: 16
+  validated: true
+- id: ew_sqrt
+  family: corpus_ew_sqrt
+  related: []
+  features:
+  - elementwise
+  - sqrt
+  - per_item_loop
+  topics:
+  - control_flow
+  - kernel_args_abi
+  - lsc
+  - math
+  summary: elementwise sqrt, work-group 16, 2/work-item
+  visa: ew_sqrt.visaasm
+  source: ew_sqrt.mlir
+  simd: 16
+  validated: true
+- id: ew_sub
+  family: corpus_ew_sub
+  related: []
+  features:
+  - elementwise
+  - sub
+  topics:
+  - arithmetic_fp
+  - kernel_args_abi
+  - lsc
+  summary: elementwise sub, work-group 32, 1/work-item
+  visa: ew_sub.visaasm
+  source: ew_sub.mlir
+  simd: 16
+  validated: true
+- id: ew_sub_masked
+  family: corpus_ew_sub
+  related: []
+  features:
+  - elementwise
+  - sub
+  - mask
+  topics:
+  - arithmetic_fp
+  - kernel_args_abi
+  - lsc
+  - predicates_execmask
+  summary: elementwise sub with tail mask, work-group 64, 1/work-item
+  visa: ew_sub_masked.visaasm
+  source: ew_sub_masked.mlir
+  simd: 16
+  validated: true
+- id: ew_tanh
+  family: corpus_ew_tanh
+  related: []
+  features:
+  - elementwise
+  - tanh
+  - per_item_loop
+  topics:
+  - control_flow
+  - kernel_args_abi
+  - lsc
+  - math
+  summary: elementwise tanh, work-group 16, 2/work-item
+  visa: ew_tanh.visaasm
+  source: ew_tanh.mlir
+  simd: 16
+  validated: true
+- id: sg_max
+  family: corpus_sg_max
+  related: []
+  features:
+  - subgroup_shuffle
+  - reduction
+  - max
+  topics:
+  - reduction
+  - simd
+  - regions
+  - predicates_execmask
+  summary: sub-group max reduction with xor shuffles, lane-0 store
+  visa: sg_max.visaasm
+  source: sg_max.mlir
+  simd: 16
+  validated: true
+- id: sg_min
+  family: corpus_sg_min
+  related: []
+  features:
+  - subgroup_shuffle
+  - reduction
+  - min
+  topics:
+  - reduction
+  - simd
+  - regions
+  - predicates_execmask
+  summary: sub-group min reduction with xor shuffles, lane-0 store
+  visa: sg_min.visaasm
+  source: sg_min.mlir
+  simd: 16
+  validated: true
+- id: transpose_2d
+  family: corpus_transpose_2d
+  related:
+  - index_2d
+  features:
+  - 2d_grid
+  - strided
+  topics:
+  - kernel_args_abi
+  - memory_addressing
+  - lsc
+  - arithmetic_int
+  summary: 2-D grid transpose with strided reads, work-group 16
+  visa: transpose_2d.visaasm
+  source: transpose_2d.mlir
+  simd: 16
+  validated: true
+- id: dpas_gemm_bf16
+  family: corpus_dpas_bf16
+  related: []
+  features:
+  - dpas
+  - block2d
+  - bf16
+  topics:
+  - dpas
+  - bf16_fp16
+  - grf
+  - lsc
+  - memory_addressing
+  summary: 8x16 DPAS GEMM tile per sub-group, bf16 x bf16 -> f32, 2-D block loads
+  visa: dpas_gemm_bf16.visaasm
+  source: dpas_gemm_bf16.mlir
+  simd: 16
+  validated: true
+- id: dpas_gemm_f16
+  family: corpus_dpas_f16
+  related: []
+  features:
+  - dpas
+  - block2d
+  - f16
+  topics:
+  - dpas
+  - bf16_fp16
+  - grf
+  - lsc
+  - memory_addressing
+  summary: 8x16 DPAS GEMM tile per sub-group, f16 x f16 -> f32, 2-D block loads
+  visa: dpas_gemm_f16.visaasm
+  source: dpas_gemm_f16.mlir
+  simd: 16
+  validated: true

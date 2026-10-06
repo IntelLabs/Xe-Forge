@@ -1,0 +1,37 @@
+entries:
+  - id: xe2-exec-widths
+    title: Xe2 execution widths and the register file
+    topics: [exec_widths, grf, simd]
+    source: documentation/visa/3_execution_model.md, 4_visa_header.md; observed
+    body: |
+      - A register (GRF) is 64 bytes: 16 dwords, 32 words, 8 qwords. A SIMD32 vector of
+        f/d is 2 registers; of uq (addresses) 4 registers; of uw 1 register.
+      - Kernels are dispatched SIMD16 or SIMD32 (`threads_per_warp` in `@launch`),
+        and `.kernel_attr SimdSize=` must match it. Instructions may use any exec size
+        up to 32; the finalizer splits wide operations as the hardware requires.
+      - 128 registers per thread by default (8 KB); a 256-register mode exists (fewer
+        threads per core); the probe's `grf_count` reports the mode in force.
+      - Values that are the same for every lane (sizes, base pointers, loop counters)
+        should be scalars (num_elts=1, exec size 1, `<0;1,0>` when used as a source):
+        a SIMD32 copy of a uniform value wastes registers.
+      - Too many simultaneously live vectors make the finalizer spill to memory
+        (reported as `hardware.spills` in the feedback). Reuse temporaries and keep
+        long-lived values scalar.
+
+  - id: xe2-restrictions
+    kind: contract
+    title: Xe2 restrictions worth knowing
+    topics: [restrictions, finalizer_errors, arithmetic_int]
+    source: documentation/visa/instructions/*.md (platform notes); observed
+    body: |
+      - Arithmetic on 64-bit integers (q/uq add, shl) is legal vISA; the finalizer
+        emulates what the hardware lacks. Keep it to address computation.
+      - `add3` accepts only d/ud/w/uw.
+      - Floating-point arithmetic needs all float sources and a destination of the
+        execution type; mixing int and float sources is an error -- convert with mov.
+      - Mixed-width float arithmetic (hf with f) is not supported by every instruction:
+        convert to f, compute, convert back.
+      - Byte-typed arithmetic (b/ub sources) is not supported on this generation: load
+        bytes with d8u32 into 32-bit lanes and compute in d/ud.
+      - DPAS operands must be register aligned (`align=wordx32`) and laid out as the
+        DPAS entry describes.

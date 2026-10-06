@@ -1,0 +1,11 @@
+default_variant: ci
+inputs:
+  A: {shape: [N], dtype: float32}
+  B: {shape: [N], dtype: float32}
+ci:
+  - params: [A, B]
+    dtype: float32
+    dims: {N: 65536}
+lowering:
+  sweep: false
+  shapes: [{N: 256}, {N: 2560}]

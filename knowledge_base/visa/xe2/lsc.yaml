@@ -1,0 +1,29 @@
+entries:
+  - id: xe2-lsc-and-caches
+    title: LSC messages and cache controls on Xe2
+    topics: [lsc, cache_controls, perf_rules]
+    source: documentation/visa/instructions/LSC_UNTYPED.md
+    body: |
+      Global memory goes through the Load/Store Cache unit (`.ugm`), shared local
+      memory through `.slm` (only if the contract reports shared_local_memory_bytes > 0).
+      Valid L1/L3 cache-control pairs for loads: `.df.df` (default), `.uc.uc`, `.st.uc`,
+      `.uc.ca`, `.ca.uc`, `.ca.ca`, `.st.ca`, `.ri.ca`; for stores: `.df.df`, `.uc.uc`,
+      `.st.uc`, `.uc.wb`, `.wt.uc`, `.wt.wb`, `.st.wb`, `.wb.wb`. Default caching is
+      correct everywhere; streaming (`.st`) suits data read or written once.
+
+      One SIMD32 gather of d32 with consecutive addresses moves 128 bytes in one
+      message. Messages are the expensive part of an elementwise kernel: prefer wide
+      vectors per address (`:d32x4`, `:d32x8`) or transposed block loads over many
+      narrow gathers when addresses are contiguous and in bounds.
+
+  - id: xe2-perf-rules
+    title: Performance rules for elementwise and reduction kernels
+    topics: [perf_rules]
+    source: general architecture; apply only after the kernel is correct
+    body: |
+      - Elementwise kernels are bound by memory bandwidth: the number and width of
+        memory messages matters, the arithmetic does not.
+      - Issue independent loads before using their results (load X and Y, then add).
+      - Move per-thread constants (base pointers, scaled strides) out of loops.
+      - Unrolling a short fixed-count loop removes the counter and branch.
+      - Keep the number of live SIMD32 uq address vectors small: each is 4 registers.

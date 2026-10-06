@@ -1,0 +1,47 @@
+entries:
+  - id: visa-file-structure
+    kind: contract
+    title: Structure of a .visaasm kernel file
+    topics: [syntax, declarations]
+    source: documentation/visa/8_appendix_visa_assembly_syntax.md; observed
+    body: |
+      A kernel file is, in order:
+
+          .version 4.2
+          .kernel "<kernel_name>"            // must equal the entry name in the contract
+          .decl ...                          // every variable, predicate, address register
+          .input <var> offset=<B> size=<B>   // binds a declared variable to the thread payload
+          .kernel_attr <Name>=<value>        // one line per required attribute (copy them from ./abi-probe)
+          .function "_main_0"
+          _main_0:
+              <instructions>
+              ret (M1, 1)
+
+      - Comments are C style: `/* ... */` and `// ...` to end of line.
+      - Labels are `NAME:` on their own line. A label must be unique in the kernel.
+      - Instructions take the form `[(pred)] opcode[.mod] (<mask>, <exec_size>) dst src0 [src1 [src2]]`.
+        Example: `add (M1, 32) Z(0,0)<1> X(0,0)<1;1,0> Y(0,0)<1;1,0>`.
+      - Immediates carry their type: `0x10:d`, `0x2:uq`, `1.0:f`, `0x3f800000:f`.
+        Floating-point immediates may be written in hex (the bit pattern) or decimal.
+      - Mnemonics are lower case in practice (`add`, `mov`, `lsc_load.ugm`).
+
+  - id: visa-types
+    title: vISA data types
+    topics: [syntax, declarations, conversions]
+    source: documentation/visa/2_datatypes.md
+    body: |
+      | type | bits | meaning |
+      | ub / b | 8 | unsigned / signed byte |
+      | uw / w | 16 | unsigned / signed word |
+      | ud / d | 32 | unsigned / signed dword |
+      | uq / q | 64 | unsigned / signed qword |
+      | hf | 16 | IEEE half |
+      | bf | 16 | bfloat16 (1-8-7) |
+      | f | 32 | IEEE single |
+      | df | 64 | IEEE double |
+      | v / uv / vf | 32 | packed immediates (8 x 4-bit signed / unsigned, 4 x restricted float) |
+      | bool | 1 | predicates only |
+
+      Triton names map as fp32->f, fp16->hf, bf16->bf, i32->d, u32->ud, i64->q,
+      i16->w, i8->b, u8->ub, i1->predicate (or ub/b in memory). A 64-bit pointer
+      argument is uq.

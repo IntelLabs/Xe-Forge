@@ -1,0 +1,41 @@
+entries:
+  - id: visa-simd-execution
+    title: SIMD execution, exec size and mask control
+    topics: [simd, predicates_execmask, exec_widths]
+    source: documentation/visa/3_execution_model.md
+    body: |
+      Each hardware thread runs SIMD: one instruction acts on `exec_size` channels
+      (1, 2, 4, 8, 16, 32). The kernel's dispatch width (`SimdSize`, chosen with `threads_per_warp` in `@launch`)
+      is the number of work-items one thread carries: lane i of the thread is
+      work-item `local_id_x[i]`.
+
+      `(M1, N)` executes channels 0..N-1 subject to the current execution mask, which
+      divergent control flow (goto) narrows. `(M1_NM, N)` ignores the execution mask
+      (NoMask): use it for scalar bookkeeping (loop counters, base addresses) and for
+      cross-lane work (reductions) that must run on lanes that are currently inactive.
+      `M2..M8` start at channel offsets 4, 8, ..., 28 (for splitting a SIMD32 operation).
+
+      A work-group of W work-items runs as W/simd hardware threads (sub-groups) that
+      execute the same kernel; sub-group s holds work-items s*simd .. s*simd+simd-1.
+
+  - id: visa-predicates
+    kind: contract
+    title: Predicates and masking out-of-range lanes
+    topics: [predicates_execmask, control_flow]
+    source: documentation/visa/3_execution_model.md, instructions/CMP.md, instructions/SEL.md; observed
+    body: |
+      `cmp.<op> (M1, N) P V0 V1` sets one predicate bit per channel; `<op>` is
+      eq, ne, gt, ge, lt, le. CMP itself cannot be predicated.
+
+      `(P) inst ...` executes inst only on channels where P is 1; `(!P) inst ...` where
+      it is 0. Predicated loads and stores leave masked-off channels untouched -- this
+      is how a Triton `mask=` is implemented:
+
+          cmp.lt (M1, 32) PM IDX(0,0)<1;1,0> N(0,0)<0;1,0>
+          (PM) lsc_load.ugm (M1, 32) XV:d32 flat[XA]:a64
+          (PM) lsc_store.ugm (M1, 32) flat[OA]:a64 ZV:d32
+
+      A masked-off load leaves its destination channels unchanged, so when Triton's
+      `other=` value matters, initialize the destination first (`mov (M1, 32) XV(0,0)<1> 0.0:f`)
+      or select afterwards with `(P) sel (M1, N) D A B` (A where P is 1, else B).
+      Predicates combine with `and`/`or`/`xor`/`not` on predicate operands.

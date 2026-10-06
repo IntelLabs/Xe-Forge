@@ -1,0 +1,11 @@
+default_variant: ci
+inputs:
+  A: {shape: [N], dtype: bfloat16}
+  B: {shape: [N], dtype: bfloat16}
+ci:
+  - params: [A, B]
+    dtype: bfloat16
+    dims: {N: 1000003}
+    flop: "5*N"
+lowering:
+  family: swiglu

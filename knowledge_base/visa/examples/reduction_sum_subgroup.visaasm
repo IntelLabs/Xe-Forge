@@ -1,0 +1,80 @@
+// subgroup_row_sum_kernel: out[r] = sum(x[r, :n_cols]) with n_cols <= 128, num_warps = 2.
+// Sub-groups cannot exchange data without shared local memory (the contract reports none),
+// so sub-group 0 (local ids 0..31) computes the whole row and sub-group 1 jumps straight to
+// the end. The sub-group index is lane 0's local id / 32, the same for every lane of a thread,
+// so a uniform jmp is correct. In sub-group 0 each lane accumulates columns
+// lid, lid+32, lid+64, lid+96 (masked loads into zeroed registers give other=0.0); then the
+// 32 partial sums are folded in a tree 32->16->8->4->2->1 using regions over the same
+// variable. The fold runs NoMask: it combines lanes regardless of the execution mask.
+// Lane 0's total is written with a one-element transposed store; its address and data
+// operands are register-aligned (align=wordx32), as every memory-message operand must be.
+.version 4.2
+.kernel "subgroup_row_sum_kernel"
+.decl R0 v_type=G type=ud num_elts=8 align=wordx32 alias=<%r0, 0>
+.decl LID v_type=G type=uw num_elts=32 align=hword
+.decl X v_type=G type=uq num_elts=1 align=qword
+.decl OUT v_type=G type=uq num_elts=1 align=qword
+.decl SCR0 v_type=G type=uq num_elts=1 align=qword
+.decl SCR1 v_type=G type=uq num_elts=1 align=qword
+.decl NCOLS v_type=G type=d num_elts=1 align=dword
+.decl STRIDE v_type=G type=d num_elts=1 align=dword
+.decl ROWOFF v_type=G type=d num_elts=1 align=dword
+.decl K v_type=G type=d num_elts=1 align=dword
+.decl COL v_type=G type=d num_elts=32 align=wordx32
+.decl ELEM v_type=G type=d num_elts=32 align=wordx32
+.decl OFF v_type=G type=q num_elts=32 align=wordx32
+.decl ADDR v_type=G type=uq num_elts=32 align=wordx32
+.decl V v_type=G type=f num_elts=32 align=wordx32
+.decl ACC v_type=G type=f num_elts=32 align=wordx32
+.decl OADDR v_type=G type=uq num_elts=1 align=wordx32
+.decl ROFF v_type=G type=uq num_elts=1 align=qword
+.decl PM v_type=P num_elts=32
+.decl PL v_type=P num_elts=1
+.decl SG v_type=G type=uw num_elts=1 align=word
+.decl PS v_type=P num_elts=1
+.input LID offset=64 size=64
+.input X offset=128 size=8
+.input OUT offset=136 size=8
+.input SCR0 offset=144 size=8
+.input SCR1 offset=152 size=8
+.input NCOLS offset=192 size=4
+.input STRIDE offset=196 size=4
+.kernel_attr Target="3d"
+.kernel_attr SimdSize=32
+.kernel_attr PerThreadInputSize=64
+
+.function "_main_0"
+_main_0:
+    shr (M1_NM, 1) SG(0,0)<1> LID(0,0)<0;1,0> 0x5:uw                // sub-group index
+    cmp.ne (M1_NM, 1) PS SG(0,0)<0;1,0> 0x0:uw
+    (PS) jmp (M1_NM, 1) DONE
+    mul (M1_NM, 1) ROWOFF(0,0)<1> R0(0,1)<0;1,0> STRIDE(0,0)<0;1,0>
+    mov (M1_NM, 32) ACC(0,0)<1> 0x0:f
+    mov (M1, 32) COL(0,0)<1> LID(0,0)<1;1,0>
+    mov (M1_NM, 1) K(0,0)<1> 0x0:d
+LOOP:
+    cmp.lt (M1, 32) PM COL(0,0)<1;1,0> NCOLS(0,0)<0;1,0>
+    add (M1, 32) ELEM(0,0)<1> COL(0,0)<1;1,0> ROWOFF(0,0)<0;1,0>
+    mov (M1, 32) OFF(0,0)<1> ELEM(0,0)<1;1,0>
+    shl (M1, 32) OFF(0,0)<1> OFF(0,0)<1;1,0> 0x2:q
+    add (M1, 32) ADDR(0,0)<1> OFF(0,0)<1;1,0> X(0,0)<0;1,0>
+    mov (M1, 32) V(0,0)<1> 0x0:f                                      // other = 0.0
+    (PM) lsc_load.ugm (M1, 32) V:d32 flat[ADDR]:a64
+    add (M1, 32) ACC(0,0)<1> ACC(0,0)<1;1,0> V(0,0)<1;1,0>
+    add (M1, 32) COL(0,0)<1> COL(0,0)<1;1,0> 0x20:d
+    add (M1_NM, 1) K(0,0)<1> K(0,0)<0;1,0> 0x1:d
+    cmp.lt (M1_NM, 1) PL K(0,0)<0;1,0> 0x4:d
+    (PL) jmp (M1_NM, 1) LOOP
+    // cross-lane tree: 32 f = two registers; ACC(1,0) is element 16
+    add (M1_NM, 16) ACC(0,0)<1> ACC(0,0)<1;1,0> ACC(1,0)<1;1,0>
+    add (M1_NM, 8) ACC(0,0)<1> ACC(0,0)<1;1,0> ACC(0,8)<1;1,0>
+    add (M1_NM, 4) ACC(0,0)<1> ACC(0,0)<1;1,0> ACC(0,4)<1;1,0>
+    add (M1_NM, 2) ACC(0,0)<1> ACC(0,0)<1;1,0> ACC(0,2)<1;1,0>
+    add (M1_NM, 1) ACC(0,0)<1> ACC(0,0)<0;1,0> ACC(0,1)<0;1,0>
+    // out + r * 4 (scalar address), one dword stored from ACC element 0
+    mov (M1_NM, 1) ROFF(0,0)<1> R0(0,1)<0;1,0>
+    shl (M1_NM, 1) ROFF(0,0)<1> ROFF(0,0)<0;1,0> 0x2:uq
+    add (M1_NM, 1) OADDR(0,0)<1> ROFF(0,0)<0;1,0> OUT(0,0)<0;1,0>
+    lsc_store.ugm (M1_NM, 1) flat[OADDR]:a64 ACC:d32t
+DONE:
+    ret (M1, 1)

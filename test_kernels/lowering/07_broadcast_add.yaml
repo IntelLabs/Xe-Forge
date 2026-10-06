@@ -1,0 +1,11 @@
+default_variant: ci
+inputs:
+  X: {shape: [M, N], dtype: float32}
+  B: {shape: [N], dtype: float32}
+ci:
+  - params: [X, B]
+    dtype: float32
+    dims: {M: 77, N: 1003}
+    flop: "M*N"
+lowering:
+  family: broadcast

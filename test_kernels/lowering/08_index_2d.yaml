@@ -1,0 +1,11 @@
+default_variant: ci
+inputs:
+  X: {shape: [M, N], dtype: float32}
+  Y: {shape: [N, M], dtype: float32}
+ci:
+  - params: [X, Y]
+    dtype: float32
+    dims: {M: 157, N: 301}
+    flop: "M*N"
+lowering:
+  family: index_2d

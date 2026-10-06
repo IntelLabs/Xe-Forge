@@ -1,0 +1,28 @@
+entries:
+  - id: visa-control-flow
+    kind: contract
+    title: Branches, loops and divergence
+    topics: [control_flow, predicates_execmask]
+    source: documentation/visa/3_execution_model.md, instructions/{JMP,GOTO,RET}.md; observed
+    body: |
+      - `jmp (M1_NM, 1) LABEL`, optionally predicated `(P) jmp (M1_NM, 1) LABEL`, is a
+        uniform branch: use it only when every channel takes the same direction (loop
+        counters, sizes that are the same for the whole thread). The predicate must be
+        a scalar decision (compute it with exec size 1 on uniform values).
+      - `goto (M1, N) LABEL` is a divergent branch: `(P) goto (M1, 32) L` sends the
+        channels with P set to L and disables them until execution reaches L;
+        `(!P) goto` skips a block for the channels where P is clear. Channels re-join
+        at the label.
+      - A uniform counted loop:
+
+            mov (M1_NM, 1) K(0,0)<1> 0x0:d
+        LOOP:
+            ...body...
+            add (M1_NM, 1) K(0,0)<1> K(0,0)<0;1,0> 0x1:d
+            cmp.lt (M1_NM, 1) PL K(0,0)<0;1,0> 0x8:d
+            (PL) jmp (M1_NM, 1) LOOP
+
+        where PL is declared `.decl PL v_type=P num_elts=1`.
+      - The kernel ends with `ret (M1, 1)`; every path must reach it.
+      - Prefer predication over branches for short masked sequences; a predicated
+        load/store is cheaper than a goto around it.

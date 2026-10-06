@@ -180,6 +180,31 @@ class ExternalConfig:
 
 
 @dataclass
+class LoweringConfig:
+    """Experimental AI lowering of a source kernel (see :mod:`xe_forge.lowering`).
+
+    ``target`` None keeps the source-level path; ``"visa"`` lowers the kernel
+    to Intel vISA. ``knowledge`` selects how much vISA knowledge the agent is
+    given (``none`` | ``docs`` | ``docs+examples``: experimental modes A/B/C).
+    ``no_compiler_seed`` forbids any compiler-generated lowering of the target
+    kernel from reaching the agent; it is the only mode implemented.
+    ``finalizer_igc`` names the IGC install whose ``ShaderOverride`` honours a
+    ``.visaasm`` file (a stock release IGC silently ignores the flag).
+    """
+
+    target: str | None = None
+    lower_target: str = "xe2"
+    max_trials: int = 12
+    optimize: bool = False
+    knowledge: str = "docs+examples"
+    no_compiler_seed: bool = True
+    kernel: str | None = None
+    timeout_s: int = 180
+    char_budget: int = 60000
+    finalizer_igc: str | None = None
+
+
+@dataclass
 class TrialConfig:
     """Trial tree management configuration"""
 
@@ -215,6 +240,7 @@ class Config:
     trial: TrialConfig = field(default_factory=TrialConfig)
     profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
     external: ExternalConfig = field(default_factory=ExternalConfig)
+    lowering: LoweringConfig = field(default_factory=LoweringConfig)
 
     @property
     def xpu(self) -> XPUConfig:
@@ -334,6 +360,19 @@ class ConfigManager:
             profile_iters=self._get_env("VTUNE_ITERS", 20, int),
         )
 
+        lowering_cfg = LoweringConfig(
+            target=self._get_env("LOWER", None),
+            lower_target=self._get_env("LOWER_TARGET", "xe2"),
+            max_trials=self._get_env("LOWER_MAX_TRIALS", 12, int),
+            optimize=self._get_env("LOWER_OPTIMIZE", False, bool),
+            knowledge=self._get_env("LOWER_KNOWLEDGE", "docs+examples"),
+            no_compiler_seed=self._get_env("LOWER_NO_COMPILER_SEED", True, bool),
+            kernel=self._get_env("LOWER_KERNEL", None),
+            timeout_s=self._get_env("LOWER_TIMEOUT", 180, int),
+            char_budget=self._get_env("LOWER_CHAR_BUDGET", 60000, int),
+            finalizer_igc=self._get_env("LOWER_FINALIZER_IGC", None),
+        )
+
         return Config(
             llm=llm,
             agent=agent,
@@ -345,6 +384,7 @@ class ConfigManager:
             trial=trial_cfg,
             profiler=profiler_cfg,
             external=external_cfg,
+            lowering=lowering_cfg,
         )
 
     def _build_device_config(self, device_type: str, dsl: str) -> DeviceConfig:

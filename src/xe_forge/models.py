@@ -34,6 +34,24 @@ class DSL(StrEnum):
         return ".py"
 
 
+# The language a kernel is written in. Lowering targets are a separate axis:
+# a Triton kernel can be optimized as Triton source, or lowered to vISA.
+SourceDSL = DSL
+
+
+class LoweringTarget(StrEnum):
+    """What a source kernel is turned into.
+
+    ``SOURCE`` is the normal Xe-Forge path: the optimized artefact is source in
+    the same DSL. ``VISA`` is the experimental path in :mod:`xe_forge.lowering`,
+    where an LLM lowers the kernel to Intel vISA and the vISA finalizer produces
+    native code. Native Xe ISA is reserved for later.
+    """
+
+    SOURCE = "source"
+    VISA = "visa"
+
+
 class DeviceType(StrEnum):
     XPU = "xpu"
     CUDA = "cuda"

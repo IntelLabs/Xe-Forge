@@ -1,0 +1,45 @@
+// masked_add_kernel: c = a + b for i < n. One element per work-item (BLOCK = 128 = work-group);
+// the last work-group is partial, so loads and stores are predicated on i < n.
+.version 4.2
+.kernel "masked_add_kernel"
+.decl R0 v_type=G type=ud num_elts=8 align=wordx32 alias=<%r0, 0>
+.decl LID v_type=G type=uw num_elts=32 align=hword
+.decl A v_type=G type=uq num_elts=1 align=qword
+.decl B v_type=G type=uq num_elts=1 align=qword
+.decl C v_type=G type=uq num_elts=1 align=qword
+.decl SCR0 v_type=G type=uq num_elts=1 align=qword
+.decl SCR1 v_type=G type=uq num_elts=1 align=qword
+.decl N v_type=G type=d num_elts=1 align=dword
+.decl BASE v_type=G type=d num_elts=1 align=dword
+.decl IDX v_type=G type=d num_elts=32 align=wordx32
+.decl OFF v_type=G type=uq num_elts=32 align=wordx32
+.decl ADDR v_type=G type=uq num_elts=32 align=wordx32
+.decl XA v_type=G type=f num_elts=32 align=wordx32
+.decl XB v_type=G type=f num_elts=32 align=wordx32
+.decl PM v_type=P num_elts=32
+.input LID offset=64 size=64
+.input A offset=128 size=8
+.input B offset=136 size=8
+.input C offset=144 size=8
+.input SCR0 offset=152 size=8
+.input SCR1 offset=192 size=8
+.input N offset=200 size=4
+.kernel_attr Target="3d"
+.kernel_attr SimdSize=32
+.kernel_attr PerThreadInputSize=64
+
+.function "_main_0"
+_main_0:
+    shl (M1_NM, 1) BASE(0,0)<1> R0(0,1)<0;1,0> 0x7:ud
+    add (M1, 32) IDX(0,0)<1> LID(0,0)<1;1,0> BASE(0,0)<0;1,0>
+    cmp.lt (M1, 32) PM IDX(0,0)<1;1,0> N(0,0)<0;1,0>              // mask = offs < n
+    mov (M1, 32) OFF(0,0)<1> IDX(0,0)<1;1,0>
+    shl (M1, 32) OFF(0,0)<1> OFF(0,0)<1;1,0> 0x2:uq
+    add (M1, 32) ADDR(0,0)<1> OFF(0,0)<1;1,0> A(0,0)<0;1,0>
+    (PM) lsc_load.ugm (M1, 32) XA:d32 flat[ADDR]:a64
+    add (M1, 32) ADDR(0,0)<1> OFF(0,0)<1;1,0> B(0,0)<0;1,0>
+    (PM) lsc_load.ugm (M1, 32) XB:d32 flat[ADDR]:a64
+    add (M1, 32) XA(0,0)<1> XA(0,0)<1;1,0> XB(0,0)<1;1,0>
+    add (M1, 32) ADDR(0,0)<1> OFF(0,0)<1;1,0> C(0,0)<0;1,0>
+    (PM) lsc_store.ugm (M1, 32) flat[ADDR]:a64 XA:d32
+    ret (M1, 1)

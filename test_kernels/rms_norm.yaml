@@ -1,0 +1,39 @@
+inputs:
+  X:
+    shape: [NUM_TOKENS, HIDDEN]
+    dtype: bfloat16
+
+inits:
+  - hidden_size: HIDDEN
+  - eps: "1e-6"
+
+ci:
+  - params: [X]
+    dtype: bfloat16
+    dims:
+      NUM_TOKENS: 83
+      HIDDEN: 768
+    flop: "4*NUM_TOKENS*HIDDEN"
+    rtol: 0.016
+    atol: 0.01
+
+bench-gpu:
+  - params: [X]
+    dtype: bfloat16
+    dims:
+      NUM_TOKENS: 4096
+      HIDDEN: 4096
+    flop: "4*NUM_TOKENS*HIDDEN"
+    rtol: 0.016
+    atol: 0.01
+
+# From vLLM's own tests: single token, scalar (non-vectorized) fallback.
+bench-edge:
+  - params: [X]
+    dtype: bfloat16
+    dims:
+      NUM_TOKENS: 1
+      HIDDEN: 8199
+    flop: "4*NUM_TOKENS*HIDDEN"
+    rtol: 0.016
+    atol: 0.01

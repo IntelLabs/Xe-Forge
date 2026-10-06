@@ -1,0 +1,26 @@
+entries:
+  - id: visa-kernel-abi
+    kind: contract
+    title: Reading the payload layout from abi-probe
+    topics: [kernel_args_abi, simd]
+    source: observed on Xe2 with this runtime; documentation/visa/4_visa_header.md
+    body: |
+      `./abi-probe` prints, for one launch configuration, the compiler's `.ze_info` table
+      and the `.input` / `.kernel_attr` lines of an empty kernel with this signature.
+      How to read it:
+      - The thread payload is a byte space. Bytes 0..63 are `%r0` (the thread header;
+        work-group ids are `%r0` dwords 1, 6 and 7 for dimensions 0, 1, 2).
+      - `per_thread_payload_arguments` (e.g. `local_id`) come next, padded to whole
+        64-byte registers; for one dimension it is one `uw` per lane: work-item index
+        within the work-group (sub-group s, lane l: s*simd + l).
+      - `payload_arguments` are the cross-thread arguments. Their `offset` is relative to
+        the cross-thread block, not to the payload; the stub's `.input` lines show where
+        each one actually lands. Match them up by order and size.
+      - `arg_index` counts the kernel's parameters as compiled: the kernel's own runtime
+        parameters first (constexprs are not parameters), then any parameters the Triton
+        compiler appends (e.g. scratch pointers), and a `local`-address-space pointer when
+        shared local memory is enabled (its slot holds the 32-bit SLM base offset).
+      - Copy every `.kernel_attr` line from the stub (e.g. `SimdSize`, `PerThreadInputSize`):
+        they must agree with the payload you bind.
+      A work-group of the Triton kernel's block may be covered however you like; consecutive
+      lanes touching consecutive addresses coalesce.

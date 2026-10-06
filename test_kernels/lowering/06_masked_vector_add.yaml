@@ -1,0 +1,11 @@
+default_variant: ci
+inputs:
+  X: {shape: [N], dtype: float32}
+  Y: {shape: [N], dtype: float32}
+ci:
+  - params: [X, Y]
+    dtype: float32
+    dims: {N: 1000003}
+    flop: "N"
+lowering:
+  family: masked_vector_add

@@ -1,0 +1,58 @@
+entries:
+  - id: visa-declarations
+    title: Declaring variables, predicates and aliases
+    topics: [declarations, syntax, virtual_variables]
+    source: documentation/visa/4_visa_header.md, 8_appendix_visa_assembly_syntax.md; observed
+    body: |
+      General (register) variable:
+
+          .decl NAME v_type=G type=<t> num_elts=<n> align=<a> [alias=<OTHER, byte_offset>]
+
+      - `num_elts` is the element count; the variable occupies num_elts*sizeof(t) bytes.
+      - `align` is one of byte, word, dword, qword, hword (32 B), wordx32 (64 B = one
+        Xe2 register), GRF, 2GRF. Use `wordx32` (or `GRF`) for SIMD-wide vectors and
+        for every load/store payload; `dword`/`qword` for scalars.
+      - `alias=<V, off>` reinterprets another variable from byte offset `off` with this
+        declaration's type, e.g. a ud view of %r0:
+        `.decl R0 v_type=G type=ud num_elts=8 align=wordx32 alias=<%r0, 0>`.
+
+      Predicate (one bit per channel):
+
+          .decl P1 v_type=P num_elts=32
+
+      Address register (for indirect operands, rarely needed): `v_type=A type=uw`.
+
+      Variables are virtual: there is no limit on how many you declare and you never
+      name physical registers; the finalizer allocates registers. Predefined variables
+      (`%r0`, `%null`, ...) are used without declaring them. A name may not be declared
+      twice.
+
+  - id: visa-predefined-variables
+    title: Predefined variables
+    topics: [declarations, kernel_args_abi]
+    source: documentation/visa/4_visa_header.md
+    body: |
+      - `%null` -- discard destination (e.g. a prefetch-only load, an unused atomic result).
+      - `%r0` -- the thread payload header, 8 dwords. In the GPGPU model used here the
+        work-group ids are in dwords 1 (x), 6 (y) and 7 (z); alias %r0 to read them.
+      - `%group_id_x/y/z`, `%thread_x/y` exist but their availability depends on the
+        execution model; prefer reading %r0 (dwords 1, 6, 7 hold the work-group ids).
+      - `%sp`, `%fp`, `%arg`, `%retval` are for function calls; a single-function kernel
+        does not use them.
+
+  - id: visa-inputs
+    kind: contract
+    title: Binding kernel arguments with .input
+    topics: [kernel_args_abi, declarations]
+    source: documentation/visa/4_visa_header.md; observed
+    body: |
+      `.input VAR offset=O size=S` says the runtime has written S bytes at payload byte
+      offset O, and VAR must be declared with exactly that size. The offsets are not
+      chosen by the kernel: they are fixed by the launch configuration. `./abi-probe` shows
+      them; declare one `.input` for every slot it lists, including ones you never read.
+
+      - pointers: `type=uq num_elts=1 align=qword`, size 8
+      - 32-bit scalars: `type=d` (or `ud` / `f`) `num_elts=1 align=dword`, size 4
+      - per-lane local ids: `type=uw num_elts=<simd> align=hword`, size 2*simd
+      - a shared-local-memory base: `type=ud num_elts=1`, size 4 (an offset for `.slm` access)
+      Inputs are read-only by convention; copy one before modifying it.
