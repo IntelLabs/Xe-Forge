@@ -58,6 +58,20 @@ def _rank(trial: dict) -> tuple[float, int, float] | None:
     return None
 
 
+def _best_id(trials: dict, *, measured_only: bool = False) -> str | None:
+    """The highest-ranking trial, optionally among those whose numbers a tool wrote."""
+    best_rank: tuple[float, int, float] | None = None
+    best_id = None
+    for tid, t in trials.items():
+        if measured_only and t.get("source") != "measured":
+            continue
+        rank = _rank(t)
+        if rank is not None and (best_rank is None or rank > best_rank):
+            best_rank = rank
+            best_id = tid
+    return best_id
+
+
 class TrialManager:
     """Persistent tree-structured trial state manager.
 
@@ -202,11 +216,12 @@ class TrialManager:
         return trial_id
 
     def profile_source_hash(self, kernel_name: str, trial_id: str, source: str | Path) -> str:
+        """sha256 of *source*, refusing a file that is not the saved trial *trial_id*."""
         state = self._load_state(kernel_name)
         trial = state["trials"][trial_id]
         digest = _digest(Path(source))
         if digest is None or _digest(self._trial_dir(kernel_name) / trial["file"]) != digest:
-            raise ValueError("Profile source does not match the saved trial")
+            raise ValueError(f"{source} does not match the saved trial {trial_id}")
         return digest
 
     def recorded_profile(
@@ -279,13 +294,26 @@ class TrialManager:
         baseline_us: float | None = None,
         triton_us: float | None = None,
         verdict: str | None = None,
+        source: str = "reported",
+        measured_against: dict | None = None,
     ) -> dict:
         """Record benchmark results for a trial. Returns the trial dict.
 
         *speedup* is absent when the host gated the comparison; *verdict* is the gate
         it named. Both are recorded as given -- no ratio is invented for a gate. See
         :func:`_rank` for how a gated trial still orders against the others.
+
+        *source* says who wrote the numbers: ``"measured"`` when the tool that took the
+        measurement recorded it, ``"reported"`` when a caller typed them in. A later
+        reported write over a measured trial makes it reported again, because the
+        numbers in it are no longer the tool's. *measured_against* names what a
+        measurement was taken against (baseline, spec, reference digests and variant);
+        the first passing one is pinned for the tree, and a measurement against
+        anything else is refused -- a speedup over a different baseline does not rank
+        against these.
         """
+        if source not in ("measured", "reported"):
+            raise ValueError(f"source must be 'measured' or 'reported', not {source!r}")
         state = self._load_state(kernel_name)
 
         if trial_id not in state["trials"]:
@@ -293,7 +321,29 @@ class TrialManager:
                 f"Trial '{trial_id}' not found. Available: {list(state['trials'].keys())}"
             )
 
+        if measured_against is not None:
+            # Only a passing measurement pins: a run that failed -- often because the
+            # baseline itself did not build -- measured nothing, and the baseline must
+            # stay repairable after it.
+            if correctness == "pass":
+                state.setdefault("measured_against", measured_against)
+            pinned = state.get("measured_against", measured_against)
+            changed = sorted(
+                k
+                for k in pinned.keys() | measured_against.keys()
+                if pinned.get(k) != measured_against.get(k)
+            )
+            if changed:
+                raise ValueError(
+                    f"refusing to record {trial_id}: measured against a different "
+                    f"{', '.join(changed)} than this tree's earlier measurements"
+                )
+
         trial = state["trials"][trial_id]
+        trial["source"] = source
+        if source == "measured":
+            # What was measured; a file changed after this is no longer that result.
+            trial["sha256"] = _digest(self._trial_dir(kernel_name) / trial["file"])
         if validation is not None:
             trial["validation"] = validation
         if correctness is not None:
@@ -323,14 +373,7 @@ class TrialManager:
         else:
             trial["status"] = "partial"
 
-        best_rank: tuple[float, int, float] | None = None
-        best_id = None
-        for tid, t in state["trials"].items():
-            rank = _rank(t)
-            if rank is not None and (best_rank is None or rank > best_rank):
-                best_rank = rank
-                best_id = tid
-        state["best_trial"] = best_id
+        state["best_trial"] = _best_id(state["trials"])
 
         self._save_state(kernel_name, state)
         return trial
@@ -382,6 +425,8 @@ class TrialManager:
             if trial.get("baseline_us") is not None and trial.get("triton_us") is not None:
                 runtime = f" (bl={trial['baseline_us']:.0f}us, tr={trial['triton_us']:.0f}us)"
             best_marker = " <<<< BEST" if tid == state["best_trial"] else ""
+            if trial.get("source") == "reported" and trial["status"] != "saved":
+                best_marker = " (reported)" + best_marker
             strategy_short = (trial["strategy"] or "")[:60]
             lines.append(
                 f"{prefix}{connector}[{icon}] {tid}: {speedup_str}{runtime}"
@@ -399,12 +444,13 @@ class TrialManager:
 
     def get_best(self, kernel_name: str) -> dict | None:
         """Return the best correct trial record, or None."""
-        state = self._load_state(kernel_name)
-        best_id = state.get("best_trial")
-        if best_id is None:
-            return None
-        trial = dict(state["trials"][best_id])
-        trial["id"] = best_id
+        best_id = self._load_state(kernel_name).get("best_trial")
+        return None if best_id is None else self.get_trial(kernel_name, best_id)
+
+    def get_trial(self, kernel_name: str, trial_id: str) -> dict:
+        """Return one trial's record, with its ``id`` and ``file_path``."""
+        trial = dict(self._load_state(kernel_name)["trials"][trial_id])
+        trial["id"] = trial_id
         trial["file_path"] = str(self._trial_dir(kernel_name) / trial["file"])
         return trial
 
@@ -417,6 +463,41 @@ class TrialManager:
         rank = _rank(trial)
         return rank is not None and rank[0] >= 1.0
 
+    def _candidates(self, kernel_name: str, state: dict) -> dict:
+        """Trials that are not a byte-for-byte copy of the baseline, nor changed since
+        ``benchmark`` measured them.
+
+        A copy is a baseline check, not a result: finalizing it would report "optimized"
+        for what was started from. Both the baseline the tree was initialized with and the
+        one measurements were pinned against count -- a baseline repaired after
+        `trial init` is still one.
+        """
+        baselines = {
+            state.get("baseline_sha256"),
+            (state.get("measured_against") or {}).get("baseline_sha256"),
+        } - {None}
+        trial_dir = self._trial_dir(kernel_name)
+        return {
+            tid: t
+            for tid, t in state["trials"].items()
+            if (digest := _digest(trial_dir / t["file"])) not in baselines
+            and t.get("sha256", digest) == digest
+        }
+
+    def has_measured_attempt(self, kernel_name: str) -> bool:
+        """Whether a trial other than a baseline copy has a correct measured result."""
+        state = self._load_state(kernel_name)
+        return any(
+            t.get("source") == "measured" and t.get("correctness") == "pass"
+            for t in self._candidates(kernel_name, state).values()
+        )
+
+    def best_measured(self, kernel_name: str) -> dict | None:
+        """The best non-baseline trial whose result ``benchmark`` recorded, or None."""
+        state = self._load_state(kernel_name)
+        best_id = _best_id(self._candidates(kernel_name, state), measured_only=True)
+        return None if best_id is None else self.get_trial(kernel_name, best_id)
+
     def get_baseline_us(self, kernel_name: str) -> list[float] | None:
         """Return cached baseline time(s) or None."""
         state = self._load_state(kernel_name)
@@ -426,6 +507,8 @@ class TrialManager:
         self,
         kernel_name: str,
         output_path: str | Path,
+        *,
+        require_measured: bool = False,
     ) -> str | None:
         """Copy the best correct trial to *output_path*.
 
@@ -437,11 +520,22 @@ class TrialManager:
         reporting that the search found nothing. Parity *is* finalized -- a kernel that
         matches the baseline is a legitimate result, and the caller can see from the
         absent ``speedup`` that it is not a win.
+
+        With *require_measured*, only trials whose numbers the measuring tool recorded
+        compete -- a result typed in by the caller is a claim, not evidence -- and a
+        trial identical to the baseline does not compete at all.
         """
         state = self._load_state(kernel_name)
-        best_id = state.get("best_trial")
+        if require_measured:
+            best_id = _best_id(self._candidates(kernel_name, state), measured_only=True)
+        else:
+            best_id = state.get("best_trial")
         if best_id is None:
-            logger.warning("No correct trials to finalize for '%s'", kernel_name)
+            logger.warning(
+                "No %scorrect trials to finalize for '%s'",
+                "measured " if require_measured else "",
+                kernel_name,
+            )
             return None
 
         self._require_profiles(kernel_name, state)

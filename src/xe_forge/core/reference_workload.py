@@ -123,6 +123,11 @@ class ReferenceWorkload:
                 f"Initialized buffers differ from the reference ({name})",
             )
 
+        # An op whose output order is not deterministic (rows placed by atomics) is compared
+        # in a canonical order. The reference owns that step, it runs on every arm's output
+        # before the comparison, and it is never timed: a trial can neither switch it off
+        # nor gain by dropping work the real op does not do.
+        canonicalize = getattr(self.reference, "canonicalize", None)
         reference_steps = []
         for model_index, (name, model) in enumerate(models):
             initial_buffers = _snapshot(dict(model.named_buffers()))
@@ -133,6 +138,8 @@ class ReferenceWorkload:
                     _restore_buffers(model, initial_buffers)
                     arguments = _move_inputs(self.copy_inputs(), self.device)
                     output = model(*arguments)
+                    if canonicalize is not None:
+                        output = canonicalize(output, *arguments)
                     output_devices = _tensor_devices(output)
                     output_snapshot = _snapshot(output)
                     del output

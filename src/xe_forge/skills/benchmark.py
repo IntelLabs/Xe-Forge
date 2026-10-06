@@ -16,9 +16,17 @@ The external path adds a ``VERDICT:`` line naming the gate that decided, and
 omits the speedup when the host refused to compute one -- a comparison the host
 could not distinguish from noise is not a regression, and must not be reported
 as a number the loop can branch away from.
+
+With ``--kernel-name`` and ``--trial-id`` the skill also records what it printed into
+the trial tree, marked as measured. A number a session types into ``trial result`` is
+its own claim; one written here is the tool's, and ``trial finalize
+--require-measured`` only accepts those.
 """
 
+import contextlib
+import io
 import os
+import re
 import sys
 
 BUILTIN_ENV = "XE_FORGE_BUILTIN_BENCHMARK"
@@ -172,10 +180,13 @@ def _run_builtin(args) -> int:
             f"TIMER: {'device_forward_after_untimed_reset' if gpu else 'device_buffer_reset_plus_forward'}"
         )
         print(f"Feedback: {result.feedback_message}")
+        ratio = "none" if result.verdict else f"{result.speedup:.2f}x"
         print(
             f"Performance: baseline_us={result.original_time_us:.2f}, "
-            f"kernel_us={result.optimized_time_us:.2f}, speedup={result.speedup:.2f}x"
+            f"kernel_us={result.optimized_time_us:.2f}, speedup={ratio}"
         )
+        if result.verdict:
+            print(f"VERDICT: {result.verdict}")
         rates = []
         if flop:
             rates += [
@@ -192,6 +203,10 @@ def _run_builtin(args) -> int:
         return 0
 
     variant = spec.resolve_variant(args.variant)
+    # The variant's tolerances decide correctness here too, not only on the reference path.
+    for name, value in (("rtol", spec.get_rtol(variant)), ("atol", spec.get_atol(variant))):
+        if value is not None:
+            setattr(executor, name, value)
     input_shapes = spec.get_input_shapes(variant)
     flop = spec.get_flop(variant)
     dtype = spec.get_dtype(variant)
@@ -283,10 +298,108 @@ def _builtin_opted_in(args) -> bool:
     return os.getenv(BUILTIN_ENV, "").strip().lower() in ("1", "true", "yes", "on")
 
 
+class _Tee(io.TextIOBase):
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, text):
+        for stream in self._streams:
+            stream.write(text)
+        return len(text)
+
+    def flush(self):
+        for stream in self._streams:
+            stream.flush()
+
+
+_NUMBER = r"([0-9]+(?:\.[0-9]+)?)"
+
+
+def parse_outcome(text: str) -> dict | None:
+    """Read the lines this skill prints back into trial-result fields.
+
+    ``None`` when no ``Correctness:`` line was printed by this process -- nothing was
+    measured here (the built-in path measures in a child, which records for itself).
+    """
+    correctness = re.search(r"^Correctness: (PASSED|FAILED)\s*$", text, re.M)
+    if correctness is None:
+        return None
+    outcome = {"correctness": "pass" if correctness.group(1) == "PASSED" else "fail"}
+    performance = re.search(r"^Performance: (.*)$", text, re.M)
+    if performance is not None:
+        line = performance.group(1)
+        for field, key in (("baseline_us", "baseline_us"), ("kernel_us", "triton_us")):
+            match = re.search(rf"\b{field}={_NUMBER}", line)
+            if match:
+                outcome[key] = float(match.group(1))
+        match = re.search(rf"\bspeedup={_NUMBER}x", line)
+        if match:
+            outcome["speedup"] = float(match.group(1))
+    verdict = re.search(r"^VERDICT: (\S+)\s*$", text, re.M)
+    if verdict is not None and verdict.group(1) != "UNSPECIFIED":
+        outcome["verdict"] = verdict.group(1)
+    return outcome
+
+
+def _trial_target(args):
+    """The (manager, kernel, trial) to record into, after checking the file is that trial."""
+    kernel_name, trial_id = getattr(args, "kernel_name", None), getattr(args, "trial_id", None)
+    if not (kernel_name or trial_id):
+        return None
+    if not (kernel_name and trial_id):
+        raise SystemExit("--kernel-name and --trial-id must be given together.")
+    from xe_forge.core.trial_manager import TrialManager
+
+    manager = TrialManager(getattr(args, "trials_dir", "./trials"))
+    try:
+        manager.profile_source_hash(kernel_name, trial_id, args.optimized)
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        raise SystemExit(f"Benchmark refused: {exc}") from exc
+    return manager, kernel_name, trial_id
+
+
+def _measured_against(args) -> dict:
+    from pathlib import Path
+
+    from xe_forge.core.trial_manager import _digest
+
+    against = {"variant": args.variant or ""}
+    for key in ("baseline", "spec", "reference"):
+        path = getattr(args, key, None)
+        against[f"{key}_sha256"] = _digest(Path(path)) if path else None
+    return against
+
+
+def _recording(target, args, produce) -> int:
+    """Run *produce*, and record what it printed if a trial was named."""
+    if target is None:
+        return produce()
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(_Tee(sys.stdout, captured)):
+        code = produce()
+    outcome = parse_outcome(captured.getvalue())
+    if outcome is not None:
+        manager, kernel_name, trial_id = target
+        try:
+            manager.record_result(
+                kernel_name,
+                trial_id,
+                source="measured",
+                measured_against=_measured_against(args),
+                **outcome,
+            )
+        except ValueError as exc:
+            print(f"VERDICT: NOT_RECORDED\nError: {exc}")
+            return 1
+        print(f"Recorded {trial_id} (measured)")
+    return code
+
+
 def run(args):
+    target = _trial_target(args)
     template = _external_template(args)
     if template:
-        sys.exit(_run_external(args, template))
+        sys.exit(_recording(target, args, lambda: _run_external(args, template)))
     if not _builtin_opted_in(args):
         print("Correctness: FAILED")
         print("VERDICT: NO_BENCHMARK_CONFIGURED")
@@ -299,8 +412,9 @@ def run(args):
         )
         sys.exit(1)
     if os.getenv(_CHILD_ENV):
-        sys.exit(_run_builtin(args))
-    sys.exit(_run_builtin_watched())
+        sys.exit(_recording(target, args, lambda: _run_builtin(args)))
+    # The child measures and records; this process only records a timeout.
+    sys.exit(_recording(target, args, _run_builtin_watched))
 
 
 _CHILD_ENV = "XE_FORGE_BENCHMARK_CHILD"

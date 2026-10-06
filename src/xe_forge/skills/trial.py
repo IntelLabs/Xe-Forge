@@ -75,7 +75,11 @@ def run(args):
                 sys.exit(1)
 
         case "finalize":
-            best_id = mgr.finalize(args.kernel_name, args.output_file)
+            best_id = mgr.finalize(
+                args.kernel_name,
+                args.output_file,
+                require_measured=getattr(args, "require_measured", False),
+            )
             if best_id:
                 print(f"Finalized {best_id} -> {args.output_file}")
             else:
@@ -84,7 +88,13 @@ def run(args):
                 # trial was slower than the baseline and was refused.
                 print(
                     "Nothing finalized: no correct trial, or the best one was a "
-                    "regression. Run `trial status` to see which.",
+                    "regression"
+                    + (
+                        ", or no correct trial was recorded by `benchmark`"
+                        if getattr(args, "require_measured", False)
+                        else ""
+                    )
+                    + ". Run `trial status` to see which.",
                     file=sys.stderr,
                 )
                 sys.exit(1)

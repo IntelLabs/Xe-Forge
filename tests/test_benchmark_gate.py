@@ -848,3 +848,64 @@ def test_a_second_session_does_not_reseed_the_lessons_ledger(tmp_path):
     ledger.write_text(ledger.read_text() + "\nentry from session one\n")
     generate_workspace(tmp_path / "ws2", config, "k", "// kernel\n", reference_code="x = 1\n")
     assert ledger.read_text().endswith("entry from session one\n")
+
+
+def test_spec_tolerances_decide_correctness_on_the_spec_path(tmp_path, monkeypatch):
+    """A variant's rtol/atol reach the executor whether or not a reference was given."""
+    from xe_forge.core import spec_loader
+
+    baseline, optimized = tmp_path / "baseline.py", tmp_path / "trial.py"
+    baseline.write_text("baseline source")
+    optimized.write_text("trial source")
+    spec = Mock()
+    spec.inputs = {"X": object()}
+    spec.resolve_variant.return_value = "bench-gpu"
+    spec.get_rtol.return_value = 0.02
+    spec.get_atol.return_value = 0.03
+    monkeypatch.setattr(spec_loader, "load_spec", Mock(return_value=spec))
+
+    executor = SimpleNamespace(rtol=1e-2, atol=1e-5)
+    seen = {}
+
+    def compare_kernels(**_kwargs):
+        seen.update(rtol=executor.rtol, atol=executor.atol)
+        return SimpleNamespace(
+            original_correct=True,
+            optimized_correct=True,
+            original_time_us=2.0,
+            optimized_time_us=1.0,
+            speedup=2.0,
+            feedback_message="",
+        )
+
+    executor.compare_kernels = compare_kernels
+    executor_module = ModuleType("xe_forge.core.executor")
+    executor_module.KernelBenchExecutor = Mock(return_value=executor)
+    monkeypatch.setitem(sys.modules, "xe_forge.core.executor", executor_module)
+
+    assert benchmark._run_builtin(_args(baseline=str(baseline), optimized=str(optimized))) == 0
+    assert seen == {"rtol": 0.02, "atol": 0.03}
+
+
+@pytest.mark.parametrize("integrated", [False, True])
+def test_every_win_ports_and_an_integration_repo_widens_what_may_change(tmp_path, integrated):
+    from xe_forge.claude.generator import generate_workspace
+    from xe_forge.config import Config
+
+    config = Config()
+    config.external.kernel_repo = str(tmp_path / "kernels")
+    if integrated:
+        config.external.integration_repos = [str(tmp_path / "vllm")]
+    ws = tmp_path / "ws"
+    generate_workspace(ws, config, "k", "// kernel\n", reference_code="x = 1\n")
+    claude_md = (ws / "CLAUDE.md").read_text()
+    port_back = (ws / ".claude" / "agents" / "port-back.md").read_text()
+    assert "every win must port back" in claude_md and "Removing a launch is in scope" in claude_md
+    assert ("serving-only" in claude_md) is integrated
+    assert (str(tmp_path / "vllm") in port_back) is integrated
+    # upstream is tried first, serving-only second, none only when neither applies.
+    assert (
+        port_back.index("**upstream**")
+        < port_back.index("**serving-only**")
+        < port_back.index("**none**")
+    )

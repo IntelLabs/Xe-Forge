@@ -26,6 +26,10 @@ class ClaudeEngine(BaseEngine):
     does not launch at all, because a stage downstream will consume it.
     """
 
+    # A subclass that drives the workspace itself has nothing to hand to a person.
+    always_launch = False
+    log_name = LOG_NAME
+
     def optimize(
         self,
         kernel_code: str,
@@ -56,12 +60,13 @@ class ClaudeEngine(BaseEngine):
             target_dtype=target_dtype,
         )
 
-        print(f"\nClaude Code workspace ready at: {workspace}")
-        print("Run:")
-        print(f"  cd {workspace}")
-        print(f"  claude /optimize-kernel {kernel_name}")
+        if not self.always_launch:
+            print(f"\nClaude Code workspace ready at: {workspace}")
+            print("Run:")
+            print(f"  cd {workspace}")
+            print(f"  claude /optimize-kernel {kernel_name}")
 
-        if not self.config.engine.auto_launch:
+        if not (self.always_launch or self.config.engine.auto_launch):
             # Nothing was attempted, so there is nothing to report as done.
             return OptimizationResult(
                 kernel_name=kernel_name,
@@ -82,7 +87,7 @@ class ClaudeEngine(BaseEngine):
             # things to say; it is not evidence that anything was optimized.
             error = (
                 f"claude session completed but recorded no correct trial at or above "
-                f"baseline for {kernel_name!r}; see {workspace / LOG_NAME}"
+                f"baseline for {kernel_name!r}; see {workspace / self.log_name}"
             )
             logger.error(error)
 
@@ -97,21 +102,23 @@ class ClaudeEngine(BaseEngine):
             error_message=error,
         )
 
+    def _trials_dir(self, workspace: Path) -> Path:
+        trials_dir = Path(self.config.trial.trials_dir)
+        return trials_dir if trials_dir.is_absolute() else workspace / trials_dir
+
     def _best_trial(self, workspace: Path, kernel_name: str) -> dict | None:
-        """The best correct trial the session recorded, if any."""
+        """The best correct trial ``benchmark`` recorded, if any -- what
+        ``finalize --require-measured`` would keep."""
         try:
             from xe_forge.core.trial_manager import TrialManager
 
-            trials_dir = Path(self.config.trial.trials_dir)
-            if not trials_dir.is_absolute():
-                trials_dir = workspace / trials_dir
-            mgr = TrialManager(trials_dir)
+            mgr = TrialManager(self._trials_dir(workspace))
             if not mgr.exists(kernel_name):
                 # A session that never ran `trial init` -- the caller is told
                 # by the absent result, not by a warning about a missing file.
-                logger.debug("No trial tree under %s for %r", trials_dir, kernel_name)
+                logger.debug("No trial tree for %r in %s", kernel_name, workspace)
                 return None
-            best = mgr.get_best(kernel_name)
+            best = mgr.best_measured(kernel_name)
         except Exception as exc:
             logger.warning("Could not read trial tree for %r: %s", kernel_name, exc)
             return None
@@ -172,7 +179,7 @@ class ClaudeEngine(BaseEngine):
             return 1, msg
 
         max_turns = self.config.engine.max_turns
-        log_path = workspace / LOG_NAME
+        log_path = workspace / self.log_name
         cmd = [
             claude_bin,
             "-p",

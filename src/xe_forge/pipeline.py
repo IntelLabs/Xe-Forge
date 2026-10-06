@@ -552,6 +552,7 @@ class XeForgePipeline:
                                         speedup=speedup,
                                         baseline_us=(val_orig_ms or 0) * 1000,
                                         triton_us=(current_ms or 0) * 1000,
+                                        source="measured",
                                     )
                                     if stage_result.success:
                                         last_trial_id = trial_id

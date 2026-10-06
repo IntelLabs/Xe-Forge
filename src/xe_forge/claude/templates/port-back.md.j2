@@ -28,22 +28,41 @@ If `output/` holds no winner, stop: there is nothing to port.
    `{{ kernel_repo }}` stays read-only; the porting edits go into the private clone's
    working tree (`upstream/`) and nowhere else.
 2. **Change what the winner changed, nowhere else.** Map each hunk of the baseline-to-winner
-   diff onto the original file and region the profile names. Keep every name, signature,
-   schema, registration and call site as it is. Add a file only when the kernel cannot be
-   expressed without one. Add no fallback, flag, environment switch or dispatch by shape.
+   diff onto the original file and region the profile names. Add a file only when the kernel
+   cannot be expressed without one. Add no fallback, flag or environment switch.
 3. **Keep the repository's conventions**: its formatting, its launch-configuration style,
    its build files. If the winner needs a compile flag the build does not pass, change the
    build target the profile names, and only that.
-4. **If the winner is not an edit of the original** -- a different algorithm, a different
-   launch structure the call site would have to change for -- write no patch; say so, and why.
+4. **Every win ports. Try, in this order, and stop at the first that applies:**
+   1. **upstream** -- the winner keeps the op's schema, signature, bindings and every call
+      site, and needs no dispatch by shape. A different algorithm, or fused or eliminated
+      launches, inside the op is in this case: replace the original implementation with the
+      winner's in the same file, behind the same entry point.
+      `xe-forge-skill upstream clone {{ kernel_repo }}`, edit `upstream/`, then
+      `xe-forge-skill upstream patch {{ kernel_name }} --kind upstream --notes "..."`.
+   2. **serving-only** -- the winner needs a dispatch by shape, or
+{%- if integration_repos %} a change to the op's
+      interface or call sites. Clone each repository that has to change --
+      `upstream clone {{ kernel_repo }}` and, for the call sites,
+      {% for r in integration_repos %}`upstream clone {{ r }} --name <short-name>`{% if not loop.last %}, {% endif %}{% endfor %} --
+      make the edits that wire the winner in, then
+      `upstream patch {{ kernel_name }} --kind serving-only --notes "..."`.
+{%- else %} is otherwise correct but not
+      upstreamable as written. (No integration repository was given, so the op's interface and
+      call sites cannot change.) Port into `upstream/` as in 1, then
+      `upstream patch {{ kernel_name }} --kind serving-only --notes "..."`.
+{%- endif %}
+      Say in the notes what makes it serving-only.
+   3. **none** -- only when neither applies: write no patch, and name the part of the op's
+      interface the winner changes and why no repository given here can carry it.
 
 ## Output
 
-- `output/upstream.patch` -- `git -C upstream diff`, paths relative to the repository root,
-  applicable with `git apply` / `patch -p1` at the recorded commit.
-- `output/PORT.txt` -- repository, base commit, touched files, the best trial and its
-  measured speedup, and what was verified:
-  - `git -C upstream apply --check` of the patch against a clean checkout, always;
+- `output/upstream.patch` (and `output/upstream-<name>.patch` for each further clone) --
+  `git -C <clone> diff`, paths relative to that repository's root, applicable with
+  `git apply` / `patch -p1` at its recorded commit. `upstream patch` writes them.
+- `output/PORT.txt` -- `kind: upstream|serving-only`, then per repository: base commit, touched
+  files; the best trial and its measured speedup; and what was verified:
   - a Python or Triton file: `python -m py_compile` of every touched file, and, when an
     interpreter that imports the repository's package is available, the repository's own
     test for this op (the profile names it) run against the patched sources;

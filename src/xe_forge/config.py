@@ -131,7 +131,7 @@ class LoggingConfig:
 class EngineConfig:
     """Engine selection configuration"""
 
-    engine: str = "dspy"  # "dspy" or "claude"
+    engine: str = "dspy"  # "dspy", "claude" or "dspy-agent"
     auto_launch: bool = False  # Claude engine: auto-launch claude CLI
     workspace: str = "./"  # Claude engine: workspace directory
     git_init: bool = False  # Claude engine: initialize workspace as git repo
@@ -176,6 +176,9 @@ class ExternalConfig:
     dataset_record: str | None = None
     lessons: str | None = None
     kernel_repo: str | None = None
+    # Repositories a kernel from kernel_repo is wired into (e.g. vLLM). With one, a winner
+    # may change the op's interface and call sites: the port patches those repos too.
+    integration_repos: list[str] = field(default_factory=list)
     timeout: int = DEFAULT_TIMEOUT
 
 
@@ -313,6 +316,9 @@ class ConfigManager:
             dataset_record=self._get_env("DATASET_RECORD", None),
             lessons=self._get_env("LESSONS_DIR", None),
             kernel_repo=self._get_env("KERNEL_REPO", None),
+            integration_repos=[
+                p for p in self._get_env("INTEGRATION_REPOS", "").split(os.pathsep) if p
+            ],
             timeout=self._get_env("EXTERNAL_TIMEOUT", DEFAULT_TIMEOUT, int),
         )
 

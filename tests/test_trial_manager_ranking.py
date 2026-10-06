@@ -220,13 +220,39 @@ def test_the_claude_engine_returns_only_what_finalize_would_keep(tmp_path, resul
     baseline = tmp_path / "base.cpp"
     baseline.write_text("// baseline\n")
     m.init("k", baseline)
-    _trial(m, tmp_path, "t0.cpp", **result)
+    _trial(m, tmp_path, "t0.cpp", source="measured", **result)
 
     best = ClaudeEngine(config)._best_trial(tmp_path, "k")
     assert (best is not None) is kept
-    assert (m.finalize("k", tmp_path / "out.cpp") is not None) is kept
+    assert (m.finalize("k", tmp_path / "out.cpp", require_measured=True) is not None) is kept
     if kept:
         assert best["code"] == "// t0.cpp\n"
+
+
+def test_the_claude_engine_returns_no_reported_win_baseline_copy_or_edited_trial(tmp_path):
+    """Both engines accept only what `finalize --require-measured` would keep."""
+    from xe_forge.config import Config
+    from xe_forge.engines.claude_engine import ClaudeEngine
+
+    config = Config()
+    config.trial.trials_dir = str(tmp_path / "trials")
+    m = TrialManager(config.trial.trials_dir)
+    baseline = tmp_path / "base.cpp"
+    baseline.write_text("// baseline\n")
+    m.init("k", baseline)
+    engine = ClaudeEngine(config)
+    win = {"speedup": 1.3, "baseline_us": 255.4, "triton_us": 196.5}
+
+    _trial(m, tmp_path, "typed.cpp", **win)  # reported
+    copy = m.save_trial("k", baseline, strategy="copy")
+    m.record_result("k", copy, correctness="pass", source="measured", **win)
+    assert engine._best_trial(tmp_path, "k") is None
+
+    tid = _trial(m, tmp_path, "t2.cpp", source="measured", **win)
+    assert engine._best_trial(tmp_path, "k")["id"] == tid
+    (m._trial_dir("k") / m.get_trial("k", tid)["file"]).write_text("// edited after\n")
+    assert engine._best_trial(tmp_path, "k") is None
+    assert m.finalize("k", tmp_path / "out.cpp", require_measured=True) is None
 
 
 def test_finalize_refuses_to_overwrite_the_winner_itself(mgr, tmp_path):

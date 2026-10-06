@@ -79,6 +79,10 @@ def generate_workspace(
         if config.external.kernel_repo
         else None
     )
+    # Where the kernel is wired in; with one, the port may change the op's call sites.
+    integration_repos = [
+        str(Path(p).expanduser().resolve()) for p in config.external.integration_repos
+    ]
 
     spec_has_inputs = bool(spec_path and load_spec(spec_path).inputs)
     # Without a PyTorch reference, the baseline -- a copy of the repo's kernel that also
@@ -168,6 +172,7 @@ def generate_workspace(
             lessons=lessons,
             compiler_flags=compiler_flags,
             kernel_repo=kernel_repo,
+            integration_repos=integration_repos,
             kernel_locator_profile_path=KERNEL_LOCATOR_PROFILE_PATH,
         )
     )
@@ -198,6 +203,7 @@ def generate_workspace(
             dataset=dataset,
             lessons=lessons,
             kernel_repo=kernel_repo,
+            integration_repos=integration_repos,
             kernel_locator_profile_path=KERNEL_LOCATOR_PROFILE_PATH,
         )
     )
@@ -235,6 +241,7 @@ def generate_workspace(
                 "port-back.md.j2",
                 kernel_name=kernel_name,
                 kernel_repo=kernel_repo,
+                integration_repos=integration_repos,
                 profile_path=KERNEL_LOCATOR_PROFILE_PATH,
                 ext=ext,
             )

@@ -159,9 +159,10 @@ Examples:
     parser.add_argument(
         "--engine",
         type=str,
-        choices=["dspy", "claude"],
+        choices=["dspy", "claude", "dspy-agent"],
         default=None,
-        help="Optimization engine (default: dspy)",
+        help="Optimization engine (default: dspy). dspy-agent runs a DSPy tool-calling "
+        "agent in the Claude workspace",
     )
 
     # Trial management
@@ -239,6 +240,15 @@ Examples:
         help="Path to an external repository holding a kernel this workspace did not "
         "write; the kernel-locator agent explores it once and writes findings before "
         "the first trial",
+    )
+    parser.add_argument(
+        "--integration-repo",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help="With --kernel-repo: a repository the kernel is wired into (e.g. vLLM). A winner "
+        "may then change the op's interface and call sites, ported as a serving-only patch "
+        "to each repository. Repeatable",
     )
 
     # Other options
@@ -348,6 +358,8 @@ def _load_config(args) -> Config:
         os.environ["LESSONS_DIR"] = args.lessons
     if getattr(args, "kernel_repo", None):
         os.environ["KERNEL_REPO"] = args.kernel_repo
+    if getattr(args, "integration_repo", None):
+        os.environ["INTEGRATION_REPOS"] = os.pathsep.join(args.integration_repo)
     if getattr(args, "compiler_flags", None):
         os.environ["COMPILER_FLAGS"] = args.compiler_flags
 
@@ -527,11 +539,12 @@ def _copy_winner_dir(src: Path, out: Path) -> str | None:
 
 def _run_optimize(parser, args, config: Config) -> int:
     """Run the optimization pipeline (original path)."""
-    # Validate input. Only the Claude engine can locate a kernel in --kernel-repo at
-    # runtime; every other engine would be handed an empty kernel.
-    if not args.input and not (args.kernel_repo and config.engine.engine == "claude"):
+    # Validate input. Only the workspace engines can locate a kernel in --kernel-repo
+    # at runtime; the pipeline would be handed an empty kernel.
+    workspace_engine = config.engine.engine in ("claude", "dspy-agent")
+    if not args.input and not (args.kernel_repo and workspace_engine):
         parser.error(
-            "--input is required (or use --kernel-repo with --engine claude, "
+            "--input is required (or use --kernel-repo with --engine claude|dspy-agent, "
             "--tile-tune / --tune-config)"
         )
     if args.input and not Path(args.input).exists():

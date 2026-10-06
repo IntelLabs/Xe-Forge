@@ -80,7 +80,9 @@ reset-plus-forward benchmark. Never infer end-to-end speedup from trace timings.
    *baseline's* other sources — a mixture nobody wrote, timed as if it were the trial.
 {%- else %}
 5. Generated kernels must be **self-contained** — all helper functions inline, because one
-   file is what gets compiled.
+   file is what gets compiled. Whatever the DSL, that file is imported as a Python module
+   defining `class Model` over the reference's inputs; SYCL source goes inside it through
+   `torch.utils.cpp_extension.load_inline`.
 {%- endif %}
 6. Do not stop at the first trial that improves. Keep going until one of the stopping
    conditions below fires, and **say in the finalize summary which one did**. A run that
@@ -115,14 +117,14 @@ Do not leave a benchmark or diagnostic running in the background when returning 
 |------|---------|
 | **Analyze** (PyTorch sources only) | `xe-forge-skill analyze {{ analyze_file }}` |
 | **Validate** | `xe-forge-skill validate <kernel{% if measurement == "host" %}_file\|dir{% else %}_file{% endif %}> --dsl {{ dsl }}` |
-| **Benchmark** | `xe-forge-skill benchmark <baseline> <optimized> {{ benchmark_options }}{% if has_spec %} [--variant <name>]{% endif %} [--baseline-us <cached>]` |
+| **Benchmark** | `xe-forge-skill benchmark <baseline> <optimized> {{ benchmark_options }}{% if has_spec %} [--variant <name>]{% endif %} [--baseline-us <cached>] --kernel-name <kernel_name> --trial-id <trial_id>` (records the result) |
 | **Init trials** | `xe-forge-skill trial init <kernel_name> <baseline_file>{% if require_profiles %} --require-profiles ComputeBasic EuStallSampling{% endif %}` |
 | **Save trial** | `xe-forge-skill trial save <kernel_name> <file{% if measurement == "host" %}\|dir{% endif %}> [--parent <id>] {% if require_profiles %}--strategy "<kernel metric value (trial)>"{% else %}[--strategy "..."]{% endif %}` |
-| **Record result** | `xe-forge-skill trial result <kernel_name> <trial_id> --correctness <pass\|fail> --speedup <float> --baseline-us <float> --kernel-us <float>{% if measurement == "host" %} [--verdict <gate>]{% endif %}` |
+| **Record a validation failure** | `xe-forge-skill trial result <kernel_name> <trial_id> --correctness <pass\|fail> --speedup <float> --baseline-us <float> --kernel-us <float>{% if measurement == "host" %} [--verdict <gate>]{% endif %}` |
 | **Check status** | `xe-forge-skill trial status <kernel_name>` |
 | **Best trial** | `xe-forge-skill trial best <kernel_name>` |
 | **Baseline time** | `xe-forge-skill trial baseline-us <kernel_name>` |
-| **Finalize** | `xe-forge-skill trial finalize <kernel_name> <output_file>` |
+| **Finalize** | `xe-forge-skill trial finalize <kernel_name> <output_file> --require-measured` |
 | **Profile** (only when `unitrace_enabled: true` or `vtune_enabled: true`) | `xe-forge-skill profile <kernel_file> {{ profile_options }}{% if require_profiles %} --trial-id <trial_id>{% endif %}{% if has_spec %} [--variant <name>]{% endif %}` |
 {% if baseline_oracle %}
 There is no PyTorch reference. `--reference` names the baseline
@@ -134,8 +136,9 @@ gate passes, never modify it; a trial that disagrees with it is wrong. Its
 {% if has_spec %}
 The commands above default to variant `{{ variant }}`, the one this run was started with.
 Append `--variant <name>` to measure another variant the spec lists; the last `--variant`
-wins. Pass the same variant to benchmark and profile, compare timings only within one
-variant, and never pass a `--baseline-us` cached on a different variant.
+wins. A trial tree is measured on one variant: the first passing `benchmark --trial-id`
+pins it, and a recorded benchmark on any other is refused. Pass the same variant to
+benchmark and profile, and never pass a `--baseline-us` cached on a different variant.
 {% endif %}
 {% if reference_workload and not baseline_oracle %}
 The supplied `_pytorch.py` file is the immutable semantic reference. Do not modify it
@@ -170,6 +173,21 @@ like.
 - **If no benchmark exists**, write one yourself, following the closest sibling pattern
   the profile points at, before starting the trial loop — an unmeasured op cannot be
   optimized, only guessed at.
+- **What a trial may change — every win must port back.** The winner is delivered as a patch,
+  so a trial may only change what a patch can carry:
+  - anything inside the op — a different algorithm, fused or eliminated launches, new kernels
+    in the same source file — as long as its schema, signature, bindings and every call site
+    stay as they are. Removing a launch is in scope. This ports upstream.
+{%- if integration_repos %}
+  - also the op's interface, its call sites, or a dispatch by shape — because it is wired into
+    {% for r in integration_repos %}`{{ r }}`{% if not loop.last %}, {% endif %}{% endfor %} (read-only, like the kernel repo). The port then patches
+    those call sites too and is delivered as **serving-only**, not for upstream.
+{%- else %}
+  - not the op's interface or call sites: no integration repository was given, so nothing
+    could carry those changes.
+{%- endif %}
+  The harness around the op (input factories, the canonicalization the test does, output
+  allocation) is not part of it: a gain there does not port and is not a result.
 {% endif %}
 {% if dataset %}
 ## THE WORKLOAD DATA — it is on disk, and you may read it
@@ -344,15 +362,21 @@ For each trial:
 2. **Validate** — `xe-forge-skill validate <path> --dsl {{ dsl }}` (fix until passing).
 3. **Save** — `xe-forge-skill trial save {{ kernel_name }} <path> --parent <id> --strategy "description"`.
 4. **Benchmark** (MANDATORY every trial):
-  - **Trial t0:** `xe-forge-skill benchmark test_kernels/{{ kernel_name }}{{ ext }} <trial_path> {{ benchmark_options }}`
+  - **Trial t0:** `xe-forge-skill benchmark test_kernels/{{ kernel_name }}{{ ext }} <saved_trial_file> {{ benchmark_options }} --kernel-name {{ kernel_name }} --trial-id <trial_id>`
+{%- if reference_workload %}
+   - **Trials t1+:** the same command. The baseline is re-timed beside the trial in every run, so pass no `--baseline-us`.
+{%- else %}
    - **Trials t1+:** get the cached baseline via `xe-forge-skill trial baseline-us {{ kernel_name }}`, then the same command with `--baseline-us <cached>`
-5. **Record** — `xe-forge-skill trial result {{ kernel_name }} <trial_id> --correctness <pass|fail> --speedup <float> --baseline-us <float> --kernel-us <float>`
+{%- endif %}
+5. **Record** — `benchmark --trial-id` records the result itself and prints
+   `Recorded <trial_id> (measured)`. Do not re-enter its numbers with `trial result`: a
+   result typed in is marked `reported`, and `finalize --require-measured` does not accept
+   it. Use `xe-forge-skill trial result {{ kernel_name }} <trial_id> --validation fail` only
+   for a trial that failed validation and was never benchmarked.
 {%- if measurement == "host" %}
-   When the benchmark gated the comparison it reports no speedup. Omit `--speedup`
-   entirely and pass `--verdict <the gate it named>` instead. Omitting it is not a
-   half-recorded trial: a trial with both times and no ratio ranks **at parity**, above
-   every measured regression, so nothing is lost by leaving it out and a number written
-   there would be one you did not measure.
+   When the benchmark gated the comparison it reports no speedup and records the gate it
+   named instead. That is not a half-recorded trial: a trial with both times and no ratio
+   ranks **at parity**, above every measured regression.
 {%- endif %}
 6. **Profile** — if `unitrace_enabled: true` or `vtune_enabled: true` in `config.yaml`,
   run `xe-forge-skill profile <kernel_file> {{ profile_options }}{% if require_profiles %} --trial-id <trial_id>{% endif %}`
@@ -386,12 +410,11 @@ For each trial:
 {% if measurement == "host" %}
    - `VERDICT: BELOW_FLOOR` or `VERDICT: INDISTINGUISHABLE`, and `speedup=none` → **this is
      not a regression and not an improvement**. The two arms were closer together than the
-     part's measured timing floor, so there is no result. Record it with `--verdict` and no
-     `--speedup`, and do not branch away from the kernel on it. Either re-benchmark on a larger
-     shape with `--variant <name>` (the spec lists them{% if dataset %}, and
-     `{{ dataset.profile_path }}` says which of them carry the real work — pick the largest
-     one that is representative, not merely the largest{% endif %}) or stop and say the
-     shape is unmeasurable here.
+     part's measured timing floor, so there is no result. It is recorded with its verdict
+     and no speedup; do not branch away from the kernel on it. If no trial separates from
+     the baseline, stop and say the shape is unmeasurable here: the tree is pinned to its
+     variant, so a larger shape is a new run started on it{% if dataset %}
+     (`{{ dataset.profile_path }}` says which variants carry the real work){% endif %}.
    - `VERDICT: NO_CALIBRATION` or `VERDICT: EXTERNAL_ERROR` → STOP and report. The gate could
      not be evaluated, so no trial after this one means anything.
 {% endif %}
@@ -410,7 +433,7 @@ runs of the same arms.
 
 ### Step 4: Finalize
 ```bash
-xe-forge-skill trial finalize {{ kernel_name }} output/{{ kernel_name }}_optimized{{ ext }}
+xe-forge-skill trial finalize {{ kernel_name }} output/{{ kernel_name }}_optimized{{ ext }} --require-measured
 ```
 {% if measurement == "host" %}
 If the best trial is a directory, drop the extension — `output/{{ kernel_name }}_optimized` —
