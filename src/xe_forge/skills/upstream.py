@@ -42,7 +42,22 @@ def _clone(args) -> None:
         raise SystemExit("--name must be a single path component")
     target = Path(f"{UPSTREAM}-{args.name}") if named else UPSTREAM
     if (target / ".git").exists():
+        # Reused, never re-cloned: it holds the session's edits. A clone of another
+        # repository or revision is refused rather than edited in its place.
         base = _git("-C", str(target), "rev-parse", "HEAD").stdout.strip()
+        origin = _git("-C", str(target), "remote", "get-url", "origin", check=False)
+        if Path(origin.stdout.strip()).resolve() != repo:
+            raise SystemExit(
+                f"{target}/ is a clone of {origin.stdout.strip() or 'unknown'}, not {repo}; "
+                "use another --name, or remove it to clone afresh"
+            )
+        if args.rev:
+            want = _git("-C", str(repo), "rev-parse", "--verify", f"{args.rev}^{{commit}}")
+            if want.stdout.strip() != base:
+                raise SystemExit(
+                    f"{target}/ is at {base}, not --rev {args.rev} ({want.stdout.strip()}); "
+                    "use another --name, or remove it to clone afresh"
+                )
         print(f"{target}/ already exists at {base}; edit it, then run `upstream patch`.")
         return
     rev = args.rev or _git("-C", str(repo), "rev-parse", "HEAD").stdout.strip()
