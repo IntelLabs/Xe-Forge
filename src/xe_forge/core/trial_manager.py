@@ -487,6 +487,7 @@ class TrialManager:
     def has_measured_attempt(self, kernel_name: str) -> bool:
         """Whether a trial other than a baseline copy has a correct measured result."""
         state = self._load_state(kernel_name)
+        return any(
             t.get("source") == "measured" and _rank(t) is not None
             for t in self._candidates(kernel_name, state).values()
         )
