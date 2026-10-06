@@ -98,12 +98,16 @@ def _port_one(clone: Path) -> tuple[list[str], bool] | None:
     for name in touched:
         path = clone / name
         if path.suffix == ".py" and path.exists():
+            # Bytecode goes outside the clone: a __pycache__ there would join the next patch.
+            check_file = OUTPUT / ".py_compile-check.pyc"
             try:
-                py_compile.compile(str(path), doraise=True)
+                py_compile.compile(str(path), cfile=str(check_file), doraise=True)
                 checks.append(f"py_compile {name}: ok")
             except py_compile.PyCompileError as exc:
                 ok = False
                 checks.append(f"py_compile {name}: FAILED: {exc.msg.strip()}")
+            finally:
+                check_file.unlink(missing_ok=True)
     unbuilt = [n for n in touched if Path(n).suffix != ".py"]
     if unbuilt:
         checks.append(f"unbuilt (rebuilding is the owner's action): {', '.join(unbuilt)}")
