@@ -131,7 +131,9 @@ def _patch(args) -> int:
         return 1
     best = _best_trial(args.kernel_name, args.trials_dir)
     if best is None:
-        print(f"No measured winner for {args.kernel_name} (none, or a regression); nothing to port.")
+        print(
+            f"No measured winner for {args.kernel_name} (none, or a regression); nothing to port."
+        )
         return 1
     OUTPUT.mkdir(exist_ok=True)
     ported = [(c, _port_one(c)) for c in clones]

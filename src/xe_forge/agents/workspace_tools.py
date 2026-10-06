@@ -156,17 +156,15 @@ def make_workspace_tools(policy: WorkspacePolicy) -> list[dspy.Tool]:
         """Search files under `path` matching `glob` for the Python regex; file:line: text."""
         pattern = re.compile(regex)
         base = policy.readable(path)
-        files = (
-            [base]
-            if base.is_file()
-            else sorted(
-                Path(d) / f
-                for d, dirs, names in os.walk(base)
-                if not any(part.startswith((".git", "__pycache__")) for part in Path(d).parts)
-                for f in names
-                if fnmatch.fnmatch(f, glob)
-            )
-        )
+
+        def walk():
+            # Pruned in place, so a linked repository's object database is never entered;
+            # sorted in place, so the order -- and what a truncation keeps -- is stable.
+            for d, dirs, names in os.walk(base):
+                dirs[:] = sorted(x for x in dirs if x not in (".git", "__pycache__"))
+                yield from (Path(d) / f for f in sorted(names) if fnmatch.fnmatch(f, glob))
+
+        files = [base] if base.is_file() else walk()
         hits = []
         for file in files:
             try:
