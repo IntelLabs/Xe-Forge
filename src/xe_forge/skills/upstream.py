@@ -38,6 +38,8 @@ def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
 def _clone(args) -> None:
     repo = Path(args.repo).expanduser().resolve()
     named = args.name and args.name != str(UPSTREAM)
+    if named and (Path(args.name).name != args.name or args.name in (".", "..")):
+        raise SystemExit("--name must be a single path component")
     target = Path(f"{UPSTREAM}-{args.name}") if named else UPSTREAM
     if (target / ".git").exists():
         base = _git("-C", str(target), "rev-parse", "HEAD").stdout.strip()
