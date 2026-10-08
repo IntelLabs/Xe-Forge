@@ -35,11 +35,12 @@ def _setup_dspy(config: Config) -> None:
     litellm.client_session = httpx.Client()
     litellm.aclient_session = httpx.AsyncClient()
     litellm.ssl_verify = True
+    bedrock = config.llm.model.startswith("bedrock/")
     lm = dspy.LM(
         model=config.llm.model,
-        api_base=config.llm.api_base,
-        model_type="responses",
-        api_key=config.llm.api_key or "",
+        api_base=None if bedrock else config.llm.api_base,
+        model_type="chat" if bedrock else "responses",
+        api_key=None if bedrock else (config.llm.api_key or ""),
         temperature=config.llm.temperature,
         max_tokens=config.llm.max_tokens,
         cache=False,

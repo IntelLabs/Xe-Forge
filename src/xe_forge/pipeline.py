@@ -174,11 +174,12 @@ class XeForgePipeline:
             os.environ["OPENAI_API_KEY"] = self.config.llm.api_key
         try:
             litellm.client_session = httpx.Client(verify=False)
+            bedrock = self.config.llm.model.startswith("bedrock/")
             lm = dspy.LM(
                 model=self.config.llm.model,
-                api_base=self.config.llm.api_base,
-                model_type="responses",
-                api_key=self.config.llm.api_key or "",
+                api_base=None if bedrock else self.config.llm.api_base,
+                model_type="chat" if bedrock else "responses",
+                api_key=None if bedrock else (self.config.llm.api_key or ""),
                 temperature=self.config.llm.temperature,
                 max_tokens=self.config.llm.max_tokens,
                 cache=False,
