@@ -6,8 +6,9 @@ and for standalone ad-hoc testing.
 Usage:
     xe-forge-skill analyze <pytorch_file>
     xe-forge-skill validate <kernel_file|kernel_dir> [--dsl triton]
-    xe-forge-skill benchmark <baseline> <optimized> --spec <spec.yaml> [--builtin-benchmark] [--baseline-us N]
+    xe-forge-skill benchmark <baseline> <optimized> --spec <spec.yaml> [--builtin-benchmark] [--baseline-us N] [--kernel-name K --trial-id T]
     xe-forge-skill trial {init|save|result|status|best|baseline-us|finalize} [args]
+    xe-forge-skill upstream {clone <repo> [--name N]|patch <kernel_name> [--kind K] [--notes TEXT]}
     xe-forge-skill profile <kernel_file> --spec <spec.yaml> [--tool auto|unitrace|vtune] [--warmup 5] [--iters 20]
 """
 
@@ -60,6 +61,11 @@ def main():
         default=None,
         help="Host command to benchmark with instead (overrides EXTERNAL_BENCHMARK)",
     )
+    p_bench.add_argument("--kernel-name", default=None, help="Trial tree to record the result in")
+    p_bench.add_argument(
+        "--trial-id", default=None, help="Saved trial the optimized file is; records the result"
+    )
+    p_bench.add_argument("--trials-dir", default="./trials")
     p_bench.add_argument(
         "--builtin-benchmark",
         action="store_true",
@@ -127,6 +133,11 @@ def main():
     t_finalize = trial_sub.add_parser("finalize")
     t_finalize.add_argument("kernel_name")
     t_finalize.add_argument("output_file")
+    t_finalize.add_argument(
+        "--require-measured",
+        action="store_true",
+        help="Only consider trials whose results `benchmark --trial-id` recorded",
+    )
     t_finalize.add_argument("--trials-dir", default="./trials")
 
     # -- profile --
@@ -183,6 +194,19 @@ def main():
     p_profile.add_argument("--trial-id", default=None, help="Saved trial this kernel file is")
     p_profile.add_argument("--trials-dir", default="./trials")
 
+    # -- upstream --
+    p_up = subparsers.add_parser("upstream", help="Port a finalized winner back as a patch")
+    up_sub = p_up.add_subparsers(dest="upstream_command", required=True)
+    u_clone = up_sub.add_parser("clone", help="Private shared clone into upstream/")
+    u_clone.add_argument("repo")
+    u_clone.add_argument("--name", default=None, help="Clone into upstream-<name>/ instead")
+    u_clone.add_argument("--rev", default=None, help="Base commit (default: the repo's HEAD)")
+    u_patch = up_sub.add_parser("patch", help="Write and verify output/upstream.patch")
+    u_patch.add_argument("kernel_name")
+    u_patch.add_argument("--kind", choices=["upstream", "serving-only"], default="upstream")
+    u_patch.add_argument("--notes", default="", help="What the patch changes and why")
+    u_patch.add_argument("--trials-dir", default="./trials")
+
     args = parser.parse_args()
 
     if args.skill == "analyze":
@@ -195,6 +219,8 @@ def main():
         from xe_forge.skills.trial import run
     elif args.skill == "profile":
         from xe_forge.skills.profile import run
+    elif args.skill == "upstream":
+        from xe_forge.skills.upstream import run
 
     run(args)
 

@@ -6,6 +6,7 @@ and set_all_seeds utilities (shared with the benchmark harness).
 """
 
 import logging
+import os
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -46,6 +47,8 @@ class ComparisonResult:
     optimized_correct: bool = True
     is_slower: bool = False
     feedback_message: str = ""
+    # Set when the arms could not be told apart: ``speedup`` is then not a result.
+    verdict: str | None = None
 
 
 class KernelBenchExecutor:
@@ -59,7 +62,9 @@ class KernelBenchExecutor:
         self,
         device: str = "xpu",
         warmup_iters: int = 200,
-        benchmark_iters: int = 100,
+        benchmark_iters: int = 200,
+        rounds: int = 10,
+        min_effect: float | None = None,
         require_correctness: bool = True,
         rtol: float = 1e-2,
         atol: float = 1e-5,
@@ -78,6 +83,13 @@ class KernelBenchExecutor:
         self.device = device
         self.warmup_iters = warmup_iters
         self.benchmark_iters = benchmark_iters
+        self.rounds = rounds
+        # The smallest speedup reported as one. Interleaving and slot swapping leave a
+        # consistent ~1% between identical builds on this part (an A/A check measured
+        # it); anything inside this band is reported as indistinguishable, not a result.
+        if min_effect is None:
+            min_effect = float(os.environ.get("BENCHMARK_MIN_EFFECT", "0.02"))
+        self.min_effect = min_effect
         self.require_correctness = require_correctness
         self.rtol = rtol
         self.atol = atol
@@ -120,27 +132,67 @@ class KernelBenchExecutor:
         device = torch.device(self.device)
         if device.type not in ("xpu", "cuda"):
             return self.time(call, args)
-        flush = torch.empty(256 * 1024 * 1024, dtype=torch.int8, device=device)
         for _ in range(self.warmup_iters):
             call(*args)
+        times = sorted(self._forward_samples(call, args, self.benchmark_iters))
+        if len(times) >= 10:
+            times = times[1:-1]
+        return sum(times) / len(times)
+
+    def _forward_samples(self, call, args: tuple, iters: int) -> list[float]:
+        """*iters* device timings of ``call.forward`` in microseconds.
+
+        Buffer restore and a cache flush run untimed before each; a dummy matmul then
+        fills the queue so the host has enqueued the end event before a short kernel
+        finishes, and launch latency is not timed as kernel time.
+        """
+        device = torch.device(self.device)
+        if not hasattr(self, "_flush"):
+            self._flush = torch.empty(256 * 1024 * 1024, dtype=torch.int8, device=device)
+            self._fill = torch.randn(1024, 1024, device=device)
         events = [
             (
                 torch.Event(device=device, enable_timing=True),
                 torch.Event(device=device, enable_timing=True),
             )
-            for _ in range(self.benchmark_iters)
+            for _ in range(iters)
         ]
         for start, end in events:
             call.reset()
-            flush.zero_()
+            self._flush.zero_()
+            torch.matmul(self._fill, self._fill)
             start.record()
             call.forward(*args)
             end.record()
         torch.accelerator.synchronize()
-        times = sorted(start.elapsed_time(end) * 1e3 for start, end in events)
-        if len(times) >= 10:
-            times = times[1:-1]
-        return sum(times) / len(times)
+        return [start.elapsed_time(end) * 1e3 for start, end in events]
+
+    def time_interleaved(self, call_a, args_a: tuple, call_b, args_b: tuple):
+        """Time two calls in alternating rounds; returns ``(a_us, b_us, ratios)``.
+
+        Timing one arm after the other puts whatever drifts in between -- clocks,
+        temperature, caches -- on one arm, and identical code then measures as a
+        speedup. Here each round times both, in alternating order, so drift and order
+        effects land on both arms. Times are medians of all samples; *ratios* holds
+        each round's ``median(a) / median(b)``.
+        """
+        from statistics import median
+
+        for call, args in ((call_a, args_a), (call_b, args_b)):
+            for _ in range(self.warmup_iters):
+                call(*args)
+        per_round = max(1, self.benchmark_iters // self.rounds)
+        a_all, b_all, ratios = [], [], []
+        for r in range(self.rounds):
+            order = ((call_a, args_a), (call_b, args_b))
+            if r % 2:
+                order = order[::-1]
+            samples = {id(c): self._forward_samples(c, a, per_round) for c, a in order}
+            a_r, b_r = samples[id(call_a)], samples[id(call_b)]
+            a_all += a_r
+            b_all += b_r
+            ratios.append(median(a_r) / median(b_r))
+        return median(a_all), median(b_all), ratios
 
     @torch.no_grad()
     def execute(
@@ -565,22 +617,46 @@ class KernelBenchExecutor:
                     spec_workload,
                 )
                 workload.validate()
-                original_time = baseline_us
-                if original_time is None:
-                    original_time = workload.measure(workload.original, self.time_forward)
-                optimized_time = workload.measure(workload.optimized, self.time_forward)
+                verdict, note = None, ""
+                if torch.device(self.device).type in ("xpu", "cuda"):
+                    # Both arms, every time, in alternating rounds, twice with the slots
+                    # swapped (see _swapped_ratios), so drift and slot bias land on both.
+                    original_time, optimized_time, ratios = self._swapped_ratios(
+                        workload, reference_code, original_code, optimized_code, spec_workload
+                    )
+                    speedup = sorted(ratios)[len(ratios) // 2]
+                    agree = min(ratios) > 1 or max(ratios) < 1
+                    if not agree or abs(speedup - 1.0) < self.min_effect:
+                        verdict = "INDISTINGUISHABLE"
+                    note = (
+                        f" Timed in {self.rounds} alternating rounds, twice with the slots "
+                        f"swapped; per-round speedup {min(ratios):.3f}-{max(ratios):.3f}x"
+                        + (
+                            f", within {self.min_effect:.0%} of 1.0 or straddling it: not "
+                            "distinguishable from no change."
+                            if verdict
+                            else "."
+                        )
+                    )
+                else:
+                    original_time = baseline_us
+                    if original_time is None:
+                        original_time = workload.measure(workload.original, self.time_forward)
+                    optimized_time = workload.measure(workload.optimized, self.time_forward)
+                    speedup = original_time / optimized_time if optimized_time > 0 else 0.0
                 if original_time <= 0 or optimized_time <= 0:
                     raise ValueError("Benchmark timings must be positive")
                 return ComparisonResult(
                     original_time_us=original_time,
                     optimized_time_us=optimized_time,
-                    speedup=original_time / optimized_time,
+                    speedup=speedup,
                     is_slower=optimized_time > original_time,
+                    verdict=verdict,
                     feedback_message=(
                         "Reference outputs and updated buffers verified for two calls "
                         "from restored initial buffers. On GPU, timing is forward only with "
                         "fixed inputs (buffer restore and cache flush run untimed); off GPU it "
-                        "is reset plus forward."
+                        "is reset plus forward." + note
                     ),
                 )
         except Exception as exc:
@@ -592,6 +668,42 @@ class KernelBenchExecutor:
                 optimized_correct=False,
                 feedback_message=f"Reference workload validation failed: {exc}",
             )
+
+    def _swapped_ratios(self, first, reference_code, a_code, b_code, spec_workload):
+        """Per-round ``a/b`` speedups with the slot each arm is timed in cancelled.
+
+        Which slot an arm is built and timed in is worth a few percent on its own. With
+        r1 = a/b and r2 = b/a measured with the slots swapped, that bias multiplies both,
+        and sqrt(r1 / r2) cancels it. *first* is the prepared (a, b) workload; the swapped
+        one is built here. Returns ``(a_us, b_us, ratios)``.
+        """
+        swapped = ReferenceWorkload.prepare(
+            self._compile_module,
+            reference_code,
+            b_code,
+            a_code,
+            self.device,
+            self.rtol,
+            self.atol,
+            spec_workload,
+        )
+        workloads = [first, swapped]
+        runs = []
+        for w in workloads:
+            try:
+                call_a = w.prepare_call(w.original)
+                call_b = w.prepare_call(w.optimized)
+                runs.append(
+                    self.time_interleaved(
+                        call_a, tuple(call_a.inputs), call_b, tuple(call_b.inputs)
+                    )
+                )
+            finally:
+                w.original.cpu()
+                w.optimized.cpu()
+        (a1, b1, r1), (b2, a2, r2) = runs
+        ratios = [(x / y) ** 0.5 for x, y in zip(r1, r2, strict=True)]
+        return (a1 * a2) ** 0.5, (b1 * b2) ** 0.5, ratios
 
     def _compile_module(self, kernel_code: str):
         """Compile Triton kernel module from source code.

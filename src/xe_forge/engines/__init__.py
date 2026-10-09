@@ -10,6 +10,10 @@ def create_engine(config) -> BaseEngine:
         from xe_forge.engines.claude_engine import ClaudeEngine
 
         return ClaudeEngine(config)
+    if name == "dspy-agent":
+        from xe_forge.engines.agent_engine import AgentEngine
+
+        return AgentEngine(config)
     from xe_forge.engines.dspy_engine import DSPyEngine
 
     return DSPyEngine(config)

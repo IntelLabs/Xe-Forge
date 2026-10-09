@@ -42,9 +42,9 @@ unitrace_enabled, vtune_enabled). Follow the CLAUDE.md workflow exactly — ever
 5. Run trials. For EACH trial you MUST:
    - Validate with `xe-forge-skill validate --dsl {{ dsl }}`
    - Save with `xe-forge-skill trial save`
-   - Benchmark with `xe-forge-skill benchmark <baseline> <optimized> {{ benchmark_options }}` — NEVER create custom test scripts, and never
-     record a timing that did not come from it
-   - Record with `xe-forge-skill trial result`
+   - Benchmark the saved trial with `xe-forge-skill benchmark <baseline> <optimized> {{ benchmark_options }} --kernel-name <kernel_name> --trial-id <trial_id>`,
+     which records the result — NEVER create custom test scripts, and never type a
+     measurement into `trial result`
    Stop when `max_trials` is exhausted, when the ideas this kernel's regime admits are
    exhausted, or when the search has plateaued.
 6. Finalize the best correct trial, then write a summary naming: the best trial and its
@@ -58,7 +58,7 @@ unitrace_enabled, vtune_enabled). Follow the CLAUDE.md workflow exactly — ever
 {% if measurement == "host" %}
 A benchmark that comes back with `speedup=none` and `VERDICT: BELOW_FLOOR` or
 `INDISTINGUISHABLE` is not a regression — it is no measurement at all. Do not branch away
-from a kernel on one; retry on a larger `--variant` or stop.
+from a kernel on one. The tree is pinned to its variant, so a larger shape is a new run.
 A trial may be split across sources. When it is, put them in a directory and pass that
 directory to `validate`, `trial save` and `benchmark` alike — naming one file of a split
 kernel builds it against the baseline's other sources and times a mixture nobody wrote.

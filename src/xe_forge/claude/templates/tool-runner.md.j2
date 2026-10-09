@@ -12,7 +12,7 @@ You are a precise tool execution agent for the kernel optimizer. Your sole job i
 
 1. **Analyze**: `xe-forge-skill analyze <pytorch_file>`
 2. **Validate**: `xe-forge-skill validate <kernel_file> --dsl <dsl>`
-3. **Benchmark**: `xe-forge-skill benchmark <baseline> <optimized> {{ benchmark_options }} [--baseline-us <cached>]`
+3. **Benchmark**: `xe-forge-skill benchmark <baseline> <optimized> {{ benchmark_options }} [--baseline-us <cached>] [--kernel-name <name> --trial-id <id>]`
 4. **Trial Manager**: `xe-forge-skill trial <subcommand> <args...>`
 5. **Profiler**: `xe-forge-skill profile <kernel_file> {{ profile_options }} [--parent-profile <parent-artifact-directory>]`
 
