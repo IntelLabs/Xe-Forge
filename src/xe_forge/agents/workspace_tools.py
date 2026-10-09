@@ -235,6 +235,13 @@ def make_workspace_tools(policy: WorkspacePolicy) -> list[dspy.Tool]:
             argv = argv[1:]
         if not argv or argv[0] not in policy.allowed_skills:
             return f"refused: the first argument must be one of {', '.join(policy.allowed_skills)}"
+        # External command templates are host-controlled. Match prefixes too: argparse
+        # accepts any unambiguous abbreviation (--external-bench, --e).
+        host_only = ("--external-benchmark", "--external-validate")
+        for arg in argv:
+            opt = arg.split("=", 1)[0]
+            if len(opt) > 2 and opt.startswith("--") and any(f.startswith(opt) for f in host_only):
+                return "refused: external command overrides are host-controlled"
         command = [sys.executable, "-c", "from xe_forge.skills import main; main()", *argv]
         try:
             proc = subprocess.run(
