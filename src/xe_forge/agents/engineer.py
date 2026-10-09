@@ -1,8 +1,6 @@
 """EngineerAgent -- a DSPy tool-calling agent driving a generated workspace.
 
-The workspace already carries the policy (``CLAUDE.md``) and the task
-(``.claude/commands/optimize-kernel.md``) a Claude session runs from. This agent reads
-the same two files as its instructions and works through
+This agent reads CLAUDE.md files as its instructions and works through
 :mod:`xe_forge.agents.workspace_tools`, so the only thing that differs between the two
 engines is the model choosing the next action. Nothing here decides what is correct or
 fast; the skills record that, and the engine reads it back from the trial tree.

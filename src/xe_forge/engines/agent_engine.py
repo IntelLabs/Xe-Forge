@@ -1,11 +1,4 @@
-"""DSPy agent engine: the Claude workspace, driven by a DSPy tool-calling agent.
-
-Everything but the model is the Claude engine's: the generated workspace, its policy
-and task files, ``xe-forge-skill`` as the only way to measure, and the trial tree as
-the only account of what happened. ``--engine dspy-agent`` swaps ``claude -p`` for
-:class:`~xe_forge.agents.engineer.EngineerAgent` over any LM DSPy can reach, and reads
-the result back exactly as the Claude engine does.
-"""
+"""DSPy agent engine: reusing Claude workspace, driven by a DSPy tool-calling agent."""
 
 from __future__ import annotations
 
