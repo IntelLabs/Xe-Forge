@@ -40,7 +40,7 @@ class OptimizationReActSignature(dspy.Signature):
         desc="Current Triton kernel code to optimize"
     )
     stage: str = dspy.InputField(
-        desc="Optimization stage to apply (e.g., dtype_fix, block_pointers, device_specific)"
+        desc="Optimization stage to apply (e.g., dtype_fix, tensor_descriptors, device_specific)"
     )
     issues: list[DetectedIssue] = dspy.InputField(desc="Specific issues to fix in this stage")
     knowledge_patterns: str = dspy.InputField(
@@ -242,7 +242,7 @@ class OptimizerReActAgent(Optimizer):
 
         Args:
             code: Current Triton code
-            stage: Stage to apply (e.g., DTYPE_FIX, BLOCK_POINTERS, DEVICE_SPECIFIC)
+            stage: Stage to apply (e.g., DTYPE_FIX, TENSOR_DESCRIPTORS, DEVICE_SPECIFIC)
             analysis: Kernel analysis results with detected issues
             xpu_config: XPU configuration (num_warps, tile sizes, etc.)
             kernel_name: Kernel function name (optional for Model-based kernels)

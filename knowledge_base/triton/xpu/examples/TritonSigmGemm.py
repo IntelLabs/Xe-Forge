@@ -89,33 +89,31 @@ def gemm_bias_sigmoid_kernel(
     m_base = pid_m * BM
     n_base = pid_n * BN
 
-    # Block pointers
-    a_bp = tl.make_block_ptr(
+    # Tensor descriptors (out-of-bounds tiles are zero-padded on load)
+    a_desc = tl.make_tensor_descriptor(
         base=A_ptr,
         shape=(M, K),
         strides=(stride_am, stride_ak),
-        offsets=(m_base, 0),
         block_shape=(BM, BK),
-        order=(1, 0),
     )
-    b_bp = tl.make_block_ptr(
+    b_desc = tl.make_tensor_descriptor(
         base=B_ptr,
         shape=(K, N),
         strides=(stride_bk, stride_bn),
-        offsets=(0, n_base),
         block_shape=(BK, BN),
-        order=(1, 0),
     )
 
     acc = tl.zeros((BM, BN), dtype=tl.float32)
 
     # K loop (dynamic-safe)
+    # Carry the K offset: indexing the contiguous dim with the loop variable
+    # loses the 2D block-load path for the descriptor load on XPU
+    off_k = 0
     for _ in tl.range(0, K, BK):
-        a = tl.load(a_bp, boundary_check=(0, 1))  # fp16
-        b = tl.load(b_bp, boundary_check=(0, 1))  # fp16
+        a = a_desc.load([m_base, off_k])  # fp16
+        b = b_desc.load([off_k, n_base])  # fp16
         acc += tl.dot(a, b)  # fp32 accumulate
-        a_bp = tl.advance(a_bp, (0, BK))
-        b_bp = tl.advance(b_bp, (BK, 0))
+        off_k += BK
 
     # Add bias
     offs_n = n_base + tl.arange(0, BN)
@@ -126,16 +124,14 @@ def gemm_bias_sigmoid_kernel(
     # Sigmoid (fp32)
     acc = _sigmoid_exp2(acc)
 
-    # Store fp16
-    c_bp = tl.make_block_ptr(
+    # Store fp16 (out-of-bounds rows/cols are dropped)
+    c_desc = tl.make_tensor_descriptor(
         base=C_ptr,
         shape=(M, N),
         strides=(stride_cm, stride_cn),
-        offsets=(m_base, n_base),
         block_shape=(BM, BN),
-        order=(1, 0),
     )
-    tl.store(c_bp, acc.to(tl.float16), boundary_check=(0, 1))
+    c_desc.store([m_base, n_base], acc.to(tl.float16))
 
 
 # -----------------------------------------------------------------------------
@@ -171,46 +167,42 @@ def gemm_bias_kernel(
     m_base = pid_m * BM
     n_base = pid_n * BN
 
-    a_bp = tl.make_block_ptr(
+    a_desc = tl.make_tensor_descriptor(
         base=A_ptr,
         shape=(M, K),
         strides=(stride_am, stride_ak),
-        offsets=(m_base, 0),
         block_shape=(BM, BK),
-        order=(1, 0),
     )
-    b_bp = tl.make_block_ptr(
+    b_desc = tl.make_tensor_descriptor(
         base=B_ptr,
         shape=(K, N),
         strides=(stride_bk, stride_bn),
-        offsets=(0, n_base),
         block_shape=(BK, BN),
-        order=(1, 0),
     )
 
     acc = tl.zeros((BM, BN), dtype=tl.float32)
 
+    # Carry the K offset: indexing the contiguous dim with the loop variable
+    # loses the 2D block-load path for the descriptor load on XPU
+    off_k = 0
     for _ in tl.range(0, K, BK):
-        a = tl.load(a_bp, boundary_check=(0, 1))
-        b = tl.load(b_bp, boundary_check=(0, 1))
+        a = a_desc.load([m_base, off_k])
+        b = b_desc.load([off_k, n_base])
         acc += tl.dot(a, b)
-        a_bp = tl.advance(a_bp, (0, BK))
-        b_bp = tl.advance(b_bp, (BK, 0))
+        off_k += BK
 
     offs_n = n_base + tl.arange(0, BN)
     mask_n = offs_n < N
     bias = tl.load(bias_ptr + offs_n, mask=mask_n, other=0.0).to(tl.float32)
     acc = acc + bias[None, :]
 
-    c_bp = tl.make_block_ptr(
+    c_desc = tl.make_tensor_descriptor(
         base=C_ptr,
         shape=(M, N),
         strides=(stride_cm, stride_cn),
-        offsets=(m_base, n_base),
         block_shape=(BM, BN),
-        order=(1, 0),
     )
-    tl.store(c_bp, acc.to(tl.float16), boundary_check=(0, 1))
+    c_desc.store([m_base, n_base], acc.to(tl.float16))
 
 
 # -----------------------------------------------------------------------------

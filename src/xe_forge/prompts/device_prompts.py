@@ -102,11 +102,12 @@ class PromptLibrary:
                 )
             return "Apply device-appropriate tuning parameters."
 
-        if stage == "block_pointers":
+        if stage == "tensor_descriptors":
             if self.dsl == "triton":
                 return (
-                    "Convert manual pointer arithmetic to tl.make_block_ptr(). "
-                    "Ensure boundary_check is correct."
+                    "Convert manual pointer arithmetic and any tl.make_block_ptr()/tl.advance() "
+                    "(deprecated) to tl.make_tensor_descriptor() with desc.load([...]) / "
+                    "desc.store([...]). The last stride must be 1."
                 )
             return ""
 

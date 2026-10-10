@@ -141,38 +141,35 @@ def _fused_linear_pool_sum_scale_kernel(
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)  # [BLOCK_M]
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)  # [BLOCK_N]
 
-    # Block pointers
-    x_block_ptr = tl.make_block_ptr(
+    # Tensor descriptors (created once; tiles are addressed by coordinates in the K loop)
+    x_desc = tl.make_tensor_descriptor(
         base=x_ptr,
         shape=(M, K),
         strides=(stride_xm, stride_xk),
-        offsets=(pid_m * BLOCK_M, 0),
         block_shape=(BLOCK_M, BLOCK_K),
-        order=(1, 0),
     )
 
-    # Read W logically as [K, N] using provided strides (wk for K, wn for N)
-    w_block_ptr = tl.make_block_ptr(
+    # Read W logically as [K, N] using provided strides (wk for K, wn for N; wn must be 1)
+    w_desc = tl.make_tensor_descriptor(
         base=w_ptr,
         shape=(K, N),
         strides=(stride_wk, stride_wn),
-        offsets=(0, pid_n * BLOCK_N),
         block_shape=(BLOCK_K, BLOCK_N),
-        order=(1, 0),
     )
 
     # FP32 accumulator for GEMM tile
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
-    # K loop (runtime bound)
+    # K loop (runtime bound); out-of-bounds elements are zero-padded by the descriptor loads
+    # Carry the K offset: indexing the contiguous dim with the loop variable
+    # loses the 2D block-load path for the descriptor load on XPU
+    off_k = 0
     for _ in range(0, K, BLOCK_K):
-        x_tile = tl.load(x_block_ptr, boundary_check=(0, 1))  # [BM, BK]
-        w_tile = tl.load(w_block_ptr, boundary_check=(0, 1))  # [BK, BN]
+        x_tile = x_desc.load([pid_m * BLOCK_M, off_k])  # [BM, BK]
+        w_tile = w_desc.load([off_k, pid_n * BLOCK_N])  # [BK, BN]
         # fp16 dot with fp32 accumulation
         acc += tl.dot(x_tile.to(tl.float16), w_tile.to(tl.float16))
-        # advance pointers
-        x_block_ptr = tl.advance(x_block_ptr, (0, BLOCK_K))
-        w_block_ptr = tl.advance(w_block_ptr, (BLOCK_K, 0))
+        off_k += BLOCK_K
 
     # Add bias (broadcast across rows)
     tl.max_contiguous(offs_n, BLOCK_N)

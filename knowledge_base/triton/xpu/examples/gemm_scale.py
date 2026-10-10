@@ -132,9 +132,9 @@ def _configs():
 # Triton kernel (Mixed precision: fp16 IO, fp32 accumulate/BN math)
 # Optimizations:
 #   - Pre-packed W^T as [K, N] for coalesced RHS access
-#   - Block pointers for X/W/Y tiles
+#   - Tensor descriptors for X/W/Y tiles (out-of-bounds handled by the descriptor)
 #   - 1D grid with GROUP_SIZE_M swizzling
-#   - Specialized no-boundary-check path when shapes divisible by tile sizes
+#   - Specialized unmasked per-channel loads when shapes divisible by tile sizes
 # -----------------------------------------------------------------------------
 @triton.autotune(configs=_configs(), key=["M", "N", "K"])
 @triton.jit
@@ -164,7 +164,7 @@ def _fused_gemm_scale_bn_kernel(
     stride_rv,
     stride_ym,
     stride_yn,
-    DIVISIBLE: tl.constexpr,  # specialization flag for boundary checks
+    DIVISIBLE: tl.constexpr,  # specialization flag for the per-channel masks
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -184,53 +184,44 @@ def _fused_gemm_scale_bn_kernel(
     pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
-    # Block pointers for X [M,K], WT [K,N], and Y [M,N]
-    x_bp = tl.make_block_ptr(
+    # Tensor descriptors for X [M,K], WT [K,N], and Y [M,N]
+    x_desc = tl.make_tensor_descriptor(
         base=x_ptr,
         shape=(M, K),
         strides=(stride_xm, stride_xk),
-        offsets=(pid_m * BLOCK_M, 0),
         block_shape=(BLOCK_M, BLOCK_K),
-        order=(1, 0),
     )
-    wt_bp = tl.make_block_ptr(
+    wt_desc = tl.make_tensor_descriptor(
         base=wt_ptr,
         shape=(K, N),
         strides=(stride_wtk, stride_wtn),
-        offsets=(0, pid_n * BLOCK_N),
         block_shape=(BLOCK_K, BLOCK_N),
-        order=(1, 0),
     )
-    y_bp = tl.make_block_ptr(
+    y_desc = tl.make_tensor_descriptor(
         base=y_ptr,
         shape=(M, N),
         strides=(stride_ym, stride_yn),
-        offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),
         block_shape=(BLOCK_M, BLOCK_N),
-        order=(1, 0),
     )
+    off_m = pid_m * BLOCK_M
+    off_n = pid_n * BLOCK_N
 
     # Accumulator: keep in fp32
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
-    # Main K loop
-    if DIVISIBLE:
-        for _ in tl.range(0, K, BLOCK_K):
-            x_tile = tl.load(x_bp)
-            w_tile = tl.load(wt_bp)
-            acc += tl.dot(x_tile.to(tl.float16), w_tile.to(tl.float16))
-            x_bp = tl.advance(x_bp, (0, BLOCK_K))
-            wt_bp = tl.advance(wt_bp, (BLOCK_K, 0))
-    else:
-        for _ in tl.range(0, K, BLOCK_K):
-            x_tile = tl.load(x_bp, boundary_check=(0, 1))
-            w_tile = tl.load(wt_bp, boundary_check=(0, 1))
-            acc += tl.dot(x_tile.to(tl.float16), w_tile.to(tl.float16))
-            x_bp = tl.advance(x_bp, (0, BLOCK_K))
-            wt_bp = tl.advance(wt_bp, (BLOCK_K, 0))
+    # Main K loop: descriptor loads zero-pad out-of-bounds elements,
+    # so divisible and ragged shapes share one path
+    # Carry the K offset: indexing the contiguous dim with the loop variable
+    # loses the 2D block-load path for the descriptor load on XPU
+    off_k = 0
+    for _ in tl.range(0, K, BLOCK_K):
+        x_tile = x_desc.load([off_m, off_k])
+        w_tile = wt_desc.load([off_k, off_n])
+        acc += tl.dot(x_tile.to(tl.float16), w_tile.to(tl.float16))
+        off_k += BLOCK_K
 
     # Column offsets for per-channel parameters
-    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_n = off_n + tl.arange(0, BLOCK_N)
 
     if DIVISIBLE:
         # Load once per tile, reuse
@@ -256,11 +247,8 @@ def _fused_gemm_scale_bn_kernel(
     acc = (acc - rm[None, :]) * inv_std[None, :]
     acc = acc * gamma[None, :] + beta[None, :]
 
-    # Store [BM, BN] as fp16
-    if DIVISIBLE:
-        tl.store(y_bp, acc.to(tl.float16))
-    else:
-        tl.store(y_bp, acc.to(tl.float16), boundary_check=(0, 1))
+    # Store [BM, BN] as fp16 (out-of-bounds rows/cols are dropped by the descriptor)
+    y_desc.store([off_m, off_n], acc.to(tl.float16))
 
 
 # -----------------------------------------------------------------------------
@@ -329,7 +317,7 @@ def kernel_function(x, weight_t, bias, scale, bn_weight, bn_bias, running_mean, 
     stride_rv = running_var.stride(0)
     stride_ym, stride_yn = y.stride()
 
-    # Specialize away boundary checks when shapes divisible by the smallest tiles across configs.
+    # Specialize away the per-channel masks when shapes divisible by the smallest tiles across configs.
     # Here we pick the minimum BLOCK_M/BLOCK_N=64 and BLOCK_K=32 in the search space.
     divisible = (M % 64 == 0) and (N % 64 == 0) and (K % 32 == 0)
 

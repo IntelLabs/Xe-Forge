@@ -185,23 +185,19 @@ def _fused_gemm_bias_add_activation_kernel(
     pid_n = (pid % num_pid_in_group) // group_size_m
 
     # -------------------------------------------------
-    # Block pointers
+    # Tensor descriptors
     # -------------------------------------------------
-    x_bp = tl.make_block_ptr(
+    x_desc = tl.make_tensor_descriptor(
         base=x_ptr,
         shape=(M, K),
         strides=(stride_xm, stride_xk),
-        offsets=(pid_m * BLOCK_M, 0),
         block_shape=(BLOCK_M, BLOCK_K),
-        order=(1, 0),
     )
-    wt_bp = tl.make_block_ptr(
+    wt_desc = tl.make_tensor_descriptor(
         base=wt_ptr,
         shape=(K, N),
         strides=(stride_wtk, stride_wtn),
-        offsets=(0, pid_n * BLOCK_N),
         block_shape=(BLOCK_K, BLOCK_N),
-        order=(1, 0),
     )
 
     # -------------------------------------------------
@@ -212,12 +208,12 @@ def _fused_gemm_bias_add_activation_kernel(
     # -------------------------------------------------
     # GEMM (fp16 inputs → fp32 acc)
     # -------------------------------------------------
+    off_k = 0
     for _ in range(0, K, BLOCK_K):
-        x_tile = tl.load(x_bp, boundary_check=(0, 1))  # fp16
-        w_tile = tl.load(wt_bp, boundary_check=(0, 1))  # fp16
+        x_tile = x_desc.load([pid_m * BLOCK_M, off_k])  # fp16
+        w_tile = wt_desc.load([off_k, pid_n * BLOCK_N])  # fp16
         acc = tl.dot(x_tile, w_tile, acc)
-        x_bp = tl.advance(x_bp, (0, BLOCK_K))
-        wt_bp = tl.advance(wt_bp, (BLOCK_K, 0))
+        off_k += BLOCK_K
 
     # -------------------------------------------------
     # Bias in FP32  ✅ FIX #1
@@ -242,15 +238,13 @@ def _fused_gemm_bias_add_activation_kernel(
     # -------------------------------------------------
     # Store fp16
     # -------------------------------------------------
-    o_bp = tl.make_block_ptr(
+    o_desc = tl.make_tensor_descriptor(
         base=o_ptr,
         shape=(M, N),
         strides=(stride_om, stride_on),
-        offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),
         block_shape=(BLOCK_M, BLOCK_N),
-        order=(1, 0),
     )
-    tl.store(o_bp, out.to(tl.float16), boundary_check=(0, 1))
+    o_desc.store([pid_m * BLOCK_M, pid_n * BLOCK_N], out.to(tl.float16))
 
 
 # --------------------------------------------------------------------

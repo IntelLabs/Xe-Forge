@@ -23,21 +23,23 @@ Optimization patterns applied (cumulative):
      regularity — adjacent M indices may cross oh/batch boundaries,
      forcing scatter/gather loads for x. By tiling over (n, oh) explicitly,
      all BLOCK_OW output pixels within a tile read CONSECUTIVE x rows
-     in the NHWC flat (N*H*W, C) view. This enables tl.make_block_ptr
+     in the NHWC flat (N*H*W, C) view. This enables a tensor descriptor
      for x loads → hardware 2D block IO on the B580's Xe2 memory subsystem.
 
-  5. ALL OPERANDS USE block_ptr (x, w, y).
-     Why: tl.make_block_ptr generates Intel 2D block load/store instructions
+  5. ALL OPERANDS USE TENSOR DESCRIPTORS (x, w, y).
+     Why: tl.make_tensor_descriptor generates Intel 2D block load/store instructions
      (SubgroupBlockReadINTEL / SubgroupBlockWriteINTEL) which use the
      B580's dedicated 2D block IO hardware. This replaces ALL scatter/gather
      loads with structured, coalesced block transfers. Measured 2-3x
      bandwidth improvement vs pointer-arithmetic loads.
 
-  6. BOUNDARY-LIMITED SHAPE on block_ptr to prevent oh-row wrapping.
+  6. BOUNDARY-LIMITED SHAPE on the y descriptor to prevent oh-row wrapping.
      Why: when BLOCK_OW doesn't evenly divide OW, the last tile's
-     block_ptr could write into the NEXT oh row's output positions in
-     the flat (N*OH*OW, C_out) view. We limit the shape parameter so
-     boundary_check masks out these wrap-around positions.
+     store could write into the NEXT oh row's output positions in
+     the flat (N*OH*OW, C_out) view. The y descriptor is based at the
+     tile's first row with shape (OW - ow0, C_out), so the descriptor
+     store drops these wrap-around positions. x needs no such limit:
+     x rows past the oh row only feed output rows that store drops.
 
   7. C_IN as tl.constexpr — inner K loop fully unrolled at compile time.
      Why: with BLOCK_K=C_IN=64, the channel reduction loop has exactly
@@ -158,13 +160,12 @@ def _conv2d_relu_bias_baseline(
             x_hw_ptrs = x_h_ptrs + kw * stride_xw
             w_kw_ptr = w_kh_ptr + kw * stride_wkw
 
-            w_bp = tl.make_block_ptr(
+            # One descriptor per (kh, kw) HWIO slice: a (C_in, C_out) matrix
+            w_desc = tl.make_tensor_descriptor(
                 base=w_kw_ptr,
                 shape=(C_in, C_out),
                 strides=(stride_wci, stride_wco),
-                offsets=(0, pid_n * BLOCK_N),
                 block_shape=(BLOCK_K, BLOCK_N),
-                order=(1, 0),
             )
 
             for c0 in range(0, C_in, BLOCK_K):
@@ -176,9 +177,8 @@ def _conv2d_relu_bias_baseline(
                     other=0.0,
                 )
 
-                w = tl.load(w_bp, boundary_check=(0, 1), padding_option="zero")
+                w = w_desc.load([c0, pid_n * BLOCK_N])
                 acc = tl.dot(x, w, acc)
-                w_bp = tl.advance(w_bp, (BLOCK_K, 0))
 
     conv_b = tl.load(conv_bias_ptr + offs_n * stride_cb0, mask=mask_n, other=0.0)
     b = tl.load(bias_ptr + offs_n * stride_b0, mask=mask_n, other=0.0)
@@ -199,7 +199,7 @@ def _conv2d_relu_bias_baseline(
 
 
 # ============================================================
-# PATTERN: Spatially-tiled fused kernel (ALL block_ptr)
+# PATTERN: Spatially-tiled fused kernel (ALL tensor descriptors)
 #
 # Grid: (n, oh, ow_tile * cout_tile) — not flat M!
 #   Preserving (n, oh) in the grid ensures that within each tile,
@@ -208,9 +208,9 @@ def _conv2d_relu_bias_baseline(
 #   with stride = C_IN. This makes x loads a regular 2D block.
 #
 # Memory access pattern:
-#   x: block_ptr (consecutive rows in flat NHWC)  -> 2D block load
-#   w: block_ptr (contiguous HWIO slice)           -> 2D block load
-#   y: block_ptr (consecutive rows in flat NHWC)   -> 2D block store
+#   x: descriptor (consecutive rows in flat NHWC) -> 2D block load
+#   w: descriptor (contiguous HWIO slice)          -> 2D block load
+#   y: descriptor (consecutive rows in flat NHWC)  -> 2D block store
 #   All three operands use hardware 2D block IO — zero scatter.
 # ============================================================
 
@@ -236,7 +236,7 @@ def _conv2d_relu_bias_spatial(
     KH: tl.constexpr, KW: tl.constexpr,
     C_IN: tl.constexpr,
 ):
-    """Spatially-tiled fused conv + ReLU + bias: ALL operands use block_ptr.
+    """Spatially-tiled fused conv + ReLU + bias: ALL operands use tensor descriptors.
 
     Grid: (n, oh, ceil(OW/BLOCK_OW), ceil(C_out/BLOCK_N))
     x viewed as flat (N*H*W, C_IN) contiguous matrix.
@@ -257,35 +257,34 @@ def _conv2d_relu_bias_spatial(
 
     acc = tl.zeros((BLOCK_OW, BLOCK_N), dtype=tl.float32)
 
+    # x viewed as the flat (N*H*W, C_IN) matrix, created once. Rows of a tile
+    # that run past the current input row only feed output rows >= OW, which
+    # the boundary-limited y store below drops.
+    x_desc = tl.make_tensor_descriptor(
+        base=x_ptr,
+        shape=(N_batch * HW, C_IN),
+        strides=(C_IN, 1),
+        block_shape=(BLOCK_OW, BLOCK_K),
+    )
+
     for kh in range(KH):
         for kw in range(KW):
             x_row_start = n * HW + (oh + kh) * W + (ow0 + kw)
-            x_valid_rows = W - (ow0 + kw)
 
-            x_bp = tl.make_block_ptr(
-                base=x_ptr,
-                shape=(x_row_start + x_valid_rows, C_IN),
-                strides=(C_IN, 1),
-                offsets=(x_row_start, 0),
-                block_shape=(BLOCK_OW, BLOCK_K),
-                order=(1, 0),
-            )
-
-            w_bp = tl.make_block_ptr(
+            # One descriptor per (kh, kw) HWIO slice: a (C_IN, C_out) matrix
+            w_desc = tl.make_tensor_descriptor(
                 base=w_ptr + kh * stride_wkh + kw * stride_wkw,
                 shape=(C_IN, C_out),
                 strides=(stride_wci, stride_wco),
-                offsets=(0, pid_n * BLOCK_N),
                 block_shape=(BLOCK_K, BLOCK_N),
-                order=(1, 0),
             )
 
-            for c0 in range(0, C_IN, BLOCK_K):
-                x_tile = tl.load(x_bp, boundary_check=(0, 1), padding_option="zero")
-                w_tile = tl.load(w_bp, boundary_check=(0, 1), padding_option="zero")
+            c0 = 0  # carried, not the loop variable: keeps the 2D block load on XPU
+            for _ in range(0, C_IN, BLOCK_K):
+                x_tile = x_desc.load([x_row_start, c0])
+                w_tile = w_desc.load([c0, pid_n * BLOCK_N])
                 acc = tl.dot(x_tile, w_tile, acc, input_precision="ieee")
-                x_bp = tl.advance(x_bp, (0, BLOCK_K))
-                w_bp = tl.advance(w_bp, (BLOCK_K, 0))
+                c0 += BLOCK_K
 
     # Fused epilogue: + conv_bias -> ReLU -> + model bias
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -297,18 +296,17 @@ def _conv2d_relu_bias_spatial(
     acc = tl.maximum(acc, 0.0)
     acc += ext_b[None, :]
 
-    # Store with boundary-limited shape to prevent oh-row wrapping
+    # Store with boundary-limited shape to prevent oh-row wrapping: the
+    # descriptor starts at this tile's first output row and ends at the oh row
     y_row_start = n * OHOW + oh * OW + ow0
     y_valid_rows = OW - ow0
-    y_bp = tl.make_block_ptr(
-        base=y_ptr,
-        shape=(y_row_start + y_valid_rows, C_out),
+    y_desc = tl.make_tensor_descriptor(
+        base=y_ptr + y_row_start * C_out,
+        shape=(y_valid_rows, C_out),
         strides=(C_out, 1),
-        offsets=(y_row_start, pid_n * BLOCK_N),
         block_shape=(BLOCK_OW, BLOCK_N),
-        order=(1, 0),
     )
-    tl.store(y_bp, acc.to(tl.float16), boundary_check=(0, 1))
+    y_desc.store([0, pid_n * BLOCK_N], acc.to(tl.float16))
 
 
 # ============================================================
@@ -337,7 +335,7 @@ def _conv2d_relu_bias_spatial(
 def _conv2d_relu_bias_optimized(
     x_ptr, w_ptr, conv_bias_ptr, bias_ptr, y_ptr,
     N, C_out, OH, OW,
-    M_total,                   # = N * OH * OW (for block_ptr shape)
+    M_total,                   # = N * OH * OW (for the y descriptor shape)
     stride_xn, stride_xh, stride_xw,
     stride_wkh, stride_wkw, stride_wci, stride_wco,
     sy_i, sy_k,               # output strides: (C_out, 1) for contiguous (M, K)
@@ -348,9 +346,17 @@ def _conv2d_relu_bias_optimized(
 ):
     """Persistent conv2d + ReLU + bias kernel.
 
-    Output stored via block_ptr (contiguous (M,K) view) -> enables 2D block writes.
+    Output stored via a tensor descriptor (contiguous (M,K) view) -> enables 2D block writes.
     """
     start_pid = tl.program_id(0)
+
+    # y is contiguous (M, C_out): one descriptor, created once for all tiles
+    y_desc = tl.make_tensor_descriptor(
+        base=y_ptr,
+        shape=(M_total, C_out),
+        strides=(sy_i, sy_k),
+        block_shape=(BLOCK_M, BLOCK_N),
+    )
 
     nhw = OH * OW
     num_pid_m = tl.cdiv(M_total, BLOCK_M)
@@ -395,13 +401,12 @@ def _conv2d_relu_bias_optimized(
             for kw in range(KW):
                 x_kh_kw = x_base + kh * stride_xh + kw * stride_xw
 
-                w_bp = tl.make_block_ptr(
+                # One descriptor per (kh, kw) HWIO slice: a (C_IN, C_out) matrix
+                w_desc = tl.make_tensor_descriptor(
                     base=w_ptr + kh * stride_wkh + kw * stride_wkw,
                     shape=(C_IN, C_out),
                     strides=(stride_wci, stride_wco),
-                    offsets=(0, pid_n * BLOCK_N),
                     block_shape=(BLOCK_K, BLOCK_N),
-                    order=(1, 0),
                 )
 
                 for c0 in range(0, C_IN, BLOCK_K):
@@ -413,9 +418,8 @@ def _conv2d_relu_bias_optimized(
                         other=0.0,
                     )
 
-                    w_tile = tl.load(w_bp, boundary_check=(0, 1), padding_option="zero")
+                    w_tile = w_desc.load([c0, pid_n * BLOCK_N])
                     acc = tl.dot(x_tile, w_tile, acc, input_precision="ieee")
-                    w_bp = tl.advance(w_bp, (BLOCK_K, 0))
 
         # Fused epilogue: + conv_bias -> ReLU -> + model bias
         conv_b = tl.load(conv_bias_ptr + offs_n, mask=mask_n, other=0.0)
@@ -425,16 +429,8 @@ def _conv2d_relu_bias_optimized(
         acc = tl.maximum(acc, 0.0)
         acc += ext_b[None, :]
 
-        # Store via block_ptr: y is contiguous (M, C_out) -> enables 2D block writes
-        y_bp = tl.make_block_ptr(
-            base=y_ptr,
-            shape=(M_total, C_out),
-            strides=(sy_i, sy_k),
-            offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),
-            block_shape=(BLOCK_M, BLOCK_N),
-            order=(1, 0),
-        )
-        tl.store(y_bp, acc.to(tl.float16), boundary_check=(0, 1))
+        # Store via the y descriptor -> 2D block writes; rows past M_total are dropped
+        y_desc.store([pid_m * BLOCK_M, pid_n * BLOCK_N], acc.to(tl.float16))
 
 
 # ============================================================

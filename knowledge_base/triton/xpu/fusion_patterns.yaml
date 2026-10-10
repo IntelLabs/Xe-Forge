@@ -34,12 +34,12 @@ constraints:
       running stats, reductions across spatial dims), keep it as a separate kernel
       to avoid register pressure collapse.
 
-  - id: nhwc_spatially_tiled_conv_with_block_ptr
-    name: "Spatially-tiled NHWC convolution using block_ptr and fused epilogue"
+  - id: nhwc_spatially_tiled_conv_with_tensor_descriptors
+    name: "Spatially-tiled NHWC convolution using tensor descriptors and fused epilogue"
     severity: critical
     description: |
       For convolution kernels, use NHWC (channels_last) layout with SPATIAL TILING
-      and ALL operands via tl.make_block_ptr. This is the only Triton conv pattern
+      and ALL operands via tl.make_tensor_descriptor. This is the only Triton conv pattern
       that reliably maps to DPAS on Intel XPU.
 
       There are THREE things that must ALL be correct:
@@ -51,12 +51,12 @@ constraints:
       2. SPATIAL TILING — grid is (n, oh, ow_tile * cout_tile), NOT flat M.
          Preserving (n, oh) in the grid ensures that within each tile,
          output pixels along ow are consecutive in NHWC flat (N*H*W, C) view.
-         This makes x loads a regular 2D block — enabling block_ptr.
+         This makes x loads a regular 2D block — enabling a descriptor.
          Flattening M = N*OH*OW DESTROYS this — adjacent M indices cross
          oh/batch boundaries, forcing scatter loads that break DPAS.
 
-      3. ALL OPERANDS USE block_ptr (x, w, y) — tl.make_block_ptr generates
-         Intel 2D block load/store instructions (SubgroupBlockReadINTEL).
+      3. ALL OPERANDS USE tensor descriptors (x, w, y) — descriptor loads/stores
+         generate Intel 2D block load/store instructions (SubgroupBlockReadINTEL).
          This replaces ALL scatter/gather with structured block transfers.
 
       WRONG patterns (all break DPAS):
@@ -91,30 +91,26 @@ constraints:
               for kw in range(KW):
                   # x rows: consecutive in flat (N*H*W, C_IN) view
                   x_row_start = n * HW + (oh + kh) * W + (ow0 + kw)
-                  x_valid_rows = W - (ow0 + kw)  # boundary limit
+                  x_valid_rows = W - (ow0 + kw)  # rows past this h-row are out of bounds
 
-                  x_bp = tl.make_block_ptr(
+                  x_desc = tl.make_tensor_descriptor(
                       base=x_ptr,
                       shape=(x_row_start + x_valid_rows, C_IN),
                       strides=(C_IN, 1),  # C is contiguous!
-                      offsets=(x_row_start, 0),
                       block_shape=(BLOCK_OW, BLOCK_K),
-                      order=(1, 0),
                   )
-                  w_bp = tl.make_block_ptr(
+                  w_desc = tl.make_tensor_descriptor(
                       base=w_ptr + kh * stride_wkh + kw * stride_wkw,
                       shape=(C_IN, C_out),
                       strides=(stride_wci, stride_wco),
-                      offsets=(0, pid_n * BLOCK_N),
                       block_shape=(BLOCK_K, BLOCK_N),
-                      order=(1, 0),
                   )
-                  for c0 in range(0, C_IN, BLOCK_K):
-                      x_tile = tl.load(x_bp, boundary_check=(0,1), padding_option="zero")
-                      w_tile = tl.load(w_bp, boundary_check=(0,1), padding_option="zero")
+                  c0 = 0  # carried, not the loop variable: keeps the 2D block load on XPU
+                  for _ in range(0, C_IN, BLOCK_K):
+                      x_tile = x_desc.load([x_row_start, c0])          # out-of-bounds rows read 0
+                      w_tile = w_desc.load([c0, pid_n * BLOCK_N])
                       acc = tl.dot(x_tile, w_tile, acc)  # → DPAS
-                      x_bp = tl.advance(x_bp, (0, BLOCK_K))
-                      w_bp = tl.advance(w_bp, (BLOCK_K, 0))
+                      c0 += BLOCK_K
 
           # Fused epilogue — all in registers, zero extra memory traffic
           offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -124,15 +120,13 @@ constraints:
           # Store with boundary-limited shape to prevent oh-row wrapping
           y_row_start = n * (OH * OW) + oh * OW + ow0
           y_valid_rows = OW - ow0
-          y_bp = tl.make_block_ptr(
+          y_desc = tl.make_tensor_descriptor(
               base=y_ptr,
               shape=(y_row_start + y_valid_rows, C_out),
               strides=(C_out, 1),
-              offsets=(y_row_start, pid_n * BLOCK_N),
               block_shape=(BLOCK_OW, BLOCK_N),
-              order=(1, 0),
           )
-          tl.store(y_bp, acc.to(tl.float16), boundary_check=(0, 1))
+          y_desc.store([y_row_start, pid_n * BLOCK_N], acc.to(tl.float16))  # rows past OW dropped
       ```
 
       Grid function:
@@ -155,12 +149,14 @@ constraints:
       Key requirements:
       - BLOCK_K must be multiple of 16 (DPAS alignment)
       - C_IN as tl.constexpr when possible (unrolls channel reduction loop)
-      - Boundary-limited shape on block_ptr prevents oh-row wrapping
+      - Boundary-limited descriptor shape prevents oh-row wrapping
+      - The store offset must include ow0 (and the C_out tile): a store at a fixed
+        column makes every OW tile write the same rows
       - Weight as HWIO (not OIHW) for direct per-(kh,kw) access
       - For Conv3d: add outer loop over K_d, use channels_last_3d,
         handle padding with conditional skip (d_ok, h_ok checks)
       - For padded convolutions: padding in d/h → conditional skip,
-        padding in w → block_ptr boundary_check handles naturally
+        padding in w → the descriptor zero-fills out-of-bounds (including negative) w
       - Pre-allocate output as channels_last, reuse across calls
       - Autotune BLOCK_OW, BLOCK_N, BLOCK_K, num_warps, num_stages
 
@@ -182,10 +178,10 @@ constraints:
 
       Then fuse into the conv epilogue as a single multiply-add on the accumulator:
       ```python
-      # After conv accumulation, before tl.store:
+      # After conv accumulation, before the output store:
       acc += conv_bias[None, :]          # conv bias
       acc = acc * bn_scale[None, :] + bn_bias[None, :]  # fused BN + scaling
-      tl.store(y_bp, acc.to(tl.float16), ...)
+      y_desc.store([y_row_start, pid_n * BLOCK_N], acc.to(tl.float16))
       ```
 
       This eliminates a full read+write of the intermediate tensor between conv and BN.
@@ -423,7 +419,7 @@ patterns:
       impact is minimal and this fusion is almost always a win when you already have a
       custom GEMM kernel.
 
-      Works with both block pointers and tensor descriptors.
+      Load D through a tensor descriptor with the same block shape as the output tile.
     pattern_before: |
       # Separate: GEMM then add
       c = matmul(a, b)           # writes [M, N] to memory
@@ -492,7 +488,7 @@ patterns:
       acc = tl.maximum(acc, -1.0)
       acc = tl.minimum(acc, 1.0)
       # Single fp16 store
-      tl.store(c_bp, acc.to(tl.float16), boundary_check=(0, 1))
+      c_desc.store([off_m, off_n], acc.to(tl.float16))
     examples:
       - file: 81_Gemm_Swish_Divide_Clamp_Tanh_Clamp.py
         note: "Swish -> /2 -> clamp -> tanh -> clamp fused into one GEMM epilogue"
@@ -523,7 +519,7 @@ patterns:
       acc = (acc - rm[None, :]) * invstd[None, :] * g[None, :] + be[None, :]
       s   = tl.load(scale_ptr).to(tl.float32)
       acc = acc * s
-      tl.store(out_bp, acc.to(tl.float16), boundary_check=(0, 1))
+      out_desc.store([row_start, col_start], acc.to(tl.float16))
     examples:
       - file: 39_Gemm_Scale_BatchNorm.py
         note: "4096x4096 GEMM fused with inference BN and per-channel scale"
@@ -545,7 +541,7 @@ patterns:
       # Epilogue after K-loop
       acc = tl.minimum(acc, constant)
       acc = acc - constant
-      tl.store(o_bp, acc.to(tl.float16), boundary_check=(0, 1))
+      o_desc.store([off_m, off_n], acc.to(tl.float16))
     examples:
       - file: 68_Matmul_Min_Subtract.py
         note: "min(GEMM+bias, C) - C fused; constant passed as Python float to avoid device sync"

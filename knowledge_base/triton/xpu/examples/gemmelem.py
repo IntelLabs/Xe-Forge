@@ -125,34 +125,40 @@ def _fused_gemm_activation_kernel(
     pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
-    # Block pointers with boundary checking (Intel optimized)
-    a_block_ptr = tl.make_block_ptr(
+    # Tensor descriptors (Intel optimized 2D block IO); out-of-bounds loads are zero-padded
+    a_desc = tl.make_tensor_descriptor(
         base=a_ptr,
         shape=(M, K),
         strides=(stride_am, stride_ak),
-        offsets=(pid_m * BLOCK_SIZE_M, 0),
         block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_K),
-        order=(1, 0),
     )
-    b_block_ptr = tl.make_block_ptr(
+    b_desc = tl.make_tensor_descriptor(
         base=b_ptr,
         shape=(K, N),
         strides=(stride_bk, stride_bn),
-        offsets=(0, pid_n * BLOCK_SIZE_N),
         block_shape=(BLOCK_SIZE_K, BLOCK_SIZE_N),
-        order=(1, 0),
     )
+    c_desc = tl.make_tensor_descriptor(
+        base=c_ptr,
+        shape=(M, N),
+        strides=(stride_cm, stride_cn),
+        block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_N),
+    )
+    off_m = pid_m * BLOCK_SIZE_M
+    off_n = pid_n * BLOCK_SIZE_N
 
     # Accumulator
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
-    # Main GEMM loop with block pointer advancement
+    # Main GEMM loop: load tiles by coordinates, stepping along K
+    # Carry the K offset: indexing the contiguous dim with the loop variable
+    # loses the 2D block-load path for the descriptor load on XPU
+    off_k = 0
     for _ in range(0, K, BLOCK_SIZE_K):
-        a = tl.load(a_block_ptr, boundary_check=(0, 1))
-        b = tl.load(b_block_ptr, boundary_check=(0, 1))
+        a = a_desc.load([off_m, off_k])
+        b = b_desc.load([off_k, off_n])
         accumulator += tl.dot(a, b)
-        a_block_ptr = tl.advance(a_block_ptr, (0, BLOCK_SIZE_K))
-        b_block_ptr = tl.advance(b_block_ptr, (BLOCK_SIZE_K, 0))
+        off_k += BLOCK_SIZE_K
 
     # Add bias
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -180,16 +186,8 @@ def _fused_gemm_activation_kernel(
     accumulator = tl.maximum(accumulator, -1.0)
     accumulator = tl.minimum(accumulator, 1.0)
 
-    # Store with block pointer
-    c_block_ptr = tl.make_block_ptr(
-        base=c_ptr,
-        shape=(M, N),
-        strides=(stride_cm, stride_cn),
-        offsets=(pid_m * BLOCK_SIZE_M, pid_n * BLOCK_SIZE_N),
-        block_shape=(BLOCK_SIZE_M, BLOCK_SIZE_N),
-        order=(1, 0),
-    )
-    tl.store(c_block_ptr, accumulator, boundary_check=(0, 1))
+    # Store through the descriptor; out-of-bounds elements are dropped
+    c_desc.store([off_m, off_n], accumulator.to(c_ptr.dtype.element_ty))
 
 
 class Model(nn.Module):

@@ -113,30 +113,28 @@ def _gemm_bn_scale_kernel(
 
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
-    a_bp = tl.make_block_ptr(
+    a_desc = tl.make_tensor_descriptor(
         base=a_ptr,
         shape=(M, K),
         strides=(stride_am, stride_ak),
-        offsets=(row_start, 0),
         block_shape=(BLOCK_M, BLOCK_K),
-        order=(1, 0),
     )
-    w_bp = tl.make_block_ptr(
+    w_desc = tl.make_tensor_descriptor(
         base=w_ptr,
         shape=(K, N),
         strides=(stride_wk, stride_wn),
-        offsets=(0, col_start),
         block_shape=(BLOCK_K, BLOCK_N),
-        order=(1, 0),
     )
 
-    # GEMM loop
+    # GEMM loop (descriptor loads zero-pad out-of-bounds elements)
+    # Carry the K offset: indexing the contiguous dim with the loop variable
+    # loses the 2D block-load path for the descriptor load on XPU
+    off_k = 0
     for _ in range(0, K, BLOCK_K):
-        a = tl.load(a_bp, boundary_check=(0, 1))  # fp16 in memory
-        w = tl.load(w_bp, boundary_check=(0, 1))  # fp16 in memory
+        a = a_desc.load([row_start, off_k])  # fp16 in memory
+        w = w_desc.load([off_k, col_start])  # fp16 in memory
         acc = tl.dot(a, w, acc)  # fp16 dot -> fp32 acc
-        a_bp = tl.advance(a_bp, (0, BLOCK_K))
-        w_bp = tl.advance(w_bp, (BLOCK_K, 0))
+        off_k += BLOCK_K
 
     offs_n = col_start + tl.arange(0, BLOCK_N)
     mask_n = offs_n < N
@@ -155,15 +153,13 @@ def _gemm_bn_scale_kernel(
     s = tl.load(scale_ptr + 0 * stride_sc, mask=True, other=1.0).to(tl.float32)
     acc = acc * s
 
-    out_bp = tl.make_block_ptr(
+    out_desc = tl.make_tensor_descriptor(
         base=out_ptr,
         shape=(M, N),
         strides=(stride_om, stride_on),
-        offsets=(row_start, col_start),
         block_shape=(BLOCK_M, BLOCK_N),
-        order=(1, 0),
     )
-    tl.store(out_bp, acc.to(tl.float16), boundary_check=(0, 1))
+    out_desc.store([row_start, col_start], acc.to(tl.float16))
 
 
 # -------------------------------------------------------------------------

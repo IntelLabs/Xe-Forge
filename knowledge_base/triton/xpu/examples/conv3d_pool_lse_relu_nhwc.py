@@ -2,8 +2,8 @@
 Conv3d(32->64, 3x3x3, pad=1) + MaxPool3d(2) + LogSumExp(dim=1) + ReLU
 FULL Triton on Intel Arc B580 — no oneDNN
 
-Spatially-tiled Conv3d (all block_ptr) + fused Pool+LSE+ReLU.
-Padding in d/h: conditional skip. Padding in w: block_ptr boundary_check.
+Spatially-tiled Conv3d (all tensor descriptors) + fused Pool+LSE+ReLU.
+Padding in d/h: conditional skip. Padding in w: descriptor out-of-bounds zero fill.
 """
 
 import time
@@ -44,7 +44,7 @@ padding = 1
 
 
 # ============================================================
-# Spatially-tiled Conv3d: all block_ptr
+# Spatially-tiled Conv3d: all tensor descriptors
 # Grid: (n, od*OH+oh, ow_tile * cout_tiles + cout_tile)
 # ============================================================
 
@@ -71,10 +71,11 @@ def _conv3d_spatial_tiled(
     PAD: tl.constexpr,
     C_IN: tl.constexpr, C_OUT: tl.constexpr,
 ):
-    """Spatially-tiled Conv3d + bias. All block_ptr.
+    """Spatially-tiled Conv3d + bias. All tensor descriptors.
 
     Padding in d/h handled by conditional skip.
-    Padding in w handled by block_ptr boundary_check (negative offsets -> zero).
+    Padding in w handled by the descriptor load: out-of-bounds coordinates
+    (including the negative w offset of the left pad) are zero-filled.
     """
     n = tl.program_id(0)
     pid_dh = tl.program_id(1)
@@ -102,51 +103,46 @@ def _conv3d_spatial_tiled(
                 if h_ok:
                     x_dh_base = x_n_base + d_in * sx_d + h_in * sx_h
 
+                    # One (d, h) input row viewed as a (W, C_IN) matrix
+                    x_desc = tl.make_tensor_descriptor(
+                        base=x_dh_base,
+                        shape=(W, C_IN),
+                        strides=(C_IN, 1),
+                        block_shape=(BLOCK_OW, BLOCK_K),
+                    )
+
                     for kw in range(KW):
                         w_start = ow0 + kw - PAD
 
-                        x_bp = tl.make_block_ptr(
-                            base=x_dh_base,
-                            shape=(W, C_IN),
-                            strides=(C_IN, 1),
-                            offsets=(w_start, 0),
-                            block_shape=(BLOCK_OW, BLOCK_K),
-                            order=(1, 0),
-                        )
-
-                        w_bp = tl.make_block_ptr(
+                        w_desc = tl.make_tensor_descriptor(
                             base=w_ptr + kd * sw_kd + kh * sw_kh + kw * sw_kw,
                             shape=(C_IN, C_OUT),
                             strides=(sw_ci, sw_co),
-                            offsets=(0, pid_n * BLOCK_N),
                             block_shape=(BLOCK_K, BLOCK_N),
-                            order=(1, 0),
                         )
 
-                        for c0 in range(0, C_IN, BLOCK_K):
-                            x_tile = tl.load(x_bp, boundary_check=(0, 1), padding_option="zero")
-                            w_tile = tl.load(w_bp, boundary_check=(0, 1), padding_option="zero")
+                        c0 = 0  # carried, not the loop variable: keeps the 2D block load on XPU
+                        for _ in range(0, C_IN, BLOCK_K):
+                            x_tile = x_desc.load([w_start, c0])
+                            w_tile = w_desc.load([c0, pid_n * BLOCK_N])
                             acc = tl.dot(x_tile, w_tile, acc, input_precision="ieee")
-                            x_bp = tl.advance(x_bp, (0, BLOCK_K))
-                            w_bp = tl.advance(w_bp, (BLOCK_K, 0))
+                            c0 += BLOCK_K
 
     # Bias
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     bias_vals = tl.load(b_ptr + offs_n, mask=offs_n < C_OUT, other=0.0)
     acc += bias_vals[None, :]
 
-    # Store: boundary-limited to prevent oh-row wrapping
+    # Store: one (od, oh) output row viewed as an (OW, C_OUT) matrix; rows
+    # past OW are out of bounds and dropped, so no oh-row wrapping
     y_dh_base = y_ptr + n * sy_n + od * sy_d + oh * sy_h
-    y_valid = OW - ow0
-    y_bp = tl.make_block_ptr(
+    y_desc = tl.make_tensor_descriptor(
         base=y_dh_base,
-        shape=(y_valid, C_OUT),
+        shape=(OW, C_OUT),
         strides=(C_OUT, 1),
-        offsets=(0, pid_n * BLOCK_N),
         block_shape=(BLOCK_OW, BLOCK_N),
-        order=(1, 0),
     )
-    tl.store(y_bp, acc.to(tl.float16), boundary_check=(0, 1))
+    y_desc.store([ow0, pid_n * BLOCK_N], acc.to(tl.float16))
 
 
 # ============================================================

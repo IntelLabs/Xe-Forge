@@ -551,7 +551,7 @@ class XPUProfiler:
                         "memory_bound",
                         "XVE Stalled > Active — kernel is memory-bound. "
                         "Use tensor descriptors, bf16 inputs, tile swizzling.",
-                        "xpu_optimizations.yaml (xpu_block_pointers, xpu_bf16)",
+                        "xpu_optimizations.yaml (xpu_tensor_descriptors, xpu_bf16)",
                     )
                 )
 

@@ -523,7 +523,7 @@ The pipeline applies stages in this order:
 | DType Fix | `dtype_fix` | float64→float32, accumulator precision, remove unnecessary casts |
 | Fusion | `fusion` | Fuse kernel launches, elementwise chains, reduction+elementwise |
 | Memory Access | `memory_access` | Fix uncoalesced access, remove inner-loop transposes, reduce register pressure |
-| Block Pointers | `block_pointers` | Convert to `tl.make_block_ptr()`, `tl.advance()`, proper boundary checks |
+| Tensor Descriptors | `tensor_descriptors` | Convert manual pointer arithmetic and deprecated `tl.make_block_ptr()`/`tl.advance()` to `tl.make_tensor_descriptor()` (`block_pointers` is accepted as an alias) |
 | Persistent Kernel | `persistent_kernel` | Persistent kernel pattern, tune NUM_PROGS |
 | XPU Specific | `xpu_specific` | Intel XPU tile sizes (256×256), num_warps=32, GROUP_SIZE_M swizzling |
 | Autotuning | `autotuning` | Add/improve `@triton.autotune` with hardware-aware config search space |
@@ -537,7 +537,7 @@ xe-forge -i kernel.py -s spec.yaml --stages memory_access,xpu_specific
 # Only autotuning
 xe-forge -i kernel.py -s spec.yaml --stages autotuning
 
-# Everything except block pointers
+# Everything except tensor descriptors
 xe-forge -i kernel.py -s spec.yaml \
     --stages algorithmic,dtype_fix,fusion,memory_access,persistent_kernel,xpu_specific,autotuning
 ```

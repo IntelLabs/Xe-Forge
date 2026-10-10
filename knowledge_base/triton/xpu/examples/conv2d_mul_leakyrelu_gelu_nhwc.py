@@ -13,11 +13,13 @@ Optimization patterns applied (cumulative):
   3. SPATIAL TILING — grid is (n, oh, ow_tile) preserving spatial structure.
      Same insight as 1.py: within a single oh row, BLOCK_OW output pixels
      map to CONSECUTIVE x rows in flat NHWC memory. This enables
-     block_ptr for x (input), w (weights), AND y (output) — all three
-     operands use hardware 2D block IO. No scatter/gather loads at all.
+     tensor descriptors for x (input), w (weights), AND y (output) — all
+     three operands use hardware 2D block IO. No scatter/gather loads at all.
 
-  4. BOUNDARY-LIMITED block_ptr SHAPE — prevents oh-row wrapping in both
-     x reads and y writes when BLOCK_OW doesn't evenly divide OW.
+  4. BOUNDARY-LIMITED DESCRIPTOR SHAPE — the x/y descriptor's row extent
+     ends at the current h-row, so out-of-bounds rows are zero-filled on
+     load and dropped on store: no oh-row wrapping in x reads or y writes
+     when BLOCK_OW doesn't evenly divide OW.
 
   5. C_IN as tl.constexpr — channel reduction loop fully unrolled.
 
@@ -199,7 +201,7 @@ def _mul_leakyrelu_gelu_kernel(
 
 
 # ============================================================
-# PATTERN: Spatially-tiled fused kernel (ALL block_ptr)
+# PATTERN: Spatially-tiled fused kernel (ALL tensor descriptors)
 #
 # Grid: (n, oh, ow_tile) — C_out=64=BLOCK_N so only 1 N tile.
 #   Same spatial tiling as 1.py: preserving (n, oh) in the grid
@@ -209,7 +211,7 @@ def _mul_leakyrelu_gelu_kernel(
 #   All 5 ops execute on the accumulator in registers.
 #   Saves ~1 GB of intermediate memory traffic vs 2-kernel approach.
 #
-# Memory access: ALL block_ptr (x, w, y) -> zero scatter loads.
+# Memory access: ALL tensor descriptors (x, w, y) -> zero scatter loads.
 # ============================================================
 
 @triton.autotune(
@@ -235,12 +237,12 @@ def _fused_conv_spatial_tiled(
     KH: tl.constexpr, KW: tl.constexpr,
     C_IN: tl.constexpr,
 ):
-    """Spatially-tiled fused conv: ALL operands use block_ptr.
+    """Spatially-tiled fused conv: ALL operands use tensor descriptors.
 
     Grid: (n, oh, ceil(OW/BLOCK_OW))
     x viewed as flat (N*H*W, C_IN) contiguous matrix.
     Within a single oh row, BLOCK_OW output pixels read consecutive x rows.
-    This enables block_ptr for x — no scatter loads!
+    This enables a tensor descriptor for x — no scatter loads!
     """
     n = tl.program_id(0)
     oh = tl.program_id(1)
@@ -252,39 +254,36 @@ def _fused_conv_spatial_tiled(
 
     acc = tl.zeros((BLOCK_OW, BLOCK_N), dtype=tl.float32)
 
-    # KH*KW small GEMMs — ALL using block_ptr
+    # KH*KW small GEMMs — ALL using tensor descriptors
     for kh in range(KH):
         for kw in range(KW):
             # x rows: n*H*W + (oh+kh)*W + (ow0+kw) .. + (BLOCK_OW-1)
-            # These are CONSECUTIVE rows in (N*H*W, C_IN) — block_ptr!
+            # These are CONSECUTIVE rows in (N*H*W, C_IN) — one 2D descriptor!
             x_row_start = n * HW + (oh + kh) * W + (ow0 + kw)
 
-            # Limit shape so boundary_check prevents reading past this h-row
+            # Limit the row extent to the end of this h-row: rows past it are
+            # out of bounds, so the descriptor load zero-fills them
             x_valid_rows = W - (ow0 + kw)
-            x_bp = tl.make_block_ptr(
+            x_desc = tl.make_tensor_descriptor(
                 base=x_ptr,
                 shape=(x_row_start + x_valid_rows, C_IN),
                 strides=(C_IN, 1),
-                offsets=(x_row_start, 0),
                 block_shape=(BLOCK_OW, BLOCK_K),
-                order=(1, 0),
             )
 
-            w_bp = tl.make_block_ptr(
+            w_desc = tl.make_tensor_descriptor(
                 base=w_ptr + kh * stride_wkh + kw * stride_wkw,
                 shape=(C_IN, C_out),
                 strides=(stride_wci, stride_wco),
-                offsets=(0, 0),
                 block_shape=(BLOCK_K, BLOCK_N),
-                order=(1, 0),
             )
 
-            for c0 in range(0, C_IN, BLOCK_K):
-                x_tile = tl.load(x_bp, boundary_check=(0, 1), padding_option="zero")
-                w_tile = tl.load(w_bp, boundary_check=(0, 1), padding_option="zero")
+            c0 = 0  # carried, not the loop variable: keeps the 2D block load on XPU
+            for _ in range(0, C_IN, BLOCK_K):
+                x_tile = x_desc.load([x_row_start, c0])
+                w_tile = w_desc.load([c0, 0])
                 acc = tl.dot(x_tile, w_tile, acc, input_precision="ieee")
-                x_bp = tl.advance(x_bp, (0, BLOCK_K))
-                w_bp = tl.advance(w_bp, (BLOCK_K, 0))
+                c0 += BLOCK_K
 
     # Fused epilogue
     offs_n = tl.arange(0, BLOCK_N)
@@ -297,24 +296,23 @@ def _fused_conv_spatial_tiled(
     acc = tl.where(acc >= 0, acc, acc * negative_slope)
     acc = 0.5 * acc * (1.0 + tl.math.erf(acc * 0.70710678118654752440))
 
-    # Store: limit shape so boundary_check prevents writing past this oh-row
+    # Store: the row extent ends at this oh-row, so the descriptor store
+    # drops rows past it instead of wrapping into the next row
     y_row_start = n * OHOW + oh * OW + ow0
     y_valid_rows = OW - ow0
-    y_bp = tl.make_block_ptr(
+    y_desc = tl.make_tensor_descriptor(
         base=y_ptr,
         shape=(y_row_start + y_valid_rows, C_out),
         strides=(C_out, 1),
-        offsets=(y_row_start, 0),
         block_shape=(BLOCK_OW, BLOCK_N),
-        order=(1, 0),
     )
-    tl.store(y_bp, acc.to(tl.float16), boundary_check=(0, 1))
+    y_desc.store([y_row_start, 0], acc.to(tl.float16))
 
 
 # ============================================================
 # Previous: flat-M fused kernel (kept for comparison)
 #   conv(NHWC) + bias + multiply + LeakyReLU + GELU
-#   Persistent, block_ptr output, C_IN constexpr
+#   Persistent, tensor-descriptor output, C_IN constexpr
 # ============================================================
 
 @triton.autotune(
@@ -376,6 +374,14 @@ def _fused_conv_mul_leakyrelu_gelu(
     offs_k = tl.arange(0, BLOCK_K)
     offs_k = tl.max_contiguous(tl.multiple_of(offs_k, BLOCK_K), BLOCK_K)
 
+    # y is contiguous (M, C_out): one descriptor for every tile
+    y_desc = tl.make_tensor_descriptor(
+        base=y_ptr,
+        shape=(M_total, C_out),
+        strides=(sy_i, sy_k),
+        block_shape=(BLOCK_M, BLOCK_N),
+    )
+
     for tile_id in range(pid, num_tiles, NUM_SMS):
         # GROUP_M swizzle
         num_pid_in_group = GROUP_M * num_pid_n
@@ -417,13 +423,11 @@ def _fused_conv_mul_leakyrelu_gelu(
             for kw in range(KW):
                 x_kh_kw = x_base + kh * stride_xh + kw * stride_xw
 
-                w_bp = tl.make_block_ptr(
+                w_desc = tl.make_tensor_descriptor(
                     base=w_ptr + kh * stride_wkh + kw * stride_wkw,
                     shape=(C_IN, C_out),
                     strides=(stride_wci, stride_wco),
-                    offsets=(0, pid_n * BLOCK_N),
                     block_shape=(BLOCK_K, BLOCK_N),
-                    order=(1, 0),
                 )
 
                 for c0 in range(0, C_IN, BLOCK_K):
@@ -435,9 +439,8 @@ def _fused_conv_mul_leakyrelu_gelu(
                         other=0.0,
                     )
 
-                    w_tile = tl.load(w_bp, boundary_check=(0, 1), padding_option="zero")
+                    w_tile = w_desc.load([c0, pid_n * BLOCK_N])
                     acc = tl.dot(x_tile, w_tile, acc, input_precision="ieee")
-                    w_bp = tl.advance(w_bp, (BLOCK_K, 0))
 
         # Fused epilogue: + bias -> * mult -> LeakyReLU -> GELU (all in registers)
         acc += conv_b[None, :]
@@ -445,21 +448,13 @@ def _fused_conv_mul_leakyrelu_gelu(
         acc = tl.where(acc >= 0, acc, acc * negative_slope)
         acc = 0.5 * acc * (1.0 + tl.math.erf(acc * 0.70710678118654752440))
 
-        # Store via block_ptr: y is contiguous (M, C_out)
-        y_bp = tl.make_block_ptr(
-            base=y_ptr,
-            shape=(M_total, C_out),
-            strides=(sy_i, sy_k),
-            offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),
-            block_shape=(BLOCK_M, BLOCK_N),
-            order=(1, 0),
-        )
-        tl.store(y_bp, acc.to(tl.float16), boundary_check=(0, 1))
+        # Store via the tensor descriptor (out-of-bounds rows/cols dropped)
+        y_desc.store([pid_m * BLOCK_M, pid_n * BLOCK_N], acc.to(tl.float16))
 
 
 # ============================================================
 # im2col approach: explicit im2col + GEMM with fused epilogue
-# Both GEMM operands use block_ptr (fully contiguous)
+# Both GEMM operands use tensor descriptors (fully contiguous)
 # ============================================================
 
 @triton.jit
@@ -553,13 +548,35 @@ def _gemm_fused_epilogue(
 ):
     """GEMM with fused epilogue: col @ w + bias * mult -> LeakyReLU -> GELU.
 
-    BOTH operands use block_ptr (fully contiguous after im2col).
+    BOTH operands use tensor descriptors (fully contiguous after im2col).
     """
     start_pid = tl.program_id(0)
 
     num_pid_m = tl.cdiv(M_chunk, BLOCK_M)
     num_pid_n = tl.cdiv(C_out, BLOCK_N)
     num_tiles = num_pid_m * num_pid_n
+
+    # Descriptors for BOTH operands and the output — fully contiguous!
+    # Created once; each tile addresses them by coordinates.
+    a_desc = tl.make_tensor_descriptor(
+        base=col_ptr,
+        shape=(M_chunk, K_TOTAL),
+        strides=(K_TOTAL, 1),
+        block_shape=(BLOCK_M, BLOCK_K),
+    )
+    b_desc = tl.make_tensor_descriptor(
+        base=w_ptr,
+        shape=(K_TOTAL, C_out),
+        strides=(C_out, 1),
+        block_shape=(BLOCK_K, BLOCK_N),
+    )
+    # y rows [y_m_offset, y_m_offset + M_chunk) belong to this chunk
+    y_desc = tl.make_tensor_descriptor(
+        base=y_ptr,
+        shape=(y_m_offset + M_chunk, C_out),
+        strides=(sy_i, sy_k),
+        block_shape=(BLOCK_M, BLOCK_N),
+    )
 
     for tile_id in range(start_pid, num_tiles, NUM_SMS):
         num_pid_in_group = GROUP_M * num_pid_n
@@ -576,30 +593,12 @@ def _gemm_fused_epilogue(
 
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
-        # Block ptrs for BOTH operands — fully contiguous!
-        a_bp = tl.make_block_ptr(
-            base=col_ptr,
-            shape=(M_chunk, K_TOTAL),
-            strides=(K_TOTAL, 1),
-            offsets=(pid_m * BLOCK_M, 0),
-            block_shape=(BLOCK_M, BLOCK_K),
-            order=(1, 0),
-        )
-        b_bp = tl.make_block_ptr(
-            base=w_ptr,
-            shape=(K_TOTAL, C_out),
-            strides=(C_out, 1),
-            offsets=(0, pid_n * BLOCK_N),
-            block_shape=(BLOCK_K, BLOCK_N),
-            order=(1, 0),
-        )
-
+        k0 = 0  # carried, not the loop variable: keeps the 2D block load on XPU
         for _ in range(0, K_TOTAL, BLOCK_K):
-            a_tile = tl.load(a_bp, boundary_check=(0, 1), padding_option="zero")
-            b_tile = tl.load(b_bp, boundary_check=(0, 1), padding_option="zero")
+            a_tile = a_desc.load([pid_m * BLOCK_M, k0])
+            b_tile = b_desc.load([k0, pid_n * BLOCK_N])
             acc = tl.dot(a_tile, b_tile, acc, input_precision="ieee")
-            a_bp = tl.advance(a_bp, (0, BLOCK_K))
-            b_bp = tl.advance(b_bp, (BLOCK_K, 0))
+            k0 += BLOCK_K
 
         # Fused epilogue
         conv_b = tl.load(conv_bias_ptr + offs_n, mask=mask_n, other=0.0)
@@ -610,15 +609,7 @@ def _gemm_fused_epilogue(
         acc = tl.where(acc >= 0, acc, acc * negative_slope)
         acc = 0.5 * acc * (1.0 + tl.math.erf(acc * 0.70710678118654752440))
 
-        y_bp = tl.make_block_ptr(
-            base=y_ptr,
-            shape=(y_m_offset + M_chunk, C_out),
-            strides=(sy_i, sy_k),
-            offsets=(y_m_offset + pid_m * BLOCK_M, pid_n * BLOCK_N),
-            block_shape=(BLOCK_M, BLOCK_N),
-            order=(1, 0),
-        )
-        tl.store(y_bp, acc.to(tl.float16), boundary_check=(0, 1))
+        y_desc.store([y_m_offset + pid_m * BLOCK_M, pid_n * BLOCK_N], acc.to(tl.float16))
 
 
 # ============================================================
@@ -764,7 +755,7 @@ def optimized_kernel_function(prep, negative_slope=0.01):
 
 
 # ============================================================
-# Spatial-tiled path: ALL block_ptr (paper Listing 4 approach)
+# Spatial-tiled path: ALL tensor descriptors (paper Listing 4 approach)
 # ============================================================
 
 def prepare_spatial_inputs(x_nchw, w_hwio, conv_bias, multiplier):
@@ -797,7 +788,7 @@ def prepare_spatial_inputs(x_nchw, w_hwio, conv_bias, multiplier):
 
 
 def spatial_kernel_function(prep, negative_slope=0.01):
-    """Spatial-tiled kernel: ALL block_ptr, zero scatter loads."""
+    """Spatial-tiled kernel: ALL tensor descriptors, zero scatter loads."""
     _fused_conv_spatial_tiled[prep['grid']](
         prep['x_nhwc'], prep['w_hwio'], prep['conv_bias'], prep['mult'], prep['y_nhwc'],
         prep['N'], prep['H'], prep['W'], prep['C_out'], prep['OH'], prep['OW'],

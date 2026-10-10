@@ -2,7 +2,7 @@
 # A: [K, M], B: [K, N], C: [M, N]
 #
 # Optimizations applied:
-# 1. Block pointers (tl.make_block_ptr) instead of manual arithmetic
+# 1. Tensor descriptors (tl.make_tensor_descriptor) instead of manual arithmetic
 # 2. Large tiles 256x256 for XPU
 # 3. 32 warps (XPU optimal)
 # 4. grf_mode='256' for large register file
@@ -95,7 +95,7 @@ def _matmul_at_kernel_optimized(
 
     A: [K, M], B: [K, N], C: [M, N]
 
-    Uses block pointers, tile swizzling, and XPU-optimal configs.
+    Uses tensor descriptors, tile swizzling, and XPU-optimal configs.
     """
     # === 1D GRID WITH GROUP_SIZE_M SWIZZLING ===
     # Better L2 cache reuse than 2D grid
@@ -112,35 +112,33 @@ def _matmul_at_kernel_optimized(
     pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
-    # === BLOCK POINTERS ===
-    # A is [K, M] - we load [BLOCK_K, BLOCK_M] tiles, then transpose for dot
-    A_block_ptr = tl.make_block_ptr(
+    # === TENSOR DESCRIPTORS ===
+    # A is [K, M] with M contiguous - describe it as laid out in memory (last
+    # stride 1), load [BLOCK_K, BLOCK_M] tiles, then transpose for dot
+    A_desc = tl.make_tensor_descriptor(
         base=A_ptr,
         shape=(K, M),
         strides=(stride_ak, stride_am),
-        offsets=(0, pid_m * BLOCK_M),
         block_shape=(BLOCK_K, BLOCK_M),
-        order=(1, 0),
     )
 
     # B is [K, N] - we load [BLOCK_K, BLOCK_N] tiles
-    B_block_ptr = tl.make_block_ptr(
+    B_desc = tl.make_tensor_descriptor(
         base=B_ptr,
         shape=(K, N),
         strides=(stride_bk, stride_bn),
-        offsets=(0, pid_n * BLOCK_N),
         block_shape=(BLOCK_K, BLOCK_N),
-        order=(1, 0),
     )
 
     # === ACCUMULATOR ===
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
     # === MAIN LOOP ===
+    off_k = 0
     for _ in range(0, K, BLOCK_K):
-        # Load with boundary checking (block pointers handle this efficiently)
-        A_tile = tl.load(A_block_ptr, boundary_check=(0, 1))  # [BLOCK_K, BLOCK_M]
-        B_tile = tl.load(B_block_ptr, boundary_check=(0, 1))  # [BLOCK_K, BLOCK_N]
+        # Descriptor loads zero-pad out-of-bounds elements (no masks needed)
+        A_tile = A_desc.load([off_k, pid_m * BLOCK_M])  # [BLOCK_K, BLOCK_M]
+        B_tile = B_desc.load([off_k, pid_n * BLOCK_N])  # [BLOCK_K, BLOCK_N]
 
         # Transpose A: [BLOCK_K, BLOCK_M] -> [BLOCK_M, BLOCK_K]
         A_tile_T = A_tile.T
@@ -149,20 +147,18 @@ def _matmul_at_kernel_optimized(
         # Use fp16 for dot, accumulate in fp32
         acc = tl.dot(A_tile_T.to(tl.float16), B_tile.to(tl.float16), acc=acc)
 
-        # Advance block pointers
-        A_block_ptr = tl.advance(A_block_ptr, (BLOCK_K, 0))
-        B_block_ptr = tl.advance(B_block_ptr, (BLOCK_K, 0))
+        # Advance the K coordinate
+        off_k += BLOCK_K
 
     # === STORE RESULT ===
-    C_block_ptr = tl.make_block_ptr(
+    # Out-of-bounds elements are dropped; acc is cast to C's dtype on store
+    C_desc = tl.make_tensor_descriptor(
         base=C_ptr,
         shape=(M, N),
         strides=(stride_cm, stride_cn),
-        offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),
         block_shape=(BLOCK_M, BLOCK_N),
-        order=(1, 0),
     )
-    tl.store(C_block_ptr, acc, boundary_check=(0, 1))
+    C_desc.store([pid_m * BLOCK_M, pid_n * BLOCK_N], acc)
 
 
 class Model(nn.Module):
