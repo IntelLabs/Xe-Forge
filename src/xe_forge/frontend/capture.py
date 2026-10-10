@@ -21,7 +21,7 @@ from pathlib import Path
 
 from xe_forge.frontend import adapters, canonical, ir
 from xe_forge.frontend.naming import name_op
-from xe_forge.frontend.torch_trace import parse_trace
+from xe_forge.frontend.torch_trace import parse_traces
 
 # Environment worth recording for reproducibility. Anything that could carry a credential
 # is left out by name, whatever its prefix.
@@ -46,7 +46,7 @@ def build(raw_dir: Path, out: Path) -> ir.CaptureRun:
     if parse is not None:
         summary = parse(raw_dir)
     elif traces:
-        summary = parse_trace(traces[0])
+        summary = parse_traces(traces)
     else:
         raise SystemExit(f"no trace in {raw_dir}")
 
@@ -54,13 +54,15 @@ def build(raw_dir: Path, out: Path) -> ir.CaptureRun:
     run["attributed_device_us"] = round(summary.attributed_us, 1)
     run["attributed_pct"] = round(summary.attributed_pct, 2)
     run["kernel_invocations"] = summary.launches
-    run["raw"] = [os.path.relpath(p, out.parent) for p in traces]
+    run["raw"] = [
+        os.path.relpath(p, out.parent) for p in sorted(raw_dir.iterdir()) if p.name != "run.json"
+    ]
     _annotate_schemas(summary.ops, raw_dir / "schemas.json")
     capture = ir.CaptureRun(run=run, ops=summary.ops)
     framework = run["framework"]
-    capture.workloads = canonical.workloads(
-        capture.ops, summary.total_us, lambda op: name_op(op, framework)
-    )
+    # An adapter whose ops are not torch ops names them itself.
+    namer = getattr(adapter, "name_op", None) or (lambda op: name_op(op, framework))
+    capture.workloads = canonical.workloads(capture.ops, summary.total_us, namer)
     ir.dump(capture, out)
     return capture
 

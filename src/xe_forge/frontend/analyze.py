@@ -16,6 +16,7 @@ Gates, in order, each one line in gates.log::
     GATE <workload_id> <gate> PASS|REJECT|UNKNOWN <evidence>
 
 ``routable``   naming found a kernel in a repository Xe-Forge can edit
+``buildable``  its DSL is one Xe-Forge writes (``models.DSL``)
 ``shaped``     the trace recorded the call's argument shapes (a spec needs dims)
 ``bounded``    measured below its roofline bound (unknown until calibrated)
 ``worth``      G >= --min-gain
@@ -31,6 +32,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 
 from xe_forge.frontend.ir import CaptureRun, Workload
+from xe_forge.models import DSL
 
 _ROUTE_REASONS = {
     "library": "library primitive: change the call, not the kernel",
@@ -109,6 +111,10 @@ def _decide(w: Workload, min_gain: float) -> Decision:
     else:
         d.gates.append(("routable", "REJECT", f"{n.route}: {_ROUTE_REASONS[n.route]} ({n.via})"))
         d.reason = _ROUTE_REASONS[n.route]
+        return d
+    if n.dsl not in {x.value for x in DSL}:
+        d.gates.append(("buildable", "REJECT", f"dsl {n.dsl!r} not in {[x.value for x in DSL]}"))
+        d.reason = f"Xe-Forge has no {n.dsl} path"
         return d
     if not w.dims:
         d.gates.append(("shaped", "REJECT", "no argument shapes recorded"))

@@ -106,10 +106,16 @@ def _named_dims(op: CapturedOp) -> dict[str, int]:
                 dims[f"{label}_D{j}"] = size
         elif i < len(op.scalars) and _int(op.scalars[i]) is not None:
             dims[label] = _int(op.scalars[i])
+    # An adapter whose trace has no per-call shapes (OpenVINO) states the call's size.
+    for key in ("tokens", "context"):
+        if key in op.framework_meta:
+            dims[key.upper()] = op.framework_meta[key]
     return dims
 
 
 def _token(op: CapturedOp, dims: dict[str, int]) -> tuple[str, int] | None:
+    if "TOKENS" in dims:
+        return "TOKENS", dims["TOKENS"]
     if "M" in dims and op.framework_op.startswith("aten::"):
         return "M", dims["M"]
     first = next((a for a in op.args if a is not None and a.shape), None)
@@ -170,17 +176,35 @@ def workloads(ops: list[CapturedOp], total_us: float, naming_fn=None) -> list[Wo
     for members in groups.values():
         tokens = {m[2][1] for m in members if m[2]}
         var: set[str] = set()
-        if len(tokens) > 1:
+        follows: set[str] = set()
+        if len(tokens) > 1 and all(m[2] for m in members):
             names = members[0][1].keys()
-            var = {n for n in names if all(m[2] and m[1][n] == m[2][1] for m in members)}
+            var = {n for n in names if all(m[1][n] == m[2][1] for m in members)}
+            # A dim that takes one value per token count, and changes with it, is a size
+            # the context dictates (a page table one page wider once decode passes the
+            # prompt), not a different workload. Two shapes at one token count are.
+            for n in names:
+                if n in var:
+                    continue
+                per_token: dict[int, set] = defaultdict(set)
+                for m in members:
+                    per_token[m[2][1]].add(m[1][n])
+                if (
+                    all(len(v) == 1 for v in per_token.values())
+                    and len(set().union(*per_token.values())) > 1
+                ):
+                    follows.add(n)
         sub: dict[str, list] = defaultdict(list)
         for m in members:
-            const = {k: v for k, v in m[1].items() if k not in var and k not in m[4]}
+            const = {
+                k: v for k, v in m[1].items() if k not in var and k not in follows and k not in m[4]
+            }
             sub[_digest([m[3], const])].append(m)
         for rows_ in sub.values():
             # Integer arguments that still vary once the tensor shapes agree are runtime
             # sizes (a context length growing every decode step), not distinct workloads.
             moving = {n for n in rows_[0][4] if len({r[1][n] for r in rows_}) > 1} - var
+            moving |= {n for n in follows if len({r[1][n] for r in rows_}) > 1}
             out.append(_workload(rows_, var | moving, moving, total_us, naming_fn))
     out.sort(key=lambda w: -w.device_us)
     return out
