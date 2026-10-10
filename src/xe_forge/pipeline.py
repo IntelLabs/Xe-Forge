@@ -1,11 +1,8 @@
 import logging
-import os
 from datetime import datetime
 from pathlib import Path
 
 import dspy
-import httpx
-import litellm
 
 from xe_forge.agents import AnalyzerAgent, Optimizer, OptimizerAgent, OptimizerReActAgent
 from xe_forge.agents.utils import extract_gemm_dims
@@ -168,23 +165,10 @@ class XeForgePipeline:
         Path(self.config.logging.kernel_dir).mkdir(parents=True, exist_ok=True)
 
     def _setup_llm(self):
-        if self.config.llm.api_base:
-            os.environ["OPENAI_API_BASE"] = self.config.llm.api_base
-        if self.config.llm.api_key:
-            os.environ["OPENAI_API_KEY"] = self.config.llm.api_key
+        from xe_forge.llm_setup import configure_dspy
+
         try:
-            litellm.client_session = httpx.Client(verify=False)
-            bedrock = self.config.llm.model.startswith("bedrock/")
-            lm = dspy.LM(
-                model=self.config.llm.model,
-                api_base=None if bedrock else self.config.llm.api_base,
-                model_type="chat" if bedrock else "responses",
-                api_key=None if bedrock else (self.config.llm.api_key or ""),
-                temperature=self.config.llm.temperature,
-                max_tokens=self.config.llm.max_tokens,
-                cache=False,
-            )
-            dspy.configure(lm=lm, warn_on_type_mismatch=False)
+            configure_dspy(self.config.llm)
         except Exception as e:
             raise RuntimeError(f"Failed to initialize LLM: {e}") from e
 

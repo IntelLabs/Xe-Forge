@@ -650,7 +650,7 @@ When multiple tolerance sources exist, the priority order is:
 
 All settings can be controlled via environment variables or a `.env` file.
 
-> **LLM provider**: Xe Forge uses [litellm](https://github.com/BerriAI/litellm) under the hood, so any provider supported by litellm works — set `LLM_MODEL` with the appropriate prefix (`openai/...`, `anthropic/...`, `azure/...`, `bedrock/...`, etc.) and point `OPENAI_API_BASE` / `OPENAI_API_KEY` at the matching endpoint and credentials.
+> **LLM provider**: Xe Forge uses [litellm](https://github.com/BerriAI/litellm) under the hood, so any provider supported by litellm works — set `LLM_MODEL` with the appropriate prefix (`openai/...`, `anthropic/...`, `azure/...`, etc.) and point `OPENAI_API_BASE` / `OPENAI_API_KEY` at the matching endpoint and credentials. For AWS Bedrock (`bedrock/...`) leave `OPENAI_API_BASE` / `OPENAI_API_KEY` unset and instead set `AWS_BEARER_TOKEN_BEDROCK` (or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) and `AWS_REGION_NAME` (default `us-east-1`); see `.env.example`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
