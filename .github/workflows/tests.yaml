@@ -1,0 +1,29 @@
+name: Tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  llm-setup:
+    name: LLM setup (CPU, offline)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Only what tests/test_llm_setup.py imports; no torch, no GPU, no credentials.
+      - name: Install dependencies
+        run: pip install "dspy>=3.4.0" "litellm>=1.0.0" "pydantic>=2.0.0" "python-dotenv>=1.0.0" "pytest>=7.0.0"
+
+      - name: Run tests
+        run: PYTHONPATH=src pytest tests/test_llm_setup.py -v
