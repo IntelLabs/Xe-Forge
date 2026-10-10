@@ -251,3 +251,36 @@ def parse_events(events: list[dict]) -> TraceSummary:
 
 def parse_trace(path: str | Path) -> TraceSummary:
     return parse_events(load_events(path))
+
+
+def parse_traces(paths: list[Path]) -> TraceSummary:
+    """Several traces (one per profiled phase, say) as one summary. Each is parsed on its
+    own -- ``External id`` restarts with every profiler session -- and rows that agree on
+    (op, signature, call site) are summed."""
+    merged: dict[tuple, CapturedOp] = {}
+    total = attributed = 0.0
+    launches = 0
+    kernels: dict[str, float] = defaultdict(float)
+    for path in paths:
+        s = parse_trace(path)
+        total += s.total_us
+        attributed += s.attributed_us
+        launches += s.launches
+        for k, v in s.kernels.items():
+            kernels[k] += v
+        for op in s.ops:
+            key = (op.framework_op, _signature(op.args, op.scalars), op.call_site)
+            row = merged.get(key)
+            if row is None:
+                merged[key] = op
+                continue
+            row.calls += op.calls
+            row.device_us = round(row.device_us + op.device_us, 3)
+            for k, v in op.kernel_symbols.items():
+                row.kernel_symbols[k] = round(row.kernel_symbols.get(k, 0.0) + v, 3)
+    ops = sorted(merged.values(), key=lambda r: -r.device_us)
+    for i, row in enumerate(ops):
+        row.id = f"op-{i:04d}"
+    return TraceSummary(
+        ops=ops, total_us=total, attributed_us=attributed, kernels=dict(kernels), launches=launches
+    )

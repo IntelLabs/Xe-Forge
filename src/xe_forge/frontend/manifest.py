@@ -15,6 +15,7 @@ time; ``xe-forge optimize`` runs the first unless told to run them all.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import yaml
@@ -106,8 +107,9 @@ def emit(
 
     out_dir = out_dir.resolve()
     specs, records = out_dir / "specs", out_dir / "records"
-    specs.mkdir(parents=True, exist_ok=True)
-    records.mkdir(parents=True, exist_ok=True)
+    for d in (specs, records):  # generated: a re-analysis must not leave stale entries
+        shutil.rmtree(d, ignore_errors=True)
+        d.mkdir(parents=True)
     run = capture.run
     model = (run.get("model") or {}).get("name", "?")
     used: set[str] = set()

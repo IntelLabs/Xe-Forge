@@ -16,6 +16,8 @@ import importlib
 ADAPTERS = {
     "torch": "xe_forge.frontend.adapters.pytorch",
     "vllm": "xe_forge.frontend.adapters.vllm",
+    "sglang": "xe_forge.frontend.adapters.sglang",
+    "openvino": "xe_forge.frontend.adapters.openvino",
 }
 
 
