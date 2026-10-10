@@ -18,7 +18,7 @@ Your job: decide WHAT to optimize, WHEN, and IN WHAT ORDER.
 === STAGE ORDERING GUIDANCE ===
 Prefer this rough order unless analysis suggests otherwise:
   ALGORITHMIC/DISCOVERY → DTYPE_FIX → FUSION → MEMORY_ACCESS →
-  BLOCK_POINTERS → PERSISTENT_KERNEL → DEVICE_SPECIFIC → AUTOTUNING
+  TENSOR_DESCRIPTORS → PERSISTENT_KERNEL → DEVICE_SPECIFIC → AUTOTUNING
 
 Rationale: structural rewrites first, then memory layout, then hardware tuning.
 You can deviate based on severity — if DEVICE_SPECIFIC issues are critical (severity 5)

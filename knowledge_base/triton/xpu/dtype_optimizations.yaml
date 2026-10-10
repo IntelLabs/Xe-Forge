@@ -70,18 +70,18 @@ patterns:
     pattern_before: |
       # All fp32 — wastes bandwidth
       acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-      a = tl.load(a_bp).to(tl.float32)
-      b = tl.load(b_bp).to(tl.float32)
+      a = a_desc.load([off_m, off_k]).to(tl.float32)
+      b = b_desc.load([off_k, off_n]).to(tl.float32)
       acc = tl.dot(a, b, acc)
-      tl.store(out_bp, acc)
+      out_desc.store([off_m, off_n], acc)
     pattern_after: |
       # fp16 loads, fp32 accumulate, fp16 store
       acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-      a = tl.load(a_bp)          # fp16 in memory
-      b = tl.load(b_bp)          # fp16 in memory
-      acc = tl.dot(a, b, acc)    # fp16 dot -> fp32 acc
+      a = a_desc.load([off_m, off_k])   # fp16 in memory
+      b = b_desc.load([off_k, off_n])   # fp16 in memory
+      acc = tl.dot(a, b, acc)           # fp16 dot -> fp32 acc
       # ... epilogue in fp32 ...
-      tl.store(out_bp, acc.to(tl.float16), boundary_check=(0, 1))
+      out_desc.store([off_m, off_n], acc.to(tl.float16))
     expected_speedup: "1.5-2x bandwidth, preserved accuracy"
     applies_to:
       - gemm

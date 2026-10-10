@@ -39,7 +39,7 @@ constraints:
   severity: critical
 - description: 'If you pass a packed transpose [K, N] into the kernel, you MUST use
 
-    weight_t.stride() (stride_wtk, stride_wtn) when creating block pointers.
+    weight_t.stride() (stride_wtk, stride_wtn) when creating its tensor descriptor.
 
     Do NOT reuse the original [N, K] tensor strides.
 
@@ -47,69 +47,110 @@ constraints:
   id: xpu_packed_weight_requires_stride_pass_through
   name: When using packed W^T, pass its strides (do not reuse original W strides)
   severity: critical
-- description: 'tl.load(block_ptr) uses boundary_check=(dim0, dim1) where values are
-    dimension indices (0,1),
+- description: |
+    tl.make_block_ptr and tl.advance are deprecated in Triton ("Use TensorDescriptor or
+    tl.make_tensor_descriptor instead"). Write tiled loads and stores with tensor
+    descriptors, and convert any block pointer found in an input kernel.
 
-    not booleans.
+    The two APIs differ in three ways that matter when converting:
 
+    1. No advance. A descriptor is created once and loaded at explicit coordinates;
+       the loop carries an offset instead of a moving pointer.
+    2. No boundary_check. Descriptor loads zero-fill out-of-bounds elements and stores
+       drop them, so `desc.load(..., boundary_check=...)` is an error, and DIVISIBLE /
+       EVEN_K branches that existed only to skip boundary_check collapse into one.
+    3. The last stride must be 1 (Triton rejects anything else at compile time). A
+       block pointer could view W[N, K] as (K, N) by swapping strides; a descriptor
+       cannot. Describe the memory as it is laid out and transpose the loaded tile.
 
-    WRONG:
-
+    BEFORE (deprecated):
     ```python
-
-    tl.load(ptr, boundary_check=(True, True))
-
+    x_bp = tl.make_block_ptr(base=x_ptr, shape=(M, K), strides=(stride_xm, stride_xk),
+                             offsets=(pid_m * BM, 0), block_shape=(BM, BK), order=(1, 0))
+    w_bp = tl.make_block_ptr(base=w_ptr, shape=(K, N), strides=(stride_wk, stride_wn),
+                             offsets=(0, pid_n * BN), block_shape=(BK, BN), order=(0, 1))
+    for _ in range(0, K, BK):
+        x = tl.load(x_bp, boundary_check=(0, 1))
+        w = tl.load(w_bp, boundary_check=(0, 1))
+        acc += tl.dot(x, w)
+        x_bp = tl.advance(x_bp, (0, BK))
+        w_bp = tl.advance(w_bp, (BK, 0))
     ```
 
-
-    CORRECT:
-
+    AFTER:
     ```python
+    x_desc = tl.make_tensor_descriptor(base=x_ptr, shape=(M, K), strides=(stride_xm, stride_xk),
+                                       block_shape=(BM, BK))
+    # W is [N, K] with K contiguous: describe it as [N, K], load [BN, BK], transpose.
+    w_desc = tl.make_tensor_descriptor(base=w_ptr, shape=(N, K), strides=(stride_wn, stride_wk),
+                                       block_shape=(BN, BK))
+    off_k = 0
+    for _ in range(0, K, BK):
+        x = x_desc.load([pid_m * BM, off_k])
+        w = w_desc.load([pid_n * BN, off_k]).T
+        acc += tl.dot(x, w)
+        off_k += BK
+    ```
+  id: deprecated_block_ptr_use_tensor_descriptors
+  name: tl.make_block_ptr / tl.advance are deprecated - use tensor descriptors
+  severity: critical
+- description: |
+    Index a descriptor's contiguous (last) dimension with a loop-carried offset, not with
+    the `for` loop's variable. Before it emits a 2D block load, the Intel backend has to
+    prove that index aligned; it does so for a constant or a value carried through the
+    loop, and on the Triton this was checked against it does not for the induction
+    variable. The load then falls back to a generic load staged through shared local
+    memory before the dot, and nothing in the output says so: results stay correct, only
+    the time changes. The row index (e.g. B's `k` in `b_desc.load([k, n])`) is not
+    affected.
 
-    tl.load(ptr, boundary_check=(0, 1))
-
+    SLOW (A misses the 2D block load):
+    ```python
+    for k in range(0, K, BK):
+        a = a_desc.load([m0, k])
+        b = b_desc.load([k, n0])
+        acc += tl.dot(a, b)
     ```
 
-    '
-  id: boundary_check_tuple
-  name: boundary_check must be tuple of ints, not bools
+    FAST (the form Intel's own descriptor GEMM benchmarks use):
+    ```python
+    off_k = 0
+    for _ in range(0, K, BK):
+        a = a_desc.load([m0, off_k])
+        b = b_desc.load([off_k, n0])
+        acc += tl.dot(a, b)
+        off_k += BK
+    ```
+
+    To check a compiled kernel: every `tt.descriptor_load` feeding a dot in its TTGIR
+    (`kernel.asm["ttgir"]`) should carry `ttig.block_io`, and the loop should contain no
+    `ttg.local_alloc`. Re-check after a Triton upgrade; the alignment analysis is the
+    backend's and can change.
+  id: descriptor_k_offset_not_loop_variable
+  name: Carry the K offset - a loop-variable index in the contiguous dim loses the 2D block load
   severity: critical
-- description: "Block pointers and tensor descriptors are different APIs. Do NOT mix\n\
-    them for the same load/store operation.\n\nOPTION 1: BLOCK POINTERS\n```python\n\
-    ptr = tl.make_block_ptr(...)\nx = tl.load(ptr, boundary_check=(0, 1))\nptr = tl.advance(ptr,\
-    \ (0, BLOCK_K))\n```\n\nOPTION 2: Tensor descriptor style (descriptor.load([...])\
-    \ coordinates list)\n```python\ndesc = tl.make_tensor_descriptor(...)\nx = desc.load([row_offset,\
-    \ col_offset])  # NO boundary_check arg here\n```\n\nCRITICAL ERROR TO AVOID:\n\
-    ```python\n# WRONG - mixing descriptor with block pointer syntax\ndesc = tl.make_tensor_descriptor(...)\n\
-    data = desc.load(..., boundary_check=(0, 1))  # ERROR! descriptors don't have\
-    \ boundary_check\n```\n\nEXCEPTION — atomic operations: It IS valid to use descriptors\
-    \ for\nloads/stores AND manual pointer arithmetic for atomic operations in\nthe\
-    \ SAME kernel, because descriptors do not support atomics. This is\na different-capability\
-    \ path, not API mixing.\n\n```python\n# Full tile → descriptor store (fast path)\n\
-    if is_full_tile:\n    c_desc.store([pid_m * BM, pid_n * BN], acc)\n# Partial tile\
-    \ → manual pointers + atomic_add (required fallback)\nelse:\n    rm = pid_m *\
-    \ BM + tl.arange(0, BM)\n    rn = pid_n * BN + tl.arange(0, BN)\n    c_ptr_ =\
-    \ c_ptr + rm[:, None] * stride_cm + rn[None, :] * stride_cn\n    tl.atomic_add(c_ptr_,\
-    \ acc, mask=mask, sem='relaxed')\n```\n"
-  id: block_ptr_vs_tma
-  name: Block pointers vs tensor descriptors - DIFFERENT APIs
-  severity: critical
-- description: 'When you need tl.atomic_add (or other atomics), you MUST fall back
-    to
+- description: |
+    Tensor descriptors have block atomics: desc.atomic_add / atomic_min / atomic_max /
+    atomic_and / atomic_or / atomic_xor take the same coordinates as desc.store and,
+    like it, drop out-of-bounds elements. Split-K and Stream-K partial tiles can
+    accumulate through the same descriptor they would store through:
 
-    manual pointer arithmetic. Descriptors only support .load() and .store().
+    ```python
+    c_desc = tl.make_tensor_descriptor(base=c_ptr, shape=(M, N), strides=(stride_cm, stride_cn),
+                                       block_shape=(BM, BN))
+    if is_full_tile:
+        c_desc.store([pid_m * BM, pid_n * BN], acc)
+    else:
+        c_desc.atomic_add([pid_m * BM, pid_n * BN], acc)
+    ```
 
-
-    This is a legitimate reason to have both descriptor loads AND manual
-
-    pointer stores in the same kernel — it is not a violation of the
-
-    "don''t mix APIs" rule (see block_ptr_vs_tma exception).
-
-    '
-  id: descriptor_no_atomic_support
-  name: Tensor descriptors do NOT support atomic operations
-  severity: critical
+    Manual pointers with tl.atomic_add(ptrs, acc, mask=mask, sem='relaxed') remain valid
+    when per-element masks or a memory-ordering argument are needed. The
+    descriptor atomics' supported dtypes and their cost are backend properties: check
+    the result against a reference and time both forms on the target part.
+  id: descriptor_atomic_support
+  name: Tensor descriptors support block atomics (desc.atomic_add, ...)
+  severity: medium
 - description: 'Triton uses tl.bfloat16 and tl.float16 (not ''bf16'').
 
     tl.dot supports float16 / bfloat16 / float32 inputs.
@@ -152,20 +193,25 @@ patterns:
   - gemm
   - conv
   - all_memory_bound
-  description: Replace manual pointer arithmetic with block pointers
+  description: Replace manual pointer arithmetic (and deprecated block pointers) with tensor descriptors
   examples:
-  - after: 'a_bp = tl.advance(a_bp, (0, BLOCK_K))
+  - after: 'off_k += BLOCK_K  # the descriptor stays put; loads take the new offset
 
       '
     before: 'a_ptrs += BLOCK_K * stride_ak
 
       '
   expected_speedup: workload-dependent (often good for indexing-heavy kernels)
-  id: xpu_block_pointers
-  name: Block Pointers
-  pattern_after: "a_bp = tl.make_block_ptr(\n  base=a_ptr,\n  shape=(M, K),\n  strides=(stride_am,\
-    \ stride_ak),\n  offsets=(pid_m * BLOCK_M, 0),\n  block_shape=(BLOCK_M, BLOCK_K),\n\
-    \  order=(1, 0),\n)\na = tl.load(a_bp, boundary_check=(0, 1))\n"
+  id: xpu_tensor_descriptors
+  name: Tensor Descriptors
+  pattern_after: |
+    a_desc = tl.make_tensor_descriptor(
+      base=a_ptr,
+      shape=(M, K),
+      strides=(stride_am, stride_ak),   # last stride must be 1
+      block_shape=(BLOCK_M, BLOCK_K),
+    )
+    a = a_desc.load([pid_m * BLOCK_M, off_k])   # out-of-bounds elements are zero-filled
   pattern_before: 'offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
 
     offs_k = tl.arange(0, BLOCK_K)
@@ -175,13 +221,13 @@ patterns:
     a = tl.load(a_ptrs, mask=(offs_m[:,None] < M) & (offs_k[None,:] < K), other=0.0)
 
     '
-  rationale: 'Block pointers can improve codegen for address calculation and boundary
-    handling.
-
-    Use them when the kernel is memory/indexing heavy.
-
-    '
-  stage: block_pointers
+  rationale: |
+    Descriptors carry the tensor's shape and strides, so address calculation and
+    boundary handling come from the compiler rather than from mask arithmetic. On a
+    part that reports has_subgroup_2d_block_io, a descriptor load feeding tl.dot is
+    lowered to a 2D block load. tl.make_block_ptr, which used to serve this purpose,
+    is deprecated.
+  stage: tensor_descriptors
 - applies_to:
   - gemm
   - compute_bound
@@ -309,16 +355,16 @@ patterns:
   notes: 'Use tl.bfloat16 / tl.float16 (not ''bf16'').
 
     '
-  pattern_after: 'x = tl.load(x_bp).to(tl.bfloat16)   # or tl.float16
+  pattern_after: 'x = x_desc.load([off_m, off_k]).to(tl.bfloat16)   # or tl.float16
 
-    w = tl.load(w_bp).to(tl.bfloat16)   # or tl.float16
+    w = w_desc.load([off_k, off_n]).to(tl.bfloat16)   # or tl.float16
 
     acc += tl.dot(x, w)                 # acc is tl.float32
 
     '
-  pattern_before: 'x = tl.load(x_bp).to(tl.float32)
+  pattern_before: 'x = x_desc.load([off_m, off_k]).to(tl.float32)
 
-    w = tl.load(w_bp).to(tl.float32)
+    w = w_desc.load([off_k, off_n]).to(tl.float32)
 
     acc += tl.dot(x, w)
 
@@ -334,39 +380,34 @@ patterns:
   - gemm
   - stream_k
   - large_matrices
-  description: Descriptor API is usable on XPU; do not avoid it based on TMA concerns
+  description: Tensor descriptors are the tiled-access API on XPU; do not avoid them based on TMA concerns
   expected_speedup: N/A (correctness/portability guidance, not a perf pattern)
   id: xpu_tensor_descriptor_note
   name: Tensor descriptors work on XPU (but no TMA hardware guarantee)
-  rationale: 'Triton docs state tensor descriptors are "TMA-backed on NVIDIA GPUs
-    with TMA
+  rationale: |
+    Triton docs state tensor descriptors are "TMA-backed on NVIDIA GPUs with TMA
+    support." This does NOT mean they are unavailable on XPU: the Intel backend lowers
+    them to 2D block IO where the part supports it, and Intel's own GEMM and attention
+    benchmarks use them (they were migrated off block pointers).
 
-    support." This does NOT mean they are unavailable on XPU — the API works and
+    tl.make_block_ptr is deprecated, so descriptors are the API for every tiled access
+    on XPU: sequential K-loops (carry an offset), variable-offset access (Stream K,
+    dynamic coordinates), batched operands (offset the base pointer).
 
-    is actively used in production XPU benchmarks (e.g., Stream K GEMM).
+    Descriptors are correct for any base alignment and any leading stride, but the fast
+    2D block path assumes a 16-byte-aligned base and leading strides that are multiples
+    of 16 bytes. A row length that breaks that (e.g. an odd fp16 K) or a K tail that is
+    not a multiple of BLOCK_K can cost far more throughput than the arithmetic suggests:
+    time the kernel at the real shape rather than at a rounded one.
 
-
-    Both block pointers and tensor descriptors are valid on XPU. Choose based on
-
-    code clarity and access pattern:
-
-    - Block pointers: good for sequential advance (standard GEMM K-loop with tl.advance)
-
-    - Tensor descriptors: good for variable-offset access (Stream K, dynamic coordinates)
-
-
-    Do NOT assume NVIDIA-style TMA hardware acceleration on XPU, but do not
-
-    avoid the descriptor API either.
-
-    '
+    Do NOT assume NVIDIA-style TMA hardware acceleration on XPU.
   stage: memory_access
 - applies_to:
   - gemm
   - stream_k
   - variable_offset_access
   description: Use descriptors for tiled loads with variable K offsets
-  expected_speedup: comparable to block pointers; simpler for variable-offset access
+  expected_speedup: N/A (this is the form tiled GEMM loads take; see xpu_tensor_descriptors)
   id: xpu_descriptor_gemm_pattern
   name: Tensor descriptor GEMM pattern (coordinate-based tile loads)
   notes: "For batched variants, add the batch offset to the descriptor's base pointer\n\
@@ -388,11 +429,11 @@ patterns:
     \ += BLOCK_SIZE_K\n"
   rationale: 'Tensor descriptors provide a clean API for tiled loads: create once,
 
-    load by coordinate. No tl.advance needed — just update the offset
+    load by coordinate, carrying the offset in a loop variable. The same form
 
-    variable. This can be simpler than block pointers when the K offset
+    handles a K offset that starts anywhere (e.g., Stream K partial tiles starting
 
-    varies (e.g., Stream K partial tiles starting at arbitrary K positions).
+    at arbitrary K positions).
 
     '
   stage: memory_access
@@ -430,7 +471,7 @@ patterns:
   - attention_linear
   description: Cache a packed transpose of weights on XPU and pass [K, N] contiguous
     into the kernel
-  expected_speedup: often significant for GEMM-heavy kernels; workload-dependent
+  expected_speedup: workload-dependent; measure against the transposed-load form
   id: xpu_pack_weight_transpose_once
   name: Pack W^T once (contiguous [K, N]) for tl.dot fast path
   notes: '- This is "layout-for-speed" (XPU optimization), not memory optimization.
@@ -443,29 +484,38 @@ patterns:
     - Consider returning XPU tensor to avoid CPU transfer overhead in benchmarks.
 
     '
-  pattern_after: "# Pack once on XPU (inference-friendly; rebuild if weights change)\n\
-    # Store packed transpose as [K, N] fp16 contiguous.\nw16 = weight.to(device=\"\
-    xpu\", dtype=torch.float16)\nweight_t = w16.t().contiguous()      # [K, N] contiguous\n\
-    \n# Kernel reads packed W^T directly with natural contiguous strides:\nwt_bp =\
-    \ tl.make_block_ptr(\n  base=wt_ptr,\n  shape=(K, N),\n  strides=(stride_wtk,\
-    \ stride_wtn),  # from weight_t.stride()\n  offsets=(0, n_base),\n  block_shape=(BLOCK_K,\
-    \ BLOCK_N),\n  order=(1, 0),\n)\nwt_tile = tl.load(wt_bp, boundary_check=(0, 1))\n"
-  pattern_before: "# Weight stored as [N, K], passed directly\nw = weight.to(device=\"\
-    xpu\", dtype=torch.float16).contiguous()\n\n# Kernel \"views\" W as (K, N) by\
-    \ swapping strides:\nw_bp = tl.make_block_ptr(\n  base=w_ptr,\n  shape=(K, N),\n\
-    \  strides=(stride_wk, stride_wm),   # swapped\n  offsets=(0, n_base),\n  block_shape=(BLOCK_K,\
-    \ BLOCK_N),\n  order=(1, 0),\n)\nw_tile = tl.load(w_bp, boundary_check=(0, 1))\n"
-  rationale: 'PyTorch/XPU GEMM paths frequently use packed/blocked layouts internally.
+  pattern_after: |
+    # Pack once on XPU (inference-friendly; rebuild if weights change)
+    # Store packed transpose as [K, N] fp16 contiguous.
+    w16 = weight.to(device="xpu", dtype=torch.float16)
+    weight_t = w16.t().contiguous()      # [K, N] contiguous
 
-    A Triton kernel that reads W with swapped strides (pretending W is (K,N))
+    # Kernel reads packed W^T directly with natural contiguous strides:
+    wt_desc = tl.make_tensor_descriptor(
+      base=wt_ptr,
+      shape=(K, N),
+      strides=(stride_wtk, stride_wtn),  # from weight_t.stride()
+      block_shape=(BLOCK_K, BLOCK_N),
+    )
+    wt_tile = wt_desc.load([off_k, n_base])
+  pattern_before: |
+    # Weight stored as [N, K], passed directly
+    w = weight.to(device="xpu", dtype=torch.float16).contiguous()
 
-    may still get suboptimal memory access and may miss the fastest matmul path.
-
-    Packing W^T once makes the physical memory layout match the kernel''s
-
-    access order for tl.dot, improving locality and throughput.
-
-    '
+    # Kernel loads [BLOCK_N, BLOCK_K] tiles of W and transposes each one:
+    w_desc = tl.make_tensor_descriptor(
+      base=w_ptr,
+      shape=(N, K),
+      strides=(stride_wn, stride_wk),
+      block_shape=(BLOCK_N, BLOCK_K),
+    )
+    w_tile = w_desc.load([n_base, off_k]).T
+  rationale: |
+    PyTorch/XPU GEMM paths frequently use packed/blocked layouts internally. A kernel
+    that loads W as [N, K] tiles and transposes them relies on a transposed 2D block
+    load; packing W^T once makes the physical layout match the dot's [K, N] operand so
+    the load needs no transpose. Which form is faster depends on the dtype and the part,
+    so keep the packed form only where it measures faster.
   stage: xpu_specific
 - applies_to:
   - gemm
@@ -584,20 +634,25 @@ patterns:
 - applies_to:
   - gemm
   - fused_gemm_epilogue
-  description: Pass packed transpose pointer and its strides into tl.make_block_ptr
+  description: Pass the packed transpose pointer and its own strides into tl.make_tensor_descriptor
   expected_speedup: enables fast-path memory access for RHS
   id: xpu_packed_transpose_kernel_signature
   name: Kernel signatures should accept packed transpose as [K, N] with its own strides
-  pattern_after: "wt_bp = tl.make_block_ptr(\n  base=WT_ptr,\n  shape=(K, N),\n  strides=(stride_wtk,\
-    \ stride_wtn),  # from WT.stride()\n  offsets=(k_start, n_base),\n  block_shape=(BLOCK_K,\
-    \ BLOCK_N),\n  order=(1, 0),\n)\n"
+  pattern_after: |
+    wt_desc = tl.make_tensor_descriptor(
+      base=WT_ptr,
+      shape=(K, N),
+      strides=(stride_wtk, stride_wtn),  # from WT.stride()
+      block_shape=(BLOCK_K, BLOCK_N),
+    )
+    wt_tile = wt_desc.load([k_start, n_base])
   rationale: 'Using packed transposes only helps if the kernel loads them with the
     correct
 
     stride metadata (from the packed tensor), not reused from the original.
 
     '
-  stage: block_pointers
+  stage: tensor_descriptors
 - description: "On Intel XPU, using fp32 `tl.exp()` in the sigmoid epilogue can be\
     \ a throughput bottleneck.\nPrefer an exp2-based formulation:\n  exp(x) = exp2(x\
     \ / ln(2))\nso:\n  sigmoid(x) = 1 / (1 + exp(-x))\n             = 1 / (1 + exp2((-x)\
@@ -681,8 +736,8 @@ patterns:
 
     - All swizzle/autotune patterns apply unchanged within each batch
 
-    - Block pointer / descriptor variants work identically — just add batch offset
-    to base pointer
+    - Tensor-descriptor variants work identically — add the batch offset to the
+    descriptor''s base pointer
 
     - For attention: heads dimension often maps to the same batch axis
 
@@ -1194,23 +1249,27 @@ patterns:
   pattern_before: 'triton.Config({"BLOCK_M": 256, "grf_mode": "256"}, num_warps=32)  #
     WRONG'
   stage: xpu_specific
-- description: 'When M, N, K are divisible by their respective BLOCK sizes, boundary_check
-    can be
-
-    omitted from tl.load/tl.store. Encoding this as autotuned constexpr flags
-
-    allows the compiler to eliminate the guard for the common case while retaining
-
-    correctness for arbitrary shapes.
-
-    '
+- description: |
+    When M, N, K are divisible by their respective BLOCK sizes, the masks on
+    plain-pointer loads and stores (bias vectors, per-row statistics, gathers) can be
+    omitted. Encoding this as autotuned constexpr flags allows the compiler to
+    eliminate the guard for the common case while retaining correctness for
+    arbitrary shapes. Tensor-descriptor loads take no mask or boundary_check, so they
+    need no flag; the flag only selects how the remaining pointer loads are guarded.
+    Set the flag from the tile sizes the launched config actually uses: a flag that is
+    true for a tile the shape does not divide reads out of bounds.
   id: even_m_n_k_constexpr_for_divisible_shapes
-  name: Use EVEN_M/N/K constexpr flags to skip boundary_check on divisible shapes
-  pattern_after: "EVEN_M: tl.constexpr\nEVEN_K: tl.constexpr\nif EVEN_M and EVEN_K:\n\
-    \    a = tl.load(a_bp)\nelse:\n    a = tl.load(a_bp, boundary_check=(0, 1))\n"
-  pattern_before: 'a = tl.load(a_bp, boundary_check=(0, 1))  # always pays check overhead
-
-    '
+  name: Use EVEN_M/N/K constexpr flags to skip masks on divisible shapes
+  pattern_after: |
+    EVEN_N: tl.constexpr
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    if EVEN_N:
+        bias = tl.load(bias_ptr + offs_n)
+    else:
+        bias = tl.load(bias_ptr + offs_n, mask=offs_n < N, other=0.0)
+  pattern_before: |
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    bias = tl.load(bias_ptr + offs_n, mask=offs_n < N, other=0.0)  # always pays the mask
   stage: xpu_specific
 - description: 'If the model stores weight as [N, K], transpose and call .contiguous()
     ONCE

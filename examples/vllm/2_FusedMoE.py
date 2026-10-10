@@ -26,7 +26,9 @@ def torch_moe_align_block_size(
     if topk_ids.numel() < num_experts:
         max_num_tokens_padded = topk_ids.numel() * block_size
 
-    flattened_token_indices = torch.arange(topk_ids.numel(), device=topk_ids.device, dtype=torch.int32)
+    flattened_token_indices = torch.arange(
+        topk_ids.numel(), device=topk_ids.device, dtype=torch.int32
+    )
     flattened_expert_ids = topk_ids.flatten()
     sorted_expert_ids, sort_indices = torch.sort(flattened_expert_ids, stable=True)
     sorted_token_indices = flattened_token_indices[sort_indices]
@@ -42,7 +44,9 @@ def torch_moe_align_block_size(
         if expert_map is not None and expert_map[expert_id] == -1:
             continue
         if original_count > 0:
-            expert_padded_counts[expert_id] = ((original_count + block_size - 1) // block_size) * block_size
+            expert_padded_counts[expert_id] = (
+                (original_count + block_size - 1) // block_size
+            ) * block_size
 
     sorted_token_ids = torch.full(
         (max_num_tokens_padded,),
@@ -64,19 +68,21 @@ def torch_moe_align_block_size(
         num_expert_tokens = expert_tokens.shape[0]
 
         if num_expert_tokens > 0:
-            sorted_token_ids[current_pos:current_pos + num_expert_tokens] = expert_tokens
+            sorted_token_ids[current_pos : current_pos + num_expert_tokens] = expert_tokens
 
             expert_blocks_needed = expert_padded_counts[expert_id] // block_size
             expert_id_new = expert_id
             if expert_map is not None:
                 expert_id_new = expert_map[expert_id]
-            expert_ids[current_block:current_block + expert_blocks_needed] = expert_id_new
+            expert_ids[current_block : current_block + expert_blocks_needed] = expert_id_new
 
             current_pos += expert_padded_counts[expert_id]
             current_block += expert_blocks_needed
 
     total_padded_tokens = expert_padded_counts.sum()
-    num_tokens_post_pad = torch.tensor([total_padded_tokens], dtype=torch.int32, device=topk_ids.device)
+    num_tokens_post_pad = torch.tensor(
+        [total_padded_tokens], dtype=torch.int32, device=topk_ids.device
+    )
 
     return sorted_token_ids, expert_ids, num_tokens_post_pad
 
@@ -232,15 +238,18 @@ def fused_moe_kernel(
 
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
 
-    a_desc = tl.make_tensor_descriptor(base=a_ptr, shape=(M, K), strides=(stride_am, stride_ak),
-                                       block_shape=(1, BLOCK_SIZE_K))
+    a_desc = tl.make_tensor_descriptor(
+        base=a_ptr, shape=(M, K), strides=(stride_am, stride_ak), block_shape=(1, BLOCK_SIZE_K)
+    )
 
-    b_desc = tl.make_tensor_descriptor(base=b_ptr + off_experts * stride_be, shape=(N, K),
-                                       strides=(stride_bn, stride_bk), block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_K))
+    b_desc = tl.make_tensor_descriptor(
+        base=b_ptr + off_experts * stride_be,
+        shape=(N, K),
+        strides=(stride_bn, stride_bk),
+        block_shape=(BLOCK_SIZE_N, BLOCK_SIZE_K),
+    )
     if use_int8_w8a16:
-        b_scale_ptrs = (
-            b_scale_ptr + off_experts * stride_bse + offs_bn[None, :] * stride_bsn
-        )
+        b_scale_ptrs = b_scale_ptr + off_experts * stride_bse + offs_bn[None, :] * stride_bsn
         b_scale = tl.load(b_scale_ptrs)
 
     if use_fp8_w8a8 or use_int8_w8a8:
@@ -248,14 +257,10 @@ def fused_moe_kernel(
         if group_k > 0 and group_n > 0:
             a_scale_ptrs = a_scale_ptr + (offs_token // top_k) * stride_asm
             offs_bsn = offs_bn // group_n
-            b_scale_ptrs = (
-                b_scale_ptr + off_experts * stride_bse + offs_bsn * stride_bsn
-            )
+            b_scale_ptrs = b_scale_ptr + off_experts * stride_bse + offs_bsn * stride_bsn
         # channel-wise
         elif per_channel_quant:
-            b_scale_ptrs = (
-                b_scale_ptr + off_experts * stride_bse + offs_bn[None, :] * stride_bsn
-            )
+            b_scale_ptrs = b_scale_ptr + off_experts * stride_bse + offs_bn[None, :] * stride_bsn
             b_scale = tl.load(b_scale_ptrs)
             a_scale_ptrs = a_scale_ptr + (offs_token // top_k) * stride_asm
             a_scale = tl.load(a_scale_ptrs, mask=token_mask, other=0.0)[:, None]
@@ -278,9 +283,7 @@ def fused_moe_kernel(
             if group_k > 0 and group_n > 0:
                 k_start = k * BLOCK_SIZE_K
                 offs_ks = k_start // group_k
-                a_scale = tl.load(
-                    a_scale_ptrs + offs_ks * stride_ask, mask=token_mask, other=0.0
-                )
+                a_scale = tl.load(a_scale_ptrs + offs_ks * stride_ask, mask=token_mask, other=0.0)
                 b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
 
                 accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
@@ -347,14 +350,11 @@ def invoke_fused_moe_triton_kernel(
     if sorted_token_ids is not None:
         EM = sorted_token_ids.size(0)
         if A.size(0) < config["BLOCK_SIZE_M"]:
-            EM = min(
-                sorted_token_ids.size(0), A.size(0) * top_k * config["BLOCK_SIZE_M"]
-            )
+            EM = min(sorted_token_ids.size(0), A.size(0) * top_k * config["BLOCK_SIZE_M"])
     else:
         EM = num_tokens * config["BLOCK_SIZE_M"]
     grid = lambda META: (
-        triton.cdiv(EM, META["BLOCK_SIZE_M"])
-        * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
+        triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
     )
     HAS_BIAS = B_bias is not None
 
@@ -419,8 +419,7 @@ class Model(torch.nn.Module):
         self.topk = TOPK
         self.QUANT = QUANT  # 0=bf16, 1=fp8_w8a8, 2=int8_w8a8, 3=int8_w8a16
 
-    def forward(self, A: torch.Tensor, B: torch.Tensor,
-                topk_ids: torch.Tensor) -> torch.Tensor:
+    def forward(self, A: torch.Tensor, B: torch.Tensor, topk_ids: torch.Tensor) -> torch.Tensor:
         m, k = A.shape
         n = B.shape[1]
 
@@ -448,16 +447,30 @@ class Model(torch.nn.Module):
             A_scale, B_scale = None, None
 
         config = get_default_config(m, self.E, n, k, self.topk, None)
-        sorted_token_ids, expert_ids, num_tokens_post_padded = \
-            torch_moe_align_block_size(topk_ids, config["BLOCK_SIZE_M"],
-                                       self.E, pad_sorted_ids=True)
+        sorted_token_ids, expert_ids, num_tokens_post_padded = torch_moe_align_block_size(
+            topk_ids, config["BLOCK_SIZE_M"], self.E, pad_sorted_ids=True
+        )
         workspace = torch.zeros(m, self.topk, n, device=A.device, dtype=torch.bfloat16)
         invoke_fused_moe_triton_kernel(
-            A_in, B_in, workspace,
-            A_scale, B_scale, None,
-            sorted_token_ids, expert_ids, num_tokens_post_padded,
-            False, self.topk, config, tl.bfloat16,
-            use_fp8, use_int8_w8a8, use_int8_w8a16, False, False,
-            None, None,
+            A_in,
+            B_in,
+            workspace,
+            A_scale,
+            B_scale,
+            None,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            False,
+            self.topk,
+            config,
+            tl.bfloat16,
+            use_fp8,
+            use_int8_w8a8,
+            use_int8_w8a16,
+            False,
+            False,
+            None,
+            None,
         )
         return workspace

@@ -481,7 +481,10 @@ worth more to the next one than a run that finished and said nothing.
 {% if dsl in ("triton", "gluon") %}
 - NO default values for `@triton.autotune` meta-parameters in kernel signature
 - Use 1D grid when applying tile swizzling (GROUP_SIZE_M)
-- `boundary_check` uses dimension indices (0, 1), not booleans
+- Tiled loads/stores use `tl.make_tensor_descriptor`; `tl.make_block_ptr` and `tl.advance` are
+  deprecated. Descriptor `.load()`/`.store()` take no `boundary_check`: out-of-bounds
+  elements are zero-filled on load and dropped on store. Carry the K offset (`off_k += BLOCK_K`)
+  rather than indexing the last dimension with the `for` variable, which loses the 2D block load
 - Cast batch indices to `int64` before stride multiplication
 - The kernel module must expose the same entry point as the baseline file it replaces
 {% elif dsl == "sycl" %}

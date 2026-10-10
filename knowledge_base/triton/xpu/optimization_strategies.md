@@ -18,7 +18,7 @@
 **Case study**: Kernel #39 (Gemm_Scale_BatchNorm) went from 2.69x (Level 1) to 5.28x (Level 2+3) by pre-packing to bf16 and folding BN into GEMM weights.
 
 ## GEMM Kernels
-1. Use tensor descriptors (preferred on XPU) or block pointers (not manual pointer arithmetic)
+1. Use tensor descriptors (`tl.make_tensor_descriptor`), not manual pointer arithmetic; `tl.make_block_ptr` is deprecated
 2. Apply tile swizzling with GROUP_SIZE_M (1D grid required)
 3. `@triton.autotune` with varied configs - sweep block sizes, warps, GRF mode
 4. Large tiles for square matrices: 256x256, 32 warps, grf_mode='256'
@@ -44,7 +44,7 @@
 - Do NOT use 2D grid with tile swizzling (must be 1D)
 - Do NOT repack weights inside forward() hot path
 - Do NOT implement GEMM2 by looping all N tiles inside one program
-- Do NOT mix block pointer and tensor descriptor APIs on same load/store
+- Do NOT use `tl.make_block_ptr` / `tl.advance` (deprecated) or pass `boundary_check` to a descriptor load
 - Do NOT use fp64 unless absolutely required (5-10x slower)
 
 ## KB Quick Index
@@ -63,7 +63,7 @@
 When transforming PyTorch -> Triton:
 
 - [ ] Identified operation type (GEMM, reduction, elementwise)
-- [ ] Chosen memory access pattern (tensor descriptors preferred; block pointers as fallback)
+- [ ] Chosen memory access pattern (tensor descriptors; plain pointers only for gathers and per-element masks)
 - [ ] Applied tile swizzling (if GEMM)
 - [ ] `@triton.autotune` with varied BLOCK_M/N/K, num_warps, grf_mode configs
 - [ ] NO default values on autotune meta-parameters in kernel signature

@@ -145,57 +145,37 @@ def _gemm_sigmoid_scale_add_kernel(
     pid_n = (pid % num_pid_in_group) // group_size_m
 
     # -----------------------------
-    # block pointers
+    # tensor descriptors
     # -----------------------------
-    x_bp = tl.make_block_ptr(
+    x_desc = tl.make_tensor_descriptor(
         base=x_ptr,
         shape=(M, K),
         strides=(stride_xm, stride_xk),
-        offsets=(pid_m * BLOCK_M, 0),
         block_shape=(BLOCK_M, BLOCK_K),
-        order=(1, 0),
     )
-    wt_bp = tl.make_block_ptr(
+    wt_desc = tl.make_tensor_descriptor(
         base=wt_ptr,
         shape=(K, N),
         strides=(stride_wtk, stride_wtn),
-        offsets=(0, pid_n * BLOCK_N),
         block_shape=(BLOCK_K, BLOCK_N),
-        order=(1, 0),
     )
 
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
     # -----------------------------
-    # K loop: specialize loads
+    # K loop: descriptor loads zero-pad out-of-bounds elements,
+    # so EVEN_* and ragged shapes share one path
     # -----------------------------
-    if EVEN_M and EVEN_N and EVEN_K:
-        # no boundary checks at all
-        for _ in range(0, K, BLOCK_K):
-            x = tl.load(x_bp)
-            wt = tl.load(wt_bp)
-            acc = tl.dot(x, wt, acc)
-            x_bp = tl.advance(x_bp, (0, BLOCK_K))
-            wt_bp = tl.advance(wt_bp, (BLOCK_K, 0))
-    else:
-        # only check what is actually needed
-        x_bc = (0, 1) if not (EVEN_M and EVEN_K) else None
-        w_bc = (0, 1) if not (EVEN_K and EVEN_N) else None
-
-        for _ in range(0, K, BLOCK_K):
-            if x_bc is None:
-                x = tl.load(x_bp)
-            else:
-                x = tl.load(x_bp, boundary_check=(0, 1))
-
-            if w_bc is None:
-                wt = tl.load(wt_bp)
-            else:
-                wt = tl.load(wt_bp, boundary_check=(0, 1))
-
-            acc = tl.dot(x, wt, acc)
-            x_bp = tl.advance(x_bp, (0, BLOCK_K))
-            wt_bp = tl.advance(wt_bp, (BLOCK_K, 0))
+    off_m = pid_m * BLOCK_M
+    off_n = pid_n * BLOCK_N
+    # Carry the K offset: indexing the contiguous dim with the loop variable
+    # loses the 2D block-load path for the descriptor load on XPU
+    off_k = 0
+    for _ in range(0, K, BLOCK_K):
+        x = x_desc.load([off_m, off_k])
+        wt = wt_desc.load([off_k, off_n])
+        acc = tl.dot(x, wt, acc)
+        off_k += BLOCK_K
 
     # -----------------------------
     # bias add (fp32)
@@ -218,25 +198,19 @@ def _gemm_sigmoid_scale_add_kernel(
     out = acc + 2.0 * sig
 
     # -----------------------------
-    # store
+    # store (out-of-bounds rows/cols are dropped by the descriptor)
     # -----------------------------
-    o_bp = tl.make_block_ptr(
+    o_desc = tl.make_tensor_descriptor(
         base=o_ptr,
         shape=(M, N),
         strides=(stride_om, stride_on),
-        offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),
         block_shape=(BLOCK_M, BLOCK_N),
-        order=(1, 0),
     )
-
-    if EVEN_M and EVEN_N:
-        tl.store(o_bp, out.to(tl.float16))
-    else:
-        tl.store(o_bp, out.to(tl.float16), boundary_check=(0, 1))
+    o_desc.store([off_m, off_n], out.to(tl.float16))
 
 
 # -------------------------------------------------------------------
-# Specialized fast kernel without boundary checks (divisible-only)
+# Specialized fast kernel for divisible shapes (unmasked bias load)
 # -------------------------------------------------------------------
 @triton.jit
 def _gemm_sigmoid_scale_add_kernel_fast(
@@ -259,8 +233,7 @@ def _gemm_sigmoid_scale_add_kernel_fast(
     GROUP_SIZE_M: tl.constexpr,
 ):
     """
-    Fast path without boundary checks.
-    Only use when (M % BLOCK_M == 0) and (N % BLOCK_N == 0) and (K % BLOCK_K == 0).
+    Fast path: the bias load is unmasked, so only use when (M % BLOCK_M == 0) and (N % BLOCK_N == 0) and (K % BLOCK_K == 0).
     1D grid with GROUP_SIZE_M swizzling.
     """
     pid = tl.program_id(0)
@@ -275,32 +248,32 @@ def _gemm_sigmoid_scale_add_kernel_fast(
     pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
-    x_bp = tl.make_block_ptr(
+    x_desc = tl.make_tensor_descriptor(
         base=x_ptr,
         shape=(M, K),
         strides=(stride_xm, stride_xk),
-        offsets=(pid_m * BLOCK_M, 0),
         block_shape=(BLOCK_M, BLOCK_K),
-        order=(1, 0),
     )
 
-    wt_bp = tl.make_block_ptr(
+    wt_desc = tl.make_tensor_descriptor(
         base=wt_ptr,
         shape=(K, N),
         strides=(stride_wtk, stride_wtn),
-        offsets=(0, pid_n * BLOCK_N),
         block_shape=(BLOCK_K, BLOCK_N),
-        order=(1, 0),
     )
 
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
-    for _k in range(0, K, BLOCK_K):
-        x = tl.load(x_bp)  # safe: divisible
-        wt = tl.load(wt_bp)  # safe: divisible
+    off_m = pid_m * BLOCK_M
+    off_n = pid_n * BLOCK_N
+    # Carry the K offset: indexing the contiguous dim with the loop variable
+    # loses the 2D block-load path for the descriptor load on XPU
+    off_k = 0
+    for _ in range(0, K, BLOCK_K):
+        x = x_desc.load([off_m, off_k])
+        wt = wt_desc.load([off_k, off_n])
         acc = tl.dot(x.to(tl.float16), wt.to(tl.float16), acc)
-        x_bp = tl.advance(x_bp, (0, BLOCK_K))
-        wt_bp = tl.advance(wt_bp, (BLOCK_K, 0))
+        off_k += BLOCK_K
 
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     bias = tl.load(b_ptr + offs_n).to(tl.float32)
@@ -311,15 +284,13 @@ def _gemm_sigmoid_scale_add_kernel_fast(
     sig = 1.0 / (1.0 + e2)
     out = acc + 2.0 * sig
 
-    o_bp = tl.make_block_ptr(
+    o_desc = tl.make_tensor_descriptor(
         base=o_ptr,
         shape=(M, N),
         strides=(stride_om, stride_on),
-        offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),
         block_shape=(BLOCK_M, BLOCK_N),
-        order=(1, 0),
     )
-    tl.store(o_bp, out.to(tl.float16))
+    o_desc.store([off_m, off_n], out.to(tl.float16))
 
 
 # -------------------------------------------------------------------
@@ -338,7 +309,7 @@ def kernel_function(
     XPU-optimized:
       - Prefer 256x256 tiles with num_warps=32 and tunable num_stages/BLOCK_K
       - 1D grid with GROUP_SIZE_M swizzling
-      - Optional divisible fast path (no boundary checks)
+      - Optional divisible fast path (unmasked bias load)
     """
     # Check XPU availability
     if not (hasattr(torch, "xpu") and torch.xpu.is_available()):
@@ -426,7 +397,7 @@ def kernel_function(
         )
         return out
 
-    # Autotuned general path with boundary checks and swizzling
+    # Autotuned general path (ragged shapes handled by descriptors) and swizzling
     def grid(META):
         return (triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(N, META["BLOCK_N"]),)
 

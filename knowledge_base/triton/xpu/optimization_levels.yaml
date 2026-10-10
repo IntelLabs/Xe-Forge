@@ -16,13 +16,13 @@ levels:
       Get the kernel working with standard XPU patterns. This is the minimum
       viable optimization — necessary but rarely sufficient for production.
     checklist:
-      - Tensor descriptors (preferred on XPU) or block pointers (not manual pointer arithmetic)
+      - Tensor descriptors (tl.make_tensor_descriptor), not manual pointer arithmetic; tl.make_block_ptr is deprecated
       - bf16/fp16 dot inputs, fp32 accumulator
       - 1D grid with tile swizzling (GROUP_SIZE_M) for GEMM kernels
       - "@triton.autotune with XPU-optimized configs"
       - Pre-packed weight transpose cached in _pack_weights()
       - Fused light epilogues (bias, simple activations)
-      - Correct boundary_check=(0, 1) for block pointers (tensor descriptors handle boundaries internally); no default block params
+      - No boundary_check on descriptor loads (descriptors handle boundaries internally); no default block params
     typical_speedup: "1.5-3x vs PyTorch"
     when_done: "Move to Level 2 — there is almost always more to gain."
 

@@ -94,41 +94,29 @@ patterns:
     name: "Use EVEN_M/N/K constexpr flags to specialize for tile-divisible shapes"
     stage: autotuning
     description: |
-      Include EVEN_M, EVEN_N, EVEN_K as autotunable constexpr booleans.
-      The compiler eliminates boundary checks when the flag is True.
-      Always include both True and False variants to handle arbitrary shapes.
-    pattern_before: |
-      # Always pays boundary check overhead regardless of shape
-      a = tl.load(a_bp, boundary_check=(0, 1))
-      b = tl.load(b_bp, boundary_check=(0, 1))
-    pattern_after: |
-      # Config sweep includes both even and non-even variants:
-      triton.Config({'BLOCK_M': 128, ..., 'EVEN_M': True,  'EVEN_K': True},  ...)
-      triton.Config({'BLOCK_M': 128, ..., 'EVEN_M': False, 'EVEN_K': False}, ...)
+      Give the kernel EVEN_M, EVEN_N, EVEN_K constexpr booleans so the compiler drops the
+      masks on plain-pointer loads/stores (bias vectors, row statistics, gathers) when the
+      shape divides the tile. Tensor-descriptor loads and stores need no flag: they have
+      no mask and handle the edges themselves.
 
-      # Kernel uses constexpr branch — compiler eliminates dead path:
-      EVEN_M: tl.constexpr
-      EVEN_K: tl.constexpr
-      if EVEN_M and EVEN_K:
-          a = tl.load(a_bp)                       # no boundary check
-      else:
-          a = tl.load(a_bp, boundary_check=(0, 1))
-    examples:
-      - before: |
-          # Always checks boundary — same code for all shapes
-          a = tl.load(a_bp, boundary_check=(0, 1))
-          tl.store(o_bp, out, boundary_check=(0, 1))
-        after: |
-          EVEN_M: tl.constexpr
-          EVEN_N: tl.constexpr
-          if EVEN_M and EVEN_K:
-              a = tl.load(a_bp)
+      Derive the flags from the shape and the chosen config with @triton.heuristics; do
+      not put them in the autotune sweep. A swept EVEN_N=True config is a legal choice
+      for the autotuner on any N, and on an N the tile does not divide it reads and
+      writes out of bounds.
+    pattern_before: |
+      # Always pays the mask regardless of shape
+      offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+      bias = tl.load(bias_ptr + offs_n, mask=offs_n < N, other=0.0)
+    pattern_after: |
+      @triton.autotune(configs=..., key=["M", "N", "K"])
+      @triton.heuristics({"EVEN_N": lambda args: args["N"] % args["BLOCK_N"] == 0})
+      @triton.jit
+      def kernel(..., BLOCK_N: tl.constexpr, EVEN_N: tl.constexpr):
+          offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+          if EVEN_N:
+              bias = tl.load(bias_ptr + offs_n)
           else:
-              a = tl.load(a_bp, boundary_check=(0, 1))
-          if EVEN_M and EVEN_N:
-              tl.store(o_bp, out)
-          else:
-              tl.store(o_bp, out, boundary_check=(0, 1))
+              bias = tl.load(bias_ptr + offs_n, mask=offs_n < N, other=0.0)
 
   - id: autotune_separate_configs_for_reduction_kernels
     name: "Use separate autotune config generators for GEMM and row-reduction kernels"

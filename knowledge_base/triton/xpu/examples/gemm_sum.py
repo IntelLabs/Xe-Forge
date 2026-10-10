@@ -101,7 +101,7 @@ def sum_weight_kernel(
     """
     Compute column-wise sum of weight: wcs[k] = sum_{n=0..N-1} w[n,k]
     fp16 loads for bandwidth, fp32 accumulation for numerical stability.
-    Uses block pointers for efficient memory access.
+    Uses a tensor descriptor for efficient 2D block memory access.
     """
     pid = tl.program_id(0)
     k_start = pid * BLOCK_N
@@ -109,23 +109,21 @@ def sum_weight_kernel(
     # Per-column fp32 accumulator
     sum_k = tl.zeros((BLOCK_N,), dtype=tl.float32)
 
-    # Block pointer over [N, K] starting at column tile [*, k_start:k_start+BLOCK_N]
-    w_block_ptr = tl.make_block_ptr(
+    # Tensor descriptor over [N, K]; each load reads the tile [m:m+BLOCK_M, k_start:k_start+BLOCK_N]
+    # (out-of-bounds rows/columns are zero-padded, so the column sums are unaffected)
+    w_desc = tl.make_tensor_descriptor(
         base=w_ptr,
         shape=(N, K),
         strides=(stride_w0, stride_w1),
-        offsets=(0, k_start),
         block_shape=(BLOCK_M, BLOCK_N),
-        order=(1, 0),
     )
 
     # Loop rows in BLOCK_M chunks
-    for _ in tl.range(0, N, BLOCK_M):
-        tile_fp16 = tl.load(w_block_ptr, boundary_check=(0, 1))
+    for m in tl.range(0, N, BLOCK_M):
+        tile_fp16 = w_desc.load([m, k_start])
         tile = tile_fp16.to(tl.float32)
         # sum over rows to accumulate per column
         sum_k += tl.sum(tile, axis=0)
-        w_block_ptr = tl.advance(w_block_ptr, (BLOCK_M, 0))
 
     # Store results
     offs_k = k_start + tl.arange(0, BLOCK_N)

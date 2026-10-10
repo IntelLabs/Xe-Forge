@@ -106,11 +106,11 @@ constraints:
 - id: descriptor_no_boundary_check_arg
   name: Tensor descriptor .load() does NOT accept boundary_check
   severity: critical
-  description: 'Unlike block pointers which use tl.load(ptr, boundary_check=(0, 1)),
+  description: 'Tensor descriptors handle boundaries internally: out-of-bounds elements
 
-    tensor descriptors handle boundaries internally. The .load() method
+    are zero-filled on load and dropped on store. The .load() method takes only a
 
-    takes only a coordinate list.
+    coordinate list (boundary_check belonged to the deprecated tl.make_block_ptr API).
 
 
     WRONG:

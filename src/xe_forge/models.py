@@ -46,13 +46,21 @@ class OptimizationStage(StrEnum):
     DTYPE_FIX = "dtype_fix"
     FUSION = "fusion"
     MEMORY_ACCESS = "memory_access"
-    BLOCK_POINTERS = "block_pointers"
+    TENSOR_DESCRIPTORS = "tensor_descriptors"
     PERSISTENT_KERNEL = "persistent_kernel"
     DEVICE_SPECIFIC = "device_specific"
     XPU_SPECIFIC = "device_specific"  # backward-compatible alias
     AUTOTUNING = "autotuning"
     DISCOVERY = "discovery"  # handles open_ended issues — novel optimizations
     # not covered by any existing stage
+
+    @classmethod
+    def _missing_(cls, value):
+        # Triton deprecated tl.make_block_ptr; the stage became tensor_descriptors.
+        # Configs, CLI flags and model output written before the rename still parse.
+        if value in ("block_pointers", "block_pointer", "block_ptr"):
+            return cls.TENSOR_DESCRIPTORS
+        return None
 
 
 class IssueType(StrEnum):
@@ -89,10 +97,10 @@ class IssueType(StrEnum):
     CACHE_EVICTION_RISK = "cache_eviction_risk"
     LONG_LIVENESS = "long_liveness"
     HIGH_REGISTER_PRESSURE = "high_register_pressure"
-    # BLOCK POINTERS
-    BLOCK_PTR_BOUNDARY_WRONG = "block_ptr_boundary_wrong"
-    BLOCK_PTR_MULTIPLE_OF_MISUSE = "block_ptr_multiple_of_misuse"
-    MISSING_BLOCK_POINTERS = "missing_block_pointers"
+    MULTIPLE_OF_MISUSE = "multiple_of_misuse"
+    # TENSOR DESCRIPTORS
+    DEPRECATED_BLOCK_POINTERS = "deprecated_block_pointers"
+    MISSING_TENSOR_DESCRIPTORS = "missing_tensor_descriptors"
     # XPU SPECIFIC
     SUBOPTIMAL_TILE_SIZE = "suboptimal_tile_size"
     SUBOPTIMAL_WARPS = "suboptimal_warps"
@@ -115,6 +123,15 @@ class IssueType(StrEnum):
     # optimization that has no matching type above.  It must populate
     # open_ended_proposal in the DetectedIssue with a precise description.
     OPEN_ENDED = "open_ended"
+
+    @classmethod
+    def _missing_(cls, value):
+        # Values from before the block-pointer API was deprecated.
+        return {
+            "block_ptr_boundary_wrong": cls.DEPRECATED_BLOCK_POINTERS,
+            "block_ptr_multiple_of_misuse": cls.MULTIPLE_OF_MISUSE,
+            "missing_block_pointers": cls.MISSING_TENSOR_DESCRIPTORS,
+        }.get(value)
 
 
 class DetectedIssue(BaseModel):
@@ -141,7 +158,7 @@ class KernelAnalysis(BaseModel):
     tile_sizes: dict[str, int] = Field(default_factory=dict)
     num_warps: int | None = None
     num_stages: int | None = None
-    uses_block_pointers: bool = False
+    uses_tensor_descriptors: bool = False
     uses_tma: bool = False
     is_persistent: bool = False
 

@@ -22,7 +22,7 @@ class AnalysisResult:
     elementwise: list[str] = field(default_factory=list)
     shapes: dict[str, int] = field(default_factory=dict)
     fusion_opportunities: list[str] = field(default_factory=list)
-    memory_pattern: str = "block_pointers"
+    memory_pattern: str = "tensor_descriptors"
     has_gemm: bool = False
     suggested_template: str | None = None
 
@@ -127,9 +127,7 @@ class KernelAnalyzer:
             if visitor.reductions:
                 fusion.append("WARNING: GEMM + reduction — use 2D GEMM then separate reduction")
 
-        memory_pattern = "block_pointers"
-        if len(visitor.reductions) > 1:
-            memory_pattern = "tensor_descriptors"
+        memory_pattern = "tensor_descriptors"
 
         template_map = {
             "gemm": "templates/gemm_template.py",

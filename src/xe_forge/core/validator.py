@@ -23,6 +23,44 @@ class ValidationIssue:
     suggestion: str | None = None
 
 
+def _descriptor_loop_variable_index(tree: ast.AST) -> list[ValidationIssue]:
+    """Flag desc.load/store/atomic_*([..., v]) where v is the enclosing for-loop variable.
+
+    On Intel XPU the compiler only proves the contiguous-dim index aligned when it is
+    a constant or a loop-carried value; an induction variable there drops the load
+    off the 2D block-IO path (it is staged through shared memory instead).
+    """
+    found = []
+    methods = {"load", "store", "atomic_add", "atomic_min", "atomic_max"}
+    for loop in ast.walk(tree):
+        if not (isinstance(loop, ast.For) and isinstance(loop.target, ast.Name)):
+            continue
+        var = loop.target.id
+        for node in ast.walk(loop):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in methods
+                and node.args
+                and isinstance(node.args[0], ast.List)
+                and len(node.args[0].elts) >= 2
+                and isinstance(node.args[0].elts[-1], ast.Name)
+                and node.args[0].elts[-1].id == var
+            ):
+                found.append(
+                    ValidationIssue(
+                        "descriptor_loop_variable_index",
+                        "warning",
+                        f"Descriptor indexed in its contiguous dim by loop variable '{var}'. "
+                        "On XPU this loses the 2D block load; carry the offset instead.",
+                        line=node.lineno,
+                        suggestion=f"{var} = 0 before the loop, iterate with `_`, "
+                        f"and `{var} += BLOCK` at the end of the body",
+                    )
+                )
+    return found
+
+
 class KernelValidator:
     """Multi-DSL static kernel validator."""
 
@@ -242,18 +280,9 @@ class KernelValidator:
                         )
                     )
 
-        # 3. boundary_check format
+        # 3. boundary_check passed to a tensor descriptor load
         for i, line in enumerate(lines):
             if "boundary_check" in line:
-                if "True" in line or "False" in line:
-                    issues.append(
-                        ValidationIssue(
-                            "boundary_check_bool",
-                            "error",
-                            "boundary_check uses booleans. Use dimension indices (0, 1).",
-                            line=i + 1,
-                        )
-                    )
                 if ".load(" in line:
                     for j in range(max(0, i - 20), i):
                         if "make_tensor_descriptor" in lines[j]:
@@ -308,18 +337,22 @@ class KernelValidator:
                         )
                     )
 
-        # 7. Mixed block pointer and tensor descriptor APIs
-        has_block_ptr = "make_block_ptr" in code
-        has_tensor_desc = "make_tensor_descriptor" in code
-        if has_block_ptr and has_tensor_desc:
-            issues.append(
-                ValidationIssue(
-                    "mixed_memory_apis",
-                    "info",
-                    "Both block pointers and tensor descriptors found. "
-                    "Don't mix APIs for the same load/store operation.",
+        # 7. Deprecated block pointer API
+        for i, line in enumerate(lines):
+            if "make_block_ptr" in line or "tl.advance(" in line:
+                issues.append(
+                    ValidationIssue(
+                        "deprecated_block_ptr",
+                        "warning",
+                        "tl.make_block_ptr / tl.advance are deprecated in Triton. "
+                        "Use tl.make_tensor_descriptor and desc.load/store at explicit offsets.",
+                        line=i + 1,
+                    )
                 )
-            )
+                break
+
+        # 7b. Descriptor indexed in its contiguous dim by the loop variable
+        issues.extend(_descriptor_loop_variable_index(tree))
 
         # 8. Device-to-host sync in hot path
         for i, line in enumerate(lines):

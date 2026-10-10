@@ -108,7 +108,7 @@ def kernel(
     pid = tl.program_id(0)
     pid_m, pid_n = swizzle_tile(pid, M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, GROUP_SIZE_M)
 
-    # Tensor descriptors (preferred on XPU — better codegen than block pointers)
+    # Tensor descriptors (tl.make_block_ptr is deprecated)
     a_desc = tl.make_tensor_descriptor(
         base=a_ptr,
         shape=[M, K],
@@ -128,12 +128,14 @@ def kernel(
     # K-loop
     off_m = pid_m * BLOCK_M
     off_n = pid_n * BLOCK_N
-    for off_k in range(0, K, BLOCK_K):
+    off_k = 0  # carried, not the loop variable: keeps the 2D block load on XPU
+    for _ in range(0, K, BLOCK_K):
         a = a_desc.load([off_m, off_k])
         b = b_desc.load([off_k, off_n])
         a = a.to(tl.bfloat16)
         b = b.to(tl.bfloat16)
         acc += tl.dot(a, b)
+        off_k += BLOCK_K
 
     # Store result
     c_desc = tl.make_tensor_descriptor(

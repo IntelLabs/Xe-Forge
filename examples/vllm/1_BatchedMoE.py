@@ -54,9 +54,7 @@ def moe_mmk(
 ):
 
     if use_w8a16:
-        b_scale_ptrs = (
-            b_scale_ptr + expert_id * stride_bse + offs_n[None, :] * stride_bsn
-        )
+        b_scale_ptrs = b_scale_ptr + expert_id * stride_bse + offs_n[None, :] * stride_bsn
         b_scale = tl.load(b_scale_ptrs)
 
     if use_w8a8:
@@ -92,9 +90,7 @@ def moe_mmk(
             if group_k > 0 and group_n > 0:
                 k_start = k * BLOCK_K
                 offs_ks = k_start // group_k
-                a_scale = tl.load(
-                    a_scale_ptrs + offs_ks * stride_ask, mask=mask_m, other=0.0
-                )
+                a_scale = tl.load(a_scale_ptrs + offs_ks * stride_ask, mask=mask_m, other=0.0)
                 b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
 
                 accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
@@ -194,33 +190,54 @@ def expert_triton_kernel(
 
 
 def get_batched_moe_configs():
-    return [
-        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 256, 'BLOCK_K': 32,
-                       'grf_mode': '256'}, num_stages=s, num_warps=32)
-        for s in [2, 3]
-    ] + [
-        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 128, 'BLOCK_K': 32,
-                       'grf_mode': m}, num_stages=s, num_warps=w)
-        for s in [2]
-        for (m, w) in ([('256', 32), ('128', 64)])
-    ] + [
-        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 128, 'BLOCK_K': 32,
-                       'grf_mode': '256'}, num_stages=s, num_warps=32)
-        for s in [2]
-    ] + [
-        triton.Config({'BLOCK_M': 8, 'BLOCK_N': 512, 'BLOCK_K': 64,
-                       'grf_mode': '256'}, num_stages=s, num_warps=32)
-        for s in [2]
-    ] + [
-        triton.Config({'BLOCK_M': 8, 'BLOCK_N': 128, 'BLOCK_K': 64,
-                       'grf_mode': '256'}, num_stages=s, num_warps=4)
-        for s in [2]
-    ]
+    return (
+        [
+            triton.Config(
+                {"BLOCK_M": 256, "BLOCK_N": 256, "BLOCK_K": 32, "grf_mode": "256"},
+                num_stages=s,
+                num_warps=32,
+            )
+            for s in [2, 3]
+        ]
+        + [
+            triton.Config(
+                {"BLOCK_M": 256, "BLOCK_N": 128, "BLOCK_K": 32, "grf_mode": m},
+                num_stages=s,
+                num_warps=w,
+            )
+            for s in [2]
+            for (m, w) in ([("256", 32), ("128", 64)])
+        ]
+        + [
+            triton.Config(
+                {"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32, "grf_mode": "256"},
+                num_stages=s,
+                num_warps=32,
+            )
+            for s in [2]
+        ]
+        + [
+            triton.Config(
+                {"BLOCK_M": 8, "BLOCK_N": 512, "BLOCK_K": 64, "grf_mode": "256"},
+                num_stages=s,
+                num_warps=32,
+            )
+            for s in [2]
+        ]
+        + [
+            triton.Config(
+                {"BLOCK_M": 8, "BLOCK_N": 128, "BLOCK_K": 64, "grf_mode": "256"},
+                num_stages=s,
+                num_warps=4,
+            )
+            for s in [2]
+        ]
+    )
 
 
 @triton.autotune(
     configs=get_batched_moe_configs(),
-    key=['max_num_tokens', 'K', 'N'],
+    key=["max_num_tokens", "K", "N"],
 )
 @triton.jit
 def batched_triton_kernel(
@@ -281,17 +298,20 @@ def batched_triton_kernel(
         base=a_ptr + expert_id * stride_ae,
         shape=(e_num_tokens, K),
         strides=(stride_am, stride_ak),
-        block_shape=(BLOCK_M, BLOCK_K))
+        block_shape=(BLOCK_M, BLOCK_K),
+    )
     b_desc = tl.make_tensor_descriptor(
         base=b_ptr + expert_id * stride_be,
         shape=(N, K),
         strides=(stride_bn, stride_bk),
-        block_shape=(BLOCK_N, BLOCK_K))
+        block_shape=(BLOCK_N, BLOCK_K),
+    )
     c_desc = tl.make_tensor_descriptor(
         base=c_ptr + expert_id * stride_ce,
         shape=(e_num_tokens, N),
         strides=(stride_cm, stride_cn),
-        block_shape=(BLOCK_M, BLOCK_N))
+        block_shape=(BLOCK_M, BLOCK_N),
+    )
 
     offs_bn = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N).to(tl.int64)) % N
 
@@ -376,9 +396,7 @@ def invoke_moe_batched_triton_kernel(
         assert B_scale.numel() == expert_num_tokens.shape[0]
         B_scale = B_scale.view(-1, 1, 1)
 
-    assert A_scale is None or A_scale.ndim == 3, (
-        f"{0 if A_scale is None else A_scale.shape}"
-    )
+    assert A_scale is None or A_scale.ndim == 3, f"{0 if A_scale is None else A_scale.shape}"
     assert B_scale is None or B_scale.ndim == 1 or B_scale.ndim == 3, (
         f"{0 if B_scale is None else B_scale.shape}"
     )
@@ -450,8 +468,9 @@ class Model(torch.nn.Module):
         self.N = N
         self.QUANT = QUANT  # 0=bf16, 1=fp8_w8a8, 2=int8_w8a16
 
-    def forward(self, A: torch.Tensor, B: torch.Tensor,
-                expert_num_tokens: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, A: torch.Tensor, B: torch.Tensor, expert_num_tokens: torch.Tensor
+    ) -> torch.Tensor:
         use_fp8 = self.QUANT == 1
         use_int8_w8a16 = self.QUANT == 2
         if use_fp8:
@@ -470,12 +489,18 @@ class Model(torch.nn.Module):
 
         C = torch.zeros(self.E, self.M, self.N, device=A.device, dtype=torch.bfloat16)
         invoke_moe_batched_triton_kernel(
-            A_in, B_in, C, expert_num_tokens,
+            A_in,
+            B_in,
+            C,
+            expert_num_tokens,
             compute_type=tl.bfloat16,
-            A_scale=A_scale, B_scale=B_scale, B_zp=None,
-            use_fp8_w8a8=use_fp8, use_int8_w8a16=use_int8_w8a16,
+            A_scale=A_scale,
+            B_scale=B_scale,
+            B_zp=None,
+            use_fp8_w8a8=use_fp8,
+            use_int8_w8a16=use_int8_w8a16,
             use_int4_w4a16=False,
-            config={'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 16},
+            config={"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 16},
             per_act_token_quant=False,
             block_shape=None,
         )

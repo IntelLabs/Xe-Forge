@@ -57,9 +57,9 @@ _SYCL_DESCRIPTIONS: dict[IssueType, str] = {
 
 _SYCL_SKIP_ISSUES: set[IssueType] = {
     IssueType.MANUAL_POINTER_ARITHMETIC,
-    IssueType.BLOCK_PTR_BOUNDARY_WRONG,
-    IssueType.BLOCK_PTR_MULTIPLE_OF_MISUSE,
-    IssueType.MISSING_BLOCK_POINTERS,
+    IssueType.DEPRECATED_BLOCK_POINTERS,
+    IssueType.MULTIPLE_OF_MISUSE,
+    IssueType.MISSING_TENSOR_DESCRIPTORS,
     IssueType.MISSING_AUTOTUNE,
     IssueType.SUBOPTIMAL_AUTOTUNE_CONFIGS,
     IssueType.AUTOTUNE_KEY_MISSING,
@@ -91,7 +91,7 @@ def _build_issue_categories(dsl: DSL = DSL.TRITON) -> str:
         OptimizationStage.DTYPE_FIX,
         OptimizationStage.FUSION,
         OptimizationStage.MEMORY_ACCESS,
-        OptimizationStage.BLOCK_POINTERS,
+        OptimizationStage.TENSOR_DESCRIPTORS,
         OptimizationStage.DEVICE_SPECIFIC,
         OptimizationStage.PERSISTENT_KERNEL,
         OptimizationStage.AUTOTUNING,
@@ -103,7 +103,7 @@ def _build_issue_categories(dsl: DSL = DSL.TRITON) -> str:
         OptimizationStage.DTYPE_FIX: "DTYPE",
         OptimizationStage.FUSION: "FUSION",
         OptimizationStage.MEMORY_ACCESS: "MEMORY ACCESS",
-        OptimizationStage.BLOCK_POINTERS: "BLOCK POINTERS",
+        OptimizationStage.TENSOR_DESCRIPTORS: "TENSOR DESCRIPTORS",
         OptimizationStage.DEVICE_SPECIFIC: "DEVICE SPECIFIC",
         OptimizationStage.PERSISTENT_KERNEL: "PERSISTENT KERNEL",
         OptimizationStage.AUTOTUNING: "AUTOTUNING",
@@ -144,11 +144,11 @@ def _build_issue_categories(dsl: DSL = DSL.TRITON) -> str:
         IssueType.CACHE_EVICTION_RISK: "large tile or long liveness evicts L2 cache lines",
         IssueType.LONG_LIVENESS: "tensor live across many ops — occupancy/register pressure risk",
         IssueType.HIGH_REGISTER_PRESSURE: "too many live values — reduces occupancy",
-        # BLOCK POINTERS
-        IssueType.MANUAL_POINTER_ARITHMETIC: "manual offset arithmetic — replace with tl.make_block_ptr",
-        IssueType.BLOCK_PTR_BOUNDARY_WRONG: "boundary_check uses booleans instead of dimension indices (0,1)",
-        IssueType.BLOCK_PTR_MULTIPLE_OF_MISUSE: "tl.multiple_of() applied to Python scalar — only valid on tensors",
-        IssueType.MISSING_BLOCK_POINTERS: "kernel could use block pointers for automatic boundary handling",
+        IssueType.MULTIPLE_OF_MISUSE: "tl.multiple_of() applied to Python scalar — only valid on tensors",
+        # TENSOR DESCRIPTORS
+        IssueType.MANUAL_POINTER_ARITHMETIC: "manual offset arithmetic on a 2D tile — replace with tl.make_tensor_descriptor",
+        IssueType.DEPRECATED_BLOCK_POINTERS: "tl.make_block_ptr / tl.advance are deprecated — convert to tl.make_tensor_descriptor",
+        IssueType.MISSING_TENSOR_DESCRIPTORS: "kernel could use tensor descriptors for automatic boundary handling",
         # XPU SPECIFIC
         IssueType.SUBOPTIMAL_TILE_SIZE: "BLOCK_M/N/K too small — XPU prefers 256x256x32",
         IssueType.SUBOPTIMAL_WARPS: "num_warps too low — XPU large GEMMs prefer 32",
