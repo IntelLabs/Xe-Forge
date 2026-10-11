@@ -289,6 +289,15 @@ came from `xe-forge-skill benchmark` here.
   `torch.utils.cpp_extension._SYCL_DLINK_FLAGS` before `load_inline`, once per target (`-Xspirv-translator=spir64_gen -spirv-ext=...` and
   `-Xspirv-translator=spir64 -spirv-ext=...`), and put ocloc options (e.g. the GRF mode)
   after the device name in `TORCH_XPU_ARCH_LIST`.
+{%- elif dsl == "opencl" %} The OpenCL C source is a string in the file, built and launched
+  with `from xe_forge.opencl import load, long_`: `k = load(src, "<kernel name>",
+  defines={...})`, then `k(global_size, local_size, *args)` inside `Model.forward` (tensors
+  pass their device pointers, `int` is `int`, `float` is `float`, `long_(v)` is a 64-bit
+  integer). It runs on torch's current XPU queue, so no queue, context or synchronization
+  of your own. A kernel that the repository generates JIT constants for (OpenVINO's
+  kernel_selector `GetJitConstants`, `KERNEL(...)`, `INPUT0_TYPE`, ...) gets every one of
+  them as an entry in `defines`, with the values the profile records for this workload,
+  and the kernel's own includes are inlined into the string.
 {%- endif %}
 {%- else %}
 {%- if dsl == "sycl" %} If it contains `TODO` markers, this is a from-scratch task: it is
@@ -533,6 +542,22 @@ worth more to the next one than a run that finished and said nothing.
 - **The kernel must be self-contained.** All helpers inline in the one file, because that
   file is what is compiled.
 {%- endif %}
+{% elif dsl == "opencl" %}
+- **Launch only through `xe_forge.opencl`.** It builds OpenCL C to SPIR-V and runs it on
+  torch's queue; a kernel launched through another OpenCL context runs out of order with
+  everything around it, and its measured time is not the time it would take in the model.
+- **Expand the generator's macros exactly.** A kernel copied from a repository that
+  generates its JIT constants builds only with the same `defines` the generator would emit
+  for this workload; a missing or different one silently selects another code path.
+- **Sub-group size is declared, not assumed** (`__attribute__((intel_reqd_sub_group_size(N)))`),
+  and a block read (`intel_sub_group_block_read*`) requires the alignment and extent it
+  reads; guard the tail.
+- **Accumulate in a wider type**: reductions over `half` accumulate in `float`.
+- **Tile parameters are measured, not chosen**: a trial built on a work-group size,
+  sub-group width or elements-per-work-item tries at least two values as siblings.
+- **Port back to the `.cl` the profile names.** The trial's kernel string maps onto that
+  file; the generator's host code changes only if a launch parameter it chooses changes.
+- The kernel must be self-contained — all helpers inline in the one source string.
 {% elif dsl == "cuda" %}
 - Use the caller's stream; do not create one, and do not synchronize inside the kernel call.
 - Declare launch bounds rather than relying on the compiler's occupancy guess.

@@ -244,6 +244,7 @@ def generate_workspace(
                 integration_repos=integration_repos,
                 profile_path=KERNEL_LOCATOR_PROFILE_PATH,
                 ext=ext,
+                stack_check=bool(config.external.stack_check),
             )
         )
 

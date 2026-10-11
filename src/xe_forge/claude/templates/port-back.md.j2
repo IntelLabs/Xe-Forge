@@ -56,6 +56,25 @@ If `output/` holds no winner, stop: there is nothing to port.
    3. **none** -- only when neither applies: write no patch, and name the part of the op's
       interface the winner changes and why no repository given here can carry it.
 
+{%- if stack_check %}
+5. **A stack check is configured: `upstream patch` builds the port inside its stack and
+   tests it there**, and prints `stack check: PASS|FAIL <reason>` with a log in `output/`.
+   - A port is done only on PASS. On FAIL the port is what is wrong, not the measurement:
+     read the log, fix the port in the clone, and run `upstream patch` again. A port that
+     cannot pass is kind **none**, with the failure in its notes.
+   - A dispatch through the repository's own selection mechanism -- a kernel selector's
+     validation and priority, an implementation's applicability check -- is **upstream**,
+     not serving-only. A hand-written shape branch in a caller is not.
+   - **upstream must break no shape the op accepts.** Either the new code is correct for the
+     op's whole domain, or the repository's selection admits it only where it is valid and
+     the original kernel's code is left unchanged for every other shape. Before porting,
+     run the winner standalone on shapes beyond the spec's variants -- tails, odd sizes, the
+     other dtypes the op's validation allows -- against the baseline at its tolerance. The
+     stack check then runs the repository's own tests for the op.
+   - **serving-only** stays available for a winner valid only at the served shapes; the stack
+     check then only proves the stack runs with it.
+{%- endif %}
+
 ## Output
 
 - `output/upstream.patch` (and `output/upstream-<name>.patch` for each further clone) --
@@ -66,6 +85,7 @@ If `output/` holds no winner, stop: there is nothing to port.
   - a Python or Triton file: `python -m py_compile` of every touched file, and, when an
     interpreter that imports the repository's package is available, the repository's own
     test for this op (the profile names it) run against the patched sources;
-  - C++/SYCL: say `unbuilt` -- rebuilding the provider is the owner's action, not yours.
+  - C++/SYCL: say `unbuilt` -- rebuilding the provider is the owner's action, not yours{% if stack_check %} --
+    unless the stack check built and tested it, which `PORT.txt` then records{% endif %}.
 
 Report back the paths written and one line saying what was and was not verified.

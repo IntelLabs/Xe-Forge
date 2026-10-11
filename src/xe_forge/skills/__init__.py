@@ -31,7 +31,9 @@ def main():
     p_validate.add_argument(
         "kernel_file", help="Path to the kernel: one source file, or a directory of them"
     )
-    p_validate.add_argument("--dsl", default="triton", choices=["triton", "sycl", "gluon", "cuda"])
+    p_validate.add_argument(
+        "--dsl", default="triton", choices=["triton", "sycl", "gluon", "cuda", "opencl"]
+    )
     p_validate.add_argument("--stage", default=None, help="Current optimization stage")
     p_validate.add_argument(
         "--external-validate",
@@ -54,7 +56,9 @@ def main():
     )
     p_bench.add_argument("--baseline-us", type=float, default=None, help="Cached baseline time")
     p_bench.add_argument("--device", default="xpu", help="Target device")
-    p_bench.add_argument("--dsl", default="triton", choices=["triton", "sycl", "gluon", "cuda"])
+    p_bench.add_argument(
+        "--dsl", default="triton", choices=["triton", "sycl", "gluon", "cuda", "opencl"]
+    )
     p_bench.add_argument("--triton-baseline", action="store_true", help="Baseline is Triton kernel")
     p_bench.add_argument(
         "--external-benchmark",

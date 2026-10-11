@@ -26,7 +26,7 @@ from pathlib import Path
 
 import xe_forge
 
-COMMANDS = ("capture", "analyze", "optimize", "run")
+COMMANDS = ("capture", "analyze", "optimize", "run", "compare")
 SRC_DIR = Path(xe_forge.__file__).resolve().parents[1]
 REPO_DIR = SRC_DIR.parent
 
@@ -182,6 +182,22 @@ def main(argv: list[str]) -> int:
     if command == "capture":
         rest, python = _split_framework_python(rest)
         return capture(rest, python)
+
+    if command == "compare":
+        from xe_forge.frontend import compare
+
+        p = argparse.ArgumentParser(prog="xe-forge compare")
+        p.add_argument("--a", nargs="+", type=Path, required=True, help="baseline capture.json(s)")
+        p.add_argument("--b", nargs="+", type=Path, required=True, help="candidate capture.json(s)")
+        p.add_argument("-o", "--output", type=Path, required=True, help="directory")
+        a = p.parse_args(rest)
+        rows = compare.compare(a.a, a.b)
+        path = compare.write(rows, a.output.resolve())
+        t = rows[0]
+        print(
+            f"compare: total {t['us_a']} -> {t['us_b']} us (x{t['speedup']}); {len(rows) - 1} workloads -> {path}"
+        )
+        return 0
 
     if command == "analyze":
         p = argparse.ArgumentParser(prog="xe-forge analyze")

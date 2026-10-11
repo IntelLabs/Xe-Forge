@@ -124,6 +124,45 @@ def _port_one(clone: Path) -> tuple[list[str], bool] | None:
     return lines, ok
 
 
+STACK_TIMEOUT = 4 * 3600  # a build of the stack plus its tests, not one benchmark
+
+
+def _stack_check(clone: Path, kernel: str, kind: str) -> tuple[bool, str] | None:
+    """The host's verdict on this port inside its stack, or None when none is configured.
+
+    The command builds the clone's changes into the stack and tests them there; for an
+    ``upstream`` port that includes the repository's own tests for the op, so a shape the
+    benchmark never ran cannot break silently. Its full output goes to ``output/``.
+    """
+    from xe_forge.config import get_config
+    from xe_forge.external import ExternalCommandError, render_command
+
+    template = get_config().external.stack_check
+    if not template:
+        return None
+    log = OUTPUT / f"stack_check_{clone.name}.log"
+    try:
+        argv = render_command(
+            template,
+            clone=str(clone.resolve()),
+            kernel=kernel,
+            kind=kind,
+            workspace=str(Path.cwd()),
+        )
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=STACK_TIMEOUT)
+    except (ExternalCommandError, OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"stack check did not run: {exc}"
+    log.write_text(proc.stdout + proc.stderr)
+    lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+    if not lines or lines[-1] != "DONE":
+        return False, f"stack check did not complete (no DONE, exit {proc.returncode}); see {log}"
+    verdict = next((ln for ln in reversed(lines) if ln.upper().startswith("STACK:")), "")
+    if not verdict:
+        return False, f"no STACK: line (log {log})"
+    token, _, detail = verdict.split(":", 1)[1].strip().partition(" ")
+    return token.upper() == "PASS", f"{detail} (log {log})".strip()
+
+
 def _patch(args) -> int:
     clones = sorted(p for p in Path(".").glob(f"{UPSTREAM}*") if (p / ".git").exists())
     if not clones:
@@ -153,12 +192,19 @@ def _patch(args) -> int:
     ]
     for _, (block, _) in ported:
         lines += block
+    stack_ok = True
+    for clone, _ in ported:
+        checked = _stack_check(clone, args.kernel_name, args.kind)
+        if checked is not None:
+            passed, reason = checked
+            stack_ok &= passed
+            lines.append(f"stack check {clone.name}: {'PASS' if passed else 'FAIL'} {reason}")
     if args.notes:
         lines += ["notes:", args.notes]
     (OUTPUT / "PORT.txt").write_text("\n".join(lines) + "\n")
     print(f"Wrote {', '.join(f'output/{c.name}.patch' for c, _ in ported)} and output/PORT.txt")
     print("\n".join(lines))
-    return 0 if all(ok for _, (_, ok) in ported) else 1
+    return 0 if stack_ok and all(ok for _, (_, ok) in ported) else 1
 
 
 def run(args):

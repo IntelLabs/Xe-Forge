@@ -27,6 +27,23 @@ def _trees(workspace: Path, name: str) -> TrialManager | None:
     return None
 
 
+def _port_status(port_txt: Path) -> dict:
+    """kind, stack verdict and mergeability from PORT.txt (``upstream patch`` writes it).
+
+    ``stack`` is None when no stack check ran: the patch is then as unverified as before.
+    Mergeable means an ``upstream`` port that passed the stack check -- built and tested
+    in its stack, including the repository's own tests for the op."""
+    text = port_txt.read_text() if port_txt.is_file() else ""
+    kind = next(
+        (ln.split(":", 1)[1].split()[0] for ln in text.splitlines() if ln.startswith("kind:")), None
+    )
+    verdicts = [
+        ln.split(":", 1)[1].split()[0] for ln in text.splitlines() if ln.startswith("stack check ")
+    ]
+    stack = None if not verdicts else ("PASS" if all(v == "PASS" for v in verdicts) else "FAIL")
+    return {"kind": kind, "stack": stack, "mergeable": kind == "upstream" and stack == "PASS"}
+
+
 def collect_one(workspace: Path, name: str, variant: str, results: Path) -> dict:
     row = {"kernel": name, "variant": variant, "workspace": str(workspace)}
     status = workspace.with_suffix(".status.json")
@@ -63,6 +80,13 @@ def collect_one(workspace: Path, name: str, variant: str, results: Path) -> dict
     if output.is_dir():
         shutil.copytree(output, dest / "output")
         row["patches"] = sorted(str(p.relative_to(dest)) for p in dest.rglob("*.patch"))
+        row.update(_port_status(dest / "output" / "PORT.txt"))
+        if row["stack"] == "FAIL":
+            # Built into its stack and broke it: kept as evidence, not handed out as a patch.
+            for p in dest.rglob("*.patch"):
+                p.rename(p.with_suffix(".patch.rejected"))
+            row["patches"] = []
+            row["outcome"] += " (stack check FAIL; patch rejected)"
     else:
         # Not finalized by the session (e.g. it ran out of turns): the measured trial's own
         # file is kept, but nothing was ported back and the outcome says so.
@@ -93,8 +117,8 @@ def collect(run_dir: Path, manifest: dict, runs: list[tuple[str, str]]) -> Path:
     lines = [
         "# Results",
         "",
-        "| kernel | repo | variant | decision | outcome | speedup | trial | patches |",
-        "|---|---|---|---|---|---|---|---|",
+        "| kernel | repo | variant | decision | outcome | speedup | trial | kind | stack | mergeable | patches |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for entry in manifest["kernels"]:
         name = entry["name"]
@@ -103,7 +127,7 @@ def collect(run_dir: Path, manifest: dict, runs: list[tuple[str, str]]) -> Path:
             decision = "optimize" if entry.get("enabled") else "skip"
             lines.append(
                 f"| `{name}` | {entry.get('repo') or '-'} | - | {decision} | "
-                f"not run: {entry.get('reason', '')} | - | - | - |"
+                f"not run: {entry.get('reason', '')} | - | - | - | - | - | - |"
             )
             continue
         for variant, r in mine:
@@ -116,7 +140,8 @@ def collect(run_dir: Path, manifest: dict, runs: list[tuple[str, str]]) -> Path:
             patches = ", ".join(r.get("patches") or []) or "-"
             lines.append(
                 f"| `{name}` | {entry.get('repo')} | {variant} | optimize | {outcome} | "
-                f"{speedup} | {r.get('trial', '-')} | {patches} |"
+                f"{speedup} | {r.get('trial', '-')} | {r.get('kind') or '-'} | "
+                f"{r.get('stack') or '-'} | {'yes' if r.get('mergeable') else 'no'} | {patches} |"
             )
     summary = results / "SUMMARY.md"
     summary.write_text("\n".join(lines) + "\n")

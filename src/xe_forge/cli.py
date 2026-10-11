@@ -103,7 +103,7 @@ Examples:
     parser.add_argument(
         "--dsl",
         type=str,
-        choices=["triton", "gluon", "sycl", "cuda"],
+        choices=["triton", "gluon", "sycl", "cuda", "opencl"],
         default=None,
         help="Kernel DSL (default: triton)",
     )
@@ -202,6 +202,12 @@ Examples:
         type=str,
         help="Command template run instead of the built-in validator; placeholders: "
         "{kernel} {trial} {dsl} {stage} {workspace}",
+    )
+    host_group.add_argument(
+        "--external-stack-check",
+        type=str,
+        help="Command template run by `upstream patch` to build and test a port inside its "
+        "stack; placeholders: {clone} {kernel} {kind} {workspace}",
     )
     host_group.add_argument(
         "--dataset-record",
@@ -337,6 +343,8 @@ def _load_config(args) -> Config:
         os.environ["EXTERNAL_BENCHMARK"] = args.external_benchmark
     if getattr(args, "external_validate", None):
         os.environ["EXTERNAL_VALIDATE"] = args.external_validate
+    if getattr(args, "external_stack_check", None):
+        os.environ["EXTERNAL_STACK_CHECK"] = args.external_stack_check
     if getattr(args, "dataset_record", None):
         os.environ["DATASET_RECORD"] = args.dataset_record
     if getattr(args, "lessons", None):
