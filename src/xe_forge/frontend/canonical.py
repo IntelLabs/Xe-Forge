@@ -4,8 +4,12 @@ A workload is what two calls share when one kernel could serve both: the op, the
 the layout class of every tensor, the non-tensor arguments, and every dimension that does
 not follow the token count. Dimensions are named after the op's own schema
 (``INPUT_D1`` is dim 1 of the argument called ``input``), so the spec Xe-Forge receives
-speaks the kernel's vocabulary; GEMM-shaped ATen ops get ``M``/``N``/``K`` instead, so
-``aten::linear``, ``aten::mm`` and ``aten::addmm`` at one shape are one workload.
+speaks the kernel's vocabulary; a matrix multiply gets ``M``/``N``/``K`` instead.
+
+What an op *is* -- its family, whether it is a matrix multiply and which argument is the
+activation or the weight -- is the naming agent's answer (``framework_meta["named"]``), for
+an ATen op as for a provider's: no table of op names or argument positions lives here, so
+a new op needs no code. An op without an answer is family ``other``, with no GEMM bound.
 
 Which dimensions are *var* is measured, not declared. The token count of a call is the
 leading dim of its first tensor (``M`` for a GEMM), and a dimension is var when it equals
@@ -24,32 +28,6 @@ from collections import defaultdict
 from xe_forge.frontend.dtypes import tensor_bytes
 from xe_forge.frontend.ir import CapturedOp, Naming, TensorArg, Workload
 
-_FAMILIES = (
-    ("gemm", r"^(linear|mm|addmm|bmm|matmul|baddbmm)$|gemm|_mm$|scaled_mm|fullyconnected"),
-    ("attention", r"attention|attn|flash|paged|mla"),
-    ("norm", r"norm"),
-    ("rope", r"rotary|rope"),
-    ("activation", r"silu|gelu|relu|swiglu|_and_mul|sigmoid|tanh"),
-    ("moe", r"moe|expert|topk|router|grouped"),
-    ("cache", r"cache"),
-    ("sampling", r"sampl|softmax|argmax|top_?p|multinomial"),
-    ("copy", r"^(copy_|to|_to_copy|contiguous|clone|cat|index|index_select|embedding|fill_)"),
-)
-
-_ATEN_GEMM = {"linear", "mm", "addmm", "bmm", "matmul", "baddbmm"}
-
-
-def base_name(framework_op: str) -> str:
-    return framework_op.split("::", 1)[-1].split(".", 1)[0]
-
-
-def family_of(framework_op: str) -> str:
-    name = base_name(framework_op).lower()
-    for fam, pattern in _FAMILIES:
-        if re.search(pattern, name):
-            return fam
-    return "elementwise" if framework_op.startswith("aten::") else "other"
-
 
 def _layout(t: TensorArg) -> str:
     """Layout class from the innermost dimension only. Outer pitches (a row-strided view
@@ -65,8 +43,8 @@ def _layout(t: TensorArg) -> str:
 
 
 def _provider_gemm(op: CapturedOp) -> dict | None:
-    """M/N/K/E and bytes per element of a GEMM a provider implements, from the naming
-    agent's answer for it (``named["gemm"]``: which argument is the activation, the weight,
+    """M/N/K/E and bytes per element of a matrix multiply -- a provider's or ATen's -- from
+    the naming agent's answer for it (``named["gemm"]``: which argument is the activation, the weight,
     what is read with the weight, the output, where N sits) -- no argument-name or
     quantization-format table here.
 
@@ -113,39 +91,16 @@ def _provider_gemm(op: CapturedOp) -> dict | None:
 
 
 def _gemm_dims(op: CapturedOp) -> dict[str, int] | None:
-    provider = _provider_gemm(op)
-    if provider is not None:
-        op.framework_meta["gemm"] = provider
-        return {k: provider[k] for k in ("M", "N", "K", "E") if k in provider}
+    gemm = _provider_gemm(op)
+    if gemm is not None:
+        op.framework_meta["gemm"] = gemm
+        keys = ("M", "N", "K", "E") if gemm.get("grouped") else ("M", "N", "K")
+        return {k: gemm[k] for k in keys if k in gemm}
     # An adapter whose matmul weights are not ports (OpenVINO FullyConnected) states K and N.
     stated = op.framework_meta.get("gemm")
     if stated and "tokens" in op.framework_meta:
         return {"M": op.framework_meta["tokens"], "N": stated["N"], "K": stated["K"]}
-    name = base_name(op.framework_op)
-    if not op.framework_op.startswith("aten::") or name not in _ATEN_GEMM:
-        return None
-    ts = [a for a in op.args if a is not None]
-    try:
-        if name == "linear":
-            x, w = ts[0], ts[1]
-            return {"M": math.prod(x.shape[:-1]), "N": w.shape[0], "K": x.shape[-1]}
-        if name == "addmm":
-            a, b = ts[1], ts[2]
-        elif name == "baddbmm":
-            a, b = ts[1], ts[2]
-        else:
-            a, b = ts[0], ts[1]
-        dims = {
-            "M": math.prod(a.shape[:-1]) if len(a.shape) > 2 and name == "matmul" else a.shape[-2]
-        }
-        dims.update(N=b.shape[-1], K=a.shape[-1])
-        if len(a.shape) == 3 and name in ("bmm", "baddbmm"):
-            dims["B"] = a.shape[0]
-        elif name == "matmul" and len(b.shape) > 2:  # batched on both sides: B matmuls
-            dims.update(M=a.shape[-2], B=math.prod(b.shape[:-2]))
-        return dims
-    except (IndexError, AttributeError):
-        return None
+    return None
 
 
 def _int(value) -> int | None:
@@ -196,12 +151,6 @@ def _attrs(op: CapturedOp) -> dict:
     )
     if (op.framework_meta.get("named") or {}).get("paged"):
         out["paged"] = True
-    if base_name(op.framework_op) in ("linear", "addmm", "baddbmm"):
-        out["bias"] = (
-            len([a for a in op.args if a is not None]) >= 3
-            if base_name(op.framework_op) == "linear"
-            else True
-        )
     return out
 
 
@@ -220,11 +169,7 @@ def workloads(ops: list[CapturedOp], total_us: float, naming_fn=None) -> list[Wo
         dims = gemm or _named_dims(op)
         scalar_dims = set() if gemm else {k for k in dims if not re.search(r"_D\d+$", k)}
         tensors = [a for a in op.args if a is not None]
-        family = (op.framework_meta.get("named") or {}).get("family") or family_of(op.framework_op)
-        if family == "other" and op.framework_meta.get("owner"):
-            family = family_of(op.framework_meta["owner"])
-        if gemm:
-            family = "gemm"
+        family = "gemm" if gemm else (op.framework_meta.get("named") or {}).get("family", "other")
         base = {
             "family": family,
             "op": op.framework_op,

@@ -13,11 +13,13 @@ so every op is dispatched.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 
+from xe_forge.frontend import prompt
 from xe_forge.frontend.adapters.pytorch import device_info, device_type
 from xe_forge.frontend.model_meta import stored
 
@@ -33,9 +35,9 @@ def add_arguments(parser) -> None:
     parser.add_argument("--quantization", help="e.g. fp8: SGLang quantizes the checkpoint at load")
 
 
-def _command(args, dev: str, stage: str) -> list[str]:
+def _command(args, dev: str, stage: str, ids_file: Path) -> list[str]:
     cmd = [
-        sys.executable, "-m", "sglang.benchmark.one_batch",
+        sys.executable, "-m", "xe_forge.frontend.adapters.sglang_one_batch", str(ids_file),
         "--model-path", args.model,
         "--device", dev,
         "--dtype", args.dtype,
@@ -75,8 +77,17 @@ def capture(args, raw_dir: Path) -> dict:
     # One process per phase: on XPU, Kineto cannot open a second profiling session in a
     # process (clearActivities: PTI_ERROR_NOT_IMPLEMENTED), and one_batch profiles prefill
     # and decode as two sessions.
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(args.model)
+    ids = prompt.token_ids(
+        lambda text: tok.encode(text, add_special_tokens=False), len(tok), args.batch,
+        args.input_len, args.prompt_file,
+    )  # fmt: skip
+    ids_file = raw_dir / "prompt_ids.json"
+    ids_file.write_text(json.dumps(ids))
     for stage in ("prefill", "decode"):
-        cmd = _command(args, dev, stage)
+        cmd = _command(args, dev, stage, ids_file)
         print(f"sglang: {' '.join(cmd)}", flush=True)
         code = subprocess.call(cmd, env=env)
         if code != 0:
@@ -111,7 +122,7 @@ def capture(args, raw_dir: Path) -> dict:
             "output_len": args.output_len,
             "attention_backend": args.attention_backend or ("intel_xpu" if dev == "xpu" else None),
             "page_size": args.page_size,
-            "one_batch": " ".join(cmd[1:]).replace(
+            "one_batch": " ".join(cmd[3:]).replace(
                 "--profile-stage decode", "--profile-stage <phase>"
             ),
         },

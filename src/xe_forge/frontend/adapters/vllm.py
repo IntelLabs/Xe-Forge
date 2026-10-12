@@ -4,7 +4,7 @@ The engine runs in this process (``VLLM_ENABLE_V1_MULTIPROCESSING=0``, tensor pa
 so a plain torch.profiler around ``LLM.generate`` sees every op and kernel. Eager mode
 (``enforce_eager``) keeps graph replay from hiding the ops; the shares it measures are the
 eager ones. One warm-up request runs first so compilation and autotuning stay outside the
-profiled window. The prompt is synthetic token ids: shapes, not text, are what is captured.
+profiled window. The prompt comes from ``frontend.prompt``, as for every adapter.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from xe_forge.frontend import prompt
 from xe_forge.frontend.adapters.pytorch import device_info, profile_region
 from xe_forge.frontend.model_meta import stored
 
@@ -27,16 +28,15 @@ def add_arguments(parser) -> None:
     parser.add_argument("--no-stack", action="store_true", help="skip call-site recording")
 
 
-def _prompts(n: int, length: int):
+def _prompts(llm, args, length: int):
     from vllm.inputs import TokensPrompt
 
-    # Deterministic ids away from the special-token ranges; only the length matters.
-    return [
-        TokensPrompt(
-            prompt_token_ids=[100 + (i * 7919 + j * 104729) % 20000 for i in range(length)]
-        )
-        for j in range(n)
-    ]
+    tok = llm.get_tokenizer()
+    ids = prompt.token_ids(
+        lambda text: tok.encode(text, add_special_tokens=False), len(tok), args.batch, length,
+        args.prompt_file,
+    )  # fmt: skip
+    return [TokensPrompt(prompt_token_ids=seq) for seq in ids]
 
 
 def capture(args, raw_dir: Path) -> dict:
@@ -57,11 +57,11 @@ def capture(args, raw_dir: Path) -> dict:
         dtype=args.dtype,
         quantization=args.quantization,
     )
-    warm = SamplingParams(max_tokens=4, ignore_eos=True, temperature=0.0)
-    llm.generate(_prompts(args.batch, min(args.input_len, 64)), warm, use_tqdm=False)
+    warm = SamplingParams(max_tokens=args.warmup_tokens, ignore_eos=True, temperature=0.0)
+    llm.generate(_prompts(llm, args, min(args.input_len, 64)), warm, use_tqdm=False)
 
     params = SamplingParams(max_tokens=args.output_len, ignore_eos=True, temperature=0.0)
-    prompts = _prompts(args.batch, args.input_len)
+    prompts = _prompts(llm, args, args.input_len)
     profile_region(
         lambda: llm.generate(prompts, params, use_tqdm=False), raw_dir, with_stack=not args.no_stack
     )

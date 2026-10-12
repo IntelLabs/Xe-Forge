@@ -20,7 +20,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from xe_forge.frontend import adapters, canonical, ir, naming
+from xe_forge.frontend import adapters, canonical, ir, naming, prompt
 from xe_forge.frontend.torch_trace import parse_traces
 
 # Environment worth recording for reproducibility. Anything that could carry a credential
@@ -127,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-o", "--output", type=Path, required=True, help="capture.json to write")
     parser.add_argument("--reparse", type=Path, help="rebuild from an existing raw/ directory")
     parser.add_argument("--names", type=Path, help="the naming agent's names.json")
+    prompt.add_arguments(parser)
     if known.framework in adapters.ADAPTERS:
         adapters.get(known.framework).add_arguments(parser)
     args = parser.parse_args(argv)
@@ -148,6 +149,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"capture: does not fit on the device at this workload: {line.strip()}",
                   file=sys.stderr, flush=True)  # fmt: skip
             os._exit(3)  # a runtime can abort in teardown after a device OOM; exit with the reason
+        run.setdefault("runtime", {})["prompt"] = prompt.describe(args.prompt_file)
         stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
         model = str((run.get("model") or {}).get("name", "model")).split("/")[-1]
         run.update(

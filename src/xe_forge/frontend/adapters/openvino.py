@@ -24,7 +24,7 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-from xe_forge.frontend import CACHE
+from xe_forge.frontend import CACHE, prompt
 from xe_forge.frontend.ir import CapturedOp, TensorArg
 from xe_forge.frontend.model_meta import stored
 from xe_forge.frontend.torch_trace import TraceSummary
@@ -104,25 +104,28 @@ def capture(args, raw_dir: Path) -> dict:
         path, device=args.device, ov_config={"PERF_COUNT": "YES"}
     )
     model.compile()
-    prompt = torch.tensor(
-        [[100 + (i * 7919) % 20000 for i in range(args.input_len)]] * args.batch,
-        dtype=torch.int64,
-    )
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(args.model if not Path(args.model).is_dir() else path)
+    ids = prompt.token_ids(
+        lambda text: tok.encode(text, add_special_tokens=False), len(tok), args.batch,
+        args.input_len, args.prompt_file,
+    )  # fmt: skip
+    tokens = torch.tensor(ids, dtype=torch.int64)
     steps: list = []
     model.request = _Recorder(model.request, steps)  # from the first infer: means accumulate
-    model.generate(prompt, max_new_tokens=4, min_new_tokens=4, do_sample=False)  # warm-up
+    warm_n = args.warmup_tokens
+    model.generate(tokens, max_new_tokens=warm_n, min_new_tokens=warm_n, do_sample=False)
     warm = len(steps)
     model.generate(
-        prompt, max_new_tokens=args.output_len, min_new_tokens=args.output_len, do_sample=False
+        tokens, max_new_tokens=args.output_len, min_new_tokens=args.output_len, do_sample=False
     )
 
     raw_dir.mkdir(parents=True, exist_ok=True)
     with open(raw_dir / "ov_profile.jsonl", "w") as f:
         for i, rows in enumerate(steps[warm:]):
-            tokens = args.batch * (args.input_len if i == 0 else 1)  # rows of a FullyConnected
-            f.write(
-                json.dumps({"tokens": tokens, "context": args.input_len + i, "rows": rows}) + "\n"
-            )
+            m = args.batch * (args.input_len if i == 0 else 1)  # rows of a FullyConnected
+            f.write(json.dumps({"tokens": m, "context": args.input_len + i, "rows": rows}) + "\n")
 
     def ports(ps):
         return [

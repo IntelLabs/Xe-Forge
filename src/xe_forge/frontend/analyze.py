@@ -157,13 +157,9 @@ def gemm_bound(
         return None
     dtype = w.dtypes[0] if w.dtypes else None
     size = storage_bytes(dtype)
-    measured = "w_bytes" in w.attrs
-    if not measured and not (
-        str(w.framework_meta.get("framework_op", "")).startswith("aten::")
-        and len(set(w.dtypes)) == 1
-    ):
-        return None  # weight bytes unmeasured (e.g. a quantized weight the trace hides)
-    a_bytes, w_bytes = w.attrs.get("a_bytes", size), w.attrs.get("w_bytes", size)
+    if "w_bytes" not in w.attrs:
+        return None  # weight bytes unmeasured: no agent answer, or a weight the trace hides
+    a_bytes, w_bytes = w.attrs.get("a_bytes", size), w.attrs["w_bytes"]
     o_bytes = w.attrs.get("o_bytes", size)  # measured from the output when the agent named it
     bw = calib.get("bandwidth_gbs")
     peaks = {k: v for k, v in (calib.get("matmul_tflops") or {}).items() if v}
@@ -180,9 +176,6 @@ def gemm_bound(
         return None
     e = e or 1
     n, k = w.dims["N"], w.dims["K"]
-    batch = 1 if grouped else w.dims.get("B", 1)  # bmm: B independent matmuls
-    if not isinstance(batch, int):
-        return None
 
     def per_call(m):
         m = w.dims["M"] if m is None else m
@@ -190,8 +183,8 @@ def gemm_bound(
             e_eff = w.attrs.get("active_experts") or experts_touched(e, m, ctx.get("topk"))
         else:
             e_eff = e
-        moved = batch * (m * k * a_bytes + e_eff * k * n * w_bytes + m * n * o_bytes)
-        return max(moved / (bw * 1e3), 2 * batch * m * n * k / (peak * 1e6))
+        moved = m * k * a_bytes + e_eff * k * n * w_bytes + m * n * o_bytes
+        return max(moved / (bw * 1e3), 2 * m * n * k / (peak * 1e6))
 
     return _against(w, per_call)
 
