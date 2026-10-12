@@ -3,7 +3,7 @@
 # A: [K, M], B: [K, N], C: [M, N]
 #
 # Issues:
-# 1. Manual pointer arithmetic (should use block pointers)
+# 1. Manual pointer arithmetic (should use tensor descriptors)
 # 2. Small tiles (64-128) - XPU prefers 256x256
 # 3. Low warps (4-8) - XPU prefers 32
 # 4. No grf_mode='256'

@@ -5,17 +5,17 @@ Maintain the same model signature, including the weights' shapes and names.
 
 === OPTIMIZATION PRIORITIES ===
 1. Apply the specific optimization patterns from knowledge_patterns
-2. Use block pointers with tl.make_block_ptr() for better memory access
+2. Use tensor descriptors (tl.make_tensor_descriptor) for tiled loads/stores; tl.make_block_ptr is deprecated
 {% if device_type == "xpu" %}
 3. Use optimal tile sizes: BLOCK_M={{ defaults.BLOCK_M }}, BLOCK_N={{ defaults.BLOCK_N }}, BLOCK_K={{ defaults.BLOCK_K }} for XPU
 4. Set num_warps={{ defaults.num_warps }} for Intel XPU
 5. Add GROUP_SIZE_M swizzling for better L2 cache utilization
-6. Use boundary_check=(0, 1) tuple format, NOT booleans
+6. Descriptor .load()/.store() take no boundary_check: out-of-bounds elements are zero-filled / dropped
 {% elif device_type == "cuda" %}
 3. Use optimal tile sizes: BLOCK_M={{ defaults.BLOCK_M }}, BLOCK_N={{ defaults.BLOCK_N }}, BLOCK_K={{ defaults.BLOCK_K }} for CUDA
 4. Set num_warps={{ defaults.num_warps }} for NVIDIA GPU
 5. Add GROUP_SIZE_M swizzling for better L2 cache utilization
-6. Use boundary_check=(0, 1) tuple format, NOT booleans
+6. Descriptor .load()/.store() take no boundary_check: out-of-bounds elements are zero-filled / dropped
 {% else %}
 3. Use tile sizes: BLOCK_M={{ defaults.BLOCK_M }}, BLOCK_N={{ defaults.BLOCK_N }}, BLOCK_K={{ defaults.BLOCK_K }}
 4. Set num_warps={{ defaults.num_warps }}

@@ -90,12 +90,12 @@ patterns:
   description: Load the residual tensor column-slice in the GEMM epilogue and add it to the fp32 accumulator before the final
     store.
   rationale: "If the residual is a 1D per-column vector (broadcast over rows), loading it\nonce per tile column costs negligible\
-    \ bandwidth. If the residual is [M, N],\nuse a block pointer to load the matching tile. Either way, this eliminates\n\
+    \ bandwidth. If the residual is [M, N],\nuse a tensor descriptor to load the matching tile. Either way, this eliminates\n\
     one full [M, N] read pass compared to a separate add kernel.\n\n```python\n# 1D residual (per-column broadcast)\nres =\
     \ tl.load(res_ptr + offs_n, mask=mask_n, other=0.0).to(tl.float32)\nacc = acc + res[None, :]\n\n# 2D residual (matching\
-    \ tile)\nr_bp = tl.make_block_ptr(base=res_ptr, shape=(M, N),\n                          strides=(stride_rm, stride_rn),\n\
-    \                          offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),\n                          block_shape=(BLOCK_M,\
-    \ BLOCK_N), order=(1, 0))\nres = tl.load(r_bp, boundary_check=(0, 1)).to(tl.float32)\nacc = acc + res\n```\n"
+    \ tile)\nr_desc = tl.make_tensor_descriptor(base=res_ptr, shape=(M, N),\n                                   strides=(stride_rm, stride_rn),\n\
+    \                                   block_shape=(BLOCK_M, BLOCK_N))\nres = r_desc.load([pid_m * BLOCK_M, pid_n * BLOCK_N]).to(tl.float32)\n\
+    acc = acc + res\n```\n"
   examples:
   - file: 70_Gemm_Sigmoid_Scaling_ResidualAdd.py
     note: Residual added after sigmoid; both scaled output and residual are fp32 at add time

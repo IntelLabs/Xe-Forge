@@ -34,35 +34,31 @@ def _linear_gelu_kernel(
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
 
-    # Block pointers for X: [M, K]
-    x_bp = tl.make_block_ptr(
+    # Tensor descriptor for X: [M, K]
+    x_desc = tl.make_tensor_descriptor(
         base=x_ptr,
         shape=(M, K),
         strides=(stride_xm, stride_xk),
-        offsets=(pid_m * BLOCK_M, 0),
         block_shape=(BLOCK_M, BLOCK_K),
-        order=(1, 0),
     )
 
-    # Block pointers for W: [K, N]
-    w_bp = tl.make_block_ptr(
+    # Tensor descriptor for W: [K, N]
+    w_desc = tl.make_tensor_descriptor(
         base=w_ptr,
         shape=(K, N),
         strides=(stride_wk, stride_wn),
-        offsets=(0, pid_n * BLOCK_N),
         block_shape=(BLOCK_K, BLOCK_N),
-        order=(1, 0),
     )
 
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
-    # K-loop
+    # K-loop (out-of-bounds elements of a descriptor load read as zero)
+    off_k = 0
     for _k in range(0, K, BLOCK_K):
-        x_tile = tl.load(x_bp, boundary_check=(0, 1)).to(tl.float16)
-        w_tile = tl.load(w_bp, boundary_check=(0, 1)).to(tl.float16)
+        x_tile = x_desc.load([pid_m * BLOCK_M, off_k]).to(tl.float16)
+        w_tile = w_desc.load([off_k, pid_n * BLOCK_N]).to(tl.float16)
         acc = tl.dot(x_tile, w_tile, acc)
-        x_bp = tl.advance(x_bp, (0, BLOCK_K))
-        w_bp = tl.advance(w_bp, (BLOCK_K, 0))
+        off_k += BLOCK_K
 
     # bias
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -87,16 +83,14 @@ def _linear_gelu_kernel(
     sig = 1.0 / (1.0 + tl.math.exp2(t * LOG2E))
     y = acc * sig
 
-    # store tmp tile
-    tmp_bp = tl.make_block_ptr(
+    # store tmp tile (out-of-bounds elements are dropped by the descriptor)
+    tmp_desc = tl.make_tensor_descriptor(
         base=tmp_ptr,
         shape=(M, N),
         strides=(stride_tm, stride_tn),
-        offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),
         block_shape=(BLOCK_M, BLOCK_N),
-        order=(1, 0),
     )
-    tl.store(tmp_bp, y.to(tl.float16), boundary_check=(0, 1))
+    tmp_desc.store([pid_m * BLOCK_M, pid_n * BLOCK_N], y.to(tl.float16))
 
 
 # -----------------------------------------------------------------------------

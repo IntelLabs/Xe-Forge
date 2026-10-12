@@ -1,5 +1,9 @@
 """Tests for static kernel validation."""
 
+from pathlib import Path
+
+import pytest
+
 from xe_forge.core.validator import KernelValidator
 
 VALID_1D_SWIZZLED_GRID = """\
@@ -68,6 +72,48 @@ def launch():
 """
 
 
+BLOCK_PTR_KERNEL = """\
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def kernel(x_ptr, M, K, stride_xm, BM: tl.constexpr, BK: tl.constexpr):
+    x_bp = tl.make_block_ptr(x_ptr, (M, K), (stride_xm, 1), (0, 0), (BM, BK), (1, 0))
+    for _ in range(0, K, BK):
+        x = tl.load(x_bp, boundary_check=(0, 1))
+        x_bp = tl.advance(x_bp, (0, BK))
+
+
+class Model:
+    pass
+"""
+
+
+TENSOR_DESCRIPTOR_KERNEL = """\
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def kernel(x_ptr, M, K, stride_xm, BM: tl.constexpr, BK: tl.constexpr):
+    x_desc = tl.make_tensor_descriptor(x_ptr, shape=(M, K), strides=(stride_xm, 1), block_shape=(BM, BK))
+    off_k = 0
+    for _ in range(0, K, BK):
+        x = x_desc.load([0, off_k])
+        off_k += BK
+
+
+class Model:
+    pass
+"""
+
+
+DESCRIPTOR_WITH_BOUNDARY_CHECK = TENSOR_DESCRIPTOR_KERNEL.replace(
+    "x_desc.load([0, off_k])", "x_desc.load([0, off_k], boundary_check=(0, 1))"
+)
+
+
 class TestGridSwizzleValidation:
     def test_1d_grid_with_swizzle_is_allowed(self):
         issues = KernelValidator().validate(VALID_1D_SWIZZLED_GRID, dsl="triton")
@@ -80,3 +126,58 @@ class TestGridSwizzleValidation:
     def test_2d_tuple_grid_with_swizzle_is_rejected(self):
         issues = KernelValidator().validate(INVALID_2D_TUPLE_SWIZZLED_GRID, dsl="triton")
         assert any(issue.check_name == "grid_swizzle_conflict" for issue in issues)
+
+
+class TestTensorDescriptorValidation:
+    def test_block_pointer_api_is_flagged_deprecated(self):
+        issues = KernelValidator().validate(BLOCK_PTR_KERNEL, dsl="triton")
+        flagged = [i for i in issues if i.check_name == "deprecated_block_ptr"]
+        assert len(flagged) == 1
+        assert flagged[0].severity == "warning"
+
+    @pytest.mark.parametrize("method", ["make_block_ptr", "advance"])
+    @pytest.mark.parametrize("multiline", [False, True])
+    def test_deprecated_api_calls_are_flagged(self, method, multiline):
+        call = f"tl.{method}(\n    ptr\n)" if multiline else f"tl.{method}(ptr)"
+        code = f"# tl.{method} is deprecated\n{call}\n"
+        issues = KernelValidator().validate(code, dsl="triton")
+        flagged = [issue for issue in issues if issue.check_name == "deprecated_block_ptr"]
+        assert len(flagged) == 1
+        assert flagged[0].severity == "warning"
+        assert flagged[0].line == 2
+
+    @pytest.mark.parametrize("method", ["make_block_ptr", "advance"])
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "# tl.{method}(ptr) is deprecated",
+            'message = "tl.{method}(ptr)"',
+            '"""Use descriptors instead of tl.{method}(ptr)."""',
+            "other.{method}(ptr)",
+            "factory = tl.{method}",
+        ],
+    )
+    def test_deprecated_api_mentions_are_not_flagged(self, method, source):
+        code = TENSOR_DESCRIPTOR_KERNEL + "\n" + source.format(method=method)
+        issues = KernelValidator().validate(code, dsl="triton")
+        assert all(issue.check_name != "deprecated_block_ptr" for issue in issues)
+
+    @pytest.mark.parametrize("template", ["gemm_template.py", "gemm_epilogue_template.py"])
+    def test_descriptor_templates_are_not_flagged_deprecated(self, template):
+        path = Path(__file__).resolve().parents[1] / "templates" / template
+        issues = KernelValidator().validate(path.read_text(encoding="utf-8"), dsl="triton")
+        assert all(
+            issue.check_name not in {"deprecated_block_ptr", "syntax_error"} for issue in issues
+        )
+
+    def test_tensor_descriptor_kernel_is_not_flagged(self):
+        issues = KernelValidator().validate(TENSOR_DESCRIPTOR_KERNEL, dsl="triton")
+        names = {i.check_name for i in issues}
+        assert "deprecated_block_ptr" not in names
+        assert "descriptor_boundary_check" not in names
+
+    def test_boundary_check_on_descriptor_load_is_rejected(self):
+        issues = KernelValidator().validate(DESCRIPTOR_WITH_BOUNDARY_CHECK, dsl="triton")
+        assert any(
+            i.check_name == "descriptor_boundary_check" and i.severity == "error" for i in issues
+        )

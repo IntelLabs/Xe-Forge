@@ -1,7 +1,7 @@
 # This kernel demonstrates all key optimizations:
 #
 # 1. FUSED kernel (GEMM + activation in single kernel)
-# 2. Block pointers instead of manual arithmetic
+# 2. Tensor descriptors instead of manual pointer arithmetic
 # 3. Large tile sizes (256x256) optimal for XPU
 # 4. 32 warps (XPU optimal vs CUDA's 8)
 # 5. grf_mode='256' for large register file
@@ -111,7 +111,7 @@ def _gemm_activation_fused_kernel(
 
     Optimizations applied:
     1. Fused GEMM + activation (single kernel launch)
-    2. Block pointers for efficient memory access
+    2. Tensor descriptors for efficient 2D block memory access
     3. GROUP_SIZE_M swizzling for L2 cache reuse
     4. Large tiles (256x256) for XPU
     5. 32 warps and grf_mode='256'
@@ -131,42 +131,41 @@ def _gemm_activation_fused_kernel(
     pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
-    # === BLOCK POINTERS (not manual arithmetic) ===
-    # X block: [BLOCK_M, BLOCK_K]
-    x_block_ptr = tl.make_block_ptr(
+    # === TENSOR DESCRIPTORS (not manual arithmetic) ===
+    # Created once, outside the K loop; tiles are then addressed by coordinates.
+    # X block: [BLOCK_M, BLOCK_K] (row-major, last stride is 1)
+    x_desc = tl.make_tensor_descriptor(
         base=x_ptr,
         shape=(M, K),
         strides=(stride_xm, stride_xk),
-        offsets=(pid_m * BLOCK_M, 0),
         block_shape=(BLOCK_M, BLOCK_K),
-        order=(1, 0),  # Row-major hint
     )
 
-    # W block: [BLOCK_K, BLOCK_N] (W is stored as [N, K], we need [K, N])
-    # So we read from W^T by using strides (stride_wk, stride_wn)
-    w_block_ptr = tl.make_block_ptr(
+    # W block: W is stored as [N, K] with K contiguous, but the dot needs [K, N].
+    # A descriptor's last stride must be 1, so describe W as it is laid out in
+    # memory ([N, K], strides (stride_wn, stride_wk)), load a [BLOCK_N, BLOCK_K]
+    # tile and transpose it in registers with .T
+    w_desc = tl.make_tensor_descriptor(
         base=w_ptr,
-        shape=(K, N),
-        strides=(stride_wk, stride_wn),
-        offsets=(0, pid_n * BLOCK_N),
-        block_shape=(BLOCK_K, BLOCK_N),
-        order=(1, 0),
+        shape=(N, K),
+        strides=(stride_wn, stride_wk),
+        block_shape=(BLOCK_N, BLOCK_K),
     )
 
     # === GEMM ACCUMULATION ===
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
+    off_k = 0
     for _ in range(0, K, BLOCK_K):
-        # Load with boundary checking (block pointers handle this efficiently)
-        x_block = tl.load(x_block_ptr, boundary_check=(0, 1))
-        w_block = tl.load(w_block_ptr, boundary_check=(0, 1))
+        # Descriptor loads zero-pad out-of-bounds elements (no masks needed)
+        x_block = x_desc.load([pid_m * BLOCK_M, off_k])
+        w_block = w_desc.load([pid_n * BLOCK_N, off_k]).T  # [BLOCK_K, BLOCK_N]
 
         # Dot product: fp16 inputs, fp32 accumulation
         acc = tl.dot(x_block.to(tl.float16), w_block.to(tl.float16), acc=acc)
 
-        # Advance block pointers (efficient - no manual arithmetic)
-        x_block_ptr = tl.advance(x_block_ptr, (0, BLOCK_K))
-        w_block_ptr = tl.advance(w_block_ptr, (BLOCK_K, 0))
+        # Advance the K coordinate (the descriptors themselves never change)
+        off_k += BLOCK_K
 
     # === ADD BIAS ===
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -192,16 +191,15 @@ def _gemm_activation_fused_kernel(
     # Final clamp to [-1, 1]
     result = tl.minimum(tl.maximum(tanh_out, -1.0), 1.0)
 
-    # === STORE WITH BLOCK POINTER ===
-    out_block_ptr = tl.make_block_ptr(
+    # === STORE WITH TENSOR DESCRIPTOR ===
+    # Out-of-bounds elements of the tile are dropped by the descriptor store
+    out_desc = tl.make_tensor_descriptor(
         base=out_ptr,
         shape=(M, N),
         strides=(stride_om, stride_on),
-        offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),
         block_shape=(BLOCK_M, BLOCK_N),
-        order=(1, 0),
     )
-    tl.store(out_block_ptr, result, boundary_check=(0, 1))
+    out_desc.store([pid_m * BLOCK_M, pid_n * BLOCK_N], result)
 
 
 def _forward_optimized(x, weight, bias):
@@ -246,7 +244,7 @@ class Model(nn.Module):
     OPTIMIZED Model for Intel XPU
 
     Uses single fused kernel with all XPU optimizations:
-    - Block pointers
+    - Tensor descriptors
     - Large tiles (256x256)
     - 32 warps
     - grf_mode='256'

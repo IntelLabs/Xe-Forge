@@ -41,22 +41,23 @@ constraints:
       ```
 
   - id: use_channels_last_for_conv
-    name: "Use channels_last (NHWC) for convolution + spatial tiling + block_ptr"
+    name: "Use channels_last (NHWC) for convolution + spatial tiling + tensor descriptors"
     severity: critical
     description: |
       For convolution workloads, ALWAYS use channels_last (NHWC) layout combined
-      with spatial tiling and block_ptr for all operands. This is required because:
+      with spatial tiling and tensor descriptors for all operands. This is required because:
 
       1. NHWC makes C contiguous (stride=1) — each (kh,kw) position's input slice
-         is a contiguous [BLOCK_OW, C_in] matrix, enabling block_ptr and DPAS.
+         is a contiguous [BLOCK_OW, C_in] matrix, which a descriptor (last stride 1)
+         can describe, enabling 2D block loads and DPAS.
 
       2. Spatial tiling (grid = n, oh, ow_tile) keeps consecutive output pixels
          along ow in consecutive memory rows in the flat (N*H*W, C) NHWC view.
-         This makes x a regular 2D block for tl.make_block_ptr.
+         This makes x a regular 2D block for tl.make_tensor_descriptor.
          Flat M tiling (M=N*OH*OW) BREAKS this — adjacent M indices cross
          oh/batch boundaries, forcing scatter loads.
 
-      3. block_ptr on ALL operands (x, w, y) generates Intel 2D block IO
+      3. Descriptors on ALL operands (x, w, y) generate Intel 2D block IO
          (SubgroupBlockReadINTEL) — structured coalesced transfers.
 
       Conversion (do ONCE, not per forward):
@@ -83,16 +84,23 @@ constraints:
       y_nhwc = y.permute(0, 2, 3, 1)  # write target for kernel
       ```
 
-  - id: block_ptr_boundary_check_tuple
-    name: "Block pointer boundary_check must be tuple of ints"
+  - id: tensor_descriptor_load_store_rules
+    name: "Tensor descriptor loads/stores take coordinates, not boundary_check"
     severity: critical
     description: |
-      tl.load(block_ptr) uses boundary_check=(dim0, dim1) where values are dimension indices.
-      Use (0,1) not booleans.
+      desc.load([off0, off1]) and desc.store([off0, off1], value) take a list of element
+      offsets. There is no boundary_check argument: out-of-bounds elements are
+      zero-filled on load and dropped on store. tl.make_block_ptr / tl.advance /
+      tl.load(ptr, boundary_check=...) are the deprecated block-pointer API.
+
+      The last stride must be 1 and the block's last dimension at least 16 bytes;
+      Triton rejects anything else when it compiles the kernel.
 
       CORRECT:
       ```python
-      tl.load(ptr, boundary_check=(0, 1))
+      x_desc = tl.make_tensor_descriptor(base=x_ptr, shape=(M, K), strides=(stride_xm, 1),
+                                         block_shape=(BM, BK))
+      x = x_desc.load([pid_m * BM, off_k])
       ```
 
   - id: no_tl_multiple_of_on_python_scalars
@@ -114,54 +122,55 @@ constraints:
       ```
 
 patterns:
-  - id: mem_block_pointers
-    name: "Block pointers for structured tiles"
+  - id: mem_tensor_descriptors
+    name: "Tensor descriptors for structured tiles"
     stage: memory_access
-    description: "Use tl.make_block_ptr + tl.load(boundary_check=...) for tiled loads/stores"
+    description: "Use tl.make_tensor_descriptor + desc.load([...]) / desc.store([...]) for tiled loads/stores"
     rationale: |
-      Block pointers can produce better addressing and bounds handling than manual pointer math.
-      They are especially useful when you repeatedly advance along K or similar dimensions.
+      Descriptors can produce better addressing and bounds handling than manual pointer math.
+      Create them once outside the loop and step through K by changing the load offset.
+      They replace tl.make_block_ptr, which is deprecated.
     pattern_before: |
       offs_m = pid_m * BM + tl.arange(0, BM)
       offs_k = k0 + tl.arange(0, BK)
       x_ptrs = x_ptr + offs_m[:, None] * stride_xm + offs_k[None, :] * stride_xk
       x = tl.load(x_ptrs, mask=(offs_m[:, None] < M) & (offs_k[None, :] < K), other=0.0)
     pattern_after: |
-      x_bp = tl.make_block_ptr(
+      x_desc = tl.make_tensor_descriptor(
         base=x_ptr,
         shape=(M, K),
-        strides=(stride_xm, stride_xk),
-        offsets=(pid_m * BM, k0),
+        strides=(stride_xm, stride_xk),   # stride_xk must be 1
         block_shape=(BM, BK),
-        order=(1, 0),
       )
-      x = tl.load(x_bp, boundary_check=(0, 1))
+      x = x_desc.load([pid_m * BM, k0])     # out-of-bounds elements read as 0
     expected_speedup: "workload-dependent (often positive when indexing is heavy)"
     applies_to: [gemm, conv, attention, all_memory_bound]
     examples:
       - before: |
-          k0 += BK
+          x_ptrs += BK * stride_xk
         after: |
-          x_bp = tl.advance(x_bp, (0, BK))
+          k0 += BK   # the descriptor is unchanged; the next load uses the new offset
 
-  - id: mem_skip_boundary_check_when_divisible
-    name: "Specialize away boundary checks when shapes are divisible"
+  - id: mem_skip_masks_when_divisible
+    name: "Specialize away masks when shapes are divisible"
     stage: memory_access
-    description: "Avoid boundary_check/masks when M/N/K are known multiples of tile sizes"
+    description: "Avoid masks on plain-pointer loads/stores when M/N/K are known multiples of tile sizes"
     rationale: |
-      Masks and boundary checks add overhead. If your benchmark/problem guarantees divisibility
+      Masks add overhead. If your benchmark/problem guarantees divisibility
       (or you can specialize per shape), you can remove masks and use unconditional loads/stores.
+      Tensor-descriptor loads and stores have no mask to remove; this applies to the
+      loads that still go through pointers (bias vectors, row statistics, gathers).
     pattern_before: |
-      x = tl.load(x_bp, boundary_check=(0, 1))
-      tl.store(o_bp, acc, boundary_check=(0, 1))
+      offs_n = pid_n * BN + tl.arange(0, BN)
+      bias = tl.load(bias_ptr + offs_n, mask=offs_n < N, other=0.0)
     pattern_after: |
-      # If M % BM == 0 and K % BK == 0 (specialized case):
-      x = tl.load(x_bp)
-      tl.store(o_bp, acc)
-    expected_speedup: "1.05-1.20x"
+      # If N % BN == 0 (specialized case):
+      offs_n = pid_n * BN + tl.arange(0, BN)
+      bias = tl.load(bias_ptr + offs_n)
+    expected_speedup: "workload-dependent"
     applies_to: [gemm, large_fixed_shapes]
     notes: |
-      - Only safe when you can guarantee divisibility or guard with a specialized kernel variant.
+      - Only safe when you can guarantee divisibility for the tile size the launched config uses, or guard with a specialized kernel variant.
 
   - id: mem_use_static_range_for_k_loop
     name: "Use tl.static_range for K loops (when K is known / bounded)"
@@ -383,18 +392,17 @@ patterns:
       lifetime of large tiles (Q) across both loops. On XPU, that increases GRF pressure.
       Loading inside each loop reduces the live range and can prevent spills.
     pattern_before: |
-      q = tl.load(Q_block_ptr)    # q live across both loops
+      q = q_desc.load([off_q, 0])    # q live across both loops
       for start_n in range(lo, hi, BLOCK_N):
           ... qk += tl.dot(q, k) ...
       for start_n in range(lo, hi, BLOCK_N):
           ... qk += tl.dot(q, k) ...  # second loop extends q lifetime
     pattern_after: |
-      tl.prefetch(Q_block_ptr)
       for start_n in range(lo, hi, BLOCK_N):
-          q = tl.load(Q_block_ptr)    # load per-iteration or per-loop (shorter liveness)
+          q = q_desc.load([off_q, 0])    # load per-iteration or per-loop (shorter liveness)
           ... qk += tl.dot(q, k) ...
       for start_n in range(lo, hi, BLOCK_N):
-          q = tl.load(Q_block_ptr)    # reload for second loop
+          q = q_desc.load([off_q, 0])    # reload for second loop
           ... qk += tl.dot(q, k) ...
     expected_speedup: "1.05-1.10x (most likely on masked/causal variants)"
     applies_to:
@@ -469,25 +477,29 @@ patterns:
     expected_speedup: "avoids synchronization overhead vs stricter semantics"
     applies_to: [stream_k, split_accumulation, reduction]
 
-  - id: mem_atomic_fallback_from_descriptors
-    name: "Fall back from descriptors/block pointers to manual pointers for atomic stores"
+  - id: mem_descriptor_atomics
+    name: "Atomic partial-tile stores: desc.atomic_add, or manual pointers when a mask or sem is needed"
     stage: memory_access
-    description: "Use manual pointer arithmetic when atomic operations are needed"
+    description: "Accumulate partial tiles through the descriptor's atomics; drop to pointers only for per-element masks or memory ordering"
     rationale: |
-      Tensor descriptors (desc.store) and block pointer stores do not support
-      atomic operations. When partial-tile accumulation requires tl.atomic_add,
-      you must compute pointers manually. This is the standard pattern for
-      Stream K partial tiles.
+      Tensor descriptors expose block atomics (desc.atomic_add / atomic_min / atomic_max /
+      atomic_and / atomic_or / atomic_xor) at the same coordinates as desc.store, with
+      out-of-bounds elements dropped. Stream K partial tiles can accumulate through the
+      output descriptor. tl.atomic_add on computed pointers is still the form to use when
+      the update needs a per-element mask beyond the tensor bounds or an explicit `sem=`.
+      Check the descriptor form against a reference on the target part before relying
+      on it, as with any atomic path.
     pattern_before: |
-      # Cannot do this:
-      c_desc.atomic_add(...)   # NOT SUPPORTED
-    pattern_after: |
       rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
       rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
       c_ptr_ = c_ptr + rm[:, None] * stride_cm + rn[None, :] * stride_cn
       mask = (rm < M)[:, None] & (rn < N)[None, :]
       tl.atomic_add(c_ptr_, acc, mask=mask, sem='relaxed')
-    expected_speedup: "N/A (required fallback when atomics are needed)"
+    pattern_after: |
+      c_desc = tl.make_tensor_descriptor(base=c_ptr, shape=(M, N), strides=(stride_cm, stride_cn),
+                                         block_shape=(BLOCK_M, BLOCK_N))
+      c_desc.atomic_add([pid_m * BLOCK_M, pid_n * BLOCK_N], acc)
+    expected_speedup: "N/A (expressiveness; time both forms where the atomic path is hot)"
     applies_to: [stream_k, partial_tiles, split_accumulation]
   - id: pre_zero_output_for_atomic_reduction_fusion
     name: "Pre-zero output buffer when fusing reduction with atomic_add"
@@ -528,12 +540,12 @@ patterns:
       ```python
       acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
       for _k in ...:
-          a = tl.load(a_bp, ...)              # fp16
-          b = tl.load(b_bp, ...)              # fp16
+          a = a_desc.load([off_m, off_k])     # fp16
+          b = b_desc.load([off_k, off_n])     # fp16
           acc = tl.dot(a, b, acc)             # fp16 dot -> fp32 acc
       bias = tl.load(bias_ptr + ...).to(tl.float32)
       acc = acc + bias[None, :]               # fp32 bias add
-      tl.store(out_bp, acc.to(tl.float16), boundary_check=(0,1))
+      out_desc.store([off_m, off_n], acc.to(tl.float16))
       ```
       Never use float64 for accumulation — 16-32x slower than float32.
     examples:

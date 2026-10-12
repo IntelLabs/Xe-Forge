@@ -62,11 +62,11 @@ _MAPPING: dict[IssueType, OptimizationStage] = {
     IssueType.CACHE_EVICTION_RISK: OptimizationStage.MEMORY_ACCESS,
     IssueType.LONG_LIVENESS: OptimizationStage.MEMORY_ACCESS,
     IssueType.HIGH_REGISTER_PRESSURE: OptimizationStage.MEMORY_ACCESS,
-    # BLOCK POINTERS
-    IssueType.MANUAL_POINTER_ARITHMETIC: OptimizationStage.BLOCK_POINTERS,
-    IssueType.BLOCK_PTR_BOUNDARY_WRONG: OptimizationStage.BLOCK_POINTERS,
-    IssueType.BLOCK_PTR_MULTIPLE_OF_MISUSE: OptimizationStage.BLOCK_POINTERS,
-    IssueType.MISSING_BLOCK_POINTERS: OptimizationStage.BLOCK_POINTERS,
+    IssueType.MULTIPLE_OF_MISUSE: OptimizationStage.MEMORY_ACCESS,
+    # TENSOR DESCRIPTORS
+    IssueType.MANUAL_POINTER_ARITHMETIC: OptimizationStage.TENSOR_DESCRIPTORS,
+    IssueType.DEPRECATED_BLOCK_POINTERS: OptimizationStage.TENSOR_DESCRIPTORS,
+    IssueType.MISSING_TENSOR_DESCRIPTORS: OptimizationStage.TENSOR_DESCRIPTORS,
     # XPU SPECIFIC
     IssueType.SUBOPTIMAL_TILE_SIZE: OptimizationStage.DEVICE_SPECIFIC,
     IssueType.SUBOPTIMAL_WARPS: OptimizationStage.DEVICE_SPECIFIC,
@@ -123,12 +123,12 @@ _KEYWORD_RULES: list[tuple[str, OptimizationStage]] = [
     ("missing_autotune", OptimizationStage.AUTOTUNING),
     ("suboptimal_autotune", OptimizationStage.AUTOTUNING),
     ("autotune_config", OptimizationStage.AUTOTUNING),
-    # BLOCK POINTERS
-    ("block_ptr", OptimizationStage.BLOCK_POINTERS),
-    ("block_pointer", OptimizationStage.BLOCK_POINTERS),
-    ("manual_pointer", OptimizationStage.BLOCK_POINTERS),
-    ("pointer_arithmetic", OptimizationStage.BLOCK_POINTERS),
-    ("tensor_descriptor", OptimizationStage.BLOCK_POINTERS),
+    # TENSOR DESCRIPTORS (block_ptr names route here: the API they name is deprecated)
+    ("block_ptr", OptimizationStage.TENSOR_DESCRIPTORS),
+    ("block_pointer", OptimizationStage.TENSOR_DESCRIPTORS),
+    ("manual_pointer", OptimizationStage.TENSOR_DESCRIPTORS),
+    ("pointer_arithmetic", OptimizationStage.TENSOR_DESCRIPTORS),
+    ("tensor_descriptor", OptimizationStage.TENSOR_DESCRIPTORS),
     ("tma", OptimizationStage.MEMORY_ACCESS),
     # MEMORY ACCESS
     ("boundary_check", OptimizationStage.MEMORY_ACCESS),
@@ -179,8 +179,10 @@ _KEYWORD_RULES: list[tuple[str, OptimizationStage]] = [
 
 _PREFIX_RULES: list[tuple[str, OptimizationStage]] = [
     ("dtype_", OptimizationStage.DTYPE_FIX),
-    ("missing_block", OptimizationStage.BLOCK_POINTERS),
-    ("block_ptr_", OptimizationStage.BLOCK_POINTERS),
+    ("missing_block", OptimizationStage.TENSOR_DESCRIPTORS),
+    ("missing_tensor_descriptor", OptimizationStage.TENSOR_DESCRIPTORS),
+    ("deprecated_block", OptimizationStage.TENSOR_DESCRIPTORS),
+    ("block_ptr_", OptimizationStage.TENSOR_DESCRIPTORS),
     ("missing_", OptimizationStage.DEVICE_SPECIFIC),  # missing_grf, missing_warp, etc.
     ("suboptimal_", OptimizationStage.DEVICE_SPECIFIC),
     ("unfused_", OptimizationStage.FUSION),

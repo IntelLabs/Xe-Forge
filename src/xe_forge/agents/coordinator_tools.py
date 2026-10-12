@@ -2,7 +2,7 @@
 CoordinatorState and tool factory functions for CoordinatorAgent.
 
 Code never flows through tool arguments — all tools are closures over CoordinatorState
-so the coordinator LLM operates at semantic level ("apply block_pointers stage")
+so the coordinator LLM operates at semantic level ("apply tensor_descriptors stage")
 without ever handling raw kernel code.
 """
 
@@ -146,7 +146,7 @@ def make_retrieve_patterns_tool(state: CoordinatorState, knowledge_base) -> Call
         """Retrieve knowledge base patterns and constraints for a given optimization stage.
 
         Use before applying a stage to understand best practices and known gotchas.
-        stage: e.g. "block_pointers", "device_specific", "algorithmic"
+        stage: e.g. "tensor_descriptors", "device_specific", "algorithmic"
         """
         if knowledge_base is None:
             return f"No knowledge base available for stage {stage!r}. Rely on LLM knowledge."
@@ -182,7 +182,7 @@ def make_apply_stage_tool(
 
         If the optimization improves performance, the new kernel automatically becomes
         the current version. Returns speedup achieved or a failure reason.
-        stage: e.g. "block_pointers", "device_specific", "dtype_fix"
+        stage: e.g. "tensor_descriptors", "device_specific", "dtype_fix"
         hints: optional free-text guidance to pass as extra context (e.g. "focus on reduction loop")
         """
         try:

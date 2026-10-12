@@ -166,35 +166,31 @@ def _linear_min_sub_kernel(
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
 
-    # Block pointers for X: (M, K) -> [BLOCK_M, BLOCK_K] tiles
-    x_bp = tl.make_block_ptr(
+    # Tensor descriptor for X: (M, K) -> [BLOCK_M, BLOCK_K] tiles
+    x_desc = tl.make_tensor_descriptor(
         base=x_ptr,
         shape=(M, K),
         strides=(stride_xm, stride_xk),
-        offsets=(pid_m * BLOCK_M, 0),
         block_shape=(BLOCK_M, BLOCK_K),
-        order=(1, 0),
     )
-    # Block pointers for W^T: (K, N) -> [BLOCK_K, BLOCK_N] tiles
-    wt_bp = tl.make_block_ptr(
+    # Tensor descriptor for W^T: (K, N) -> [BLOCK_K, BLOCK_N] tiles
+    wt_desc = tl.make_tensor_descriptor(
         base=wt_ptr,
         shape=(K, N),
         strides=(stride_wtk, stride_wtn),
-        offsets=(0, pid_n * BLOCK_N),
         block_shape=(BLOCK_K, BLOCK_N),
-        order=(1, 0),
     )
 
     # Accumulator
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
-    # Main K loop
+    # Main K loop (out-of-bounds elements of a descriptor load read as zero)
+    off_k = 0
     for _ in range(0, K, BLOCK_K):
-        x_blk = tl.load(x_bp, boundary_check=(0, 1))
-        wt_blk = tl.load(wt_bp, boundary_check=(0, 1))
+        x_blk = x_desc.load([pid_m * BLOCK_M, off_k])
+        wt_blk = wt_desc.load([off_k, pid_n * BLOCK_N])
         acc = tl.dot(x_blk.to(tl.float16), wt_blk.to(tl.float16), acc=acc)
-        x_bp = tl.advance(x_bp, (0, BLOCK_K))
-        wt_bp = tl.advance(wt_bp, (BLOCK_K, 0))
+        off_k += BLOCK_K
 
     # Add bias once per tile
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -206,15 +202,13 @@ def _linear_min_sub_kernel(
     acc = acc - constant
 
     # Store
-    o_bp = tl.make_block_ptr(
+    o_desc = tl.make_tensor_descriptor(
         base=o_ptr,
         shape=(M, N),
         strides=(stride_om, stride_on),
-        offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),
         block_shape=(BLOCK_M, BLOCK_N),
-        order=(1, 0),
     )
-    tl.store(o_bp, acc.to(tl.float16), boundary_check=(0, 1))
+    o_desc.store([pid_m * BLOCK_M, pid_n * BLOCK_N], acc.to(tl.float16))
 
 
 def kernel_function(input_tensor, linear_weight_t, linear_bias, constant):

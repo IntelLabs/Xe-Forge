@@ -27,7 +27,7 @@ DEFAULT_STAGE_ORDER: list[OptimizationStage] = [
     OptimizationStage.DTYPE_FIX,
     OptimizationStage.FUSION,
     OptimizationStage.MEMORY_ACCESS,
-    OptimizationStage.BLOCK_POINTERS,
+    OptimizationStage.TENSOR_DESCRIPTORS,
     OptimizationStage.PERSISTENT_KERNEL,
     OptimizationStage.DEVICE_SPECIFIC,
     OptimizationStage.AUTOTUNING,
@@ -45,9 +45,9 @@ _HARD_DEPENDENCIES: list[tuple[OptimizationStage, OptimizationStage]] = [
     (OptimizationStage.DISCOVERY, OptimizationStage.DTYPE_FIX),
     (OptimizationStage.DISCOVERY, OptimizationStage.FUSION),
     (OptimizationStage.DTYPE_FIX, OptimizationStage.FUSION),
-    (OptimizationStage.MEMORY_ACCESS, OptimizationStage.BLOCK_POINTERS),
+    (OptimizationStage.MEMORY_ACCESS, OptimizationStage.TENSOR_DESCRIPTORS),
     (OptimizationStage.FUSION, OptimizationStage.DEVICE_SPECIFIC),
-    (OptimizationStage.BLOCK_POINTERS, OptimizationStage.DEVICE_SPECIFIC),
+    (OptimizationStage.TENSOR_DESCRIPTORS, OptimizationStage.DEVICE_SPECIFIC),
     (OptimizationStage.DEVICE_SPECIFIC, OptimizationStage.AUTOTUNING),
 ]
 
@@ -189,7 +189,7 @@ def _format_kernel_context(
         parts.append(f"input_shapes: {input_shapes}")
     if flop:
         parts.append(f"flop: {flop:.2e}")
-    parts.append(f"uses_block_pointers: {analysis.uses_block_pointers}")
+    parts.append(f"uses_tensor_descriptors: {analysis.uses_tensor_descriptors}")
     parts.append(f"is_persistent: {analysis.is_persistent}")
     parts.append(f"has_fusion_opportunity: {analysis.has_fusion_opportunity}")
     parts.append(f"has_algorithmic_opportunity: {analysis.has_algorithmic_opportunity}")

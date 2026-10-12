@@ -56,9 +56,7 @@ def _prepare_kv_tile(
             + (seq_offset % BLOCK_SIZE) * stride_s_slot
             + kv_head_idx * stride_s_head
         )
-        token_head_scales = tl.load(
-            scale_cache_ptr + scale_idx, mask=tile_mask, other=1.0
-        )
+        token_head_scales = tl.load(scale_cache_ptr + scale_idx, mask=tile_mask, other=1.0)
         return data.to(Q.dtype), token_head_scales
     return data.to(Q.dtype), unused_scales
 
@@ -158,9 +156,7 @@ def kernel_unified_attention_2d(
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
 
-    seq_idx = find_seq_idx(
-        query_start_len_ptr, q_block_global_idx, num_seqs, BLOCK_Q, True
-    )
+    seq_idx = find_seq_idx(query_start_len_ptr, q_block_global_idx, num_seqs, BLOCK_Q, True)
 
     q_block_start_idx = tl.load(query_start_len_ptr + seq_idx) // BLOCK_Q + seq_idx
     q_block_local_idx = q_block_global_idx - q_block_start_idx
@@ -183,22 +179,26 @@ def kernel_unified_attention_2d(
     query_mask_1 = tl.where(query_offset_1 < num_query_heads, 1, 0).to(tl.int1)
 
     # Q : (BLOCK_M, HEAD_SIZE_PADDED) via tensor descriptor
-    q_base = (query_ptr
-              + (cur_batch_in_all_start_index + q_block_local_idx * BLOCK_Q) * query_stride_0
-              + (kv_head_idx * num_queries_per_kv) * query_stride_1)
+    q_base = (
+        query_ptr
+        + (cur_batch_in_all_start_index + q_block_local_idx * BLOCK_Q) * query_stride_0
+        + (kv_head_idx * num_queries_per_kv) * query_stride_1
+    )
     if HEAD_SIZE == HEAD_SIZE_PADDED:
         q_desc = tl.make_tensor_descriptor(
             base=q_base,
             shape=(q_block_local_len, num_queries_per_kv * HEAD_SIZE),
             strides=(query_stride_0, 1),
-            block_shape=(BLOCK_Q, num_queries_per_kv * HEAD_SIZE_PADDED))
+            block_shape=(BLOCK_Q, num_queries_per_kv * HEAD_SIZE_PADDED),
+        )
         Q_raw = q_desc.load([0, 0])
     else:
         q_desc = tl.make_tensor_descriptor(
             base=q_base,
             shape=(q_block_local_len, num_queries_per_kv, HEAD_SIZE),
             strides=(query_stride_0, query_stride_1, 1),
-            block_shape=(BLOCK_Q, num_queries_per_kv, HEAD_SIZE_PADDED))
+            block_shape=(BLOCK_Q, num_queries_per_kv, HEAD_SIZE_PADDED),
+        )
         Q_raw = q_desc.load([0, 0, 0])
     Q = Q_raw.reshape(BLOCK_M, HEAD_SIZE_PADDED)
 
@@ -220,20 +220,13 @@ def kernel_unified_attention_2d(
     context_len = seq_len - cur_batch_query_len
 
     if USE_ALIBI_SLOPES:
-        alibi_slope = tl.load(
-            alibi_slopes_ptr + query_offset_1, mask=query_mask_1, other=0.0
-        )
+        alibi_slope = tl.load(alibi_slopes_ptr + query_offset_1, mask=query_mask_1, other=0.0)
 
     if USE_QQ_BIAS:
-        qq_bias_row_ptrs = (
-            qq_bias_ptr + query_pos[:, None] * qq_bias_stride_0
-        )
+        qq_bias_row_ptrs = qq_bias_ptr + query_pos[:, None] * qq_bias_stride_0
 
     max_seq_prefix_len = (
-        context_len
-        + q_block_local_idx * BLOCK_Q
-        + (BLOCK_M - 1) // num_queries_per_kv
-        + 1
+        context_len + q_block_local_idx * BLOCK_Q + (BLOCK_M - 1) // num_queries_per_kv + 1
     )
 
     if USE_MM_PREFIX:
@@ -270,34 +263,60 @@ def kernel_unified_attention_2d(
         ).to(tl.int64)
 
         # K via tensor descriptor: (HEAD_SIZE_PADDED, TILE_SIZE) after transpose
-        k_base = key_cache_ptr + physical_block_idx * stride_k_cache_0 + kv_head_idx * stride_k_cache_2
+        k_base = (
+            key_cache_ptr + physical_block_idx * stride_k_cache_0 + kv_head_idx * stride_k_cache_2
+        )
         k_desc = tl.make_tensor_descriptor(
-            base=k_base, shape=(BLOCK_SIZE, HEAD_SIZE),
+            base=k_base,
+            shape=(BLOCK_SIZE, HEAD_SIZE),
             strides=(stride_k_cache_1, stride_k_cache_3),
-            block_shape=(TILE_SIZE, HEAD_SIZE_PADDED))
+            block_shape=(TILE_SIZE, HEAD_SIZE_PADDED),
+        )
         offset_in_block = (j * TILE_SIZE) % BLOCK_SIZE
         K_load = k_desc.load([offset_in_block, 0]).T
 
         K, k_token_head_scales = _prepare_kv_tile(
-            K_load, Q, k_scale, k_scale_cache_ptr,
-            physical_block_idx, seq_offset, kv_head_idx,
-            stride_ks_blk, stride_ks_slot, stride_ks_head,
-            tile_mask, BLOCK_SIZE, KV_QUANT_MODE,
+            K_load,
+            Q,
+            k_scale,
+            k_scale_cache_ptr,
+            physical_block_idx,
+            seq_offset,
+            kv_head_idx,
+            stride_ks_blk,
+            stride_ks_slot,
+            stride_ks_head,
+            tile_mask,
+            BLOCK_SIZE,
+            KV_QUANT_MODE,
         )
 
         # V via tensor descriptor: (TILE_SIZE, HEAD_SIZE_PADDED)
-        v_base = value_cache_ptr + physical_block_idx * stride_v_cache_0 + kv_head_idx * stride_v_cache_2
+        v_base = (
+            value_cache_ptr + physical_block_idx * stride_v_cache_0 + kv_head_idx * stride_v_cache_2
+        )
         v_desc = tl.make_tensor_descriptor(
-            base=v_base, shape=(BLOCK_SIZE, HEAD_SIZE),
+            base=v_base,
+            shape=(BLOCK_SIZE, HEAD_SIZE),
             strides=(stride_v_cache_1, stride_v_cache_3),
-            block_shape=(TILE_SIZE, HEAD_SIZE_PADDED))
+            block_shape=(TILE_SIZE, HEAD_SIZE_PADDED),
+        )
         V_load = v_desc.load([offset_in_block, 0])
 
         V, v_token_head_scales = _prepare_kv_tile(
-            V_load, Q, v_scale, v_scale_cache_ptr,
-            physical_block_idx, seq_offset, kv_head_idx,
-            stride_vs_blk, stride_vs_slot, stride_vs_head,
-            tile_mask, BLOCK_SIZE, KV_QUANT_MODE,
+            V_load,
+            Q,
+            v_scale,
+            v_scale_cache_ptr,
+            physical_block_idx,
+            seq_offset,
+            kv_head_idx,
+            stride_vs_blk,
+            stride_vs_slot,
+            stride_vs_head,
+            tile_mask,
+            BLOCK_SIZE,
+            KV_QUANT_MODE,
         )
 
         query_abs_pos = context_len + query_pos[:, None]
@@ -316,17 +335,11 @@ def kernel_unified_attention_2d(
 
         if USE_MM_PREFIX:
             for i in range(MAX_MM_RANGES):
-                range_start = tl.load(
-                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2
-                )
-                range_end = tl.load(
-                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
-                )
+                range_start = tl.load(mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2)
+                range_end = tl.load(mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1)
                 is_valid = range_start < range_end
                 q_in_range = (
-                    (query_abs_pos >= range_start)
-                    & (query_abs_pos <= range_end)
-                    & is_valid
+                    (query_abs_pos >= range_start) & (query_abs_pos <= range_end) & is_valid
                 )
                 k_in_range = (
                     (seq_offset[None, :] >= range_start)
@@ -345,9 +358,7 @@ def kernel_unified_attention_2d(
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
 
-        S = tl.where(
-            query_mask_1[:, None] & query_mask_0[:, None] & seq_mask, S, float("-inf")
-        )
+        S = tl.where(query_mask_1[:, None] & query_mask_0[:, None] & seq_mask, S, float("-inf"))
 
         if USE_ALIBI_SLOPES:
             if USE_ALIBI_SQRT:
@@ -398,15 +409,15 @@ def kernel_unified_attention_2d(
 
     # Output store via tensor descriptor
     output_offset = (
-        (cur_batch_in_all_start_index + q_block_local_idx * BLOCK_Q) * output_stride_0
-        + (kv_head_idx * num_queries_per_kv) * output_stride_1
-    )
+        cur_batch_in_all_start_index + q_block_local_idx * BLOCK_Q
+    ) * output_stride_0 + (kv_head_idx * num_queries_per_kv) * output_stride_1
     output_base = output_ptr + output_offset
     output_desc = tl.make_tensor_descriptor(
         base=output_base,
         shape=(q_block_local_len, num_queries_per_kv, HEAD_SIZE),
         strides=(output_stride_0, output_stride_1, 1),
-        block_shape=(BLOCK_Q, num_queries_per_kv, HEAD_SIZE_PADDED))
+        block_shape=(BLOCK_Q, num_queries_per_kv, HEAD_SIZE_PADDED),
+    )
     acc = acc.to(output_ptr.dtype.element_ty)
     output_desc.store([0, 0, 0], acc.reshape(BLOCK_Q, num_queries_per_kv, HEAD_SIZE_PADDED))
 
@@ -481,9 +492,7 @@ def kernel_unified_attention_3d(
     kv_head_idx = tl.program_id(1)
     segm_idx = tl.program_id(2)
 
-    seq_idx = find_seq_idx(
-        query_start_len_ptr, q_block_global_idx, num_seqs, BLOCK_Q, True
-    )
+    seq_idx = find_seq_idx(query_start_len_ptr, q_block_global_idx, num_seqs, BLOCK_Q, True)
 
     q_block_start_idx = tl.load(query_start_len_ptr + seq_idx) // BLOCK_Q + seq_idx
     q_block_local_idx = q_block_global_idx - q_block_start_idx
@@ -515,22 +524,26 @@ def kernel_unified_attention_3d(
     q_block_local_len = tl.minimum(BLOCK_Q, cur_batch_query_len - q_block_local_idx * BLOCK_Q)
 
     # Q : (BLOCK_M, HEAD_SIZE_PADDED) via tensor descriptor
-    q_base = (query_ptr
-              + (cur_batch_in_all_start_index + q_block_local_idx * BLOCK_Q) * query_stride_0
-              + (kv_head_idx * num_queries_per_kv) * query_stride_1)
+    q_base = (
+        query_ptr
+        + (cur_batch_in_all_start_index + q_block_local_idx * BLOCK_Q) * query_stride_0
+        + (kv_head_idx * num_queries_per_kv) * query_stride_1
+    )
     if HEAD_SIZE == HEAD_SIZE_PADDED:
         q_desc = tl.make_tensor_descriptor(
             base=q_base,
             shape=(q_block_local_len, num_queries_per_kv * HEAD_SIZE),
             strides=(query_stride_0, 1),
-            block_shape=(BLOCK_Q, num_queries_per_kv * HEAD_SIZE_PADDED))
+            block_shape=(BLOCK_Q, num_queries_per_kv * HEAD_SIZE_PADDED),
+        )
         Q_raw = q_desc.load([0, 0])
     else:
         q_desc = tl.make_tensor_descriptor(
             base=q_base,
             shape=(q_block_local_len, num_queries_per_kv, HEAD_SIZE),
             strides=(query_stride_0, query_stride_1, 1),
-            block_shape=(BLOCK_Q, num_queries_per_kv, HEAD_SIZE_PADDED))
+            block_shape=(BLOCK_Q, num_queries_per_kv, HEAD_SIZE_PADDED),
+        )
         Q_raw = q_desc.load([0, 0, 0])
     Q = Q_raw.reshape(BLOCK_M, HEAD_SIZE_PADDED)
 
@@ -554,20 +567,13 @@ def kernel_unified_attention_3d(
     context_len = seq_len - cur_batch_query_len
 
     if USE_ALIBI_SLOPES:
-        alibi_slope = tl.load(
-            alibi_slopes_ptr + query_offset_1, mask=query_mask_1, other=0.0
-        )
+        alibi_slope = tl.load(alibi_slopes_ptr + query_offset_1, mask=query_mask_1, other=0.0)
 
     if USE_QQ_BIAS:
-        qq_bias_row_ptrs = (
-            qq_bias_ptr + query_pos[:, None] * qq_bias_stride_0
-        )
+        qq_bias_row_ptrs = qq_bias_ptr + query_pos[:, None] * qq_bias_stride_0
 
     max_seq_prefix_len = (
-        context_len
-        + q_block_local_idx * BLOCK_Q
-        + (BLOCK_M - 1) // num_queries_per_kv
-        + 1
+        context_len + q_block_local_idx * BLOCK_Q + (BLOCK_M - 1) // num_queries_per_kv + 1
     )
     max_seq_prefix_len = tl.minimum(max_seq_prefix_len, seq_len)
 
@@ -603,34 +609,60 @@ def kernel_unified_attention_3d(
         ).to(tl.int64)
 
         # K via tensor descriptor
-        k_base = key_cache_ptr + physical_block_idx * stride_k_cache_0 + kv_head_idx * stride_k_cache_2
+        k_base = (
+            key_cache_ptr + physical_block_idx * stride_k_cache_0 + kv_head_idx * stride_k_cache_2
+        )
         k_desc = tl.make_tensor_descriptor(
-            base=k_base, shape=(BLOCK_SIZE, HEAD_SIZE),
+            base=k_base,
+            shape=(BLOCK_SIZE, HEAD_SIZE),
             strides=(stride_k_cache_1, stride_k_cache_3),
-            block_shape=(TILE_SIZE, HEAD_SIZE_PADDED))
+            block_shape=(TILE_SIZE, HEAD_SIZE_PADDED),
+        )
         offset_in_block = (j * TILE_SIZE) % BLOCK_SIZE
         K_load = k_desc.load([offset_in_block, 0]).T
 
         K, k_token_head_scales = _prepare_kv_tile(
-            K_load, Q, k_scale, k_scale_cache_ptr,
-            physical_block_idx, seq_offset, kv_head_idx,
-            stride_ks_blk, stride_ks_slot, stride_ks_head,
-            tile_mask, BLOCK_SIZE, KV_QUANT_MODE,
+            K_load,
+            Q,
+            k_scale,
+            k_scale_cache_ptr,
+            physical_block_idx,
+            seq_offset,
+            kv_head_idx,
+            stride_ks_blk,
+            stride_ks_slot,
+            stride_ks_head,
+            tile_mask,
+            BLOCK_SIZE,
+            KV_QUANT_MODE,
         )
 
         # V via tensor descriptor
-        v_base = value_cache_ptr + physical_block_idx * stride_v_cache_0 + kv_head_idx * stride_v_cache_2
+        v_base = (
+            value_cache_ptr + physical_block_idx * stride_v_cache_0 + kv_head_idx * stride_v_cache_2
+        )
         v_desc = tl.make_tensor_descriptor(
-            base=v_base, shape=(BLOCK_SIZE, HEAD_SIZE),
+            base=v_base,
+            shape=(BLOCK_SIZE, HEAD_SIZE),
             strides=(stride_v_cache_1, stride_v_cache_3),
-            block_shape=(TILE_SIZE, HEAD_SIZE_PADDED))
+            block_shape=(TILE_SIZE, HEAD_SIZE_PADDED),
+        )
         V_load = v_desc.load([offset_in_block, 0])
 
         V, v_token_head_scales = _prepare_kv_tile(
-            V_load, Q, v_scale, v_scale_cache_ptr,
-            physical_block_idx, seq_offset, kv_head_idx,
-            stride_vs_blk, stride_vs_slot, stride_vs_head,
-            tile_mask, BLOCK_SIZE, KV_QUANT_MODE,
+            V_load,
+            Q,
+            v_scale,
+            v_scale_cache_ptr,
+            physical_block_idx,
+            seq_offset,
+            kv_head_idx,
+            stride_vs_blk,
+            stride_vs_slot,
+            stride_vs_head,
+            tile_mask,
+            BLOCK_SIZE,
+            KV_QUANT_MODE,
         )
 
         query_abs_pos = context_len + query_pos[:, None]
@@ -649,17 +681,11 @@ def kernel_unified_attention_3d(
 
         if USE_MM_PREFIX:
             for i in range(MAX_MM_RANGES):
-                range_start = tl.load(
-                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2
-                )
-                range_end = tl.load(
-                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
-                )
+                range_start = tl.load(mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2)
+                range_end = tl.load(mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1)
                 is_valid = range_start < range_end
                 q_in_range = (
-                    (query_abs_pos >= range_start)
-                    & (query_abs_pos <= range_end)
-                    & is_valid
+                    (query_abs_pos >= range_start) & (query_abs_pos <= range_end) & is_valid
                 )
                 k_in_range = (
                     (seq_offset[None, :] >= range_start)
@@ -678,9 +704,7 @@ def kernel_unified_attention_3d(
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
 
-        S = tl.where(
-            query_mask_1[:, None] & query_mask_0[:, None] & seq_mask, S, float("-inf")
-        )
+        S = tl.where(query_mask_1[:, None] & query_mask_0[:, None] & seq_mask, S, float("-inf"))
 
         if USE_ALIBI_SLOPES:
             if USE_ALIBI_SQRT:
@@ -728,8 +752,7 @@ def kernel_unified_attention_3d(
     segm_output_offset = (
         (cur_batch_in_all_start_index + q_block_local_idx * BLOCK_Q)
         * (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
-        + (kv_head_idx * num_queries_per_kv)
-        * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+        + (kv_head_idx * num_queries_per_kv) * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
         + segm_idx * HEAD_SIZE_PADDED
     )
     segm_output_desc = tl.make_tensor_descriptor(
@@ -740,7 +763,8 @@ def kernel_unified_attention_3d(
             NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED,
             1,
         ),
-        block_shape=(BLOCK_Q, num_queries_per_kv, HEAD_SIZE_PADDED))
+        block_shape=(BLOCK_Q, num_queries_per_kv, HEAD_SIZE_PADDED),
+    )
     segm_output_desc.store([0, 0, 0], acc.reshape(BLOCK_Q, num_queries_per_kv, HEAD_SIZE_PADDED))
 
     segm_offset = (
@@ -781,9 +805,7 @@ def reduce_segments(
     query_token_idx = tl.program_id(0)
     query_head_idx = tl.program_id(1)
 
-    seq_idx = find_seq_idx(
-        query_start_len_ptr, query_token_idx, num_seqs, BLOCK_Q, False
-    )
+    seq_idx = find_seq_idx(query_start_len_ptr, query_token_idx, num_seqs, BLOCK_Q, False)
 
     seq_len = tl.load(seq_lens_ptr + seq_idx)
 
@@ -809,8 +831,7 @@ def reduce_segments(
     overall_expsum = tl.sum(segm_expsum)
 
     segm_output_offset = (
-        query_token_idx.to(tl.int64)
-        * (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+        query_token_idx.to(tl.int64) * (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
         + query_head_idx * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
         + tl.arange(0, NUM_SEGMENTS_PER_SEQ)[:, None] * HEAD_SIZE_PADDED
         + tl.arange(0, HEAD_SIZE_PADDED)[None, :]
@@ -860,7 +881,10 @@ def _get_tile_size(
 # Launcher
 # ---------------------------------------------------------------------------
 def unified_attention(
-    q, k, v, out,
+    q,
+    k,
+    v,
+    out,
     cu_seqlens_q,
     max_seqlen_q,
     seqused_k,
@@ -888,9 +912,7 @@ def unified_attention(
             use_mm_prefix = True
             max_mm_ranges = mm_prefix_range.shape[1]
         else:
-            raise ValueError(
-                f"Unsupported mm_prefix_range shape: {mm_prefix_range.shape}"
-            )
+            raise ValueError(f"Unsupported mm_prefix_range shape: {mm_prefix_range.shape}")
 
     use_alibi_slopes = alibi_slopes is not None
     use_qq_bias = qq_bias is not None
@@ -902,9 +924,7 @@ def unified_attention(
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
 
-    BLOCK_M = (
-        16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
-    )
+    BLOCK_M = 16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
     BLOCK_Q = BLOCK_M // num_queries_per_kv
 
     total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
@@ -927,8 +947,7 @@ def unified_attention(
     assert block_size % TILE_SIZE_PREFILL == 0, "block_size must be multiple of TILE_SIZE"
 
     seq_threshold_3D = 32
-    if (max_seqlen_q > 1 or num_seqs > seq_threshold_3D
-            or 0 < sliding_window_val <= 1024):
+    if max_seqlen_q > 1 or num_seqs > seq_threshold_3D or 0 < sliding_window_val <= 1024:
         # 2D kernel path
         kernel_unified_attention_2d[(total_num_q_blocks, num_kv_heads)](
             output_ptr=out,
@@ -996,22 +1015,29 @@ def unified_attention(
         num_par_softmax_segments = 16
 
         softmax_segm_output = torch.empty(
-            q.shape[0], num_query_heads, num_par_softmax_segments,
+            q.shape[0],
+            num_query_heads,
+            num_par_softmax_segments,
             triton.next_power_of_2(head_size),
-            dtype=torch.float32, device=q.device,
+            dtype=torch.float32,
+            device=q.device,
         )
         softmax_segm_max = torch.empty(
-            q.shape[0], num_query_heads, num_par_softmax_segments,
-            dtype=torch.float32, device=q.device,
+            q.shape[0],
+            num_query_heads,
+            num_par_softmax_segments,
+            dtype=torch.float32,
+            device=q.device,
         )
         softmax_segm_expsum = torch.empty(
-            q.shape[0], num_query_heads, num_par_softmax_segments,
-            dtype=torch.float32, device=q.device,
+            q.shape[0],
+            num_query_heads,
+            num_par_softmax_segments,
+            dtype=torch.float32,
+            device=q.device,
         )
 
-        kernel_unified_attention_3d[(
-            total_num_q_blocks, num_kv_heads, num_par_softmax_segments
-        )](
+        kernel_unified_attention_3d[(total_num_q_blocks, num_kv_heads, num_par_softmax_segments)](
             segm_output_ptr=softmax_segm_output,
             segm_max_ptr=softmax_segm_max,
             segm_expsum_ptr=softmax_segm_expsum,
@@ -1098,13 +1124,27 @@ def unified_attention(
 # KernelBench Model
 # ---------------------------------------------------------------------------
 class Model(torch.nn.Module):
-    def __init__(self, QH: int, KH: int, D: int, BS: int, NS: int, TQ: int, MKV: int, NB: int,
-                 SW: int = 0, SCAP: int = 0, KQM: int = 0):
+    def __init__(
+        self,
+        QH: int,
+        KH: int,
+        D: int,
+        BS: int,
+        NS: int,
+        TQ: int,
+        MKV: int,
+        NB: int,
+        SW: int = 0,
+        SCAP: int = 0,
+        KQM: int = 0,
+    ):
         super().__init__()
-        self.scale = D ** -0.5
+        self.scale = D**-0.5
         self.sliding_window = SW
         self.softcap = SCAP / 100.0 if SCAP > 0 else 0.0
-        self.kv_quant_mode = KQM  # 0=none, 1=fp8_per_tensor, 2=int8_per_token_head, 3=fp8_per_token_head
+        self.kv_quant_mode = (
+            KQM  # 0=none, 1=fp8_per_tensor, 2=int8_per_token_head, 3=fp8_per_token_head
+        )
 
         query_lens = []
         base = TQ // NS
@@ -1124,15 +1164,13 @@ class Model(torch.nn.Module):
         torch.manual_seed(42)
         block_tables = torch.randint(0, NB, (NS, max_num_blocks_per_seq), dtype=torch.int32)
 
-        self.register_buffer('cu_query_lens', cu_query_lens)
-        self.register_buffer('kv_lens_tensor', kv_lens_tensor)
-        self.register_buffer('block_tables', block_tables)
+        self.register_buffer("cu_query_lens", cu_query_lens)
+        self.register_buffer("kv_lens_tensor", kv_lens_tensor)
+        self.register_buffer("block_tables", block_tables)
 
         if KQM >= 2:
-            self.register_buffer('k_scale_cache',
-                                 torch.ones(NB, BS, KH, dtype=torch.float32))
-            self.register_buffer('v_scale_cache',
-                                 torch.ones(NB, BS, KH, dtype=torch.float32))
+            self.register_buffer("k_scale_cache", torch.ones(NB, BS, KH, dtype=torch.float32))
+            self.register_buffer("v_scale_cache", torch.ones(NB, BS, KH, dtype=torch.float32))
 
     def forward(self, query: torch.Tensor, key_cache: torch.Tensor, value_cache: torch.Tensor):
         if self.kv_quant_mode in (1, 3):
@@ -1157,7 +1195,7 @@ class Model(torch.nn.Module):
             window_size=(window_val, window_val),
             softcap=self.softcap,
             kv_quant_mode=self.kv_quant_mode,
-            k_scale_cache=getattr(self, 'k_scale_cache', None),
-            v_scale_cache=getattr(self, 'v_scale_cache', None),
+            k_scale_cache=getattr(self, "k_scale_cache", None),
+            v_scale_cache=getattr(self, "v_scale_cache", None),
         )
         return out

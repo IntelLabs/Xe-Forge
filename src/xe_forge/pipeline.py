@@ -29,7 +29,7 @@ DEFAULT_STAGE_ORDER: list[OptimizationStage] = [
     OptimizationStage.DTYPE_FIX,
     OptimizationStage.FUSION,
     OptimizationStage.MEMORY_ACCESS,
-    OptimizationStage.BLOCK_POINTERS,
+    OptimizationStage.TENSOR_DESCRIPTORS,
     OptimizationStage.PERSISTENT_KERNEL,
     OptimizationStage.DEVICE_SPECIFIC,
     OptimizationStage.AUTOTUNING,

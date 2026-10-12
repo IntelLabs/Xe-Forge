@@ -242,18 +242,9 @@ class KernelValidator:
                         )
                     )
 
-        # 3. boundary_check format
+        # 3. boundary_check passed to a tensor descriptor load
         for i, line in enumerate(lines):
             if "boundary_check" in line:
-                if "True" in line or "False" in line:
-                    issues.append(
-                        ValidationIssue(
-                            "boundary_check_bool",
-                            "error",
-                            "boundary_check uses booleans. Use dimension indices (0, 1).",
-                            line=i + 1,
-                        )
-                    )
                 if ".load(" in line:
                     for j in range(max(0, i - 20), i):
                         if "make_tensor_descriptor" in lines[j]:
@@ -308,18 +299,25 @@ class KernelValidator:
                         )
                     )
 
-        # 7. Mixed block pointer and tensor descriptor APIs
-        has_block_ptr = "make_block_ptr" in code
-        has_tensor_desc = "make_tensor_descriptor" in code
-        if has_block_ptr and has_tensor_desc:
-            issues.append(
-                ValidationIssue(
-                    "mixed_memory_apis",
-                    "info",
-                    "Both block pointers and tensor descriptors found. "
-                    "Don't mix APIs for the same load/store operation.",
+        # 7. Deprecated block pointer API
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "tl"
+                and node.func.attr in {"make_block_ptr", "advance"}
+            ):
+                issues.append(
+                    ValidationIssue(
+                        "deprecated_block_ptr",
+                        "warning",
+                        "tl.make_block_ptr / tl.advance are deprecated in Triton. "
+                        "Use tl.make_tensor_descriptor and desc.load/store at explicit offsets.",
+                        line=node.lineno,
+                    )
                 )
-            )
+                break
 
         # 8. Device-to-host sync in hot path
         for i, line in enumerate(lines):

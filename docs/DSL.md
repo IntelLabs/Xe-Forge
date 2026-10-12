@@ -62,7 +62,7 @@ DSL_SUPPORTED_STAGES = {
 }
 ```
 
-Include only stages that make sense (e.g. SYCL omits `BLOCK_POINTERS` and
+Include only stages that make sense (e.g. SYCL omits `TENSOR_DESCRIPTORS` and
 `PERSISTENT_KERNEL`). Missing DSL → falls back to the Triton set.
 
 ## Step 3 — Executor

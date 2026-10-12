@@ -4,7 +4,7 @@ examples:
   stages:
   - algorithmic
   - fusion
-  - block_pointers
+  - tensor_descriptors
   - xpu_specific
   - autotuning
   description: 'Shows optimization of a linear layer followed by activation.
@@ -16,7 +16,7 @@ examples:
   optimized: gemm_activation_optimized.py
   optimizations_applied:
   - Kernel fusion (2 kernels to 1)
-  - Block pointers (vs manual arithmetic)
+  - Tensor descriptors (vs manual arithmetic)
   - Large tiles 256x256 (vs 64x64)
   - 32 warps (vs default 8)
   - grf_mode 256
@@ -27,12 +27,12 @@ examples:
 - id: matmul_at
   name: MatMul A^T @ B Optimization
   stages:
-  - block_pointers
+  - tensor_descriptors
   - xpu_specific
   - memory_access
   description: 'Matrix multiplication C = A^T @ B where A is [K, M], B is [K, N].
 
-    Shows conversion from manual pointer arithmetic to block pointers,
+    Shows conversion from manual pointer arithmetic to tensor descriptors,
 
     2D grid to 1D with swizzling, and XPU-specific optimizations.
 
@@ -40,7 +40,7 @@ examples:
   unoptimized: matmul_at_unoptimized.py
   optimized: matmul_at_optimized.py
   optimizations_applied:
-  - Block pointers (tl.make_block_ptr) instead of manual arithmetic
+  - Tensor descriptors (tl.make_tensor_descriptor) instead of manual arithmetic; A^T read as [K, M] tiles and transposed
   - Large tiles 256x256 (vs 64-128)
   - 32 warps (vs 4-8)
   - grf_mode 256 for large register file
@@ -52,7 +52,7 @@ examples:
   name: GEMM + Swish + Divide + Clamp + Tanh + Clamp (Fused Activation Chain)
   stages:
   - fusion
-  - block_pointers
+  - tensor_descriptors
   - xpu_specific
   - autotuning
   description: 'GEMM with a 5-step activation chain fused entirely in the epilogue.
@@ -63,7 +63,7 @@ examples:
   file: gemmelem.py
   optimizations_applied:
   - Fused activation chain (Swish, divide, clamp, tanh, clamp) in GEMM epilogue
-  - Block pointers with tl.advance
+  - Tensor descriptors loaded at an advancing K offset
   - GROUP_SIZE_M swizzling (1D grid)
   - 32 warps, grf_mode 256
   - Autotune configs
@@ -72,7 +72,7 @@ examples:
   name: MatMul + Add + Swish + Tanh + GELU + Hardtanh (Fused)
   stages:
   - fusion
-  - block_pointers
+  - tensor_descriptors
   - xpu_specific
   - memory_access
   - autotuning
@@ -84,7 +84,7 @@ examples:
   file: MMTanh.py
   optimizations_applied:
   - Fused bias add + residual add + Swish + Tanh + GELU + Hardtanh in epilogue
-  - Block pointers for X and W^T
+  - Tensor descriptors for X and W^T
   - 1D grid with GROUP_SIZE_M swizzle
   - Pre-packed W^T with version-tracked cache invalidation
   - fp16 I/O, fp32 accumulator, fp16 store
@@ -94,7 +94,7 @@ examples:
   name: MatMul + Min + Subtract (Fused Epilogue)
   stages:
   - fusion
-  - block_pointers
+  - tensor_descriptors
   - memory_access
   - xpu_specific
   description: 'GEMM with fused min-clamp and scalar subtract epilogue.
@@ -105,7 +105,7 @@ examples:
   file: matt_elem.py
   optimizations_applied:
   - Fused min(GEMM+bias, C) - C epilogue
-  - Block pointers for X and W^T
+  - Tensor descriptors for X and W^T
   - Pre-packed W^T cached in __init__
   - Constant as Python float (no device to host sync)
   - fp16 I/O, fp32 accumulator
@@ -115,7 +115,7 @@ examples:
   stages:
   - algorithmic
   - fusion
-  - block_pointers
+  - tensor_descriptors
   - xpu_specific
   description: 'GEMM with pairwise max-pool, row-sum, and scale fused in-kernel using
 
@@ -127,7 +127,7 @@ examples:
   - In-register maxpool via tl.reshape and tl.max
   - Row sum + scale in epilogue
   - Atomic accumulation into pre-zeroed fp32 buffer
-  - Block pointers with 1D grid and GROUP_SIZE_M swizzle
+  - Tensor descriptors with 1D grid and GROUP_SIZE_M swizzle
   - tl.max_contiguous hint on bias offset
   - fp16 I/O, fp32 accumulation
   expected_speedup: eliminates intermediate [M,N] tensor and separate reduction kernels
@@ -136,7 +136,7 @@ examples:
   stages:
   - algorithmic
   - fusion
-  - block_pointers
+  - tensor_descriptors
   - xpu_specific
   - autotuning
   description: 'Two-stage GEMM pipeline with sigmoid between stages, followed by
@@ -147,7 +147,7 @@ examples:
   file: TritonSigmGemm.py
   optimizations_applied:
   - exp2-based sigmoid helper (_sigmoid_exp2)
-  - Block pointers in both GEMM kernels
+  - Tensor descriptors in both GEMM kernels
   - Pre-packed W1^T and W2^T (no per-forward repack)
   - Separate LogSumExp reduction kernel
   - Separate autotune configs for GEMM vs LSE kernels
@@ -156,26 +156,28 @@ examples:
   name: GEMM + Sigmoid + Scale + Residual Add (EVEN_M/N/K Specialization)
   stages:
   - xpu_specific
-  - block_pointers
+  - tensor_descriptors
   - autotuning
   description: 'GEMM with sigmoid, scale, and residual add. Demonstrates EVEN_M/N/K
 
-    autotune flags to skip boundary checks for divisible shapes.
+    autotune flags; with tensor descriptors handling tile edges, EVEN_N only selects
+
+    whether the bias load is masked.
 
     '
   file: gemm_sigm.py
   optimizations_applied:
-  - EVEN_M/N/K constexpr flags for boundary-check elimination
+  - EVEN_N constexpr flag to drop the bias-load mask on divisible shapes
   - GROUP_SIZE_M sweep including no-swizzle fallback (1, 2, 4)
   - exp2-based sigmoid in epilogue
-  - Block pointers with conditional boundary_check
+  - Tensor descriptors (out-of-bounds handled by the descriptor, no boundary_check)
   - Fast-path kernel for divisible shapes
   - Autotune sweep over tiles, warps, stages, grf, groups
 - id: gemm_scale_batchnorm
   name: GEMM + Scale + BatchNorm Inference Fusion
   stages:
   - fusion
-  - block_pointers
+  - tensor_descriptors
   - xpu_specific
   - autotuning
   description: 'GEMM with per-channel scale and BatchNorm (inference mode) fused in
@@ -197,7 +199,7 @@ examples:
   stages:
   - algorithmic
   - fusion
-  - block_pointers
+  - tensor_descriptors
   - xpu_specific
   description: 'GEMM with fused BatchNorm and scale, followed by 2D-tiled Softmax
 
@@ -215,7 +217,7 @@ examples:
   stages:
   - algorithmic
   - fusion
-  - block_pointers
+  - tensor_descriptors
   - xpu_specific
   - memory_access
   description: 'Linear + GELU fused in one kernel, then row-wise Softmax as a
@@ -226,7 +228,7 @@ examples:
   file: MMSoftx.py
   optimizations_applied:
   - GELU tanh formulation via tl.math.tanh
-  - Block pointers for X and W^T
+  - Tensor descriptors for X and W^T
   - Separate row-wise softmax kernel
   - Weight stored as [K, N] pre-transposed and cached fp16 on XPU
   - Version-tracked cache for training safety
@@ -249,24 +251,24 @@ examples:
   - dtype_fix and xpu_specific optimizations
   expected_speedup: 1.97x
 - id: conv2d_relu_bias_nhwc
-  name: Conv2d + ReLU + Bias (NHWC Spatially-Tiled with block_ptr)
+  name: Conv2d + ReLU + Bias (NHWC Spatially-Tiled with tensor descriptors)
   stages:
   - fusion
   - memory_access
-  - block_pointers
+  - tensor_descriptors
   - xpu_specific
   - autotuning
   description: |
     Conv2d(64->128, 3x3) + ReLU + bias.
-    Shows the spatially-tiled NHWC convolution pattern with ALL block_ptr.
+    Shows the spatially-tiled NHWC convolution pattern with tensor descriptors on all operands.
     Grid is (n, oh, ow_tile * cout_tile) preserving spatial structure.
     Weight packed as HWIO. C_IN as constexpr. Fused epilogue.
   file: conv2d_relu_bias_nhwc.py
   optimizations_applied:
   - NHWC (channels_last) layout for all tensors
   - Spatial tiling grid (n, oh, ow_tile) not flat M
-  - ALL operands via block_ptr (x, w, y) for 2D block IO
-  - Boundary-limited block_ptr shape prevents oh-row wrapping
+  - ALL operands via tensor descriptors (x, w, y) for 2D block IO
+  - Boundary-limited descriptor shape prevents oh-row wrapping
   - C_IN as tl.constexpr for channel loop unrolling
   - Fused epilogue (conv_bias + ReLU + model_bias) in registers
   - Pre-prepared inputs with zero per-call overhead
@@ -277,7 +279,7 @@ examples:
   stages:
   - fusion
   - memory_access
-  - block_pointers
+  - tensor_descriptors
   - xpu_specific
   - autotuning
   description: |
@@ -285,7 +287,7 @@ examples:
     Heavy 5-op fused epilogue eliminates ~1 GB intermediate traffic.
   file: conv2d_mul_leakyrelu_gelu_nhwc.py
   optimizations_applied:
-  - NHWC + spatial tiling + ALL block_ptr
+  - NHWC + spatial tiling + tensor descriptors on all operands
   - Heavy fused epilogue bias + multiply + LeakyReLU + GELU(erf)
   - Pre-loaded bias/multiplier stay in registers during GEMM loops
   expected_speedup: significant due to eliminated 1GB intermediate
@@ -294,7 +296,7 @@ examples:
   stages:
   - fusion
   - memory_access
-  - block_pointers
+  - tensor_descriptors
   - xpu_specific
   - autotuning
   description: |
@@ -304,7 +306,7 @@ examples:
   optimizations_applied:
   - channels_last_3d (NDHWC) layout, weight as DHWIO
   - Spatial tiling grid (n, od*OH+oh, ow_tile*cout_tiles)
-  - Padding via conditional skip + block_ptr boundary_check
+  - Padding via conditional skip + descriptor zero-fill at the edges
   - Fused MaxPool3d + LogSumExp(dim=1) + ReLU in second kernel
   - Numerically stable LogSumExp with online max tracking
   expected_speedup: conv portion 2-4x
