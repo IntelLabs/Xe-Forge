@@ -1,5 +1,9 @@
 """Tests for static kernel validation."""
 
+from pathlib import Path
+
+import pytest
+
 from xe_forge.core.validator import KernelValidator
 
 VALID_1D_SWIZZLED_GRID = """\
@@ -149,6 +153,41 @@ class TestTensorDescriptorValidation:
         flagged = [i for i in issues if i.check_name == "deprecated_block_ptr"]
         assert len(flagged) == 1
         assert flagged[0].severity == "warning"
+
+    @pytest.mark.parametrize("method", ["make_block_ptr", "advance"])
+    @pytest.mark.parametrize("multiline", [False, True])
+    def test_deprecated_api_calls_are_flagged(self, method, multiline):
+        call = f"tl.{method}(\n    ptr\n)" if multiline else f"tl.{method}(ptr)"
+        code = f"# tl.{method} is deprecated\n{call}\n"
+        issues = KernelValidator().validate(code, dsl="triton")
+        flagged = [issue for issue in issues if issue.check_name == "deprecated_block_ptr"]
+        assert len(flagged) == 1
+        assert flagged[0].severity == "warning"
+        assert flagged[0].line == 2
+
+    @pytest.mark.parametrize("method", ["make_block_ptr", "advance"])
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "# tl.{method}(ptr) is deprecated",
+            'message = "tl.{method}(ptr)"',
+            '"""Use descriptors instead of tl.{method}(ptr)."""',
+            "other.{method}(ptr)",
+            "factory = tl.{method}",
+        ],
+    )
+    def test_deprecated_api_mentions_are_not_flagged(self, method, source):
+        code = TENSOR_DESCRIPTOR_KERNEL + "\n" + source.format(method=method)
+        issues = KernelValidator().validate(code, dsl="triton")
+        assert all(issue.check_name != "deprecated_block_ptr" for issue in issues)
+
+    @pytest.mark.parametrize("template", ["gemm_template.py", "gemm_epilogue_template.py"])
+    def test_descriptor_templates_are_not_flagged_deprecated(self, template):
+        path = Path(__file__).resolve().parents[1] / "templates" / template
+        issues = KernelValidator().validate(path.read_text(encoding="utf-8"), dsl="triton")
+        assert all(
+            issue.check_name not in {"deprecated_block_ptr", "syntax_error"} for issue in issues
+        )
 
     def test_tensor_descriptor_kernel_is_not_flagged(self):
         issues = KernelValidator().validate(TENSOR_DESCRIPTOR_KERNEL, dsl="triton")

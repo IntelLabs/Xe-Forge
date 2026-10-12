@@ -338,15 +338,21 @@ class KernelValidator:
                     )
 
         # 7. Deprecated block pointer API
-        for i, line in enumerate(lines):
-            if "make_block_ptr" in line or "tl.advance(" in line:
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "tl"
+                and node.func.attr in {"make_block_ptr", "advance"}
+            ):
                 issues.append(
                     ValidationIssue(
                         "deprecated_block_ptr",
                         "warning",
                         "tl.make_block_ptr / tl.advance are deprecated in Triton. "
                         "Use tl.make_tensor_descriptor and desc.load/store at explicit offsets.",
-                        line=i + 1,
+                        line=node.lineno,
                     )
                 )
                 break
