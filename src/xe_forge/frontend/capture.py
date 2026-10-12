@@ -20,8 +20,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from xe_forge.frontend import adapters, canonical, ir
-from xe_forge.frontend.naming import name_op
+from xe_forge.frontend import adapters, canonical, ir, naming
 from xe_forge.frontend.torch_trace import parse_traces
 
 # Environment worth recording for reproducibility. Anything that could carry a credential
@@ -38,8 +37,9 @@ def _env_subset() -> dict:
     }
 
 
-def build(raw_dir: Path, out: Path) -> ir.CaptureRun:
-    """``raw/`` (run.json + trace) -> capture.json."""
+def build(raw_dir: Path, out: Path, names: dict | None = None) -> ir.CaptureRun:
+    """``raw/`` (run.json + trace) -> capture.json. ``names`` is the naming agent's answer
+    (``names.json``): each op gets the entry for its key, and the run the model's facts."""
     run = json.loads((raw_dir / "run.json").read_text())
     adapter = adapters.get(run["framework"])
     parse = getattr(adapter, "parse", None)
@@ -61,11 +61,16 @@ def build(raw_dir: Path, out: Path) -> ir.CaptureRun:
         os.path.relpath(p, out.parent) for p in sorted(raw_dir.iterdir()) if p.name != "run.json"
     ]
     _annotate_schemas(summary.ops, raw_dir / "schemas.json")
+    key = getattr(adapter, "name_key", naming.key)  # stable across a patched build
+    entries = (names or {}).get("ops") or {}
+    for op in summary.ops:
+        op.framework_meta["name_key"] = key(op)
+        if key(op) in entries:
+            op.framework_meta["named"] = entries[key(op)]
+    if names is not None:
+        run["model_facts"] = names.get("model") or {}
     capture = ir.CaptureRun(run=run, ops=summary.ops)
-    framework = run["framework"]
-    # An adapter whose ops are not torch ops names them itself.
-    namer = getattr(adapter, "name_op", None) or (lambda op: name_op(op, framework))
-    capture.workloads = canonical.workloads(capture.ops, summary.total_us, namer)
+    capture.workloads = canonical.workloads(capture.ops, summary.total_us, naming.name_op)
     ir.dump(capture, out)
     return capture
 
@@ -121,13 +126,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("-o", "--output", type=Path, required=True, help="capture.json to write")
     parser.add_argument("--reparse", type=Path, help="rebuild from an existing raw/ directory")
+    parser.add_argument("--names", type=Path, help="the naming agent's names.json")
     if known.framework in adapters.ADAPTERS:
         adapters.get(known.framework).add_arguments(parser)
     args = parser.parse_args(argv)
 
     out = args.output.resolve()
+    names = json.loads(args.names.read_text()) if args.names else None
     if args.reparse:
-        capture = build(args.reparse.resolve(), out)
+        capture = build(args.reparse.resolve(), out, names)
     else:
         raw_dir = out.parent / "raw"
         for stale in raw_dir.glob("trace*"):  # an earlier capture's traces are not this one's
@@ -150,7 +157,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         raw_dir.mkdir(parents=True, exist_ok=True)
         (raw_dir / "run.json").write_text(json.dumps(run, indent=1) + "\n")
-        capture = build(raw_dir, out)
+        capture = build(raw_dir, out, names)
 
     r = capture.run
     print(

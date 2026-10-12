@@ -64,77 +64,51 @@ def _layout(t: TensorArg) -> str:
     return "s"
 
 
-# Argument names a provider GEMM gives its activation and its weight (vLLM _xpu_C, SGLang),
-# and everything read with the weight: scales, zero points, bias. Activation-side scales
-# (A_scale) are not weight traffic.
-_GEMM_ACT = ("A", "A_", "ptr_A", "activations", "mat_a")
-_GEMM_WEIGHT = ("B", "ptr_B", "weights", "packed_weights", "mat_b")
-_WEIGHT_SIDE = re.compile(
-    r"^(B|ptr_B|weights|packed_weights|mat_b|scales|zeros|weight_scales|scales_b)$"
-    r"|^(ptr_)?B_(scale|zp)_?$|^(ptr_)?bias_?$"
-)
-_GROUPED = re.compile(r"rows_per_expert|total_rows|problem_sizes|expert_offsets")
-
-
 def _provider_gemm(op: CapturedOp) -> dict | None:
-    """M/N/K/E and bytes per element of a provider GEMM, read from its schema's argument
-    names and integer arguments -- no per-op table, no quantization-format table.
+    """M/N/K/E and bytes per element of a GEMM a provider implements, from the naming
+    agent's answer for it (``named["gemm"]``: which argument is the activation, the weight,
+    what is read with the weight, the output, where N sits) -- no argument-name or
+    quantization-format table here.
 
     Bytes are *measured* from the captured tensors: weight-side bytes (weight, scales, zero
-    points, bias) over the logical E*N*K weight elements, activation bytes over M*K. So
-    MXFP4, NVFP4, INT4 groups or block FP8 come out right without being named. E is the
-    *local* expert count the kernel was given (its argument, or its weight's leading dim);
-    a grouped call without one gets no E, and its bound stays unknown -- never E=1. The
-    compute dtype is what the multiply runs in: on Xe2 FP8/FP4 are dequantized to bf16.
-    """
-    name = base_name(op.framework_op).lower()
+    points, bias) over the logical E*N*K weight elements, activation bytes over M*K, output
+    bytes over M*N. E is the *local* expert count the kernel was given (the argument the
+    agent names, or the weight's leading dim); a grouped call without one gets no E, and its
+    bound stays unknown -- never E=1. The compute dtype is the activation's; which peak that
+    runs at is the calibration's to say."""
+    spec = (op.framework_meta.get("named") or {}).get("gemm")
     names = op.framework_meta.get("arg_names") or []
-    if (
-        op.framework_op.startswith("aten::")
-        or not names
-        or not re.search(r"gemm|_mm|matmul|bmm", name)
-    ):
+    if not spec or not names:
         return None
     by = {n: op.args[i] for i, n in enumerate(names) if i < len(op.args) and op.args[i] is not None}
-    ints = {
-        n.lower(): _int(op.scalars[i])
-        for i, n in enumerate(names)
-        if i < len(op.scalars) and _int(op.scalars[i]) is not None
-    }
-    act = next((by[n] for n in _GEMM_ACT if n in by), None)
-    w = next((by[n] for n in _GEMM_WEIGHT if n in by), None)
+    ints = {n: _int(op.scalars[i]) for i, n in enumerate(names) if i < len(op.scalars)}
+    act, w = by.get(spec.get("activation")), by.get(spec.get("weight"))
     if act is None or w is None or not act.shape or len(w.shape) < 2:
         return None
-    k = ints.get("k") or act.shape[-1] * (2 if act.dtype == "float4_e2m1fn_x2" else 1)
+    k = act.shape[-1] * int(spec.get("act_per_stored") or 1)
     m = math.prod(act.shape[:-1])
-    grouped = any(_GROUPED.search(n) for n in names) or "num_experts" in ints or "n_experts" in ints
-    experts = ints.get("num_experts") or ints.get("n_experts")
-    if experts is None and len(w.shape) == 3 and (grouped or "bmm" in name):
+    grouped = bool(spec.get("grouped"))
+    experts = ints.get(spec.get("experts") or "")
+    if experts is None and grouped and len(w.shape) == 3:
         experts = w.shape[0]  # [E, ...] weights: the kernel's own (local) count
-    wdims = list(w.shape[1:]) if len(w.shape) == 3 else list(w.shape)
-    n = ints.get("n")
-    if n is None and len(wdims) == 2:
-        # The other weight dim is N; K is stored whole, or packed (fp4x2: K/2, int4 in int32: K/8).
-        rest = list(wdims)
-        packed = next((p for p in (k, k // 2, k // 8) if p in rest), None)
-        if packed is not None:
-            rest.remove(packed)
-            n = rest[0]
-    if n is None:
-        return {"M": m, "K": k, "grouped": grouped}  # still a GEMM; N, and so its bound, unknown
-    per_matrix = experts if (grouped or "bmm" in name) else 1
-    side = [tensor_bytes(t.shape, t.dtype) for nm, t in by.items() if _WEIGHT_SIDE.search(nm)]
+    n = w.shape[spec["n_axis"]] if isinstance(spec.get("n_axis"), int) else None
+    if n is None or (grouped and experts is None):
+        return {"M": m, "K": k, "grouped": grouped}  # still a GEMM; its bound is unknown
+    per_matrix = experts if grouped else 1
+    side = [
+        tensor_bytes(by[a].shape, by[a].dtype) for a in spec.get("weight_side") or [] if a in by
+    ]
+    side = side or [tensor_bytes(w.shape, w.dtype)]
     a_total = tensor_bytes(act.shape, act.dtype)
-    if per_matrix is None or None in side or a_total is None:
-        dims_only = {"M": m, "N": n, "K": k, "grouped": grouped}
-        return (
-            dims_only if grouped else None
-        )  # a grouped call is still a GEMM; its bound is unknown
-    compute = act.dtype if act.dtype in ("bfloat16", "float16", "int8") else "bfloat16"
+    if None in side or a_total is None:
+        return {"M": m, "N": n, "K": k, "grouped": grouped}
+    out = by.get(spec.get("output") or "")
+    o_total = tensor_bytes(out.shape, out.dtype) if out is not None else None
     return {
         "M": m, "N": n, "K": k, "E": per_matrix,
         "w_bytes": round(sum(side) / (per_matrix * n * k), 5),
-        "a_bytes": round(a_total / (m * k), 5), "compute": compute, "grouped": grouped,
+        "a_bytes": round(a_total / (m * k), 5), "compute": act.dtype, "grouped": grouped,
+        **({"o_bytes": round(o_total / (m * n), 5)} if o_total else {}),
     }  # fmt: skip
 
 
@@ -217,7 +191,11 @@ def _attrs(op: CapturedOp) -> dict:
         if value is not None and _int(value) is None:
             out[names[i] if i < len(names) else f"arg{i}"] = value
     gemm = op.framework_meta.get("gemm") or {}
-    out.update({k: gemm[k] for k in ("w_bytes", "a_bytes", "compute", "grouped") if k in gemm})
+    out.update(
+        {k: gemm[k] for k in ("w_bytes", "a_bytes", "o_bytes", "compute", "grouped") if k in gemm}
+    )
+    if (op.framework_meta.get("named") or {}).get("paged"):
+        out["paged"] = True
     if base_name(op.framework_op) in ("linear", "addmm", "baddbmm"):
         out["bias"] = (
             len([a for a in op.args if a is not None]) >= 3
@@ -242,9 +220,11 @@ def workloads(ops: list[CapturedOp], total_us: float, naming_fn=None) -> list[Wo
         dims = gemm or _named_dims(op)
         scalar_dims = set() if gemm else {k for k in dims if not re.search(r"_D\d+$", k)}
         tensors = [a for a in op.args if a is not None]
-        family = family_of(op.framework_op)
+        family = (op.framework_meta.get("named") or {}).get("family") or family_of(op.framework_op)
         if family == "other" and op.framework_meta.get("owner"):
             family = family_of(op.framework_meta["owner"])
+        if gemm:
+            family = "gemm"
         base = {
             "family": family,
             "op": op.framework_op,

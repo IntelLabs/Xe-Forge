@@ -189,19 +189,26 @@ analysis. Abridged, from a Qwen2.5-0.5B capture:
 - **Aggregation.** Ops sum per (op, signature, call site); workloads sum over ops, layers
   collapsed by the call site and phases folded into the var histogram.
 
-### Naming (`naming.py`)
+### Naming: an agent (`frontend-name.md.j2` -> `names.json`)
 
-A lookup from the captured identity to what the kernel-locator is told; reading the source
-is the locator's job. Routes:
+Where an op is implemented is read from the framework and the repositories, not matched
+against tables in code. After capture, `xe-forge run` gives one agent session the ops
+covering `--name-coverage` of device time. For each one it gets the op, its owner, the
+kernels it launched, its argument names, shapes and dtypes, and its call site, plus the
+model config and the kernel repositories on the machine. The agent answers per op key:
 
-| route | when | manifest |
-|---|---|---|
-| `kernel` | the op's `torch.ops` namespace is a provider (`_C`, `_C_cache_ops`, `_moe_C`, `_xpu_C`, `_vllm_fa2_C`, ... -> `vllm-xpu-kernels`, `sycl`), or a kernel launched outside any op whose name is a plain identifier, as a `@triton.jit` function's is (-> the framework's repo, `triton`) | enabled if it passes the gates |
-| `library` | every kernel the op launched is a library primitive (oneDNN `gemm_kernel`, ...) | disabled: change the call, not the kernel |
-| `aten` | an ATen op inside PyTorch | disabled: no kernel repository |
-| `unnamed` | no rule matched | disabled |
+| field | meaning |
+|---|---|
+| `route` | `kernel` (a kernel in a repository Xe-Forge rewrites), `library` (a library primitive: tune the call), `aten` (inside PyTorch), `unnamed` (not established, with the reason) |
+| `name`, `repo`, `dsl`, `via` | what the kernel-locator greps for, where, in which language, and the evidence |
+| `family`, `paged` | the op family; whether it reads a paged buffer (no streaming bound) |
+| `gemm` | for a matrix multiply: which argument is the activation, the weight, what is read with the weight, the output, where N sits, packing along K, grouping and the expert-count argument |
 
-A new provider is one row in `PROVIDERS`.
+It also answers once per model with `model.topk` and `model.experts`. The capture is then
+rebuilt with `--names`, and so are the prove arms' captures, so both arms key their
+workloads alike. The key is the implementing op (OpenVINO: node type plus implementation),
+which a patched build keeps. Without `names.json`, only `aten::` ops are named, by
+PyTorch's own rule.
 
 ## Analyze: the decision
 
@@ -240,7 +247,6 @@ LM configured once in `llm_setup.py`. Planning *how* to optimize is already Xe-F
 fields it ignores:
 
 ```yaml
-partition: b70
 kernels:
 - name: varlen_fwd                 # the symbol the kernel-locator greps for
   repo: vllm-xpu-kernels           # a path, or a directory beside this checkout
@@ -293,38 +299,6 @@ apply, so a measured regression is never copied. A kept result gets
 `<repo>.patch` when the session ported back) and `result.json`; `SUMMARY.md` has one row
 per manifest entry: win / parity / no win / skipped / not run, with the reason.
 
-## Observed: Qwen2.5-7B-Instruct, bf16, batch 1, 512-token prompt, 32 decode steps, one B70
-
-Share of device time by route, from the two captures:
-
-| route | vLLM | SGLang | OpenVINO (fp16 IR) |
-|---|---|---|---|
-| library (oneDNN GEMMs) | 96.08% | 96.06% | 94.01% (`FullyConnected`) |
-| provider kernels | 3.71% (vllm-xpu-kernels) | 3.66% (sgl-kernel-xpu) | 5.99% (openvino OpenCL: `sdpa_opt` 2.59%, `permute_ref` 1.60%, `rms_gpu_bfyx_opt` 0.97%, ...) |
-| ATen ops | 0.13% | 0.28% | - |
-| framework Triton kernels | 0.07% | 0.01% | - |
-| total device time | 851.2 ms | 850.8 ms | 1004.7 ms |
-
-OpenVINO's device time is the sum of `PERF_COUNT` `real_time` over executed primitives,
-not a torch.profiler kernel timeline, so the totals are comparable only roughly. Its
-`permute_ref` (a transpose the other two stacks do not run) is OpenVINO-specific work.
-
-`xe-forge run --top 3` on each produced a measured win for every chosen kernel, at the
-decode variant (Xe-Forge's own benchmark):
-
-| framework | kernel | speedup | result |
-|---|---|---|---|
-| vLLM | `silu_and_mul` | 2.05x | port-back patch (serving-only: rounding differs from the repo's test) |
-| vLLM | `fused_add_rms_norm` | 1.51x | port-back patch |
-| vLLM | `varlen_fwd` | 1.54x | measured trial; the session ran out of turns before finalizing |
-| SGLang | `fwd` | 1.66x | port-back patch (split-KV heuristic for short contexts) |
-| SGLang | `silu_and_mul` | 3.52x | port-back patch |
-| SGLang | `fused_add_rmsnorm` | 2.38x | port-back patch |
-
-Patches are unbuilt, and none has been measured in serving yet. Weighted by share, the
-SGLang three are worth about 1.7% of decode device time: at batch 1 the GEMMs, which read
-every weight once per token, are the time, and they are a library call.
-
 ## Library calls (oneDNN): tuned only below the card's roofline
 
 A GEMM served by oneDNN is not a kernel Xe-Forge rewrites, but how the framework calls it
@@ -332,13 +306,13 @@ can still leave time on the table. Whether it does is measured, not assumed:
 
 - `xe-forge calibrate` (GPU node) records the card's read bandwidth (a reduction over
   random data: constant data compresses and would read faster than any real tensor) and
-  large-square matmul throughput per dtype, under `~/.cache/xe_forge/calibration/`.
+  large-square matmul throughput per dtype it can multiply (a dtype it cannot is `None`,
+  with the reason), under `$XE_FORGE_CACHE/calibration/`.
 - `xe-forge analyze --calibration <json>` bounds every M/N/K GEMM workload, at each captured
   token count: `max((M*K + K*N + M*N) * size / bandwidth, 2*M*N*K / peak)`. A workload at
-  0.8 or more of its bound is rejected "at roofline" with its efficiency; below it, its
-  recoverable time (not its whole share) ranks it, and a library workload becomes an entry
-  with `target: library`, named by its call site (vLLM/SGLang: the linear module; OpenVINO:
-  `fully_connected_onednn`).
+  `--at-roofline` (default 0.8) or more of its bound is rejected "at roofline" with its
+  efficiency; below it, its recoverable time (not its whole share) ranks it, and a library
+  workload becomes an entry with `target: library`, at the call site the naming agent named.
 - `xe-forge optimize` passes `--target library`: the workspace reproduces the call as the
   repository makes it (oneDNN API, `ONEDNN_VERBOSE` for the implementation picked) and trials
   change only how it is called -- prepacked weights, attributes, primitive reuse, splitting.
@@ -346,33 +320,28 @@ can still leave time on the table. Whether it does is measured, not assumed:
   kernels.
 
 Without `--calibration` nothing is tuned: library entries are listed per call site and stay
-skipped. On the B70 the decode GEMMs of Qwen2.5-7B measure 0.92-1.04 of their bound (read
-bandwidth 566-573 GB/s): nothing to tune there.
+skipped.
 
 ## Bounds for any op, any architecture
 
-- **Model metadata** is stored whole (`run.model.config`) and read through
-  `model_meta.model_value`, which also looks into nested LLM configs (`text_config`,
-  `language_config`, `llm_config`). Top-k is `num_experts_per_tok`, `experts_per_token`,
-  `num_experts_per_token` or `moe_topk`. Experts are `num_local_experts`, `num_experts` or
-  `n_routed_experts`. A generic `top_k` is never read, so sparse-attention `index_topk`
-  and sampling settings can't be mistaken for it. Checked against real configs:
-  DeepSeek-V4, GLM-5, Qwen3.5-MoE (nested), Qwen3-Next, MiniMax-M2, Kimi Linear,
-  LFM2-MoE, Nemotron-3 and GPT-OSS. Jamba is gated, so not tested.
-- **Bytes are measured from the captured tensors:** weight, scales, zero points and bias,
-  over E·N·K. MXFP4, NVFP4, INT4 groups, block FP8 and future formats need no format
-  table. FP8/FP4 multiply in BF16 on Xe2.
-- **A grouped (MoE) call never gets E=1.** E is the local count the kernel was given; or
-  the model's experts divided by the expert-parallel size; or the bound is unknown. A
+- **Model metadata** is stored whole (`run.model.config`). What a family calls its top-k and
+  expert count, and where a multimodal model nests its language model, is the naming
+  agent's to read (`names.json` `model` -> `run.model_facts`).
+- **Bytes are measured from the captured tensors** the naming agent identified: weight,
+  scales, zero points and bias over E·N·K, the activation over M·K, the output over M·N.
+  No quantization-format table. The compute peak is the calibration's for the activation
+  dtype; for a dtype it has no measured peak for, the fastest measured one.
+- **A grouped (MoE) call never gets E=1.** E is the local count the kernel was given (the
+  argument the agent named, or the weight's leading dim); or the model's experts divided by
+  the expert-parallel size; or the bound is unknown. A
   measured `active_experts` overrides the uniform-routing estimate. Each point's bound is
   capped at its measured time, so a violated assumption shows no headroom rather than
   invented headroom.
 - **A bound registry:** `gemm` gets the roofline. Every other op gets the streaming bound
-  (all its tensors read or written once, over bandwidth), except ops with paged buffers
-  (KV cache, block or page tables), which stay unknown until a family bounder (attention,
-  MLA, linear attention, SSM, collective) is added as one entry. Ranking uses recoverable
-  time, so an op already streaming at its bandwidth (e.g. Nemotron's `relu2_no_mul` at
-  0.87) is no longer offered.
+  (all its tensors read or written once, over bandwidth), except ops the agent marked
+  `paged` (KV cache, block or page tables), which stay unknown until a family bounder
+  (attention, MLA, linear attention, SSM, collective) is added as one entry. Ranking uses
+  recoverable time, so an op already streaming at its bandwidth is no longer offered.
 
 ## Mergeable patches: the stack check
 

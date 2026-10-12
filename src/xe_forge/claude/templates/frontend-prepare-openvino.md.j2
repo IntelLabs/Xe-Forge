@@ -1,0 +1,5 @@
+Export {{ model }} to an OpenVINO IR directory at {{ out }}, loadable by optimum-intel's
+OVModelForCausalLM, with {{ fmt }} weights. Download what you need (unset HF_HUB_OFFLINE for
+it). Check that, under the framework's interpreter,
+OVModelForCausalLM.from_pretrained("{{ out }}", device="GPU") loads it and generates 4 tokens.
+Write prepared.json {"model": "{{ out }}"}, or {"error": "<why>"}.

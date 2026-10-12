@@ -8,7 +8,7 @@
 
 Measured, never written down: a value that cannot be measured is ``None`` (never 0), with
 the reason in ``unmeasured``, and a reader treats ``None`` as unknown. The record is cached
-under ``~/.cache/xe_forge/calibration/<device>.json``; ``xe-forge analyze --calibration``
+under ``$XE_FORGE_CACHE/calibration/<device>.json`` (default ``~/.cache/xe_forge``); ``xe-forge analyze --calibration``
 reads it.
 """
 
@@ -19,11 +19,13 @@ import re
 import statistics
 from pathlib import Path
 
-CACHE = Path.home() / ".cache" / "xe_forge" / "calibration"
+from xe_forge import frontend
+
+CACHE = frontend.CACHE / "calibration"
 DTYPES = ("bfloat16", "float16")
 
 
-def _time_us(fn, dev, iters: int = 20) -> float:
+def _time_us(fn, dev, iters: int) -> float:
     import torch
 
     mod = getattr(torch, dev)
@@ -41,7 +43,8 @@ def _time_us(fn, dev, iters: int = 20) -> float:
     return statistics.median(times)
 
 
-def measure() -> dict:
+def measure(read_bytes: int = 1 << 30, n: int = 8192, iters: int = 20) -> dict:
+    """``read_bytes`` must exceed the card's caches; ``n`` is the square matmul size."""
     import torch
 
     from xe_forge.frontend.adapters.pytorch import device_info, device_type
@@ -57,34 +60,40 @@ def measure() -> dict:
         rec["unmeasured"]["all"] = "no GPU visible to torch"
         return rec
     try:
-        # 1 GiB of random data: a constant fill would compress, and Intel GPUs compress
-        # memory traffic losslessly, so it would read faster than any real tensor.
-        x = torch.rand(1 << 29, dtype=torch.float16, device=dev)
-        us = _time_us(lambda: x.sum(), dev)
+        # Random data: a constant fill would compress, and GPUs that compress memory
+        # traffic losslessly would read it faster than any real tensor.
+        x = torch.rand(read_bytes // 2, dtype=torch.float16, device=dev)
+        us = _time_us(lambda: x.sum(), dev, iters)
         rec["bandwidth_gbs"] = round(x.numel() * x.element_size() / us / 1e3, 1)
         del x
     except Exception as exc:  # recorded, not swallowed: the reason says whether to retry
         rec["unmeasured"]["bandwidth_gbs"] = repr(exc)
-    for name in DTYPES:
+
+    def fp(dt):
+        a, b = (torch.randn(n, n, device=dev, dtype=dt) for _ in range(2))
+        return lambda: torch.matmul(a, b)
+
+    def int8():
+        a, b = (torch.randint(-64, 64, (n, n), device=dev, dtype=torch.int8) for _ in range(2))
+        return lambda: torch._int_mm(a, b)
+
+    def fp8():
+        one = torch.ones((), device=dev)
+        a = torch.randn(n, n, device=dev).to(torch.float8_e4m3fn)
+        b = torch.randn(n, n, device=dev).to(torch.float8_e4m3fn).t()
+        return lambda: torch._scaled_mm(a, b, scale_a=one, scale_b=one, out_dtype=torch.bfloat16)
+
+    # Whatever the card multiplies natively is measured; a dtype it cannot is None with the
+    # reason, and a bound for it falls back to the fastest measured peak.
+    kernels = {**{name: (lambda name=name: fp(getattr(torch, name))) for name in DTYPES},
+               "int8": int8, "float8_e4m3fn": fp8}  # fmt: skip
+    for name, make in kernels.items():
         try:
-            n = 8192
-            a = torch.randn(n, n, device=dev, dtype=getattr(torch, name))
-            b = torch.randn(n, n, device=dev, dtype=getattr(torch, name))
-            us = _time_us(lambda a=a, b=b: torch.matmul(a, b), dev, iters=10)
+            us = _time_us(make(), dev, max(1, iters // 2))
             rec["matmul_tflops"][name] = round(2 * n**3 / us / 1e6, 1)
         except Exception as exc:
             rec["matmul_tflops"][name] = None
             rec["unmeasured"][f"matmul_tflops.{name}"] = repr(exc)
-    try:  # int8 activations (W4A8, W8A8 int) multiply on XMX int8
-        a = torch.randint(-64, 64, (8192, 8192), device=dev, dtype=torch.int8)
-        b = torch.randint(-64, 64, (8192, 8192), device=dev, dtype=torch.int8)
-        us = _time_us(lambda: torch._int_mm(a, b), dev, iters=10)
-        rec["matmul_tflops"]["int8"] = round(2 * 8192**3 / us / 1e6, 1)
-    except Exception as exc:
-        rec["matmul_tflops"]["int8"] = None
-        rec["unmeasured"]["matmul_tflops.int8"] = repr(exc)
-    # No FP8/FP4 entry on purpose: Xe2 XMX has no FP8/FP4 matrix math; those GEMMs dequantize
-    # and multiply in bf16/fp16, which is the peak their bound uses.
     return rec
 
 
@@ -99,8 +108,8 @@ def load(path: str | Path) -> dict:
     return json.loads(Path(path).read_text())
 
 
-def main(out: Path | None) -> int:
-    rec = measure()
+def main(out: Path | None, read_bytes: int = 1 << 30, n: int = 8192, iters: int = 20) -> int:
+    rec = measure(read_bytes, n, iters)
     path = out or default_path(rec)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(rec, indent=1) + "\n")

@@ -4,8 +4,7 @@ The model (an exported IR directory, or an HF id an agent exported once per
 ``--weight-format``, see ``prepare``) is compiled on the GPU with ``PERF_COUNT``.
 ``generate`` runs one prefill and ``--output-len`` decode steps; a thin proxy around the
 model's infer request reads ``get_profiling_info()`` after every step. The plugin reports
-each node's *mean* time
-over the runs it executed in, so a step's own time is recovered as
+each node's *mean* time over the runs it executed in, so a step's own time is recovered as
 ``n * mean_n - (n - 1) * mean_(n-1)``. The compiled runtime model gives each executed node
 its port shapes and precisions.
 
@@ -13,10 +12,9 @@ OpenVINO reports no per-call shapes -- the runtime model's are dynamic -- so eac
 carries the call's token count and context length, and ``-1`` stays where a dim is
 dynamic: the agent maps model-level sizes to the kernel's arguments.
 
-Naming: a primitive implemented by oneDNN is a library call; any other GPU primitive is
-an OpenCL kernel in the ``openvino`` repository, named by its implementation as the source
-names it (``ocl::sdpa::opt__f16`` -> ``sdpa_opt``, ``permute_ref__f16`` -> ``permute_ref``).
-Where profiling reports ``undef``, the runtime model's ``primitiveType`` is used.
+Each row's kernel symbol is the implementation profiling reports, or, where it reports
+``undef``, the runtime model's ``primitiveType``. Which source that is -- an OpenCL kernel
+in the plugin, a oneDNN call -- is the naming agent's to establish (``name_key``).
 """
 
 from __future__ import annotations
@@ -26,11 +24,11 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-from xe_forge.frontend.ir import CapturedOp, Naming, TensorArg
+from xe_forge.frontend import CACHE
+from xe_forge.frontend.ir import CapturedOp, TensorArg
 from xe_forge.frontend.model_meta import stored
 from xe_forge.frontend.torch_trace import TraceSummary
 
-_LIBRARY = re.compile(r"onednn|dnnl", re.I)
 _DTYPES = {"f16": "float16", "bf16": "bfloat16", "f32": "float32", "i64": "int64",
            "i32": "int32", "i8": "int8", "u8": "uint8", "boolean": "bool"}  # fmt: skip
 
@@ -44,8 +42,8 @@ def add_arguments(parser) -> None:
     parser.add_argument(
         "--weight-format",
         default="fp16",
-        choices=("fp16", "int8", "int4", "fp8"),
-        help="weights of an HF id, exported once by an agent and cached",
+        help="weight format of an HF id's export, as OpenVINO names it (int4, fp8, ...); "
+        "an agent exports it once and it is cached",
     )
 
 
@@ -75,31 +73,21 @@ class _Recorder:
         self._steps.append(rows)
 
 
-PREPARE = """\
-Export {model} to an OpenVINO IR directory at {out}, loadable by optimum-intel's
-OVModelForCausalLM, with weights in {fmt}: fp16 is no compression, int8/int4 weight
-compression, fp8 full f8e4m3 quantization calibrated on a standard text dataset. Choose
-settings the model's shapes allow (e.g. a group size dividing every channel). Download
-what you need (unset HF_HUB_OFFLINE for it). Check that, under the framework's interpreter,
-OVModelForCausalLM.from_pretrained("{out}", device="GPU") loads it and generates 4 tokens.
-Write prepared.json {{"model": "{out}"}}, or {{"error": "<why>"}}.
-"""
-
-
 def ir_dir(args) -> Path:
     """Where the IR for an HF id and weight format lives, once exported."""
     name = f"{args.model.replace('/', '--')}--{args.weight_format}"
-    return Path.home() / ".cache/xe_forge/ov-models" / name
+    return CACHE / "ov-models" / name
 
 
-def prepare(args) -> tuple[Path, str] | None:
+def prepare(args) -> tuple[Path, str, dict] | None:
     """What the model needs before capture -- an exported IR, and the agent's task to make
     it -- or None when it has one. Export is per model (formats, calibration, shapes), so an
     agent does it rather than code here."""
     out = Path(args.model) if Path(args.model).is_dir() else ir_dir(args)
     if (out / "openvino_model.xml").is_file():
         return None
-    return out, PREPARE.format(model=args.model, out=out, fmt=args.weight_format)
+    context = {"model": args.model, "out": out, "fmt": args.weight_format}
+    return out, "frontend-prepare-openvino.md.j2", context
 
 
 def capture(args, raw_dir: Path) -> dict:
@@ -216,26 +204,8 @@ def parse(raw_dir: Path) -> TraceSummary:
     )
 
 
-def name_op(op: CapturedOp) -> Naming:
+def name_key(op: CapturedOp) -> str:
+    """names.json key: the node type and the implementation the plugin picked for it (one
+    type runs different kernels at different shapes); a patched kernel keeps its name."""
     impl = max(op.kernel_symbols, key=op.kernel_symbols.get) if op.kernel_symbols else ""
-    # The GPU plugin names every OpenCL kernel it runs; it reports oneDNN primitives as
-    # "undef" (FullyConnected on XMX: ONEDNN_VERBOSE shows matmul jit:gemm:any).
-    if impl == "undef" or _LIBRARY.search(impl):
-        op.impl_class = "onednn"
-        # The call to tune is the plugin's oneDNN implementation of the op.
-        name = {"FullyConnected": "fully_connected_onednn", "Gemm": "gemm_onednn"}.get(
-            op.framework_op.split("::")[-1], op.framework_op.split("::")[-1]
-        )
-        return Naming("library", name, "openvino", "sycl", via=f"oneDNN ({impl})")
-    if not impl:
-        return Naming("unnamed", op.framework_op, via="no implementation reported")
-    op.impl_class = "provider"
-    # "ocl::sdpa::opt__f16" -> "sdpa_opt": the source file the locator greps for.
-    name = re.sub(r"_*_(f16|f32|bf16|i8|u8|i32|i64)$", "", re.sub(r"^(ocl|cm|sycl)::", "", impl))
-    return Naming(
-        "kernel",
-        name.replace("::", "_"),
-        "openvino",
-        "opencl",
-        via=f"OpenVINO GPU primitive {impl}",
-    )
+    return f"{op.framework_op}|{impl}"

@@ -1,0 +1,41 @@
+Name the ops a model ran, so each can be optimized where it lives. The model is {{ model }},
+run by {{ framework }}; its config is config.json here. ops.json lists the ops that took
+{{ coverage }} of device time, keyed by op: the framework op, the op that owns it, the kernels
+it launched with their device time, its argument names, shapes and dtypes, and its call site.
+The kernel repositories on this machine are in {{ repos }}.
+
+For each key, find where the op is implemented -- the registration of its namespace, the
+kernel it launches, the source behind it -- by reading the framework and the repositories,
+not by guessing from names. Then write names.json:
+
+{"ops": {"<key>": {
+   "route": "kernel" | "library" | "aten" | "unnamed",
+       kernel:  a kernel in one of the repositories that Xe-Forge can rewrite;
+       library: the op's time is a library primitive (e.g. oneDNN) -- what is tuned is the
+                call, in the repository that makes it;
+       aten:    implemented inside PyTorch, no repository to edit;
+       unnamed: none of these could be established -- say why in "via".
+   "name": the symbol to grep for in the repository (kernel function, or the function
+           making the library call), "repo": the repository's directory name,
+   "dsl": the language the kernel is written in ("sycl", "triton", "opencl", ...); for a
+          library call, the language the call is made in, which its baseline reproduces,
+   "via": one line: how you established it (file:line),
+   "family": "gemm" | "attention" | "norm" | "activation" | "moe" | "rope" | "cache" |
+             "sampling" | "copy" | "elementwise" | "other",
+   "paged": true when an argument is a paged or allocated buffer (a KV cache, a block or
+            page table) whose touched part depends on the context, not its shape,
+   "gemm": only for a matrix multiply -- which argument is what, from the kernel's source:
+     {"activation": "<arg>", "weight": "<arg>",
+      "act_per_stored": <logical K elements per stored activation element, 1 unless packed>,
+      "n_axis": <index of N in the weight's shape>,
+      "weight_side": ["<arg>", ...]   every tensor read with the weight: weight, scales,
+                                      zero points, bias -- not activation-side scales,
+      "output": "<arg>" or null,
+      "grouped": true for one call over several experts' matrices,
+      "experts": "<integer argument holding the expert count>" or null}
+ }},
+ "model": {"topk": <experts each token is routed to, or null>,
+           "experts": <routed experts in the model, or null>}}
+
+Use the keys exactly as ops.json gives them. An op you cannot place is "unnamed" with the
+reason, never a guess.

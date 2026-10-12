@@ -44,42 +44,36 @@ def capture(argv: list[str], framework_python: str | None) -> int:
     return subprocess.call(cmd, env=env)
 
 
-FIT_PROMPT = """\
-Before anything is downloaded, exported or captured: will this capture run on this machine's
-GPU?  xe-forge capture {args}
-Answer from the model's config (the hub's metadata, no weight download), the device's memory,
-and how this framework executes this model at this workload -- weights in the requested
-format, KV cache for batch x (input + output) tokens, and the working memory of its layers
-as the framework runs them (e.g. MoE experts computed densely for every token). Do not run
-the model. Write fit.json {{"fits": true|false, "need_gb": <n>, "have_gb": <n>, "reason":
-"<one line>"}}.
-"""
-
-
-def fits(capture_args: list[str], python: str | None, run_dir: Path) -> int:
-    """A short agent session judges whether the model fits before anything is spent on it.
-    Only a definite "no" stops the run; no answer is not a no."""
+def _agent(step: str, template: str, context: dict, cwd: Path, answer: str, python, turns):
+    """One agent step; None when it gave no answer (the reason is printed)."""
     from xe_forge.frontend import agent
 
-    prompt = FIT_PROMPT.format(args=shlex.join(capture_args))
     try:
-        answer = agent.run(prompt, run_dir / "fit", "fit.json", python or sys.executable, 30)
+        return agent.run(template, context, cwd, answer, python or sys.executable, turns)
     except (RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
-        print(f"fit: no answer ({exc}); proceeding", file=sys.stderr)
+        print(f"{step}: {exc}", file=sys.stderr)
+        return None
+
+
+def fits(capture_args: list[str], python: str | None, run_dir: Path, max_turns: int) -> int:
+    """An agent judges whether the model fits before anything is spent on it. Only a
+    definite "no" stops the run; no answer is not a no."""
+    context = {"args": shlex.join(capture_args)}
+    answer = _agent("fit", "frontend-fit.md.j2", context, run_dir / "fit", "fit.json", python,
+                    max_turns)  # fmt: skip
+    if answer is None:
         return 0
     if answer.get("fits") is False:
         print(f"fit: does not fit -- {answer.get('reason', '')}", file=sys.stderr)
         return 3
-    print(
-        f"fit: {answer.get('need_gb')} of {answer.get('have_gb')} GB -- {answer.get('reason', '')}"
-    )
+    print(f"fit: {answer.get('need_gb')} of {answer.get('have_gb')} GB -- {answer.get('reason')}")
     return 0
 
 
 def prepare(capture_args: list[str], python: str | None, run_dir: Path, max_turns: int) -> int:
     """An adapter whose framework needs the model prepared first (OpenVINO: an exported IR)
     names the task, and an agent does it -- formats, calibration, what to install where."""
-    from xe_forge.frontend import adapters, agent
+    from xe_forge.frontend import adapters
 
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--framework")
@@ -92,14 +86,69 @@ def prepare(capture_args: list[str], python: str | None, run_dir: Path, max_turn
     task = adapter.prepare(p.parse_known_args(capture_args)[0])
     if task is None:
         return 0
-    out, prompt = task
+    out, template, context = task
     print(f"prepare: an agent prepares the model -> {out}", flush=True)
-    try:
-        agent.run(prompt, run_dir / "prepare", "prepared.json", python or sys.executable, max_turns)
-    except (RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
-        print(f"prepare: {exc}", file=sys.stderr)
-        return 1
-    return 0
+    done = _agent("prepare", template, context, run_dir / "prepare", "prepared.json", python,
+                  max_turns)  # fmt: skip
+    return 0 if done is not None else 1
+
+
+def name(
+    capture_path: Path, run_dir: Path, python, max_turns: int, repos: Path, coverage: float
+) -> Path | None:
+    """The naming agent: where each costly op is implemented, and which argument is what
+    (``frontend-name.md.j2``). Writes ``<run>/names.json``; None when it gave no answer."""
+    from xe_forge.frontend import ir
+
+    cap = ir.load(capture_path)
+    work = run_dir / "name"
+    work.mkdir(parents=True, exist_ok=True)
+    total = sum(op.device_us for op in cap.ops) or 1.0
+    by_key: dict[str, list] = {}
+    for op in cap.ops:
+        by_key.setdefault(op.framework_meta.get("name_key", op.framework_op), []).append(op)
+    ranked = sorted(by_key.items(), key=lambda kv: -sum(o.device_us for o in kv[1]))
+    listing, covered = {}, 0.0
+    for key, ops in ranked:
+        if covered >= coverage:
+            break
+        us = sum(o.device_us for o in ops)
+        covered += us / total
+        top = max(ops, key=lambda o: o.device_us)
+        arg_names = top.framework_meta.get("arg_names") or []
+        listing[key] = {
+            "framework_op": top.framework_op,
+            "owner": top.framework_meta.get("owner"),
+            "share": round(us / total, 4),
+            "kernels": dict(sorted(top.kernel_symbols.items(), key=lambda kv: -kv[1])[:5]),
+            "args": [
+                {
+                    "name": arg_names[i] if i < len(arg_names) else f"arg{i}",
+                    **(
+                        {"shape": a.shape, "dtype": a.dtype}
+                        if a
+                        else {"value": top.scalars[i] if i < len(top.scalars) else None}
+                    ),
+                }
+                for i, a in enumerate(top.args)
+            ],
+            "call_site": top.call_site,
+        }
+    (work / "ops.json").write_text(json.dumps(listing, indent=1) + "\n")
+    model = cap.run.get("model") or {}
+    (work / "config.json").write_text(json.dumps(model.get("config") or {}, indent=1) + "\n")
+    context = {
+        "model": model.get("name"),
+        "framework": cap.run.get("framework"),
+        "coverage": f"{covered:.0%}",
+        "repos": repos,
+    }
+    answer = _agent("name", "frontend-name.md.j2", context, work, "names.json", python, max_turns)
+    if answer is None:
+        return None
+    path = run_dir / "names.json"
+    path.write_text(json.dumps(answer, indent=1) + "\n")
+    return path
 
 
 def _split_framework_python(argv: list[str]) -> tuple[list[str], str | None]:
@@ -117,25 +166,42 @@ def _split_framework_python(argv: list[str]) -> tuple[list[str], str | None]:
 # ── analyze ────────────────────────────────────────────────────────────────
 
 
-def analyze(
-    capture_path: Path,
-    out_dir: Path,
-    top: int,
-    min_gain: float,
-    partition: str,
-    calibration: Path | None = None,
-) -> Path:
+def _add_analyze_args(p: argparse.ArgumentParser) -> None:
+    from xe_forge.frontend import analyze as an
+    from xe_forge.frontend import manifest
+
+    p.add_argument("--top", type=int, default=3, help="kernels to optimize")
+    p.add_argument("--min-gain", type=float, default=0.005, help="smallest share worth it")
+    p.add_argument(
+        "--at-roofline", type=float, default=an.AT_ROOFLINE,
+        help="efficiency of its calibrated bound at which an op counts as done",
+    )  # fmt: skip
+    p.add_argument(
+        "--coverage", type=float, default=manifest.COVERAGE,
+        help="share of an op's time its benchmark variants must cover",
+    )  # fmt: skip
+    p.add_argument("--max-variants", type=int, default=manifest.MAX_VARIANTS)
+    p.add_argument("--partition", help="Slurm partition recorded in kernels.yaml, if any")
+    p.add_argument("--calibration", type=Path, help="xe-forge calibrate output")
+
+
+def analyze(capture_path: Path, out_dir: Path, a: argparse.Namespace) -> Path:
     from xe_forge.frontend import analyze as an
     from xe_forge.frontend import ir, manifest
 
     cap = ir.load(capture_path)
-    calib = json.loads(calibration.read_text()) if calibration else None
-    result = an.analyze(cap, top=top, min_gain=min_gain, calibration=calib)
+    calib = json.loads(a.calibration.read_text()) if a.calibration else None
+    result = an.analyze(
+        cap, top=a.top, min_gain=a.min_gain, calibration=calib, at_roofline=a.at_roofline
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "analysis.json").write_text(json.dumps(result.as_dict(), indent=1) + "\n")
     (out_dir / "gates.log").write_text(an.gates_log(result))
     (out_dir / "report.md").write_text(an.report(result, cap))
-    path = manifest.emit(result, cap, capture_path, out_dir, partition=partition)
+    path = manifest.emit(
+        result, cap, capture_path, out_dir, partition=a.partition,
+        coverage=a.coverage, max_variants=a.max_variants,
+    )  # fmt: skip
     enabled = [e for e in result.entries if e.enabled]
     print(
         f"analyze: {len(cap.workloads)} workloads -> {len(result.entries)} kernels, "
@@ -259,7 +325,11 @@ def main(argv: list[str]) -> int:
 
         p = argparse.ArgumentParser(prog="xe-forge calibrate")
         p.add_argument("-o", "--output", type=Path, help="default: the per-device cache")
-        return calibrate.main(p.parse_args(rest).output)
+        p.add_argument("--read-bytes", type=int, default=1 << 30, help="> the card's caches")
+        p.add_argument("--matmul-n", type=int, default=8192, help="square matmul size")
+        p.add_argument("--iters", type=int, default=20)
+        a = p.parse_args(rest)
+        return calibrate.main(a.output, a.read_bytes, a.matmul_n, a.iters)
 
     if command == "compare":
         from xe_forge.frontend import compare
@@ -281,19 +351,9 @@ def main(argv: list[str]) -> int:
         p = argparse.ArgumentParser(prog="xe-forge analyze")
         p.add_argument("capture", type=Path)
         p.add_argument("-o", "--output", type=Path, help="directory (default: the capture's)")
-        p.add_argument("--top", type=int, default=5)
-        p.add_argument("--min-gain", type=float, default=0.005)
-        p.add_argument("--partition", default="b70")
-        p.add_argument("--calibration", type=Path, help="xe-forge calibrate output")
+        _add_analyze_args(p)
         a = p.parse_args(rest)
-        analyze(
-            a.capture.resolve(),
-            (a.output or a.capture.parent).resolve(),
-            a.top,
-            a.min_gain,
-            a.partition,
-            a.calibration,
-        )
+        analyze(a.capture.resolve(), (a.output or a.capture.parent).resolve(), a)
         return 0
 
     if command == "optimize":
@@ -310,16 +370,17 @@ def main(argv: list[str]) -> int:
         print(summary.read_text())
         return 0
 
-    # run: [prepare ->] capture -> analyze -> optimize -> collect [-> prove]
+    # run: fit -> [prepare ->] capture -> name -> analyze -> optimize -> collect [-> prove]
     from xe_forge.frontend import collect, manifest
 
     rest, python = _split_framework_python(rest)
     p = argparse.ArgumentParser(prog="xe-forge run", allow_abbrev=False)
     p.add_argument("-o", "--output", type=Path, required=True, help="run directory")
-    p.add_argument("--top", type=int, default=3)
-    p.add_argument("--min-gain", type=float, default=0.005)
-    p.add_argument("--partition", default="b70")
-    p.add_argument("--calibration", type=Path, help="xe-forge calibrate output")
+    _add_analyze_args(p)
+    p.add_argument(
+        "--name-coverage", type=float, default=0.99,
+        help="share of device time whose ops the naming agent places",
+    )  # fmt: skip
     p.add_argument("--analyze-only", action="store_true", help="stop after the manifest")
     p.add_argument(
         "--prove", action="store_true", help="build the stack with the winning patches and "
@@ -337,7 +398,7 @@ def main(argv: list[str]) -> int:
     capture_path = run_dir / "capture.json"
     if not capture_path.is_file():
         code = (
-            fits(capture_args, python, run_dir)
+            fits(capture_args, python, run_dir, a.max_turns)
             or prepare(capture_args, python, run_dir, a.max_turns)
             or capture([*capture_args, "-o", str(capture_path)], python)
         )
@@ -346,7 +407,26 @@ def main(argv: list[str]) -> int:
             return code
     else:
         print(f"run: reusing {capture_path}")
-    path = analyze(capture_path, run_dir, a.top, a.min_gain, a.partition, a.calibration)
+    names = run_dir / "names.json"
+    if not names.is_file():
+        repos = Path(a.kernel_repos).resolve() if a.kernel_repos else REPO_DIR.parent
+        if name(capture_path, run_dir, python, a.max_turns, repos, a.name_coverage) is None:
+            print("run: no names.json; only ATen ops are named", file=sys.stderr)
+    if names.is_file():
+        # Rebuild the capture with the agent's names; later captures (prove) carry them too.
+        capture_args = [*capture_args, "--names", str(names)]
+        reparse = [
+            "--reparse",
+            str(run_dir / "raw"),
+            "--names",
+            str(names),
+            "-o",
+            str(capture_path),
+        ]
+        if capture(reparse, python) != 0:
+            print("run: re-reading the capture with names.json failed", file=sys.stderr)
+            return 1
+    path = analyze(capture_path, run_dir, a)
     if a.analyze_only:
         return 0
     a.stack_python = (python or sys.executable) if a.stack_check else None

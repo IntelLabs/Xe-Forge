@@ -16,25 +16,11 @@ from pathlib import Path
 
 from xe_forge.frontend import agent
 
-BUILD_PROMPT = """\
-Build two copies of a serving stack so a patch can be measured in the model.
-Patches, each with the PORT.txt beside it naming its repository and base commit:
-{patches}
-
-- Arm A is every touched repository at its base commit; arm B is the same with the patches.
-  Clone fresh for each arm; never modify the repository PORT.txt names.
-- Build both the same way, as the repository builds, into venv-A and venv-B here, each
-  layered over the framework's venv and holding only what you rebuilt.
-- Check that each arm imports its rebuilt package from its own venv and that the framework
-  still imports.
-- Write arms.json {{"A": "<venv-A python>", "B": "<venv-B python>"}}, or {{"error": "<why>"}}
-  if an arm cannot be built, and in report.md what you built and how.
-"""
-
 
 def _build_arms(prove_dir: Path, patches: list[Path], python: str, max_turns: int) -> dict:
-    prompt = BUILD_PROMPT.format(patches="\n".join(f"  {p}" for p in patches))
-    arms = agent.run(prompt, prove_dir, "arms.json", python, max_turns)
+    arms = agent.run(
+        "frontend-build-arms.md.j2", {"patches": patches}, prove_dir, "arms.json", python, max_turns
+    )
     if set(arms) != {"A", "B"} or arms["A"] == arms["B"]:
         raise RuntimeError(f"build agent gave no two distinct arms: {arms} (see {prove_dir})")
     return arms
@@ -43,7 +29,8 @@ def _build_arms(prove_dir: Path, patches: list[Path], python: str, max_turns: in
 def prove(
     run_dir: Path, capture, capture_args: list[str], python: str, repeat: int, max_turns: int
 ) -> str:
-    """Build, capture both arms, compare. Returns the SUMMARY.md section."""
+    """Build, capture both arms, compare. Returns the SUMMARY.md section. ``capture_args``
+    carry ``--names``, so both arms name their ops -- and so key their workloads -- alike."""
     from xe_forge.frontend import compare
 
     rows = json.loads((run_dir / "results" / "summary.json").read_text())

@@ -88,7 +88,7 @@ def load_events(path: str | Path) -> list[dict]:
 
 
 def _module_name(name: str) -> str:
-    # "nn.Module: Qwen2DecoderLayer_3" -> "Qwen2DecoderLayer"
+    # "nn.Module: <Class>_3" -> "<Class>"
     return re.sub(r"_\d+$", "", name[len(_MODULE_PREFIX) :])
 
 

@@ -278,8 +278,7 @@ call is what is optimized. The library itself is never edited and no new kernel 
   move the implementation oneDNN picks is a finding, not a failure. Say so in the lessons.
   A hand-written GEMM is a different route (Xe-Forge's `--tile-tune`), not this one.
 - **Port back to the call site** the profile names (the framework's Python, or the
-  plugin's oneDNN implementation such as OpenVINO's `fully_connected_onednn.cpp`),
-  never to oneDNN.
+  plugin's implementation of the op over the library), never to the library itself.
 {% endif %}
 ## WORKFLOW — Follow these steps in order
 
@@ -322,10 +321,12 @@ call is what is optimized. The library itself is never edited and no new kernel 
   defines={...})`, then `k(global_size, local_size, *args)` inside `Model.forward` (tensors
   pass their device pointers, `int` is `int`, `float` is `float`, `long_(v)` is a 64-bit
   integer). It runs on torch's current XPU queue, so no queue, context or synchronization
-  of your own. A kernel that the repository generates JIT constants for (OpenVINO's
-  kernel_selector `GetJitConstants`, `KERNEL(...)`, `INPUT0_TYPE`, ...) gets every one of
+  of your own. A kernel that the repository generates JIT constants for gets every one of
   them as an entry in `defines`, with the values the profile records for this workload,
-  and the kernel's own includes are inlined into the string.
+  and the kernel's own includes are inlined into the string. The source declares the
+  extensions it uses (e.g. `#pragma OPENCL EXTENSION cl_khr_fp16 : enable` for `half`);
+  `load(..., options=..., spirv_options=...)` takes clang and llvm-spirv flags when a trial
+  needs others than the run's defaults.
 {%- endif %}
 {%- else %}
 {%- if dsl == "sycl" %} If it contains `TODO` markers, this is a from-scratch task: it is

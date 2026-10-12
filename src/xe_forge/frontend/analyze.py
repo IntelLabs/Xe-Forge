@@ -28,14 +28,12 @@ spec carries the variants of every workload that kernel served.
 
 from __future__ import annotations
 
-import re
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 
 from xe_forge.frontend.canonical import resolve_dims
 from xe_forge.frontend.dtypes import storage_bytes, tensor_bytes
 from xe_forge.frontend.ir import CaptureRun, Workload
-from xe_forge.frontend.model_meta import moe_experts, moe_topk
 from xe_forge.models import DSL
 
 _ROUTE_REASONS = {
@@ -104,8 +102,7 @@ class Analysis:
 
 
 # At or above this fraction of its roofline bound a GEMM has nothing left worth an agent run.
-AT_ROOFLINE = 0.8
-_PAGED = re.compile(r"CACHE|BLOCK_TABLE|PAGE_TABLE|(^|_)KV(_|$)")
+AT_ROOFLINE = 0.8  # default of --at-roofline
 
 
 def experts_touched(experts: int, rows: int, topk: int | None) -> float:
@@ -167,9 +164,12 @@ def gemm_bound(
     ):
         return None  # weight bytes unmeasured (e.g. a quantized weight the trace hides)
     a_bytes, w_bytes = w.attrs.get("a_bytes", size), w.attrs.get("w_bytes", size)
-    o_bytes = 2 if measured else size  # a provider GEMM writes bf16/fp16
+    o_bytes = w.attrs.get("o_bytes", size)  # measured from the output when the agent named it
     bw = calib.get("bandwidth_gbs")
-    peak = (calib.get("matmul_tflops") or {}).get(w.attrs.get("compute", dtype))
+    peaks = {k: v for k, v in (calib.get("matmul_tflops") or {}).items() if v}
+    # The compute dtype's measured peak; a dtype the card has no measured peak for runs at
+    # most at the fastest measured one -- still a lower bound on time.
+    peak = peaks.get(w.attrs.get("compute", dtype)) or max(peaks.values(), default=None)
     if not (bw and peak and a_bytes and w_bytes):
         return None
     grouped = bool(w.attrs.get("grouped"))
@@ -202,11 +202,11 @@ def streaming_bound(
     """Every tensor argument is read or written at least once: per token count, the bytes of
     all of them over the card's bandwidth -- a lower bound for any op, family unknown.
 
-    Refused (None) for ops with a paged or allocated buffer among their arguments (KV cache,
-    block or page tables): the part they touch depends on the context, not on the shape, so
-    counting the buffer whole overstates the bound and skipping it understates it."""
+    Refused (None) for ops the naming agent marked ``paged`` -- a KV cache, a block or page
+    table: the part they touch depends on the context, not on the shape, so counting the
+    buffer whole overstates the bound and skipping it understates it."""
     bw = (calib or {}).get("bandwidth_gbs")
-    if not bw or not w.tensors or any(_PAGED.search(label) for label, _ in w.tensors):
+    if not bw or not w.tensors or w.attrs.get("paged"):
         return None
     if not any(f"{label}_D0" in w.dims for label, _ in w.tensors):
         return None  # dims named by role (a GEMM's M/N/K), not per tensor: no shapes to sum
@@ -241,7 +241,11 @@ def bound(w: Workload, calib: dict | None, ctx: dict | None = None) -> tuple[flo
 
 
 def _decide(
-    w: Workload, min_gain: float, calib: dict | None = None, ctx: dict | None = None
+    w: Workload,
+    min_gain: float,
+    calib: dict | None = None,
+    ctx: dict | None = None,
+    at_roofline: float = AT_ROOFLINE,
 ) -> Decision:
     d = Decision(
         workload_id=w.workload_id,
@@ -256,7 +260,7 @@ def _decide(
     if bounded is not None:
         d.eff = round(bounded[1], 3)
         d.gain = w.share * (bounded[0] / w.device_us) if w.device_us else 0.0
-        if d.eff >= AT_ROOFLINE:
+        if d.eff >= at_roofline:
             d.gates.append(("bounded", "REJECT", f"at roofline: eff {d.eff:.2f} of its bound"))
             d.reason = f"at roofline (eff {d.eff:.2f} of the card's measured bound)"
             return d
@@ -295,15 +299,22 @@ def _decide(
 
 
 def analyze(
-    capture: CaptureRun, top: int = 5, min_gain: float = 0.005, calibration: dict | None = None
+    capture: CaptureRun,
+    top: int = 3,
+    min_gain: float = 0.005,
+    calibration: dict | None = None,
+    at_roofline: float = AT_ROOFLINE,
 ) -> Analysis:
-    model = capture.run.get("model") or {}
+    facts = capture.run.get("model_facts") or {}  # the naming agent's: top-k, experts
     ctx = {
-        "topk": moe_topk(model),
-        "experts": moe_experts(model),
+        "topk": facts.get("topk"),
+        "experts": facts.get("experts"),
         "ep": (capture.run.get("runtime") or {}).get("ep"),
     }
-    decisions = {w.workload_id: _decide(w, min_gain, calibration, ctx) for w in capture.workloads}
+    decisions = {
+        w.workload_id: _decide(w, min_gain, calibration, ctx, at_roofline)
+        for w in capture.workloads
+    }
 
     groups: dict[tuple, list[Workload]] = defaultdict(list)
     for w in capture.workloads:

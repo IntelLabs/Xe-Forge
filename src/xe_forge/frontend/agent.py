@@ -1,35 +1,26 @@
 """One headless Claude session for work the frontend delegates: preparing a model for its
-framework, building the stacks a patch is measured in. Per-model and per-repository
-specifics live in the prompt, not here. The session answers in a JSON file it writes."""
+framework, naming its ops, building the stacks a patch is measured in. The prompts are
+templates (``claude/templates/frontend-*.md.j2``); per-model and per-repository specifics
+live there, not here. The session answers in a JSON file it writes."""
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
 import time
 from pathlib import Path
 
-TIMEOUT = 6 * 3600
-RESUMES = 5
-RESUME = (
-    "{answer} is not written yet. Wait for the work you started -- check it is still running "
-    "and restart it if it died -- and stop only once {answer} is written."
-)
-
-RULES = """
-The framework's interpreter is {python}; its venv must not change -- install nothing into
-it, never use uv. Anything missing goes into a venv you create here, layered over it (a .pth
-calling site.addsitedir on its site-packages, after the venv's own). Run builds and exports
-with the ANTHROPIC_* and OPENAI_* variables unset, so no log carries them. Long builds and
-exports are expected: this session ends when you stop and anything still running is killed,
-so wait for all of it, and stop only once {answer} is written.
-"""
+TIMEOUT = int(os.environ.get("XE_FORGE_AGENT_TIMEOUT", 6 * 3600))  # seconds per session
+RESUMES = int(os.environ.get("XE_FORGE_AGENT_RESUMES", 5))
 
 
-def run(prompt: str, cwd: Path, answer: str, python: str, max_turns: int) -> dict:
-    """Run the session in ``cwd``; return the JSON it wrote to ``answer`` (raises if none)."""
+def run(template: str, context: dict, cwd: Path, answer: str, python: str, max_turns: int) -> dict:
+    """Render ``template`` (claude/templates) with ``context`` plus the shared rules, run
+    the session in ``cwd``, and return the JSON it wrote to ``answer`` (raises if none)."""
+    from xe_forge.claude.generator import render
     from xe_forge.config import get_config
     from xe_forge.engines.claude_engine import claude_env
 
@@ -43,7 +34,9 @@ def run(prompt: str, cwd: Path, answer: str, python: str, max_turns: int) -> dic
     env = claude_env(get_config())
     # Headless claude kills background work after this ceiling: let a build run its course.
     env["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] = str(TIMEOUT * 1000)
-    prompt += RULES.format(python=python, answer=answer)
+    prompt = render(template, **context) + render(
+        "frontend-rules.md.j2", python=python, answer=answer
+    )
     log_path, deadline = cwd / "session.log", time.monotonic() + TIMEOUT
     cmd = [claude, "-p", prompt]
     for _ in range(1 + RESUMES):
@@ -58,13 +51,17 @@ def run(prompt: str, cwd: Path, answer: str, python: str, max_turns: int) -> dic
                     timeout=max(1.0, deadline - time.monotonic()),
                 )  # fmt: skip
             except subprocess.TimeoutExpired:
-                raise RuntimeError(
-                    f"agent timed out after {TIMEOUT // 3600} h (see {cwd})"
-                ) from None
+                raise RuntimeError(f"agent timed out after {TIMEOUT} s (see {cwd})") from None
         session = re.findall(r'"session_id":"([^"]+)"', log_path.read_text())
         if path.is_file() or not session:
             break
-        cmd = [claude, "--resume", session[-1], "-p", RESUME.format(answer=answer)]
+        cmd = [
+            claude,
+            "--resume",
+            session[-1],
+            "-p",
+            render("frontend-resume.md.j2", answer=answer),
+        ]
     got = json.loads(path.read_text()) if path.is_file() else {}
     if "error" in got or not got:
         raise RuntimeError(f"agent: {got.get('error', f'no {answer}')} (see {cwd})")

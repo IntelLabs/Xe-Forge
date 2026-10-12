@@ -125,7 +125,9 @@ def _port_one(clone: Path) -> tuple[list[str], bool] | None:
     return lines, ok
 
 
-STACK_TIMEOUT = 4 * 3600  # a build of the stack plus its tests, not one benchmark
+STACK_TIMEOUT = int(
+    os.environ.get("XE_FORGE_STACK_TIMEOUT", 4 * 3600)
+)  # seconds: a build plus its tests
 
 
 def _stack_check(clones: list[Path], kernel: str, kind: str) -> tuple[bool, str] | None:

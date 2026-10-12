@@ -24,11 +24,15 @@ import tempfile
 from pathlib import Path
 
 CACHE = Path(os.environ.get("XE_FORGE_OPENCL_CACHE", Path.home() / ".cache/xe_forge/opencl"))
-# Every argument that shapes the module is part of the cache key, so changing one rebuilds.
-_CLANG_ARGS = ["-target", "spir64", "-O2", "-Xclang", "-finclude-default-header", "-emit-llvm"]
-_SPIRV_ARGS = [
-    "--spirv-ext=+all,-SPV_KHR_untyped_pointers"
-]  # the GPU loader rejects untyped pointers
+# What turns OpenCL C into bitcode llvm-spirv takes: the pipeline itself, not a choice.
+_PIPELINE = ["-target", "spir64", "-Xclang", "-finclude-default-header", "-emit-llvm", "-c"]
+# Choices, with per-run defaults: clang `options` go after these (the last flag wins);
+# `spirv_options` replace the llvm-spirv default, which drops an extension the GPU loader
+# here rejects. Everything that shapes the module is in the cache key.
+OPTIONS = os.environ.get("XE_FORGE_OPENCL_OPTIONS", "-cl-std=CL3.0 -O2")
+SPIRV_OPTIONS = os.environ.get(
+    "XE_FORGE_SPIRV_OPTIONS", "--spirv-ext=+all,-SPV_KHR_untyped_pointers"
+)
 
 _CPP = "#include <torch/extension.h>\nint64_t build(py::bytes spirv);\nvoid launch(int64_t h, std::string name, std::vector<int64_t> gws, std::vector<int64_t> lws, py::list args);"
 
@@ -102,22 +106,27 @@ def _tool(name: str) -> str:
     return found
 
 
-def compile_spirv(source: str, defines: dict | None = None, options: str = "") -> bytes:
-    """OpenCL C -> SPIR-V bytes, cached by (source, defines, options)."""
+def compile_spirv(
+    source: str,
+    defines: dict | None = None,
+    options: str = "",
+    spirv_options: str | None = None,
+) -> bytes:
+    """OpenCL C -> SPIR-V bytes, cached by everything that shapes them."""
     flags = [f"-D{k}={v}" if v is not None else f"-D{k}" for k, v in (defines or {}).items()]
-    flags += options.split()
-    key = hashlib.sha256(
-        "\0".join([source, *flags, *_CLANG_ARGS, *_SPIRV_ARGS]).encode()
-    ).hexdigest()[:24]
+    clang = [*_PIPELINE, *OPTIONS.split(), *options.split(), *flags]
+    spirv = (SPIRV_OPTIONS if spirv_options is None else spirv_options).split()
+    key = hashlib.sha256("\0".join([source, *clang, "|", *spirv]).encode()).hexdigest()[:24]
     cached = CACHE / f"{key}.spv"
     if cached.is_file():
         return cached.read_bytes()
     with tempfile.TemporaryDirectory() as tmp:
         cl, bc, spv = Path(tmp, "k.cl"), Path(tmp, "k.bc"), Path(tmp, "k.spv")
-        cl.write_text("#pragma OPENCL EXTENSION cl_khr_fp16 : enable\n" + source)
-        std = [] if any(f.startswith("-cl-std") for f in flags) else ["-cl-std=CL3.0"]
-        cmd = [_tool("clang"), *std, *_CLANG_ARGS, "-c", str(cl), "-o", str(bc), *flags]
-        for step in (cmd, [_tool("llvm-spirv"), *_SPIRV_ARGS, str(bc), "-o", str(spv)]):
+        cl.write_text(source)
+        for step in (
+            [_tool("clang"), *clang, str(cl), "-o", str(bc)],
+            [_tool("llvm-spirv"), *spirv, str(bc), "-o", str(spv)],
+        ):
             r = subprocess.run(step, capture_output=True, text=True)
             if r.returncode != 0:
                 raise RuntimeError(f"OpenCL compile failed: {' '.join(step)}\n{r.stderr}")
@@ -150,6 +159,13 @@ def runtime():
     return _runtime
 
 
-def load(source: str, name: str, defines: dict | None = None, options: str = "") -> Kernel:
+def load(
+    source: str,
+    name: str,
+    defines: dict | None = None,
+    options: str = "",
+    spirv_options: str | None = None,
+) -> Kernel:
     """Compile ``source`` and return kernel ``name`` ready to launch on torch's queue."""
-    return Kernel(runtime().build(compile_spirv(source, defines, options)), name)
+    spirv = compile_spirv(source, defines, options, spirv_options)
+    return Kernel(runtime().build(spirv), name)
