@@ -278,7 +278,7 @@ def _fused_conv_spatial_tiled(
                 block_shape=(BLOCK_K, BLOCK_N),
             )
 
-            c0 = 0  # carried, not the loop variable: keeps the 2D block load on XPU
+            c0 = 0
             for _ in range(0, C_IN, BLOCK_K):
                 x_tile = x_desc.load([x_row_start, c0])
                 w_tile = w_desc.load([c0, 0])
@@ -593,7 +593,7 @@ def _gemm_fused_epilogue(
 
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
-        k0 = 0  # carried, not the loop variable: keeps the 2D block load on XPU
+        k0 = 0
         for _ in range(0, K_TOTAL, BLOCK_K):
             a_tile = a_desc.load([pid_m * BLOCK_M, k0])
             b_tile = b_desc.load([k0, pid_n * BLOCK_N])

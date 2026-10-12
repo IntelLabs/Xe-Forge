@@ -3,7 +3,7 @@
 #
 # Issues:
 # 1. Two separate kernels instead of fused
-# 2. Manual pointer arithmetic instead of block pointers
+# 2. Manual pointer arithmetic instead of tensor descriptors
 # 3. Small tile sizes (64x64)
 # 4. Low warp count (default)
 # 5. No grf_mode configuration
@@ -39,12 +39,12 @@ def _linear_kernel(
     BLOCK_K: tl.constexpr,
 ):
     """
-    UNOPTIMIZED: Uses manual pointer arithmetic, no block pointers
+    UNOPTIMIZED: Uses manual pointer arithmetic, no tensor descriptors
     """
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
 
-    # Manual offset calculation (SLOW - should use block pointers)
+    # Manual offset calculation (SLOW - should use tensor descriptors)
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
 

@@ -161,8 +161,6 @@ def _fused_linear_pool_sum_scale_kernel(
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
     # K loop (runtime bound); out-of-bounds elements are zero-padded by the descriptor loads
-    # Carry the K offset: indexing the contiguous dim with the loop variable
-    # loses the 2D block-load path for the descriptor load on XPU
     off_k = 0
     for _ in range(0, K, BLOCK_K):
         x_tile = x_desc.load([pid_m * BLOCK_M, off_k])  # [BM, BK]

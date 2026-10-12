@@ -109,25 +109,6 @@ class Model:
 """
 
 
-DESCRIPTOR_INDEXED_BY_LOOP_VARIABLE = """\
-import triton
-import triton.language as tl
-
-
-@triton.jit
-def kernel(x_ptr, w_ptr, M, N, K, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
-    x_desc = tl.make_tensor_descriptor(x_ptr, shape=(M, K), strides=(K, 1), block_shape=(BM, BK))
-    w_desc = tl.make_tensor_descriptor(w_ptr, shape=(K, N), strides=(N, 1), block_shape=(BK, BN))
-    for k in range(0, K, BK):
-        x = x_desc.load([0, k])
-        w = w_desc.load([k, 0])
-
-
-class Model:
-    pass
-"""
-
-
 DESCRIPTOR_WITH_BOUNDARY_CHECK = TENSOR_DESCRIPTOR_KERNEL.replace(
     "x_desc.load([0, off_k])", "x_desc.load([0, off_k], boundary_check=(0, 1))"
 )
@@ -200,14 +181,3 @@ class TestTensorDescriptorValidation:
         assert any(
             i.check_name == "descriptor_boundary_check" and i.severity == "error" for i in issues
         )
-
-    def test_loop_variable_in_contiguous_dim_is_flagged(self):
-        issues = KernelValidator().validate(DESCRIPTOR_INDEXED_BY_LOOP_VARIABLE, dsl="triton")
-        flagged = [i for i in issues if i.check_name == "descriptor_loop_variable_index"]
-        # x_desc.load([0, k]) only: w_desc.load([k, 0]) has k in the row dim
-        assert len(flagged) == 1
-        assert flagged[0].severity == "warning"
-
-    def test_carried_offset_is_not_flagged(self):
-        issues = KernelValidator().validate(TENSOR_DESCRIPTOR_KERNEL, dsl="triton")
-        assert all(i.check_name != "descriptor_loop_variable_index" for i in issues)

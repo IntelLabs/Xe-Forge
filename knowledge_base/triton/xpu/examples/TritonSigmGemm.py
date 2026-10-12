@@ -106,8 +106,6 @@ def gemm_bias_sigmoid_kernel(
     acc = tl.zeros((BM, BN), dtype=tl.float32)
 
     # K loop (dynamic-safe)
-    # Carry the K offset: indexing the contiguous dim with the loop variable
-    # loses the 2D block-load path for the descriptor load on XPU
     off_k = 0
     for _ in tl.range(0, K, BK):
         a = a_desc.load([m_base, off_k])  # fp16
@@ -182,8 +180,6 @@ def gemm_bias_kernel(
 
     acc = tl.zeros((BM, BN), dtype=tl.float32)
 
-    # Carry the K offset: indexing the contiguous dim with the loop variable
-    # loses the 2D block-load path for the descriptor load on XPU
     off_k = 0
     for _ in tl.range(0, K, BK):
         a = a_desc.load([m_base, off_k])

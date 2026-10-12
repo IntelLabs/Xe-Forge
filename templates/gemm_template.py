@@ -140,7 +140,7 @@ def gemm_kernel(
     off_n = pid_n * BLOCK_N
 
     # K-loop: accumulate partial products
-    off_k = 0  # carried, not the loop variable: keeps the 2D block load on XPU
+    off_k = 0
     for _ in range(0, K, BLOCK_K):
         # Load tiles by coordinate
         a = a_desc.load([off_m, off_k])

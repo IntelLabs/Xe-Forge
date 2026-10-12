@@ -151,8 +151,6 @@ def _fused_gemm_activation_kernel(
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
     # Main GEMM loop: load tiles by coordinates, stepping along K
-    # Carry the K offset: indexing the contiguous dim with the loop variable
-    # loses the 2D block-load path for the descriptor load on XPU
     off_k = 0
     for _ in range(0, K, BLOCK_SIZE_K):
         a = a_desc.load([off_m, off_k])

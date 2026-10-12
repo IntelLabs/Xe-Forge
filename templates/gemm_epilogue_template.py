@@ -172,7 +172,7 @@ def gemm_epilogue_kernel(
     off_n = pid_n * BLOCK_N
 
     # K-loop
-    off_k = 0  # carried, not the loop variable: keeps the 2D block load on XPU
+    off_k = 0
     for _ in range(0, K, BLOCK_K):
         a = a_desc.load([off_m, off_k])
         b = b_desc.load([off_k, off_n])

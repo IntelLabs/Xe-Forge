@@ -483,8 +483,7 @@ worth more to the next one than a run that finished and said nothing.
 - Use 1D grid when applying tile swizzling (GROUP_SIZE_M)
 - Tiled loads/stores use `tl.make_tensor_descriptor`; `tl.make_block_ptr` and `tl.advance` are
   deprecated. Descriptor `.load()`/`.store()` take no `boundary_check`: out-of-bounds
-  elements are zero-filled on load and dropped on store. Carry the K offset (`off_k += BLOCK_K`)
-  rather than indexing the last dimension with the `for` variable, which loses the 2D block load
+  elements are zero-filled on load and dropped on store
 - Cast batch indices to `int64` before stride multiplication
 - The kernel module must expose the same entry point as the baseline file it replaces
 {% elif dsl == "sycl" %}

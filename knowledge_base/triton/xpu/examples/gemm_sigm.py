@@ -168,8 +168,6 @@ def _gemm_sigmoid_scale_add_kernel(
     # -----------------------------
     off_m = pid_m * BLOCK_M
     off_n = pid_n * BLOCK_N
-    # Carry the K offset: indexing the contiguous dim with the loop variable
-    # loses the 2D block-load path for the descriptor load on XPU
     off_k = 0
     for _ in range(0, K, BLOCK_K):
         x = x_desc.load([off_m, off_k])
@@ -266,8 +264,6 @@ def _gemm_sigmoid_scale_add_kernel_fast(
 
     off_m = pid_m * BLOCK_M
     off_n = pid_n * BLOCK_N
-    # Carry the K offset: indexing the contiguous dim with the loop variable
-    # loses the 2D block-load path for the descriptor load on XPU
     off_k = 0
     for _ in range(0, K, BLOCK_K):
         x = x_desc.load([off_m, off_k])

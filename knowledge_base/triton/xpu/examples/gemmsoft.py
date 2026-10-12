@@ -127,8 +127,6 @@ def _gemm_bn_scale_kernel(
     )
 
     # GEMM loop (descriptor loads zero-pad out-of-bounds elements)
-    # Carry the K offset: indexing the contiguous dim with the loop variable
-    # loses the 2D block-load path for the descriptor load on XPU
     off_k = 0
     for _ in range(0, K, BLOCK_K):
         a = a_desc.load([row_start, off_k])  # fp16 in memory

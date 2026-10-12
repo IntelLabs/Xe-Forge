@@ -95,39 +95,12 @@ constraints:
   name: tl.make_block_ptr / tl.advance are deprecated - use tensor descriptors
   severity: critical
 - description: |
-    Index a descriptor's contiguous (last) dimension with a loop-carried offset, not with
-    the `for` loop's variable. Before it emits a 2D block load, the Intel backend has to
-    prove that index aligned; it does so for a constant or a value carried through the
-    loop, and on the Triton this was checked against it does not for the induction
-    variable. The load then falls back to a generic load staged through shared local
-    memory before the dot, and nothing in the output says so: results stay correct, only
-    the time changes. The row index (e.g. B's `k` in `b_desc.load([k, n])`) is not
-    affected.
-
-    SLOW (A misses the 2D block load):
-    ```python
-    for k in range(0, K, BK):
-        a = a_desc.load([m0, k])
-        b = b_desc.load([k, n0])
-        acc += tl.dot(a, b)
-    ```
-
-    FAST (the form Intel's own descriptor GEMM benchmarks use):
-    ```python
-    off_k = 0
-    for _ in range(0, K, BK):
-        a = a_desc.load([m0, off_k])
-        b = b_desc.load([off_k, n0])
-        acc += tl.dot(a, b)
-        off_k += BK
-    ```
-
-    To check a compiled kernel: every `tt.descriptor_load` feeding a dot in its TTGIR
-    (`kernel.asm["ttgir"]`) should carry `ttig.block_io`, and the loop should contain no
-    `ttg.local_alloc`. Re-check after a Triton upgrade; the alignment analysis is the
-    backend's and can change.
-  id: descriptor_k_offset_not_loop_variable
-  name: Carry the K offset - a loop-variable index in the contiguous dim loses the 2D block load
+    A descriptor operand gets 2D block loads/stores only if its contiguous-dim size and
+    row stride are multiples of 16 elements and its base is 16-byte aligned; otherwise it
+    silently falls back to gather loads. Check that each tile load/store in
+    kernel.asm["ttgir"] carries ttig.block_io.
+  id: descriptor_2d_block_io_alignment
+  name: 2D block IO needs 16-element widths/strides and a 16-byte-aligned base
   severity: critical
 - description: |
     Tensor descriptors have block atomics: desc.atomic_add / atomic_min / atomic_max /

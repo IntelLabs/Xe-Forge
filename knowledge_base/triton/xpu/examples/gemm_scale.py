@@ -211,8 +211,6 @@ def _fused_gemm_scale_bn_kernel(
 
     # Main K loop: descriptor loads zero-pad out-of-bounds elements,
     # so divisible and ragged shapes share one path
-    # Carry the K offset: indexing the contiguous dim with the loop variable
-    # loses the 2D block-load path for the descriptor load on XPU
     off_k = 0
     for _ in tl.range(0, K, BLOCK_K):
         x_tile = x_desc.load([off_m, off_k])
