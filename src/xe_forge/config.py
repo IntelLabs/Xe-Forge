@@ -136,6 +136,9 @@ class EngineConfig:
     workspace: str = "./"  # Claude engine: workspace directory
     git_init: bool = False  # Claude engine: initialize workspace as git repo
     max_turns: int = 80  # Claude engine: turn limit for one headless session
+    # What a workspace optimizes: "kernel" (write or edit a kernel) or "library" (tune how
+    # the repository calls a library such as oneDNN; no new kernel).
+    target: str = "kernel"
     # Name, ``module:attr`` reference, or entry point of a build backend
     # (see xe_forge.core.build_backend). None keeps the default ai_bench path.
     build_backend: str | None = None
@@ -183,6 +186,9 @@ class ExternalConfig:
     # {clone} {kernel} {kind} {workspace}; prints "STACK: PASS|FAIL <reason>", DONE last).
     # Run by `upstream patch`; unset, a port is reported unbuilt as before.
     stack_check: str | None = None
+    # The stack's interpreter: set, the port-back agent builds and tests the port in that
+    # stack itself and records its verdict with `upstream patch --stack`.
+    stack_python: str | None = None
     timeout: int = DEFAULT_TIMEOUT
 
 
@@ -309,6 +315,7 @@ class ConfigManager:
             workspace=self._get_env("WORKSPACE", "./"),
             git_init=self._get_env("WORKSPACE_GIT_INIT", False, bool),
             max_turns=self._get_env("MAX_TURNS", 80, int),
+            target=self._get_env("TARGET", "kernel"),
             build_backend=self._get_env("BUILD_BACKEND", None),
             compiler_flags=self._get_env("COMPILER_FLAGS", None),
         )
@@ -318,6 +325,7 @@ class ConfigManager:
             benchmark=self._get_env("EXTERNAL_BENCHMARK", None),
             validate=self._get_env("EXTERNAL_VALIDATE", None),
             stack_check=self._get_env("EXTERNAL_STACK_CHECK", None),
+            stack_python=self._get_env("STACK_PYTHON", None),
             dataset_record=self._get_env("DATASET_RECORD", None),
             lessons=self._get_env("LESSONS_DIR", None),
             kernel_repo=self._get_env("KERNEL_REPO", None),

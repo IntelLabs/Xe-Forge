@@ -29,7 +29,7 @@ COLUMNS = [
     "calls_a", "calls_b", "us_a", "us_b", "per_call_a", "per_call_b",
     "speedup", "delta_us", "share_a", "spread_a", "spread_b",
 ]  # fmt: skip
-_SAME_WORK = ("batch", "input_len", "output_len")
+_SAME_WORK = ("batch", "input_len", "output_len", "weight_format", "quantization")
 
 
 def _arm(paths: list[Path]) -> tuple[list[ir.CaptureRun], dict]:

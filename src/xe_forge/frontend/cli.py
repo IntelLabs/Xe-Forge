@@ -4,7 +4,7 @@
                       [--framework-python <venv>/bin/python] [adapter flags]
     xe-forge analyze  run/capture.json [--top 5] [--min-gain 0.005] [-o run/]
     xe-forge optimize run/kernels.yaml [--engine claude] [--only NAME] [--all-variants]
-    xe-forge run      --framework vllm --model <id> -o run/ [all of the above]
+    xe-forge run      --framework vllm --model <id> -o run/ [all of the above] [--stack-check] [--prove]
 
 ``optimize`` runs, per enabled (kernel, variant), the same command a hand-written manifest
 gets from ``scripts/gen_kernel_sbatch.py``: ``python -m xe_forge.cli --name --kernel-repo
@@ -26,7 +26,7 @@ from pathlib import Path
 
 import xe_forge
 
-COMMANDS = ("capture", "analyze", "optimize", "run", "compare")
+COMMANDS = ("capture", "analyze", "optimize", "run", "compare", "calibrate")
 SRC_DIR = Path(xe_forge.__file__).resolve().parents[1]
 REPO_DIR = SRC_DIR.parent
 
@@ -44,6 +44,64 @@ def capture(argv: list[str], framework_python: str | None) -> int:
     return subprocess.call(cmd, env=env)
 
 
+FIT_PROMPT = """\
+Before anything is downloaded, exported or captured: will this capture run on this machine's
+GPU?  xe-forge capture {args}
+Answer from the model's config (the hub's metadata, no weight download), the device's memory,
+and how this framework executes this model at this workload -- weights in the requested
+format, KV cache for batch x (input + output) tokens, and the working memory of its layers
+as the framework runs them (e.g. MoE experts computed densely for every token). Do not run
+the model. Write fit.json {{"fits": true|false, "need_gb": <n>, "have_gb": <n>, "reason":
+"<one line>"}}.
+"""
+
+
+def fits(capture_args: list[str], python: str | None, run_dir: Path) -> int:
+    """A short agent session judges whether the model fits before anything is spent on it.
+    Only a definite "no" stops the run; no answer is not a no."""
+    from xe_forge.frontend import agent
+
+    prompt = FIT_PROMPT.format(args=shlex.join(capture_args))
+    try:
+        answer = agent.run(prompt, run_dir / "fit", "fit.json", python or sys.executable, 30)
+    except (RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+        print(f"fit: no answer ({exc}); proceeding", file=sys.stderr)
+        return 0
+    if answer.get("fits") is False:
+        print(f"fit: does not fit -- {answer.get('reason', '')}", file=sys.stderr)
+        return 3
+    print(
+        f"fit: {answer.get('need_gb')} of {answer.get('have_gb')} GB -- {answer.get('reason', '')}"
+    )
+    return 0
+
+
+def prepare(capture_args: list[str], python: str | None, run_dir: Path, max_turns: int) -> int:
+    """An adapter whose framework needs the model prepared first (OpenVINO: an exported IR)
+    names the task, and an agent does it -- formats, calibration, what to install where."""
+    from xe_forge.frontend import adapters, agent
+
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--framework")
+    framework = pre.parse_known_args(capture_args)[0].framework
+    adapter = adapters.get(framework) if framework else None
+    if not hasattr(adapter, "prepare"):
+        return 0
+    p = argparse.ArgumentParser(add_help=False)
+    adapter.add_arguments(p)
+    task = adapter.prepare(p.parse_known_args(capture_args)[0])
+    if task is None:
+        return 0
+    out, prompt = task
+    print(f"prepare: an agent prepares the model -> {out}", flush=True)
+    try:
+        agent.run(prompt, run_dir / "prepare", "prepared.json", python or sys.executable, max_turns)
+    except (RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+        print(f"prepare: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _split_framework_python(argv: list[str]) -> tuple[list[str], str | None]:
     out, python, it = [], None, iter(argv)
     for a in it:
@@ -59,12 +117,20 @@ def _split_framework_python(argv: list[str]) -> tuple[list[str], str | None]:
 # ── analyze ────────────────────────────────────────────────────────────────
 
 
-def analyze(capture_path: Path, out_dir: Path, top: int, min_gain: float, partition: str) -> Path:
+def analyze(
+    capture_path: Path,
+    out_dir: Path,
+    top: int,
+    min_gain: float,
+    partition: str,
+    calibration: Path | None = None,
+) -> Path:
     from xe_forge.frontend import analyze as an
     from xe_forge.frontend import ir, manifest
 
     cap = ir.load(capture_path)
-    result = an.analyze(cap, top=top, min_gain=min_gain)
+    calib = json.loads(calibration.read_text()) if calibration else None
+    result = an.analyze(cap, top=top, min_gain=min_gain, calibration=calib)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "analysis.json").write_text(json.dumps(result.as_dict(), indent=1) + "\n")
     (out_dir / "gates.log").write_text(an.gates_log(result))
@@ -97,6 +163,10 @@ def xe_forge_command(entry: dict, variant: str, repo: Path, workspace: Path, opt
     ]  # fmt: skip
     if entry.get("record"):
         cmd += ["--dataset-record", entry["record"]]
+    if entry.get("target") == "library":
+        cmd += ["--target", "library"]
+    if getattr(opts, "stack_python", None):  # the interpreter the stack check builds over
+        cmd += ["--stack-python", opts.stack_python]
     if entry["dsl"] == "sycl" and opts.compiler_flags:
         cmd += ["--compiler-flags", opts.compiler_flags.replace("{kernel_repo}", str(repo))]
     return cmd + list(opts.passthrough)
@@ -115,12 +185,13 @@ def optimize(manifest_path: Path, run_dir: Path, opts) -> list[tuple[str, str]]:
 
     pairs = []
     for entry in data["kernels"]:
-        if not entry.get("enabled") or (opts.only and entry["name"] not in opts.only):
+        key = manifest.key(entry)
+        if not entry.get("enabled") or (opts.only and not {entry["name"], key} & set(opts.only)):
             continue
         variants = entry["variants"] if opts.all_variants else entry["variants"][:1]
         for variant in variants:
-            pairs.append((entry["name"], variant))
-            workspace = ws_root / f"{entry['name']}__{variant}"
+            pairs.append((key, variant))
+            workspace = ws_root / f"{key}__{variant}"
             status_path = workspace.with_suffix(".status.json")
             repo = manifest.resolve_repo(entry["repo"], repos_dir)
             if not repo.is_dir():
@@ -183,6 +254,13 @@ def main(argv: list[str]) -> int:
         rest, python = _split_framework_python(rest)
         return capture(rest, python)
 
+    if command == "calibrate":
+        from xe_forge.frontend import calibrate
+
+        p = argparse.ArgumentParser(prog="xe-forge calibrate")
+        p.add_argument("-o", "--output", type=Path, help="default: the per-device cache")
+        return calibrate.main(p.parse_args(rest).output)
+
     if command == "compare":
         from xe_forge.frontend import compare
 
@@ -206,6 +284,7 @@ def main(argv: list[str]) -> int:
         p.add_argument("--top", type=int, default=5)
         p.add_argument("--min-gain", type=float, default=0.005)
         p.add_argument("--partition", default="b70")
+        p.add_argument("--calibration", type=Path, help="xe-forge calibrate output")
         a = p.parse_args(rest)
         analyze(
             a.capture.resolve(),
@@ -213,6 +292,7 @@ def main(argv: list[str]) -> int:
             a.top,
             a.min_gain,
             a.partition,
+            a.calibration,
         )
         return 0
 
@@ -230,7 +310,7 @@ def main(argv: list[str]) -> int:
         print(summary.read_text())
         return 0
 
-    # run: capture -> analyze -> optimize -> collect
+    # run: [prepare ->] capture -> analyze -> optimize -> collect [-> prove]
     from xe_forge.frontend import collect, manifest
 
     rest, python = _split_framework_python(rest)
@@ -239,23 +319,44 @@ def main(argv: list[str]) -> int:
     p.add_argument("--top", type=int, default=3)
     p.add_argument("--min-gain", type=float, default=0.005)
     p.add_argument("--partition", default="b70")
+    p.add_argument("--calibration", type=Path, help="xe-forge calibrate output")
     p.add_argument("--analyze-only", action="store_true", help="stop after the manifest")
+    p.add_argument(
+        "--prove", action="store_true", help="build the stack with the winning patches and "
+        "measure them in the model (prove.py)"
+    )  # fmt: skip
+    p.add_argument("--prove-repeat", type=int, default=3, help="captures per arm")
+    p.add_argument(
+        "--stack-check", action="store_true", help="each port-back agent builds and tests "
+        "its port in the framework's stack (Xe-Forge --stack-python)"
+    )  # fmt: skip
     _add_optimize_args(p)
     a, capture_args = p.parse_known_args(rest)
     a.passthrough = passthrough
     run_dir = a.output.resolve()
     capture_path = run_dir / "capture.json"
     if not capture_path.is_file():
-        code = capture([*capture_args, "-o", str(capture_path)], python)
+        code = (
+            fits(capture_args, python, run_dir)
+            or prepare(capture_args, python, run_dir, a.max_turns)
+            or capture([*capture_args, "-o", str(capture_path)], python)
+        )
         if code != 0:
-            print(f"run: capture failed (exit {code}); nothing to analyze", file=sys.stderr)
+            print(f"run: stopped before analysis (exit {code})", file=sys.stderr)
             return code
     else:
         print(f"run: reusing {capture_path}")
-    path = analyze(capture_path, run_dir, a.top, a.min_gain, a.partition)
+    path = analyze(capture_path, run_dir, a.top, a.min_gain, a.partition, a.calibration)
     if a.analyze_only:
         return 0
+    a.stack_python = (python or sys.executable) if a.stack_check else None
     pairs = optimize(path, run_dir, a)
     summary = collect.collect(run_dir, manifest.load(path), pairs)
+    if a.prove:
+        from xe_forge.frontend import prove
+
+        section = prove.prove(run_dir, capture, capture_args, python or sys.executable,
+                              a.prove_repeat, a.max_turns)  # fmt: skip
+        summary.write_text(summary.read_text() + "\n" + section)
     print(summary.read_text())
     return 0

@@ -68,6 +68,9 @@ class Workload:
     call_sites: list[str]
     naming: Naming
     framework_meta: dict[str, Any] = field(default_factory=dict)
+    # The op's tensor arguments in order, [label, dtype]: the dims named <LABEL>_D<j> are their
+    # shapes, so a bound can rebuild every tensor at any captured token count.
+    tensors: list[list[str]] = field(default_factory=list)
 
 
 @dataclass

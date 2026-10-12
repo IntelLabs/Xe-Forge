@@ -53,6 +53,15 @@ def _base(op: str) -> str:
 def name_op(op: CapturedOp, framework: str = "vllm") -> Naming:
     impl = op.framework_op
     ns = _namespace(impl)
+    symbols = list(op.kernel_symbols)
+    if ns in PROVIDERS and symbols and all(LIBRARY_KERNELS.match(k) for k in symbols):
+        # A provider op that is a library call inside (vLLM's dense _xpu_C GEMMs run
+        # oneDNN): tuning it means changing the call in the provider's source.
+        repo, dsl = PROVIDERS[ns]
+        op.impl_class = "onednn"
+        return Naming(
+            "library", _base(impl), repo, dsl, via=f"torch.ops.{ns} -> library: {symbols[0]}"
+        )
     if ns in PROVIDERS:
         repo, dsl = PROVIDERS[ns]
         op.impl_class = "provider"
@@ -68,10 +77,17 @@ def name_op(op: CapturedOp, framework: str = "vllm") -> Naming:
         if repo is None:
             return Naming("unnamed", _base(impl), via="kernel launched outside any op")
         return Naming("kernel", _base(impl), repo, "triton", via="launched outside any op")
-    symbols = list(op.kernel_symbols)
     if symbols and all(LIBRARY_KERNELS.match(k) for k in symbols):
         op.impl_class = "onednn"
-        return Naming("library", _base(impl), via="library primitive: " + symbols[0])
+        # The call to tune is the framework's own: the module that calls the library.
+        site = op.call_site.rsplit("/", 1)[-1] or _base(impl)
+        return Naming(
+            "library",
+            site,
+            FRAMEWORK_REPOS.get(framework),
+            "sycl",
+            via="library primitive: " + symbols[0],
+        )
     if ns == "aten":
         op.impl_class = "aten"
         return Naming("aten", _base(impl), via="ATen op inside PyTorch")

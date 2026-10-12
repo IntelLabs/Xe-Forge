@@ -34,6 +34,7 @@ def _port_status(port_txt: Path) -> dict:
     Mergeable means an ``upstream`` port that passed the stack check -- built and tested
     in its stack, including the repository's own tests for the op."""
     text = port_txt.read_text() if port_txt.is_file() else ""
+    text = text.split("\nnotes:", 1)[0]  # free text after this line is the session's, not a verdict
     kind = next(
         (ln.split(":", 1)[1].split()[0] for ln in text.splitlines() if ln.startswith("kind:")), None
     )
@@ -44,7 +45,9 @@ def _port_status(port_txt: Path) -> dict:
     return {"kind": kind, "stack": stack, "mergeable": kind == "upstream" and stack == "PASS"}
 
 
-def collect_one(workspace: Path, name: str, variant: str, results: Path) -> dict:
+def collect_one(
+    workspace: Path, name: str, variant: str, results: Path, key: str | None = None
+) -> dict:
     row = {"kernel": name, "variant": variant, "workspace": str(workspace)}
     status = workspace.with_suffix(".status.json")
     if status.is_file():
@@ -72,7 +75,7 @@ def collect_one(workspace: Path, name: str, variant: str, results: Path) -> dict
         return row
     speedup = best.get("speedup")
     row["outcome"] = "win" if speedup and speedup > 1.0 else "parity"
-    dest = results / f"{name}__{variant}"
+    dest = results / f"{key or name}__{variant}"  # key: unique per manifest entry
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True)
@@ -106,12 +109,15 @@ def collect_one(workspace: Path, name: str, variant: str, results: Path) -> dict
 def collect(run_dir: Path, manifest: dict, runs: list[tuple[str, str]]) -> Path:
     """``runs``: the (kernel, variant) pairs optimize attempted. Writes results/SUMMARY.md
     with one row per manifest entry, attempted or not."""
+    from xe_forge.frontend.manifest import key as key_of
+
     results = run_dir / "results"
     results.mkdir(parents=True, exist_ok=True)
+    names = {key_of(e): e["name"] for e in manifest["kernels"]}
     attempted = {}
-    for name, variant in runs:
-        attempted[(name, variant)] = collect_one(
-            run_dir / "workspaces" / f"{name}__{variant}", name, variant, results
+    for k, variant in runs:
+        attempted[(k, variant)] = collect_one(
+            run_dir / "workspaces" / f"{k}__{variant}", names.get(k, k), variant, results, k
         )
 
     lines = [
@@ -122,7 +128,7 @@ def collect(run_dir: Path, manifest: dict, runs: list[tuple[str, str]]) -> Path:
     ]
     for entry in manifest["kernels"]:
         name = entry["name"]
-        mine = [(v, r) for (n, v), r in attempted.items() if n == name]
+        mine = [(v, r) for (k, v), r in attempted.items() if k == key_of(entry)]
         if not mine:
             decision = "optimize" if entry.get("enabled") else "skip"
             lines.append(

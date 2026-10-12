@@ -209,6 +209,9 @@ def main():
     u_patch.add_argument("kernel_name")
     u_patch.add_argument("--kind", choices=["upstream", "serving-only"], default="upstream")
     u_patch.add_argument("--notes", default="", help="What the patch changes and why")
+    u_patch.add_argument(
+        "--stack", default="", help='your stack check verdict: "PASS|FAIL <evidence>"'
+    )
     u_patch.add_argument("--trials-dir", default="./trials")
 
     args = parser.parse_args()

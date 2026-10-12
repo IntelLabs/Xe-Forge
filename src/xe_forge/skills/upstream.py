@@ -19,6 +19,7 @@ engine does it the same way and none needs a shell:
 
 from __future__ import annotations
 
+import os
 import py_compile
 import subprocess
 import sys
@@ -127,12 +128,15 @@ def _port_one(clone: Path) -> tuple[list[str], bool] | None:
 STACK_TIMEOUT = 4 * 3600  # a build of the stack plus its tests, not one benchmark
 
 
-def _stack_check(clone: Path, kernel: str, kind: str) -> tuple[bool, str] | None:
+def _stack_check(clones: list[Path], kernel: str, kind: str) -> tuple[bool, str] | None:
     """The host's verdict on this port inside its stack, or None when none is configured.
 
-    The command builds the clone's changes into the stack and tests them there; for an
-    ``upstream`` port that includes the repository's own tests for the op, so a shape the
-    benchmark never ran cannot break silently. Its full output goes to ``output/``.
+    One check per port, over all of its clones together (``{clone}`` is the kernel's,
+    ``{clones}`` every changed one, ``os.pathsep``-joined): a port that changes an interface
+    and its callers ships as a whole and is tested as one. The command builds the changes
+    into the stack -- from a copy, never inside a clone, whose tree is the patch -- and tests
+    them there, including the repository's own tests for the op. Its output goes to
+    ``output/``; it gets no LLM credentials.
     """
     from xe_forge.config import get_config
     from xe_forge.external import ExternalCommandError, render_command
@@ -140,17 +144,22 @@ def _stack_check(clone: Path, kernel: str, kind: str) -> tuple[bool, str] | None
     template = get_config().external.stack_check
     if not template:
         return None
-    log = OUTPUT / f"stack_check_{clone.name}.log"
+    log = OUTPUT / "stack_check.log"
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "OPENAI_"))}
     try:
         argv = render_command(
             template,
-            clone=str(clone.resolve()),
+            clone=str(clones[0].resolve()),
+            clones=os.pathsep.join(str(c.resolve()) for c in clones),
             kernel=kernel,
             kind=kind,
             workspace=str(Path.cwd()),
         )
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=STACK_TIMEOUT)
-    except (ExternalCommandError, OSError, subprocess.TimeoutExpired) as exc:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=STACK_TIMEOUT, env=env)
+    except subprocess.TimeoutExpired as exc:
+        log.write_text(f"{exc.stdout or ''}{exc.stderr or ''}")
+        return False, f"stack check timed out after {STACK_TIMEOUT}s; see {log}"
+    except (ExternalCommandError, OSError) as exc:
         return False, f"stack check did not run: {exc}"
     log.write_text(proc.stdout + proc.stderr)
     lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
@@ -160,7 +169,10 @@ def _stack_check(clone: Path, kernel: str, kind: str) -> tuple[bool, str] | None
     if not verdict:
         return False, f"no STACK: line (log {log})"
     token, _, detail = verdict.split(":", 1)[1].strip().partition(" ")
-    return token.upper() == "PASS", f"{detail} (log {log})".strip()
+    passed = token.upper() == "PASS" and proc.returncode == 0
+    if token.upper() == "PASS" and not passed:
+        detail = f"PASS printed but exit {proc.returncode}; {detail}"
+    return passed, f"{detail} (log {log})".strip()
 
 
 def _patch(args) -> int:
@@ -193,12 +205,17 @@ def _patch(args) -> int:
     for _, (block, _) in ported:
         lines += block
     stack_ok = True
-    for clone, _ in ported:
-        checked = _stack_check(clone, args.kernel_name, args.kind)
-        if checked is not None:
-            passed, reason = checked
-            stack_ok &= passed
-            lines.append(f"stack check {clone.name}: {'PASS' if passed else 'FAIL'} {reason}")
+    names = "+".join(c.name for c, _ in ported)  # one verdict for the port as a whole
+    verdict, _, evidence = getattr(args, "stack", "").strip().partition(" ")
+    if verdict:  # the session's own check in the stack
+        stack_ok &= verdict.upper() == "PASS"
+        lines.append(f"stack check {names}: {verdict.upper()} {evidence}".rstrip())
+    built = all(ok for _, (_, ok) in ported)  # a port that does not compile is not checked
+    checked = _stack_check([c for c, _ in ported], args.kernel_name, args.kind) if built else None
+    if checked is not None:
+        passed, reason = checked
+        stack_ok &= passed
+        lines.append(f"stack check {names}: {'PASS' if passed else 'FAIL'} {reason}")
     if args.notes:
         lines += ["notes:", args.notes]
     (OUTPUT / "PORT.txt").write_text("\n".join(lines) + "\n")

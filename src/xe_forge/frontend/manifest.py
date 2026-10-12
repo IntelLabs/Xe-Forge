@@ -21,6 +21,7 @@ from pathlib import Path
 import yaml
 
 from xe_forge.frontend.analyze import Analysis, Entry
+from xe_forge.frontend.canonical import resolve_dims
 from xe_forge.frontend.ir import CaptureRun, Workload
 
 COVERAGE = 0.9
@@ -71,15 +72,6 @@ def _variants(e: Entry) -> list[tuple[str, Workload, str | None, int | None, flo
     return rows
 
 
-def _dims(w: Workload, value: int | None) -> dict:
-    """Concrete dims for one captured token count: var dims that follow the token count
-    take it; the others take what the heaviest call at that count used."""
-    with_ = {}
-    if value is not None and w.var_axes:
-        with_ = next(iter(w.var_axes.values())).get(str(value), {}).get("with", {})
-    return {k: (with_.get(k, value) if v == "var" else v) for k, v in w.dims.items()}
-
-
 def build_spec(e: Entry) -> tuple[dict, dict[str, str]] | None:
     rows = _variants(e)
     if not rows:
@@ -89,7 +81,9 @@ def build_spec(e: Entry) -> tuple[dict, dict[str, str]] | None:
     smallest = min(rows, key=lambda r: r[3] if r[3] is not None else 0)
     for name, w, axis, value, _ in [("ci", *smallest[1:]), *rows]:
         rtol, atol = _TOLERANCE.get(_dtype(w), (0.05, 0.05))
-        spec[name] = [{"dtype": _dtype(w), "rtol": rtol, "atol": atol, "dims": _dims(w, value)}]
+        spec[name] = [
+            {"dtype": _dtype(w), "rtol": rtol, "atol": atol, "dims": resolve_dims(w, value)}
+        ]
         if name != "ci":
             record[name] = w.workload_id + (f"@{axis}={value}" if axis else "")
     return spec, record
@@ -124,10 +118,17 @@ def emit(
             "priority": e.priority,
             "reason": e.reason,
         }
-        built = build_spec(e) if e.repo else None
+        if e.target == "library":
+            item["target"] = "library"
+        # A library call gets a spec only once it is to be tuned: unbounded, it stays skipped.
+        built = build_spec(e) if e.repo and (e.target == "kernel" or e.enabled) else None
         if built is not None:
             spec, variants = built
-            stem = e.name if e.name not in used else f"{e.name}__{e.repo}"
+            stem = next(
+                s
+                for s in (e.name, f"{e.name}__{e.repo}", f"{e.name}__{e.repo}__{e.target}")
+                if s not in used
+            )  # unique: analysis groups by (route, repo, name)
             used.add(stem)
             spec_path = specs / f"{stem}.yaml"
             header = (
@@ -195,3 +196,9 @@ def load(path: str | Path) -> dict:
 def resolve_repo(repo: str, repos_dir: Path) -> Path:
     p = Path(repo).expanduser()
     return p if p.is_absolute() else (repos_dir / p).resolve()
+
+
+def key(entry: dict) -> str:
+    """An entry's own name for its workspace and results: its spec's stem, unique in the
+    manifest even when two entries share a kernel name (a kernel and a library route)."""
+    return Path(entry["spec"]).stem if entry.get("spec") else entry["name"]

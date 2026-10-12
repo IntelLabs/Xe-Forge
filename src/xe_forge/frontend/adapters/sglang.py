@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 from xe_forge.frontend.adapters.pytorch import device_info, device_type
-from xe_forge.frontend.adapters.vllm import _CONFIG_KEYS
+from xe_forge.frontend.model_meta import stored
 
 
 def add_arguments(parser) -> None:
@@ -30,6 +30,7 @@ def add_arguments(parser) -> None:
     parser.add_argument("--dtype", default="auto")
     parser.add_argument("--attention-backend", help="default: intel_xpu on XPU")
     parser.add_argument("--page-size", type=int, default=64)
+    parser.add_argument("--quantization", help="e.g. fp8: SGLang quantizes the checkpoint at load")
 
 
 def _command(args, dev: str, stage: str) -> list[str]:
@@ -55,6 +56,8 @@ def _command(args, dev: str, stage: str) -> list[str]:
         "--profile-steps", str(max(args.output_len - 1, 1)),
         "--profile-prefix", "trace",
     ]  # fmt: skip
+    if args.quantization:
+        cmd += ["--quantization", args.quantization]
     backend = args.attention_backend or ("intel_xpu" if dev == "xpu" else None)
     if backend:
         cmd += ["--attention-backend", backend]
@@ -92,9 +95,7 @@ def capture(args, raw_dir: Path) -> dict:
     try:
         from transformers import AutoConfig
 
-        hf = AutoConfig.from_pretrained(args.model).to_dict()
-        text = hf.get("text_config") or {}
-        model_cfg.update({k: hf.get(k, text.get(k)) for k in _CONFIG_KEYS if k in hf or k in text})
+        model_cfg["config"] = stored(AutoConfig.from_pretrained(args.model).to_dict())
     except Exception as exc:  # the config is context, not a requirement
         model_cfg["config_error"] = repr(exc)
 

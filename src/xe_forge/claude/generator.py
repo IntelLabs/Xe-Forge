@@ -156,6 +156,8 @@ def generate_workspace(
     (workspace / "CLAUDE.md").write_text(
         _render(
             "CLAUDE.md.j2",
+            target=config.engine.target,
+            stack_check=bool(config.external.stack_check or config.external.stack_python),
             dsl=dsl,
             device=device,
             kernel_name=kernel_name,
@@ -245,6 +247,7 @@ def generate_workspace(
                 profile_path=KERNEL_LOCATOR_PROFILE_PATH,
                 ext=ext,
                 stack_check=bool(config.external.stack_check),
+                stack_python=config.external.stack_python,
             )
         )
 

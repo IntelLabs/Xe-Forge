@@ -44,6 +44,9 @@ _DTYPES = {
     "c10::Float8_e4m3fn": "float8_e4m3fn",
     "c10::Float8_e5m2": "float8_e5m2",
     "c10::Float8_e4m3fnuz": "float8_e4m3fnuz",
+    "c10::Float8_e5m2fnuz": "float8_e5m2fnuz",
+    "c10::Float8_e8m0fnu": "float8_e8m0fnu",  # MX block scales
+    "c10::Float4_e2m1fn_x2": "float4_e2m1fn_x2",  # two FP4 values per byte (MXFP4)
     "c10::complex<float>": "complex64",
 }
 

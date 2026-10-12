@@ -21,10 +21,11 @@ import math
 import re
 from collections import defaultdict
 
+from xe_forge.frontend.dtypes import tensor_bytes
 from xe_forge.frontend.ir import CapturedOp, Naming, TensorArg, Workload
 
 _FAMILIES = (
-    ("gemm", r"^(linear|mm|addmm|bmm|matmul|baddbmm)$|gemm|_mm$|scaled_mm"),
+    ("gemm", r"^(linear|mm|addmm|bmm|matmul|baddbmm)$|gemm|_mm$|scaled_mm|fullyconnected"),
     ("attention", r"attention|attn|flash|paged|mla"),
     ("norm", r"norm"),
     ("rope", r"rotary|rope"),
@@ -63,7 +64,89 @@ def _layout(t: TensorArg) -> str:
     return "s"
 
 
+# Argument names a provider GEMM gives its activation and its weight (vLLM _xpu_C, SGLang),
+# and everything read with the weight: scales, zero points, bias. Activation-side scales
+# (A_scale) are not weight traffic.
+_GEMM_ACT = ("A", "A_", "ptr_A", "activations", "mat_a")
+_GEMM_WEIGHT = ("B", "ptr_B", "weights", "packed_weights", "mat_b")
+_WEIGHT_SIDE = re.compile(
+    r"^(B|ptr_B|weights|packed_weights|mat_b|scales|zeros|weight_scales|scales_b)$"
+    r"|^(ptr_)?B_(scale|zp)_?$|^(ptr_)?bias_?$"
+)
+_GROUPED = re.compile(r"rows_per_expert|total_rows|problem_sizes|expert_offsets")
+
+
+def _provider_gemm(op: CapturedOp) -> dict | None:
+    """M/N/K/E and bytes per element of a provider GEMM, read from its schema's argument
+    names and integer arguments -- no per-op table, no quantization-format table.
+
+    Bytes are *measured* from the captured tensors: weight-side bytes (weight, scales, zero
+    points, bias) over the logical E*N*K weight elements, activation bytes over M*K. So
+    MXFP4, NVFP4, INT4 groups or block FP8 come out right without being named. E is the
+    *local* expert count the kernel was given (its argument, or its weight's leading dim);
+    a grouped call without one gets no E, and its bound stays unknown -- never E=1. The
+    compute dtype is what the multiply runs in: on Xe2 FP8/FP4 are dequantized to bf16.
+    """
+    name = base_name(op.framework_op).lower()
+    names = op.framework_meta.get("arg_names") or []
+    if (
+        op.framework_op.startswith("aten::")
+        or not names
+        or not re.search(r"gemm|_mm|matmul|bmm", name)
+    ):
+        return None
+    by = {n: op.args[i] for i, n in enumerate(names) if i < len(op.args) and op.args[i] is not None}
+    ints = {
+        n.lower(): _int(op.scalars[i])
+        for i, n in enumerate(names)
+        if i < len(op.scalars) and _int(op.scalars[i]) is not None
+    }
+    act = next((by[n] for n in _GEMM_ACT if n in by), None)
+    w = next((by[n] for n in _GEMM_WEIGHT if n in by), None)
+    if act is None or w is None or not act.shape or len(w.shape) < 2:
+        return None
+    k = ints.get("k") or act.shape[-1] * (2 if act.dtype == "float4_e2m1fn_x2" else 1)
+    m = math.prod(act.shape[:-1])
+    grouped = any(_GROUPED.search(n) for n in names) or "num_experts" in ints or "n_experts" in ints
+    experts = ints.get("num_experts") or ints.get("n_experts")
+    if experts is None and len(w.shape) == 3 and (grouped or "bmm" in name):
+        experts = w.shape[0]  # [E, ...] weights: the kernel's own (local) count
+    wdims = list(w.shape[1:]) if len(w.shape) == 3 else list(w.shape)
+    n = ints.get("n")
+    if n is None and len(wdims) == 2:
+        # The other weight dim is N; K is stored whole, or packed (fp4x2: K/2, int4 in int32: K/8).
+        rest = list(wdims)
+        packed = next((p for p in (k, k // 2, k // 8) if p in rest), None)
+        if packed is not None:
+            rest.remove(packed)
+            n = rest[0]
+    if n is None:
+        return {"M": m, "K": k, "grouped": grouped}  # still a GEMM; N, and so its bound, unknown
+    per_matrix = experts if (grouped or "bmm" in name) else 1
+    side = [tensor_bytes(t.shape, t.dtype) for nm, t in by.items() if _WEIGHT_SIDE.search(nm)]
+    a_total = tensor_bytes(act.shape, act.dtype)
+    if per_matrix is None or None in side or a_total is None:
+        dims_only = {"M": m, "N": n, "K": k, "grouped": grouped}
+        return (
+            dims_only if grouped else None
+        )  # a grouped call is still a GEMM; its bound is unknown
+    compute = act.dtype if act.dtype in ("bfloat16", "float16", "int8") else "bfloat16"
+    return {
+        "M": m, "N": n, "K": k, "E": per_matrix,
+        "w_bytes": round(sum(side) / (per_matrix * n * k), 5),
+        "a_bytes": round(a_total / (m * k), 5), "compute": compute, "grouped": grouped,
+    }  # fmt: skip
+
+
 def _gemm_dims(op: CapturedOp) -> dict[str, int] | None:
+    provider = _provider_gemm(op)
+    if provider is not None:
+        op.framework_meta["gemm"] = provider
+        return {k: provider[k] for k in ("M", "N", "K", "E") if k in provider}
+    # An adapter whose matmul weights are not ports (OpenVINO FullyConnected) states K and N.
+    stated = op.framework_meta.get("gemm")
+    if stated and "tokens" in op.framework_meta:
+        return {"M": op.framework_meta["tokens"], "N": stated["N"], "K": stated["K"]}
     name = base_name(op.framework_op)
     if not op.framework_op.startswith("aten::") or name not in _ATEN_GEMM:
         return None
@@ -84,6 +167,8 @@ def _gemm_dims(op: CapturedOp) -> dict[str, int] | None:
         dims.update(N=b.shape[-1], K=a.shape[-1])
         if len(a.shape) == 3 and name in ("bmm", "baddbmm"):
             dims["B"] = a.shape[0]
+        elif name == "matmul" and len(b.shape) > 2:  # batched on both sides: B matmuls
+            dims.update(M=a.shape[-2], B=math.prod(b.shape[:-2]))
         return dims
     except (IndexError, AttributeError):
         return None
@@ -116,7 +201,7 @@ def _named_dims(op: CapturedOp) -> dict[str, int]:
 def _token(op: CapturedOp, dims: dict[str, int]) -> tuple[str, int] | None:
     if "TOKENS" in dims:
         return "TOKENS", dims["TOKENS"]
-    if "M" in dims and op.framework_op.startswith("aten::"):
+    if "M" in dims and (op.framework_op.startswith("aten::") or "gemm" in op.framework_meta):
         return "M", dims["M"]
     first = next((a for a in op.args if a is not None and a.shape), None)
     if first is None:
@@ -131,6 +216,8 @@ def _attrs(op: CapturedOp) -> dict:
     for i, value in enumerate(op.scalars):
         if value is not None and _int(value) is None:
             out[names[i] if i < len(names) else f"arg{i}"] = value
+    gemm = op.framework_meta.get("gemm") or {}
+    out.update({k: gemm[k] for k in ("w_bytes", "a_bytes", "compute", "grouped") if k in gemm})
     if base_name(op.framework_op) in ("linear", "addmm", "baddbmm"):
         out["bias"] = (
             len([a for a in op.args if a is not None]) >= 3
@@ -252,4 +339,23 @@ def _workload(members, var: set[str], moving: set[str], total_us: float, naming_
         call_sites=sorted({m[0].call_site for m in members if m[0].call_site}),
         naming=naming,
         framework_meta={"framework_op": base["op"], "kernel_symbols": list(top.kernel_symbols)[:3]},
+        tensors=_tensor_labels(top),
     )
+
+
+def _tensor_labels(op: CapturedOp) -> list[list[str]]:
+    names = op.framework_meta.get("arg_names") or []
+    return [
+        [(names[i] if i < len(names) else f"arg{i}").upper(), t.dtype]
+        for i, t in enumerate(op.args)
+        if t is not None
+    ]
+
+
+def resolve_dims(w: Workload, value: int | None) -> dict:
+    """Concrete dims for one captured token count: var dims that follow the token count
+    take it; the others take what the heaviest call at that count used."""
+    with_ = {}
+    if value is not None and w.var_axes:
+        with_ = next(iter(w.var_axes.values())).get(str(value), {}).get("with", {})
+    return {k: (with_.get(k, value) if v == "var" else v) for k, v in w.dims.items()}

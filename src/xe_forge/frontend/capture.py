@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import sys
 from datetime import datetime
@@ -50,6 +51,8 @@ def build(raw_dir: Path, out: Path) -> ir.CaptureRun:
     else:
         raise SystemExit(f"no trace in {raw_dir}")
 
+    if not summary.launches:
+        raise SystemExit(f"capture: no device kernel in {raw_dir}; nothing ran on the device")
     run["total_device_us"] = round(summary.total_us, 1)
     run["attributed_device_us"] = round(summary.attributed_us, 1)
     run["attributed_pct"] = round(summary.attributed_pct, 2)
@@ -102,6 +105,9 @@ def _annotate_schemas(ops: list[ir.CapturedOp], cache: Path) -> None:
         cache.write_text(json.dumps(known, indent=1, sort_keys=True) + "\n")
 
 
+_NO_FIT = re.compile(r"OUT_OF_RESOURCES|OUT_OF_DEVICE_MEMORY|out of memory|OutOfMemory", re.I)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     pre = argparse.ArgumentParser(add_help=False)
@@ -124,7 +130,17 @@ def main(argv: list[str] | None = None) -> int:
         capture = build(args.reparse.resolve(), out)
     else:
         raw_dir = out.parent / "raw"
-        run = adapters.get(args.framework).capture(args, raw_dir)
+        for stale in raw_dir.glob("trace*"):  # an earlier capture's traces are not this one's
+            stale.unlink()
+        try:
+            run = adapters.get(args.framework).capture(args, raw_dir)
+        except Exception as exc:
+            if not _NO_FIT.search(str(exc)):
+                raise
+            line = next((ln for ln in str(exc).splitlines() if _NO_FIT.search(ln)), str(exc))
+            print(f"capture: does not fit on the device at this workload: {line.strip()}",
+                  file=sys.stderr, flush=True)  # fmt: skip
+            os._exit(3)  # a runtime can abort in teardown after a device OOM; exit with the reason
         stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
         model = str((run.get("model") or {}).get("name", "model")).split("/")[-1]
         run.update(
