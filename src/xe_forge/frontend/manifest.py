@@ -1,15 +1,5 @@
-"""The kernel manifest and its specs: the only thing the frontend hands Xe-Forge.
-
-    kernels.yaml        one entry per kernel: name, repo, dsl, spec, variants, enabled
-    specs/<name>.yaml   no-inputs spec: dims go as keyword arguments to the baseline's
-                        get_init_inputs/get_inputs, the baseline copy being the oracle
-    records/<name>.json DatasetRecord: which captured workload each variant times
-
-The same format ``scripts/nemotron30b/extract.py`` writes by hand and
-``scripts/gen_kernel_sbatch.py`` turns into one Slurm job per (kernel, variant). Every
-entry is kept, enabled or not, with the reason, so the manifest is the full record of the
-decision and an entry can be switched on by hand. A ``variants`` list is ordered by device
-time; ``xe-forge optimize`` runs the first unless told to run them all.
+"""Write and read the kernel manifest: ``kernels.yaml``, ``specs/<name>.yaml`` and
+``records/<name>.json``. Every entry is kept, enabled or not, with its reason.
 """
 
 from __future__ import annotations
@@ -24,7 +14,7 @@ from xe_forge.frontend.analyze import Analysis, Entry
 from xe_forge.frontend.canonical import resolve_dims
 from xe_forge.frontend.ir import CaptureRun, Workload
 
-COVERAGE = 0.9  # defaults of --coverage and --max-variants
+COVERAGE = 0.9
 MAX_VARIANTS = 4
 
 _TOLERANCE = {
@@ -52,8 +42,7 @@ def _dtype(w: Workload) -> str:
 def _variants(
     e: Entry, coverage: float = COVERAGE, max_variants: int = MAX_VARIANTS
 ) -> list[tuple[str, Workload, str | None, int | None, float]]:
-    """(variant name, workload, var axis, value, device us), costliest first; per workload
-    the smallest set of values covering ``coverage`` of its time, at most ``max_variants``."""
+    """(variant, workload, var axis, value, device us) covering ``coverage``, costliest first."""
     rows = []
     for i, w in enumerate(e.workloads):
         if not w.dims:
@@ -111,7 +100,7 @@ def emit(
 
     out_dir = out_dir.resolve()
     specs, records = out_dir / "specs", out_dir / "records"
-    for d in (specs, records):  # generated: a re-analysis must not leave stale entries
+    for d in (specs, records):
         shutil.rmtree(d, ignore_errors=True)
         d.mkdir(parents=True)
     run = capture.run
@@ -130,7 +119,6 @@ def emit(
         }
         if e.target == "library":
             item["target"] = "library"
-        # A library call gets a spec only once it is to be tuned: unbounded, it stays skipped.
         wanted = e.repo and (e.target == "kernel" or e.enabled)
         built = build_spec(e, coverage, max_variants, tolerance) if wanted else None
         if built is not None:
@@ -139,7 +127,7 @@ def emit(
                 s
                 for s in (e.name, f"{e.name}__{e.repo}", f"{e.name}__{e.repo}__{e.target}")
                 if s not in used
-            )  # unique: analysis groups by (route, repo, name)
+            )
             used.add(stem)
             spec_path = specs / f"{stem}.yaml"
             header = (
@@ -148,7 +136,7 @@ def emit(
                 f"baseline's get_init_inputs/get_inputs.\n"
             )
             spec_path.write_text(header + yaml.safe_dump(spec, sort_keys=False))
-            load_spec(spec_path)  # fail here, not in a workspace, on a spec Xe-Forge rejects
+            load_spec(spec_path)  # fail now rather than in a workspace
             record_path = records / f"{stem}.json"
             record_path.write_text(
                 json.dumps(
@@ -191,8 +179,7 @@ def emit(
 
 
 def load(path: str | Path) -> dict:
-    """Read a manifest; ``spec`` and ``record`` paths come back absolute (relative ones are
-    relative to the manifest). An enabled entry missing what a run needs is an error."""
+    """Read a manifest with absolute ``spec``/``record`` paths; raise on an incomplete entry."""
     path = Path(path).resolve()
     data = yaml.safe_load(path.read_text())
     if not isinstance(data, dict) or not isinstance(data.get("kernels"), list):
@@ -214,6 +201,5 @@ def resolve_repo(repo: str, repos_dir: Path) -> Path:
 
 
 def key(entry: dict) -> str:
-    """An entry's own name for its workspace and results: its spec's stem, unique in the
-    manifest even when two entries share a kernel name (a kernel and a library route)."""
+    """An entry's unique workspace/results name: its spec's stem, else its name."""
     return Path(entry["spec"]).stem if entry.get("spec") else entry["name"]

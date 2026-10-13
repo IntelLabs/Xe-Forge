@@ -1,10 +1,5 @@
-"""vLLM: run the model in-process for one profiled request batch.
-
-The engine runs in this process (``VLLM_ENABLE_V1_MULTIPROCESSING=0``, tensor parallel 1),
-so a plain torch.profiler around ``LLM.generate`` sees every op and kernel. Eager mode
-(``enforce_eager``) keeps graph replay from hiding the ops; the shares it measures are the
-eager ones. One warm-up request runs first so compilation and autotuning stay outside the
-profiled window. The prompt comes from ``frontend.prompt``, as for every adapter.
+"""vLLM: run the model eagerly for one profiled request batch, in-process at TP 1 and with
+vLLM's per-worker profiler at ``--tp N``.
 """
 
 from __future__ import annotations
@@ -26,6 +21,9 @@ def add_arguments(parser) -> None:
     parser.add_argument("--quantization", help="e.g. fp8: vLLM quantizes the checkpoint at load")
     parser.add_argument("--max-model-len", type=int)
     parser.add_argument("--no-stack", action="store_true", help="skip call-site recording")
+    parser.add_argument(
+        "--tp", type=int, default=1, help="tensor parallel size; ranks profile themselves"
+    )
 
 
 def _prompts(llm, args, length: int):
@@ -39,22 +37,33 @@ def _prompts(llm, args, length: int):
 def capture(args, raw_dir: Path) -> dict:
     if not args.model:
         raise SystemExit("--framework vllm needs --model")
-    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"  # out of process, the profiler sees nothing
+    sharded = args.tp > 1
+    if not sharded:  # out of process, a profiler here sees nothing
+        os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
     import vllm
     from vllm import LLM, SamplingParams
 
+    extra = {}
+    if sharded:
+        from vllm.config import ProfilerConfig
+
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        extra["profiler_config"] = ProfilerConfig(
+            profiler="torch", torch_profiler_dir=str(raw_dir.resolve()),
+            torch_profiler_record_shapes=True, torch_profiler_with_stack=not args.no_stack,
+        )  # fmt: skip
     max_len = args.max_model_len or args.input_len + args.output_len + 64
     llm = LLM(
         model=args.model,
         enforce_eager=True,
-        tensor_parallel_size=1,
+        tensor_parallel_size=args.tp,
+        **extra,
         max_num_seqs=args.batch,
         max_model_len=max_len,
         dtype=args.dtype,
         quantization=args.quantization,
-        # A cached prefix (from the warm-up, or another sequence) shortens the prefill the
-        # profile sees: every call must run the input_len it says it runs.
+        # A cached prefix would shorten the profiled prefill below input_len.
         enable_prefix_caching=False,
         trust_remote_code=args.trust_remote_code,
     )
@@ -63,15 +72,21 @@ def capture(args, raw_dir: Path) -> dict:
 
     params = SamplingParams(max_tokens=args.output_len, ignore_eos=True, temperature=0.0)
     prompts = _prompts(llm, args, args.input_len)
-    profile_region(
-        lambda: llm.generate(prompts, params, use_tqdm=False), raw_dir, with_stack=not args.no_stack
-    )
+    if sharded:
+        llm.start_profile(profile_prefix="trace")
+        llm.generate(prompts, params, use_tqdm=False)
+        llm.stop_profile()
+    else:
+        profile_region(
+            lambda: llm.generate(prompts, params, use_tqdm=False), raw_dir,
+            with_stack=not args.no_stack,
+        )  # fmt: skip
 
     model_cfg = {"name": args.model}
     try:
         model_cfg["config"] = stored(llm.llm_engine.model_config.hf_config.to_dict())
         model_cfg["dtype"] = str(llm.llm_engine.model_config.dtype).replace("torch.", "")
-    except Exception as exc:  # the config is context, not a requirement
+    except Exception as exc:
         model_cfg["config_error"] = repr(exc)
 
     return {
@@ -79,7 +94,7 @@ def capture(args, raw_dir: Path) -> dict:
         "framework_version": vllm.__version__,
         "model": model_cfg,
         "runtime": {
-            "tp": 1,
+            "tp": args.tp,
             "enforce_eager": True,
             "prefix_caching": False,
             "batch": args.batch,

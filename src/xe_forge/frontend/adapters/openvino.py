@@ -1,23 +1,7 @@
-"""OpenVINO: per-primitive device time from PERF_COUNT, for an LLM run by optimum-intel.
+"""OpenVINO: per-primitive device time from PERF_COUNT for an LLM run by optimum-intel.
 
-The model (an exported IR directory, or an HF id an agent exported once per
-``--weight-format``, see ``prepare``) is compiled on the GPU with ``PERF_COUNT``.
-
-The GPU plugin's counters are a node's mean over a count of runs the API does not expose,
-kept per compiled graph (``Graph::update_profiling_info``), so a step's time cannot be
-taken out of them once steps differ. Instead a reference ``generate`` records the prefill
-infer and one decode infer -- their inputs and the variable states before each -- and each
-phase is replayed ``--phase-runs`` times on a freshly loaded model, whose counters then hold
-identical runs only (``_phase``). The compiled runtime model gives each executed node its
-port shapes and precisions.
-
-OpenVINO reports no per-call shapes -- the runtime model's are dynamic -- so each row
-carries the call's token count and context length, and ``-1`` stays where a dim is
-dynamic: the agent maps model-level sizes to the kernel's arguments.
-
-Each row's kernel symbol is the implementation profiling reports, or, where it reports
-``undef``, the runtime model's ``primitiveType``. Which source that is -- an OpenCL kernel
-in the plugin, a oneDNN call -- is the naming agent's to establish (``name_key``).
+PERF_COUNT keeps a per-graph mean over uncounted runs, so prefill and one decode infer are
+recorded once and each replayed on a freshly loaded model.
 """
 
 from __future__ import annotations
@@ -63,9 +47,7 @@ def add_arguments(parser) -> None:
 
 
 class _Recorder:
-    """Stands in for the model's InferRequest during a reference run: keeps, for each infer,
-    the inputs it was given and the model's variable states just before it -- so each phase
-    can be replayed exactly, with no input names or model knowledge here."""
+    """InferRequest proxy recording each infer's inputs and the variable states before it."""
 
     def __init__(self, request, calls: list):
         self._request, self._calls = request, calls
@@ -79,7 +61,7 @@ class _Recorder:
         def value(state):
             try:
                 return np.array(state.state.data, copy=True)
-            except RuntimeError:  # reset (before a prefill): no shape yet -- replayed as reset
+            except RuntimeError:  # no shape before a prefill; replayed as a reset
                 return None
 
         self._calls.append({
@@ -90,12 +72,7 @@ class _Recorder:
 
 
 def _phase(request, call: dict, runs: int, tensor=None) -> tuple[list[dict], float]:
-    """One recorded infer, replayed ``runs`` times on a request whose counters are fresh.
-
-    The plugin reports a node's mean over the times it ran, and identical runs execute the
-    same primitives, so the warm per-run time is ``(runs * mean_after_all - mean_after_one)
-    / (runs - 1)`` -- the first, cold run excluded. Never a mean taken apart across different
-    steps (the plugin counts runs a profile does not show)."""
+    """Replay one infer ``runs`` times; warm us = (runs * mean - first) / (runs - 1)."""
     import statistics
     import time
 
@@ -124,16 +101,35 @@ def _phase(request, call: dict, runs: int, tensor=None) -> tuple[list[dict], flo
     return rows, statistics.median(walls)
 
 
+def const_bytes(model) -> dict[str, int]:
+    """Bytes each node reads from constant-only input subgraphs (a weight and its decompression)."""
+    const: dict = {}  # node name -> constant-subgraph bytes, or None
+    out = {}
+    for op in model.get_ordered_ops():
+        name, kind = op.get_friendly_name(), op.get_type_name()
+        sources = [
+            op.input_value(i).get_node().get_friendly_name() for i in range(op.get_input_size())
+        ]
+        if kind == "Constant":
+            const[name] = op.get_byte_size()
+        elif kind != "Parameter" and sources and all(const.get(s) is not None for s in sources):
+            const[name] = sum(const[s] for s in sources)
+        else:
+            const[name] = None
+        read = sum(const[s] for s in sources if const.get(s))
+        if read and const[name] is None:
+            out[name] = read
+    return out
+
+
 def ir_dir(args) -> Path:
-    """Where the IR for an HF id and weight format lives, once exported."""
+    """Cache directory of the exported IR for an HF id and weight format."""
     name = f"{args.model.replace('/', '--')}--{args.weight_format}"
     return CACHE / "ov-models" / name
 
 
 def prepare(args) -> tuple[Path, str, dict] | None:
-    """What the model needs before capture -- an exported IR, and the agent's task to make
-    it -- or None when it has one. Export is per model (formats, calibration, shapes), so an
-    agent does it rather than code here."""
+    """(IR dir, template, context) of the agent's export task; None when the IR exists."""
     out = Path(args.model) if Path(args.model).is_dir() else ir_dir(args)
     if (out / args.ov_xml).is_file():
         return None
@@ -167,7 +163,6 @@ def capture(args, raw_dir: Path) -> dict:
     ids = prompt.token_ids(prompt.hf_vocab(tok), args.batch, args.input_len, args.prompt_file)
     tokens = torch.tensor(ids, dtype=torch.int64)
 
-    # Reference run: the prefill infer and one decode infer, exactly as the framework feeds them.
     model = load()
     calls: list = []
     model.request = _Recorder(model.request, calls)
@@ -177,12 +172,12 @@ def capture(args, raw_dir: Path) -> dict:
     if len(calls) < 2:
         raise SystemExit(f"OpenVINO: the reference run made {len(calls)} infer(s), not 2")
 
-    # Each phase on a freshly loaded model: its counters hold that phase's runs only.
+    # A freshly loaded model per phase, so its counters hold that phase only.
     raw_dir.mkdir(parents=True, exist_ok=True)
     context = 0
     with open(raw_dir / "ov_profile.jsonl", "w") as f:
         for call in calls[:2]:
-            first = next(iter(call["inputs"].values()))  # [batch, tokens] fed this infer
+            first = next(iter(call["inputs"].values()))  # [batch, tokens]
             m, context = math.prod(first.shape), context + first.shape[-1]
             model = load()
             rows, wall = _phase(model.request, call, args.phase_runs)
@@ -210,6 +205,8 @@ def capture(args, raw_dir: Path) -> dict:
             "outputs": ports(op.outputs()),
         }
     (raw_dir / "runtime_model.json").write_text(json.dumps(nodes, indent=1) + "\n")
+    # Weights the compiled model keeps internal are measured in the original graph.
+    (raw_dir / "const_bytes.json").write_text(json.dumps(const_bytes(model.model), indent=1) + "\n")
 
     return {
         "framework": "openvino",
@@ -224,6 +221,8 @@ def capture(args, raw_dir: Path) -> dict:
 
 def parse(raw_dir: Path) -> TraceSummary:
     nodes = json.loads((raw_dir / "runtime_model.json").read_text())
+    consts_path = raw_dir / "const_bytes.json"
+    consts = json.loads(consts_path.read_text()) if consts_path.is_file() else {}
     runtime = json.loads((raw_dir / "run.json").read_text()).get("runtime") or {}
     fold = re.compile(runtime.get("site_pattern") or r"\.\d+(?=[./])")
     rows: dict[tuple, CapturedOp] = {}
@@ -231,20 +230,19 @@ def parse(raw_dir: Path) -> TraceSummary:
     launches = 0
     kernels: dict[str, float] = defaultdict(float)
     steps = [json.loads(line) for line in (raw_dir / "ov_profile.jsonl").read_text().splitlines()]
-    for step in steps:  # node times beyond what the phase took on the clock are not times
+    for step in steps:
         busy = sum(r["us"] for r in step["rows"] if "EXECUTED" in r["status"])
         if step.get("wall_us") and busy > 2 * step["wall_us"]:
             raise SystemExit(
                 f"OpenVINO profiling: {busy:.0f} us of node time in a {step['wall_us']:.0f} us "
                 f"phase ({step['tokens']} tokens); the counters do not measure this run"
             )
-    # A step's time is recovered from a running mean in whole us: it may be off by about one
-    # us per run, never by more. Anything below that is not a running mean for this model.
+    # Recovery from a whole-us running mean is off by about 1 us per run; below that is wrong.
     floor = -2.0 * (len(steps) + 16)
     for step in steps:
         for r in step["rows"]:
             if "EXECUTED" not in r["status"]:
-                continue  # fused away or not run: no time of its own
+                continue
             # Profiling names a node "<type>:<name>"; the runtime model names it "<name>".
             r["node"] = re.sub(r"^[a-z0-9_]+:(?!:)", "", r["node"])
             if r["us"] < floor:
@@ -252,7 +250,7 @@ def parse(raw_dir: Path) -> TraceSummary:
                     f"OpenVINO profiling: {r['node']} has {r['us']:.0f} us in a step; the "
                     "plugin's counters are not a running mean per run for this model"
                 )
-            if r["exec"] in ("", "undef"):  # the runtime model knows what profiling does not
+            if r["exec"] in ("", "undef"):
                 r["exec"] = (nodes.get(r["node"]) or {}).get("rt", {}).get(
                     "primitiveType"
                 ) or "undef"
@@ -276,11 +274,15 @@ def parse(raw_dir: Path) -> TraceSummary:
                 node = nodes.get(r["node"]) or {}
                 outs = node.get("outputs") or []
                 if r["type"] == "FullyConnected" and ports and outs:
-                    # A matmul against weights the runtime model keeps internal: K from the
-                    # input, N from the output, M is the call's token count.
+                    # Weights are internal: K from the input, N from the output.
+                    sources = (node.get("rt") or {}).get("originalLayersNames", "").split(",")
+                    # A compiled node may carry an output suffix ("MatMul.0") the original lacks.
+                    weight = sum(consts.get(n, consts.get(re.sub(r"\.\d+$", "", n), 0))
+                                 for n in sources if n)  # fmt: skip
                     op.framework_meta["gemm"] = {
                         "K": ports[0]["shape"][-1],
                         "N": outs[0]["shape"][-1],
+                        **({"weight_bytes": weight} if weight else {}),
                     }
             op.calls += 1
             op.device_us += r["us"]
@@ -295,7 +297,6 @@ def parse(raw_dir: Path) -> TraceSummary:
 
 
 def name_key(op: CapturedOp) -> str:
-    """names.json key: the node type and the implementation the plugin picked for it (one
-    type runs different kernels at different shapes); a patched kernel keeps its name."""
+    """names.json key: node type and the implementation the plugin picked for it."""
     impl = max(op.kernel_symbols, key=op.kernel_symbols.get) if op.kernel_symbols else ""
     return f"{op.framework_op}|{impl}"

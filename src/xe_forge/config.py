@@ -136,8 +136,7 @@ class EngineConfig:
     workspace: str = "./"  # Claude engine: workspace directory
     git_init: bool = False  # Claude engine: initialize workspace as git repo
     max_turns: int = 80  # Claude engine: turn limit for one headless session
-    # What a workspace optimizes: "kernel" (write or edit a kernel) or "library" (tune how
-    # the repository calls a library such as oneDNN; no new kernel).
+    # "kernel" or "library" (tune how the repository calls a library such as oneDNN).
     target: str = "kernel"
     # Name, ``module:attr`` reference, or entry point of a build backend
     # (see xe_forge.core.build_backend). None keeps the default ai_bench path.
@@ -182,12 +181,9 @@ class ExternalConfig:
     # Repositories a kernel from kernel_repo is wired into (e.g. vLLM). With one, a winner
     # may change the op's interface and call sites: the port patches those repos too.
     integration_repos: list[str] = field(default_factory=list)
-    # A host command that builds a port inside its stack and tests it there (placeholders
-    # {clone} {kernel} {kind} {workspace}; prints "STACK: PASS|FAIL <reason>", DONE last).
-    # Run by `upstream patch`; unset, a port is reported unbuilt as before.
+    # Builds and tests a port in its stack; prints "STACK: PASS|FAIL <reason>", DONE last.
     stack_check: str | None = None
-    # The stack's interpreter: set, the port-back agent builds and tests the port in that
-    # stack itself and records its verdict with `upstream patch --stack`.
+    # The stack's interpreter; set, the port-back agent builds and tests the port there.
     stack_python: str | None = None
     timeout: int = DEFAULT_TIMEOUT
 

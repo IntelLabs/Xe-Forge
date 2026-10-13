@@ -39,7 +39,7 @@ def _render(template_name: str, **context: object) -> str:
     return _env.get_template(template_name).render(**context)
 
 
-render = _render  # for the framework frontend's agent prompts, in the same templates dir
+render = _render
 
 
 def generate_workspace(

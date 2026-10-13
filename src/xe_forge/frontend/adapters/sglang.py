@@ -1,15 +1,5 @@
-"""SGLang: profile one batch with SGLang's own benchmark and read its traces.
-
-``python -m sglang.benchmark.one_batch`` loads a ``ModelRunner`` in-process (the server
-runs the model in a scheduler subprocess, out of reach of a profiler), warms up, and runs
-one prefill and ``--output-len`` decode steps. With ``--profile`` it records them with
-torch.profiler -- XPU activity, ``with_stack``, and shapes with ``--profile-record-shapes``
--- and exports one chrome trace per phase into ``SGLANG_TORCH_PROFILER_DIR``. This adapter
-runs it once per phase, with every decode step profiled, and leaves the traces in ``raw/``;
-the shared parser reads them. It runs one_batch's own command line, with one internal
-touched: its input builder is handed the shared prompt's token ids (``sglang_one_batch``),
-and checked first, since internals move between releases. Tensor parallel 1; graph capture
-is disabled so every op is dispatched.
+"""SGLang: profile one prefill and the decode steps with ``sglang.benchmark.one_batch``, one
+process per phase, graph capture off; the shared parser reads the traces.
 """
 
 from __future__ import annotations
@@ -34,6 +24,9 @@ def add_arguments(parser) -> None:
     parser.add_argument("--attention-backend", help="default: intel_xpu on XPU")
     parser.add_argument("--page-size", type=int, default=64)
     parser.add_argument("--quantization", help="e.g. fp8: SGLang quantizes the checkpoint at load")
+    parser.add_argument(
+        "--tp", type=int, default=1, help="tensor parallel size; rank 0 is profiled"
+    )
 
 
 def _command(args, dev: str, stage: str, ids_file: Path) -> list[str]:
@@ -42,7 +35,7 @@ def _command(args, dev: str, stage: str, ids_file: Path) -> list[str]:
         "--model-path", args.model,
         "--device", dev,
         "--dtype", args.dtype,
-        "--tp-size", "1",
+        "--tp-size", str(args.tp),
         "--page-size", str(args.page_size),
         "--disable-cuda-graph",
         "--batch-size", str(args.batch),
@@ -53,9 +46,7 @@ def _command(args, dev: str, stage: str, ids_file: Path) -> list[str]:
         "--profile-activities", "CPU", {"xpu": "XPU", "cuda": "GPU"}.get(dev, "CPU"),
         "--profile-stage", stage,
         "--profile-start-step", "0",
-        # one_batch decodes output_len - 1 steps (prefill yields the first token); a
-        # window past the last step is never stopped, and on XPU the profiler torn down
-        # at exit aborts the process.
+        # Decode runs output_len - 1 steps; a longer window never stops and aborts on XPU.
         "--profile-steps", str(max(args.output_len - 1, 1)),
         "--profile-prefix", "trace",
     ]  # fmt: skip
@@ -77,9 +68,7 @@ def capture(args, raw_dir: Path) -> dict:
     dev = device_type()
     raw_dir.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, SGLANG_TORCH_PROFILER_DIR=str(raw_dir))
-    # One process per phase: on XPU, Kineto cannot open a second profiling session in a
-    # process (clearActivities: PTI_ERROR_NOT_IMPLEMENTED), and one_batch profiles prefill
-    # and decode as two sessions.
+    # One process per phase: Kineto on XPU cannot open a second session in a process.
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
@@ -96,7 +85,7 @@ def capture(args, raw_dir: Path) -> dict:
     if not traces:
         raise SystemExit(f"sglang one_batch wrote no trace into {raw_dir}")
 
-    # Provider ops register on import; the schema lookup after this needs them.
+    # Provider ops register on import; the schema lookup needs them.
     try:
         import sgl_kernel  # noqa: F401
     except ImportError:
@@ -108,7 +97,7 @@ def capture(args, raw_dir: Path) -> dict:
 
         config = AutoConfig.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
         model_cfg["config"] = stored(config.to_dict())
-    except Exception as exc:  # the config is context, not a requirement
+    except Exception as exc:
         model_cfg["config_error"] = repr(exc)
 
     return {
@@ -116,7 +105,7 @@ def capture(args, raw_dir: Path) -> dict:
         "framework_version": getattr(sglang, "__version__", "unknown"),
         "model": model_cfg,
         "runtime": {
-            "tp": 1,
+            "tp": args.tp,
             "cuda_graph": False,
             "batch": args.batch,
             "dtype": args.dtype,

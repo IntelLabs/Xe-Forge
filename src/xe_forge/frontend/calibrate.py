@@ -1,15 +1,6 @@
-"""What this card can do: the two numbers a GEMM's roofline bound needs.
+"""Measure the card's read bandwidth and matmul throughput per dtype for roofline bounds.
 
-    xe-forge calibrate [-o calibration.json]          (on a GPU node, torch with XPU)
-
-- ``bandwidth_gbs``: read bandwidth, a reduction over a tensor far larger than any cache.
-- ``matmul_tflops[dtype]``: throughput of a large square ``torch.matmul`` -- oneDNN at its
-  best case, so "at the bound" means "as good as the library gets on a friendly shape".
-
-Measured, never written down: a value that cannot be measured is ``None`` (never 0), with
-the reason in ``unmeasured``, and a reader treats ``None`` as unknown. The record is cached
-under ``$XE_FORGE_CACHE/calibration/<device>.json`` (default ``~/.cache/xe_forge``); ``xe-forge analyze --calibration``
-reads it.
+An unmeasurable value is ``None`` with its reason in ``unmeasured``; never 0.
 """
 
 from __future__ import annotations
@@ -62,13 +53,12 @@ def measure(
         rec["unmeasured"]["all"] = "no GPU visible to torch"
         return rec
     try:
-        # Random data: a constant fill would compress, and GPUs that compress memory
-        # traffic losslessly would read it faster than any real tensor.
+        # Random data: a constant fill compresses and reads faster than real tensors.
         x = torch.rand(read_bytes // 2, dtype=torch.float16, device=dev)
         us = _time_us(lambda: x.sum(), dev, iters)
         rec["bandwidth_gbs"] = round(x.numel() * x.element_size() / us / 1e3, 1)
         del x
-    except Exception as exc:  # recorded, not swallowed: the reason says whether to retry
+    except Exception as exc:
         rec["unmeasured"]["bandwidth_gbs"] = repr(exc)
 
     def fp(dt):
@@ -85,8 +75,6 @@ def measure(
         b = torch.randn(n, n, device=dev).to(torch.float8_e4m3fn).t()
         return lambda: torch._scaled_mm(a, b, scale_a=one, scale_b=one, out_dtype=torch.bfloat16)
 
-    # Whatever the card multiplies natively is measured; a dtype it cannot is None with the
-    # reason, and a bound for it falls back to the fastest measured peak.
     kernels = {**{name: (lambda name=name: fp(getattr(torch, name))) for name in DTYPES},
                "int8": int8, "float8_e4m3fn": fp8}  # fmt: skip
     for name, make in kernels.items():

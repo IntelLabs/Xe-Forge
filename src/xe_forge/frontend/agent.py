@@ -1,7 +1,4 @@
-"""One headless Claude session for work the frontend delegates: preparing a model for its
-framework, naming its ops, building the stacks a patch is measured in. The prompts are
-templates (``claude/templates/frontend-*.md.j2``); per-model and per-repository specifics
-live there, not here. The session answers in a JSON file it writes."""
+"""One headless Claude session for delegated frontend work; it answers in a JSON file."""
 
 from __future__ import annotations
 
@@ -14,13 +11,12 @@ import subprocess
 import time
 from pathlib import Path
 
-TIMEOUT = int(os.environ.get("XE_FORGE_AGENT_TIMEOUT", 6 * 3600))  # seconds per session
+TIMEOUT = int(os.environ.get("XE_FORGE_AGENT_TIMEOUT", 6 * 3600))
 RESUMES = int(os.environ.get("XE_FORGE_AGENT_RESUMES", 5))
 
 
 def run(template: str, context: dict, cwd: Path, answer: str, python: str, max_turns: int) -> dict:
-    """Render ``template`` (claude/templates) with ``context`` plus the shared rules, run
-    the session in ``cwd``, and return the JSON it wrote to ``answer`` (raises if none)."""
+    """Run ``template`` as a session in ``cwd``; return the JSON it wrote to ``answer``."""
     from xe_forge.claude.generator import render
     from xe_forge.config import get_config
     from xe_forge.engines.claude_engine import claude_env
@@ -30,21 +26,21 @@ def run(template: str, context: dict, cwd: Path, answer: str, python: str, max_t
         raise RuntimeError("no 'claude' CLI on PATH")
     cwd.mkdir(parents=True, exist_ok=True)
     path = cwd / answer
-    path.unlink(missing_ok=True)  # a previous session's answer is not this one's
+    path.unlink(missing_ok=True)
     (cwd / "session.log").unlink(missing_ok=True)
     env = claude_env(get_config())
-    # Headless claude kills background work after this ceiling: let a build run its course.
+    # Headless claude kills background work after this ceiling; builds need longer.
     env["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] = str(TIMEOUT * 1000)
     prompt = render(template, **context) + render(
         "frontend-rules.md.j2", python=python, answer=answer
     )
-    (cwd / "prompt.md").write_text(prompt)  # what the session was asked, for the record
+    (cwd / "prompt.md").write_text(prompt)
     log_path, deadline = cwd / "session.log", time.monotonic() + TIMEOUT
     cmd = [claude, "-p", prompt]
     for _ in range(1 + RESUMES):
         start = log_path.stat().st_size if log_path.is_file() else 0
         with open(log_path, "a") as log:
-            # Its own process group: on timeout the detached builds a session started go too.
+            # Own process group, so a timeout also kills the detached builds it started.
             proc = subprocess.Popen(
                 [*cmd, "--dangerously-skip-permissions", "--max-turns", str(max_turns),
                  "--output-format", "stream-json", "--verbose"],
@@ -60,9 +56,7 @@ def run(template: str, context: dict, cwd: Path, answer: str, python: str, max_t
             break
         text = log_path.read_text()[start:]
         result = _result(text)
-        # A session that stopped cleanly (or ran out of turns) while detached work it started
-        # was still running ("I'll check back") is resumed, with its context, until it
-        # answers. An error -- the API, the CLI -- is not something resuming fixes.
+        # Resume a session that stopped while its detached work ran; not one that errored.
         failed = proc.returncode != 0 and result.get("subtype") != "error_max_turns"
         session = re.findall(r'"session_id":"([^"]+)"', text)
         if failed or not session:
@@ -84,7 +78,7 @@ def run(template: str, context: dict, cwd: Path, answer: str, python: str, max_t
 
 
 def _result(stream: str) -> dict:
-    """The last ``result`` event of a stream-json session log (subtype, result text)."""
+    """The last ``result`` event of a stream-json log."""
     for line in reversed(stream.splitlines()):
         if '"type":"result"' in line or '"type": "result"' in line:
             try:

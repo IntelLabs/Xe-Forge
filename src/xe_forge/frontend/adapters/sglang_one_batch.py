@@ -1,10 +1,6 @@
-"""``sglang.benchmark.one_batch`` with the shared prompt's token ids.
+"""Run ``sglang.benchmark.one_batch`` on the token ids ``frontend.prompt`` made.
 
-one_batch takes a prompt only as text lines, which it re-tokenizes and does not cut to
-``--input-len``; its synthetic inputs are random. Its input builder takes ready ids, so this
-runs its CLI with that builder handed the ids ``frontend.prompt`` made:
-
-    python -m xe_forge.frontend.adapters.sglang_one_batch <ids.json> <one_batch args...>
+Usage: ``python -m xe_forge.frontend.adapters.sglang_one_batch <ids.json> <one_batch args...>``
 """
 
 from __future__ import annotations

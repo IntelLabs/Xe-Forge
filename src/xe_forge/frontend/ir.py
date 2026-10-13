@@ -1,11 +1,5 @@
-"""The capture file: what a framework ran, independent of which framework ran it.
-
-Two levels. ``CapturedOp`` is one row per (framework op, argument signature, call site) as
-the trace showed it, strides and all. ``Workload`` is the canonical form several ops can
-share: a family, role-named dims, dtypes, a layout class, and a histogram over the axes
-that varied. Analysis reads workloads; ops are kept so a decision can be traced back to
-what was observed. Whatever only one framework can say goes in ``framework_meta`` and is
-never read by analysis.
+"""The framework-independent capture file: per-op rows (``CapturedOp``) and the canonical
+``Workload`` rows analysis reads. Framework-only data goes in ``framework_meta``.
 """
 
 from __future__ import annotations
@@ -41,10 +35,7 @@ class CapturedOp:
 
 @dataclass
 class Naming:
-    """What the kernel-locator is told to look for. ``route`` says whether Xe-Forge can
-    take it: ``kernel`` (a named kernel in a repository), ``library`` (a library call --
-    change the call, not the kernel), ``aten`` (inside PyTorch) or ``unnamed`` (the naming
-    agent did not place it)."""
+    """What the kernel-locator looks for; ``route`` is kernel, library, aten or unnamed."""
 
     route: str
     name: str | None = None
@@ -69,8 +60,7 @@ class Workload:
     call_sites: list[str]
     naming: Naming
     framework_meta: dict[str, Any] = field(default_factory=dict)
-    # The op's tensor arguments in order, [label, dtype]: the dims named <LABEL>_D<j> are their
-    # shapes, so a bound can rebuild every tensor at any captured token count.
+    # [label, dtype] per tensor argument; its shape is the dims named <LABEL>_D<j>.
     tensors: list[list[str]] = field(default_factory=list)
 
 

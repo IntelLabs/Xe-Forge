@@ -1,18 +1,6 @@
-"""Two arms of captures (before/after a patch), workload by workload, in one fixed format.
+"""Compare two arms of captures (before/after a patch) workload by workload.
 
-    xe-forge compare --a A/capture.json [A2/capture.json ...] --b B/capture.json [...] -o out/
-
-Every framework writes the same ``capture.json``, and a workload's id depends on the op,
-its shapes, dtypes and layout -- not on the kernel that ran it -- so a patched kernel keeps
-its id and the comparison is a join. The output is the same for vLLM, SGLang and OpenVINO:
-``compare.csv`` / ``compare.json`` (one row per workload, ``TOTAL`` first, fixed columns)
-and ``compare.md``.
-
-Stable by construction: captures of different work are refused (framework, model and the
-run's batch/input/output lengths must agree), several captures per arm are reduced to
-their median with the spread beside it, rows are sorted by the baseline's time, numbers
-are rounded, and a workload whose call count differs between arms is flagged rather than
-given a speedup it did not earn.
+Arms must run the same work; several captures per arm reduce to a median with its spread.
 """
 
 from __future__ import annotations
@@ -29,7 +17,7 @@ COLUMNS = [
     "calls_a", "calls_b", "us_a", "us_b", "per_call_a", "per_call_b",
     "speedup", "delta_us", "share_a", "spread_a", "spread_b",
 ]  # fmt: skip
-# A capture's whole ``runtime`` is its work, except what only describes how it was launched.
+# Runtime keys that describe how a capture was launched, not its work.
 _NOT_WORK = ("one_batch",)
 
 
@@ -52,7 +40,7 @@ def _arm(paths: list[Path]) -> tuple[list[ir.CaptureRun], dict]:
 
 
 def _reduce(caps: list[ir.CaptureRun]) -> tuple[dict, dict, dict]:
-    """workload id -> (median us, calls, spread), plus totals and workload metadata."""
+    """(workload id -> (median us, calls, spread), workload metadata, totals)."""
     per: dict[str, list[tuple[float, int]]] = {}
     meta: dict[str, ir.Workload] = {}
     for c in caps:

@@ -1,12 +1,6 @@
 """Capture entry point, run under the framework's own interpreter.
 
-    python -m xe_forge.frontend.capture --framework vllm --model <id> -o run/capture.json
-
-``xe-forge capture`` launches this in a subprocess with ``--framework-python`` (default:
-the current interpreter) and this package's ``src`` on ``PYTHONPATH``, so nothing is
-installed into the framework's environment. The adapter writes ``raw/`` beside the output
-and returns the run metadata; ``build`` turns ``raw/`` into ``capture.json`` and can be
-re-run on its own (``--reparse``) without running the framework again.
+Runs the adapter into ``raw/`` and builds ``capture.json`` from it; ``--reparse`` rebuilds only.
 """
 
 from __future__ import annotations
@@ -25,14 +19,12 @@ from pathlib import Path
 from xe_forge.frontend import adapters, canonical, ir, naming, prompt
 from xe_forge.frontend.torch_trace import parse_traces
 
-# Environment worth recording for reproducibility. Anything that could carry a credential
-# is left out by name, whatever its prefix.
 _ENV_PREFIXES = tuple(
     os.environ.get(
         "XE_FORGE_CAPTURE_ENV",
         "VLLM_,SGLANG_,SGL_,OV_,ONEDNN_,DNNL_,ONEAPI_,SYCL_,UR_,ZE_,IGC_,CCL_,TORCH_,PYTORCH_,HF_HUB_",
     ).split(",")
-)  # environment that shapes a capture, recorded with it
+)
 _SECRET_WORDS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "AUTH")
 
 
@@ -45,16 +37,24 @@ def _env_subset() -> dict:
 
 
 def build(raw_dir: Path, out: Path, names: dict | None = None) -> ir.CaptureRun:
-    """``raw/`` (run.json + trace) -> capture.json. ``names`` is the naming agent's answer
-    (``names.json``): each op gets the entry for its key, and the run the model's facts."""
+    """``raw/`` (run.json + traces) -> capture.json, with ops named from ``names``."""
     run = json.loads((raw_dir / "run.json").read_text())
     adapter = adapters.get(run["framework"])
     parse = getattr(adapter, "parse", None)
     traces = sorted(raw_dir.glob("trace*.json*"))
+    ranks: dict[int, list[Path]] = {}
+    for t in traces:
+        found = re.search(r"rank(\d+)", t.name)
+        ranks.setdefault(int(found.group(1)) if found else 0, []).append(t)
     if parse is not None:
         summary = parse(raw_dir)
     elif traces:
-        summary = parse_traces(traces)
+        # TP ranks run the same shapes: rank 0 is the workload, per-rank totals show imbalance.
+        summary = parse_traces(ranks[min(ranks)])
+        if len(ranks) > 1:
+            run["ranks"] = {
+                r: round(parse_traces(ts).total_us, 1) for r, ts in sorted(ranks.items())
+            }
     else:
         raise SystemExit(f"no trace in {raw_dir}")
 
@@ -68,7 +68,7 @@ def build(raw_dir: Path, out: Path, names: dict | None = None) -> ir.CaptureRun:
         os.path.relpath(p, out.parent) for p in sorted(raw_dir.iterdir()) if p.name != "run.json"
     ]
     _annotate_schemas(summary.ops, raw_dir / "schemas.json")
-    key = getattr(adapter, "name_key", naming.key)  # stable across a patched build
+    key = getattr(adapter, "name_key", naming.key)
     entries = (names or {}).get("ops") or {}
     ops = []
     for op in summary.ops:
@@ -79,16 +79,41 @@ def build(raw_dir: Path, out: Path, names: dict | None = None) -> ir.CaptureRun:
     summary.ops = ops
     if names is not None:
         run["model_facts"] = names.get("model") or {}
+    if (raw_dir / "counters.json").is_file():
+        run["counters"] = _counters(json.loads((raw_dir / "counters.json").read_text()))
     capture = ir.CaptureRun(run=run, ops=summary.ops)
     capture.workloads = canonical.workloads(capture.ops, summary.total_us, naming.name_op)
     ir.dump(capture, out)
     return capture
 
 
+_SIMD = re.compile(r"\[SIMD\d+ \{\d+;\s*\d+;\s*\d+\} \{\d+;\s*\d+;\s*\d+\}\]$")
+
+
+def _counters(summary: dict) -> dict:
+    """unitrace ComputeBasic records -> {kernel: {gb_per_s, util_pct, us}}, time-weighted."""
+    acc: dict = {}
+    for r in summary.get("records") or []:
+        time_ns = r.get("time_ns")
+        if not time_ns:
+            continue
+        name = _SIMD.sub("", r["kernel"])
+        moved = sum((r["memory"].get(d) or {}).get("bytes") or 0 for d in ("read", "write"))
+        utils = [v for k, v in (r.get("counters") or {}).items()
+                 if k.endswith("_UTILIZATION[%]") and v is not None]  # fmt: skip
+        a = acc.setdefault(name, {"bytes": 0.0, "ns": 0.0, "util_ns": 0.0})
+        a["bytes"] += moved
+        a["ns"] += time_ns
+        a["util_ns"] += (max(utils) if utils else 0.0) * time_ns
+    return {
+        k: {"gb_per_s": round(a["bytes"] / a["ns"], 3), "util_pct": round(a["util_ns"] / a["ns"], 2),
+            "us": round(a["ns"] / 1e3, 3)}
+        for k, a in acc.items()
+    }  # fmt: skip
+
+
 def _split(op) -> list:
-    """An op whose kernels live in different places (a Python op running several Triton
-    kernels) is one row per kernel group the naming agent names (``named["kernels"]``:
-    symbol substring -> entry): same arguments and calls, each group's own time."""
+    """Split an op into one row per kernel group in ``named["kernels"]``."""
     named = op.framework_meta.get("named") or {}
     groups = named.get("kernels")
     if not isinstance(groups, dict) or not groups:
@@ -127,9 +152,7 @@ def _schema_args(op_name: str, nargs: int) -> list[str] | None:
 
 
 def _annotate_schemas(ops: list[ir.CapturedOp], cache: Path) -> None:
-    """Name each op's arguments from its schema. Provider ops are only registered in the
-    framework's interpreter, so the names found there are kept in ``raw/schemas.json`` and
-    a re-parse elsewhere reads them back."""
+    """Name each op's arguments from its schema, cached in ``cache`` for a re-parse elsewhere."""
     known = json.loads(cache.read_text()) if cache.is_file() else {}
     for op in ops:
         if "::" not in op.framework_op or op.framework_op.startswith("kernel::"):
@@ -146,7 +169,7 @@ def _annotate_schemas(ops: list[ir.CapturedOp], cache: Path) -> None:
 
 
 def workload_args(argv: list[str]) -> list[str]:
-    """The arguments that decide what was captured: all but where it was written to."""
+    """``argv`` without its output and naming paths."""
     out, skip = [], False
     for a in argv:
         if skip:
@@ -162,7 +185,7 @@ _NO_FIT = re.compile(
     r"OUT_OF_RESOURCES|OUT_OF_DEVICE_MEMORY|out of memory|OutOfMemory"
     r"|not enough (KV cache|memory)|KV cache is needed|No available memory for the cache",
     re.I,
-)  # what runtimes say when the model does not fit at this workload
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -190,13 +213,13 @@ def main(argv: list[str] | None = None) -> int:
 
     out = args.output.resolve()
     names = json.loads(args.names.read_text()) if args.names else None
-    for module in args.import_ops:  # providers register their ops on import
+    for module in args.import_ops:
         importlib.import_module(module)
     if args.reparse:
         capture = build(args.reparse.resolve(), out, names)
     else:
         raw_dir = out.parent / "raw"
-        for stale in raw_dir.glob("trace*"):  # an earlier capture's traces are not this one's
+        for stale in raw_dir.glob("trace*"):
             stale.unlink()
         try:
             run = adapters.get(args.framework).capture(args, raw_dir)
@@ -206,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
             line = next((ln for ln in str(exc).splitlines() if _NO_FIT.search(ln)), str(exc))
             print(f"capture: does not fit on the device at this workload: {line.strip()}",
                   file=sys.stderr, flush=True)  # fmt: skip
-            os._exit(3)  # a runtime can abort in teardown after a device OOM; exit with the reason
+            os._exit(3)  # a runtime can abort in teardown after a device OOM
         runtime = run.setdefault("runtime", {})
         runtime.update(prompt=prompt.describe(args.prompt_file), inputs="text")
         stamp = datetime.now().strftime("%Y%m%dT%H%M%S")

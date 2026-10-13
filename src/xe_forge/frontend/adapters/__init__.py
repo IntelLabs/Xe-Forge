@@ -1,12 +1,5 @@
-"""Framework adapters. Each one only runs its framework and leaves artefacts in ``raw/``.
-
-An adapter module provides::
-
-    add_arguments(parser)            # its own flags, on top of the common ones
-    capture(args, raw_dir) -> dict   # run the framework; return the run metadata
-
-and, when its artefacts are not torch.profiler traces, ``parse(raw_dir) -> TraceSummary``.
-Everything after that -- canonical workloads, ranking, the manifest -- is shared.
+"""Framework adapters: ``add_arguments(parser)``, ``capture(args, raw_dir) -> dict``, and
+optionally ``parse(raw_dir) -> TraceSummary`` when artefacts are not torch.profiler traces.
 """
 
 from __future__ import annotations

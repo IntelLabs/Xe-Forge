@@ -1,25 +1,15 @@
-"""Captured op -> what the kernel-locator is told to look for.
-
-Which repository carries an op, which kernel or library call implements it, in which
-language, and which of its arguments is the activation or the weight is the naming agent's
-answer (``frontend-name.md.j2`` -> ``names.json``): it reads the framework and the
-repositories instead of matching names against tables kept here. Each op carries its entry
-as ``framework_meta["named"]``; this module only turns it into a ``Naming``.
-
-Routes: ``kernel`` (a named kernel in a repository Xe-Forge can edit), ``library`` (a
-library primitive -- change the call, not the kernel), ``aten`` (inside PyTorch, no kernel
-repository) and ``unnamed`` (not established).
-"""
+"""Turn the naming agent's ``names.json`` entry for an op into a ``Naming``, and validate it."""
 
 from __future__ import annotations
 
+from xe_forge.frontend import formula
 from xe_forge.frontend.ir import CapturedOp, Naming
 
-_IMPL = {"kernel": "provider", "aten": "aten"}  # a library call: the library the agent names
+_IMPL = {"kernel": "provider", "aten": "aten"}
 
 
 def key(op: CapturedOp) -> str:
-    """What names.json is keyed by: the implementing op, which a patched build keeps."""
+    """The names.json key: the implementing op, stable across a patched build."""
     return op.framework_op
 
 
@@ -40,13 +30,14 @@ def name_op(op: CapturedOp) -> Naming:
             entry.get("dsl"),
             via=entry.get("via", "named by the naming agent"),
         )
-    op.impl_class = "unknown"  # an ATen op too: its kernel may be in an editable repository
+    op.impl_class = "unknown"
     return Naming("unnamed", _base(op.framework_op), via="not named (no names.json entry)")
 
 
 ROUTES = ("kernel", "library", "aten", "unnamed")
 FAMILIES = ("gemm", "attention", "mla", "indexer", "linear_attention", "ssm", "norm",
-            "activation", "moe", "rope", "cache", "sampling", "copy", "elementwise", "other")  # fmt: skip
+            "activation", "moe", "rope", "cache", "sampling", "copy", "collective", "elementwise",
+            "other")  # fmt: skip
 ROWS = ("token", "token_expert")
 
 
@@ -55,9 +46,7 @@ def _pos_int(v) -> bool:
 
 
 def validate(names, listing: dict, repos) -> list[str]:
-    """What is wrong with a naming answer, checked against the ops it was asked about; an
-    empty list means it can be used. The contract is the template's
-    (``frontend-name.md.j2``), and this is its check at the boundary."""
+    """Problems with a naming answer against the ops it was asked about; empty if usable."""
     from pathlib import Path
 
     from xe_forge.models import DSL
@@ -67,7 +56,7 @@ def validate(names, listing: dict, repos) -> list[str]:
         return ["not {'ops': {...}, 'model': {...}}"]
     out = []
 
-    def entry(where: str, e, args: dict, kernel_level: bool = False) -> None:
+    def entry(where: str, e, args: dict, dims: dict, kernel_level: bool = False) -> None:
         if not isinstance(e, dict):
             out.append(f"{where}: not an object")
             return
@@ -86,9 +75,21 @@ def validate(names, listing: dict, repos) -> list[str]:
                 out.append(f"{where}: dsl {e.get('dsl')!r} not one of {sorted(dsls)}")
         if e.get("family") is not None and e["family"] not in FAMILIES:
             out.append(f"{where}: family {e['family']!r} not one of {FAMILIES}")
-        for flag in ("paged", "args_complete"):
-            if flag in e and type(e[flag]) is not bool:
-                out.append(f"{where}: {flag} must be true or false")
+        cost = e.get("cost")
+        if cost is not None:
+            if not isinstance(cost, dict) or "bytes" not in cost:
+                out.append(f"{where}.cost: needs {{'bytes': ..., 'flops': ...}}")
+            else:
+                for what in ("bytes", "flops"):
+                    if what not in cost:
+                        continue
+                    used = formula.names(cost[what])
+                    if used is None:
+                        out.append(f"{where}.cost.{what}: not an arithmetic expression")
+                    elif used - set(dims):
+                        out.append(
+                            f"{where}.cost.{what}: {sorted(used - set(dims))} are not dims of the op"
+                        )
         if kernel_level:
             return
         if e.get("token_arg") is not None and e["token_arg"] not in args:
@@ -126,14 +127,14 @@ def validate(names, listing: dict, repos) -> list[str]:
                 out.append(f"{where}.kernels: not an object")
             else:
                 for sym, k in kernels.items():
-                    entry(f"{where}.kernels[{sym!r}]", k, args, kernel_level=True)
+                    entry(f"{where}.kernels[{sym!r}]", k, args, dims, kernel_level=True)
 
     for key, e in names["ops"].items():
         if key not in listing:
             out.append(f"{key!r}: not a key of ops.json")
             continue
         args = {a["name"]: a.get("shape") for a in listing[key].get("args", [])}
-        entry(repr(key), e, args)
+        entry(repr(key), e, args, listing[key].get("dims") or {})
     model = names.get("model", {})
     if not isinstance(model, dict):
         out.append("model: not an object")
@@ -142,3 +143,59 @@ def validate(names, listing: dict, repos) -> list[str]:
             if model.get(fact) is not None and not _pos_int(model[fact]):
                 out.append(f"model.{fact}: {model[fact]!r} is not a positive integer")
     return out
+
+
+def keep_valid(names, listing: dict, repos) -> tuple[dict | None, list[str]]:
+    """The answer minus its invalid entries, and the problems; None if not an answer."""
+    ops = names.get("ops") if isinstance(names, dict) else None
+    whole = validate({**names, "ops": {}} if isinstance(ops, dict) else names, listing, repos)
+    if whole:
+        return None, whole
+    problems = []
+    for key in list(ops):
+        wrong = validate({"ops": {key: ops[key]}}, listing, repos)
+        if wrong:
+            problems += wrong
+            del ops[key]
+    return names, problems
+
+
+def refuted(names: dict, listing: dict, calib: dict | None, noise: float) -> list[tuple]:
+    """(key, kernel group or None, evidence) per stated cost a measured call contradicts."""
+    bw = (calib or {}).get("bandwidth_gbs")
+    if not bw:
+        return []
+    peaks = {k: v for k, v in (calib.get("matmul_tflops") or {}).items() if v}
+    out = []
+
+    def check(key, sub, cost, shapes):
+        for shape in shapes:
+            us = shape["us_per_call"]
+            if sub is not None:
+                us = sum(t for s, t in shape.get("kernels_per_call", {}).items() if sub in s)
+            moved = formula.evaluate(cost.get("bytes", 0), shape["dims"])
+            flops = formula.evaluate(cost.get("flops", 0), shape["dims"])
+            peak = peaks.get(shape.get("dtype")) or max(peaks.values(), default=0)
+            if moved is None or flops is None:
+                continue
+            bound = max(moved / (bw * 1e3), flops / (peak * 1e6) if peak else 0.0)
+            if us and bound > us * (1 + noise):
+                dims = ", ".join(f"{k}={v}" for k, v in list(shape["dims"].items())[:4])
+                out.append((key, sub, f"bound {bound:.0f} us > measured {us:.0f} us at {dims}"))
+                return
+
+    for key, e in (names.get("ops") or {}).items():
+        shapes = (listing.get(key) or {}).get("shapes") or []
+        if isinstance(e, dict) and isinstance(e.get("cost"), dict):
+            check(key, None, e["cost"], shapes)
+        for sub, k in (e.get("kernels") or {}).items() if isinstance(e, dict) else ():
+            if isinstance(k, dict) and isinstance(k.get("cost"), dict):
+                check(key, sub, k["cost"], shapes)
+    return out
+
+
+def drop_costs(names: dict, which: list[tuple]) -> None:
+    """Remove refuted costs in place."""
+    for key, sub, _ in which:
+        entry = names["ops"][key]
+        (entry["kernels"][sub] if sub is not None else entry).pop("cost", None)

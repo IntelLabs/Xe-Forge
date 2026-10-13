@@ -2,8 +2,9 @@ Name the ops a model ran, so each can be optimized where it lives. The model is 
 run by {{ framework }}; its config is config.json here. ops.json lists the ops that took
 {{ coverage }} of device time, keyed by op: the framework op, the op that owns it, its share
 and calls, every kernel it launched with their device time, its arguments (name, shape and
-dtype, or value), and its call site. The kernel repositories on this machine are in
-{{ repos }}.
+dtype, or value), its dims (the names a cost formula uses), every captured shape with its
+measured time per call ("shapes"), and its call site. The kernel
+repositories on this machine are in {{ repos }}.
 
 For each key, find where the op is implemented -- the registration of its namespace, the
 kernels it launches, the source behind them -- by reading the framework and the
@@ -25,18 +26,27 @@ repositories, not by guessing from names. Then write names.json:
    "library": for a library call, which library (e.g. "onednn", "onemkl");
    "via": one line: how you established it (file:line);
    "family": one of {{ families | join(", ") }};
-   "paged": true when an argument is a paged or slot-indexed pool (a KV cache, a block or
-            page table, an SSM or conv state pool) whose touched part depends on the
-            context, not its shape;
-   "args_complete": false when the kernels read state the arguments do not show (weights,
-            caches or states fetched by a layer name);
    "token_arg", "token_axis": the argument and axis that hold the tokens, when that is not
             the first tensor's first axis;
+   "cost": only where you see a kernel may do more work than it needs -- read more than
+           its inputs (all experts instead of the routed ones), re-read what an unfused
+           neighbour wrote, recompute -- because every kernel's achieved speed is measured
+           anyway and that cannot see wasted work. Then {"bytes": "<expression>", "flops":
+           "<expression>"}: a lower bound on one call, the least any implementation must
+           move and compute, over the op's "dims" in ops.json, with numbers from the config
+           and the kernel; only + - * / // ** and parentheses. It must hold at every shape
+           under "shapes" in ops.json: on this card
+           {%- if calibration %} ({{ calibration.bandwidth_gbs }} GB/s, matmul TFLOP/s
+           {{ calibration.matmul_tflops }}){% endif %}, bytes / bandwidth and flops / peak
+           may not exceed that shape's us_per_call (a kernel group: its kernels_per_call); a
+           cost that does is dropped;
    "kernels": only when the op's kernels live in different places (a Python op launching
             several kernels): {"<kernel symbol substring>": {route, name, repo, dsl, via,
-            family}} -- each group of kernels is then measured and optimized on its own;
-   "gemm": only for a matrix multiply -- which argument is what, from the kernel's source;
-           a list when the op multiplies by more than one weight:
+            family, cost}} -- each group of kernels is then measured, bounded and optimized
+            on its own;
+   "gemm": only for a matrix multiply whose weight is one of its arguments, and not where
+           ops.json already gives the op's "gemm" -- which argument is what, from the
+           kernel's source; a list when the op multiplies by more than one weight:
      {"activation": "<arg>", "weight": "<arg>",
       "act_per_stored": <logical K elements per stored activation element, 1 unless packed>,
       "n_axis": <index of N in the weight's shape>,
@@ -53,4 +63,5 @@ repositories, not by guessing from names. Then write names.json:
 
 Use the keys exactly as ops.json gives them, and argument names exactly as it lists them.
 Before writing, check each name greps in its repository and each argument you name is one
-the op has. An op you cannot place is "unnamed" with the reason, never a guess.
+the op has. An op you cannot place is "unnamed" with the reason, never a guess; an entry that
+fails these checks is dropped and its op left unnamed.

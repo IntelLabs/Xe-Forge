@@ -383,8 +383,6 @@ def _load_config(args) -> Config:
 def main():
     sys.stdout.reconfigure(line_buffering=True)
 
-    # The framework frontend (capture / analyze / optimize / run) has its own parser; the
-    # flat single-kernel interface below is unchanged.
     from xe_forge.frontend.cli import COMMANDS
 
     if len(sys.argv) > 1 and sys.argv[1] in COMMANDS:

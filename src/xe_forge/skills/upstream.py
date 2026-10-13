@@ -131,15 +131,7 @@ STACK_TIMEOUT = int(
 
 
 def _stack_check(clones: list[Path], kernel: str, kind: str) -> tuple[bool, str] | None:
-    """The host's verdict on this port inside its stack, or None when none is configured.
-
-    One check per port, over all of its clones together (``{clone}`` is the kernel's,
-    ``{clones}`` every changed one, ``os.pathsep``-joined): a port that changes an interface
-    and its callers ships as a whole and is tested as one. The command builds the changes
-    into the stack -- from a copy, never inside a clone, whose tree is the patch -- and tests
-    them there, including the repository's own tests for the op. Its output goes to
-    ``output/``; it gets no LLM credentials.
-    """
+    """(passed, reason) of the host stack check over all clones of a port; None if unset."""
     from xe_forge.config import get_config
     from xe_forge.external import ExternalCommandError, render_command
 
@@ -207,12 +199,12 @@ def _patch(args) -> int:
     for _, (block, _) in ported:
         lines += block
     stack_ok = True
-    names = "+".join(c.name for c, _ in ported)  # one verdict for the port as a whole
+    names = "+".join(c.name for c, _ in ported)
     verdict, _, evidence = getattr(args, "stack", "").strip().partition(" ")
-    if verdict:  # the session's own check in the stack
+    if verdict:
         stack_ok &= verdict.upper() == "PASS"
         lines.append(f"stack check {names}: {verdict.upper()} {evidence}".rstrip())
-    built = all(ok for _, (_, ok) in ported)  # a port that does not compile is not checked
+    built = all(ok for _, (_, ok) in ported)
     checked = _stack_check([c for c, _ in ported], args.kernel_name, args.kind) if built else None
     from xe_forge.config import get_config
 

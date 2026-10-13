@@ -1,16 +1,5 @@
-"""Read a torch.profiler chrome trace into ``CapturedOp`` rows.
-
-One parser for every PyTorch framework (vLLM, SGLang, a bare module): they all export the
-same trace. A device kernel names the host op that launched it through ``External id``;
-that op is charged to its *outermost* enclosing dispatched op, so an op whose work happens
-in nested calls -- how serving stacks register their heaviest ops -- collects its
-children's time and the charges never overlap (the rule FlashInfer-Bench's
-``device/attribution.py`` applies to in-memory profiler events). Host ops nest by
-``ts``/``dur`` on their thread; ``nn.Module`` frames (``with_stack=True``) enclosing the
-owner give the call site, with instance numbers dropped so every layer shares one.
-
-Requires the trace to have been recorded with ``record_shapes=True``; without it every
-row has an empty signature and dedup collapses all calls of an op into one.
+"""Read torch.profiler chrome traces into ``CapturedOp`` rows, charging each kernel to its
+outermost dispatched op. Needs ``record_shapes=True``, else every call of an op collapses.
 """
 
 from __future__ import annotations
@@ -25,9 +14,8 @@ from typing import Any
 
 from xe_forge.frontend.ir import CapturedOp, TensorArg
 
-# Runtime-API frames interleaved with ops; never owners (FIB attribution._NOT_OPS).
 _NOT_OPS = ("cudaLaunch", "cudaMemcpy", "Runtime Triggered")
-_RUNTIME_NS = {"ze", "ur", "cl"}  # runtime namespaces, matched whole: "clip::" is an op
+_RUNTIME_NS = {"ze", "ur", "cl"}  # matched whole: "clip::" is an op
 _DEVICE_CATS = ("kernel", "gpu_memcpy", "gpu_memset")
 _MODULE_PREFIX = "nn.Module: "
 
@@ -46,8 +34,8 @@ _DTYPES = {
     "c10::Float8_e5m2": "float8_e5m2",
     "c10::Float8_e4m3fnuz": "float8_e4m3fnuz",
     "c10::Float8_e5m2fnuz": "float8_e5m2fnuz",
-    "c10::Float8_e8m0fnu": "float8_e8m0fnu",  # MX block scales
-    "c10::Float4_e2m1fn_x2": "float4_e2m1fn_x2",  # two FP4 values per byte (MXFP4)
+    "c10::Float8_e8m0fnu": "float8_e8m0fnu",
+    "c10::Float4_e2m1fn_x2": "float4_e2m1fn_x2",
     "c10::complex<float>": "complex64",
 }
 
@@ -91,7 +79,6 @@ def load_events(path: str | Path) -> list[dict]:
 
 
 def _module_name(name: str) -> str:
-    # "nn.Module: <Class>_3" -> "<Class>"
     return re.sub(r"_\d+$", "", name[len(_MODULE_PREFIX) :])
 
 
@@ -175,9 +162,7 @@ def _parse_args(args: dict) -> tuple[list[TensorArg | None], list[Any]]:
     for i, typ in enumerate(types):
         value = concrete[i] if i < len(concrete) else ""
         shape = dims[i] if i < len(dims) else []
-        # A concrete value means a scalar, whatever its type name ("double" is both). A
-        # shaped argument of a type not mapped here is still a tensor: its bytes are unknown
-        # (so is any bound over them), but it is not lost.
+        # A concrete value is a scalar even when its type name ("double") is a dtype.
         shaped = isinstance(shape, list) and all(isinstance(d, int) for d in shape)
         if value == "" and shaped and (typ in _DTYPES or (typ and shape)):
             stride = strides[i] if i < len(strides) and isinstance(strides[i], list) else None
@@ -197,9 +182,7 @@ def _signature(tensors, scalars) -> str:
 
 
 def _launch_ids(events: list[dict]) -> dict:
-    """``{correlation: External id}`` from the runtime launch events (``cudaLaunchKernel``,
-    ``urEnqueue*``, ...): a device event that lost its ``External id`` still has the
-    ``correlation`` of the launch that does -- Kineto's own link from kernel to op."""
+    """``{correlation: External id}`` from launch events, for kernels missing an External id."""
     out = {}
     for e in events:
         args = e.get("args") or {}
@@ -230,8 +213,7 @@ def parse_events(events: list[dict]) -> TraceSummary:
         node = nodes.get(args.get("External id", launch.get(args.get("correlation"))))
         owner = _owner(node) if node is not None else None
         if owner is None:
-            # Launched outside any dispatched op (e.g. a Triton launcher called directly):
-            # kept as its own row, named by the kernel, with no signature to read.
+            # Launched outside any dispatched op (e.g. a direct Triton launch).
             row = unowned.setdefault(
                 kname,
                 CapturedOp(id="", framework_op=f"kernel::{kname}", args=[], call_site=""),
@@ -241,13 +223,10 @@ def parse_events(events: list[dict]) -> TraceSummary:
             row.kernel_symbols[kname] = row.kernel_symbols.get(kname, 0.0) + us
             continue
         attributed += us
-        # Rows are keyed on the op that implements the work: the owner, or -- when the
-        # owner is registered in Python -- the provider op inside it that launched the
-        # kernel, with that op's own arguments. Each kernel still lands in exactly one row.
+        # Key on the implementing op: a Python-registered owner's inner provider op, if any.
         impl = _launcher(node, owner) or owner
         if impl is owner and not owner.name.startswith("aten::"):
-            # An owner registered in Python runs ATen ops too (an absorbed bmm, a shared
-            # expert's linear): each is its own row, under the owner, not part of the owner's.
+            # A Python-registered owner's inner ATen ops get their own rows.
             impl = _below(node, owner) or owner
         tensors, scalars = _parse_args(impl.args)
         site = "/".join(owner.modules)
@@ -286,9 +265,7 @@ def parse_trace(path: str | Path) -> TraceSummary:
 
 
 def parse_traces(paths: list[Path]) -> TraceSummary:
-    """Several traces (one per profiled phase, say) as one summary. Each is parsed on its
-    own -- ``External id`` restarts with every profiler session -- and rows that agree on
-    (op, signature, call site) are summed."""
+    """Several traces merged into one summary; each is parsed alone since External ids restart."""
     merged: dict[tuple, CapturedOp] = {}
     total = attributed = 0.0
     launches = 0

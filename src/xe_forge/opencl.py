@@ -1,17 +1,7 @@
-"""Run an OpenCL C kernel on torch's XPU queue, for ``--dsl opencl`` trial modules.
+"""Run an OpenCL C kernel on torch's XPU queue: ``load(src, name)(gws, lws, *args)``.
 
-    from xe_forge.opencl import load
-    k = load(cl_source, "my_kernel", defines={"INPUT0_TYPE": "half"})
-    k((global_size,), (local_size,), out, x, n)       # tensors -> device pointers, int -> int32
-
-The source is compiled ahead of time -- oneAPI ``clang`` (OpenCL C -> LLVM bitcode) then
-``llvm-spirv`` -- and the SPIR-V is loaded through SYCL on torch's current queue, so the
-kernel runs in the same stream as every other op: torch events time it and the output is
-ordinary tensors. (Runtime OpenCL compilation would need ``ocloc``; SPIR-V goes to the
-driver directly.) Compiled SPIR-V is cached by content under ``~/.cache/xe_forge/opencl``.
-
-Arguments: a tensor passes its device pointer (``__global`` buffers); a Python ``int`` is
-an ``int``; a ``float`` is a ``float``. Wrap a 64-bit integer as ``long_(v)``.
+Compiled ahead of time to SPIR-V and cached. A tensor passes its device pointer, ``int`` is
+int32, ``float`` is float, ``long_(v)`` is int64.
 """
 
 from __future__ import annotations
@@ -27,12 +17,9 @@ CACHE = Path(
     os.environ.get("XE_FORGE_OPENCL_CACHE")
     or Path(os.environ.get("XE_FORGE_CACHE", Path.home() / ".cache/xe_forge")) / "opencl"
 )
-# What turns OpenCL C into bitcode llvm-spirv takes: the pipeline itself, not a choice.
 _PIPELINE = ["-target", "spir64", "-Xclang", "-finclude-default-header", "-emit-llvm", "-c"]
-# Choices, with per-run defaults: clang `options` go after these (the last flag wins);
-# `spirv_options` replace the llvm-spirv default, which drops an extension the GPU loader
-# here rejects. Everything that shapes the module is in the cache key.
 OPTIONS = os.environ.get("XE_FORGE_OPENCL_OPTIONS", "-cl-std=CL3.0 -O2")
+# The llvm-spirv default emits an extension the GPU loader rejects.
 SPIRV_OPTIONS = os.environ.get(
     "XE_FORGE_SPIRV_OPTIONS", "--spirv-ext=+all,-SPV_KHR_untyped_pointers"
 )
@@ -166,7 +153,7 @@ class Kernel:
 
 
 def runtime():
-    """The SYCL side (built once per process): SPIR-V -> kernel bundle, and launch."""
+    """The SYCL extension that builds SPIR-V bundles and launches them, built once."""
     global _runtime
     if _runtime is None:
         from torch.utils.cpp_extension import load_inline

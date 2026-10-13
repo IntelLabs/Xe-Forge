@@ -1,29 +1,6 @@
-"""Which captured workloads are worth an Xe-Forge run, decided by arithmetic.
+"""Rank captured workloads by recoverable share of device time and gate them into entries.
 
-Per workload, over the profiled window:
-
-    S = device time / total device time          (share)
-    G = recoverable time / total device time     (end-to-end ceiling)
-
-Without a calibrated bound for the part, nothing says how far below its current time a
-workload could go, so G is taken as S and the row says ``bound: unknown``; the roofline
-gate reports ``unknown`` rather than passing. That ranks by share alone -- the right order
-when all that is known is where the time goes, and why a 5 us kernel called 100,000 times
-outranks a 300 us kernel called twice.
-
-Gates, in order, each one line in gates.log::
-
-    GATE <workload_id> <gate> PASS|REJECT|UNKNOWN <evidence>
-
-``routable``   naming found a kernel in a repository Xe-Forge can edit
-``buildable``  its DSL is one Xe-Forge writes (``models.DSL``)
-``shaped``     the trace recorded the call's argument shapes (a spec needs dims)
-``bounded``    measured below its roofline bound (unknown until calibrated)
-``worth``      G >= --min-gain
-``top``        among the --top kernels by summed G
-
-Workloads are then grouped by kernel: one manifest entry per (repository, name), whose
-spec carries the variants of every workload that kernel served.
+Gates (routable, buildable, shaped, bounded, worth, top) each write one line to gates.log.
 """
 
 from __future__ import annotations
@@ -31,8 +8,9 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 
+from xe_forge.frontend import formula
 from xe_forge.frontend.canonical import resolve_dims
-from xe_forge.frontend.dtypes import storage_bytes, tensor_bytes
+from xe_forge.frontend.dtypes import storage_bytes
 from xe_forge.frontend.ir import CaptureRun, Workload
 from xe_forge.models import DSL
 
@@ -53,7 +31,7 @@ class Decision:
     mean_us: float
     gates: list[tuple[str, str, str]] = field(default_factory=list)
     reason: str = ""
-    eff: float | None = None  # fraction of its roofline bound, when calibrated
+    eff: float | None = None  # fraction of its bound
 
 
 @dataclass
@@ -68,7 +46,7 @@ class Entry:
     enabled: bool = False
     priority: float = 0.0
     reason: str = ""
-    target: str = "kernel"  # or "library": tune how the library is called, not a kernel
+    target: str = "kernel"  # or "library"
 
 
 @dataclass
@@ -101,18 +79,12 @@ class Analysis:
         }
 
 
-# At or above this fraction of its roofline bound a GEMM has nothing left worth an agent run.
-AT_ROOFLINE = 0.8  # default of --at-roofline
-NOISE = 0.1  # a bound this far above its measurement is noise; further is an error
+AT_ROOFLINE = 0.8
+NOISE = 0.1  # a bound this far above its measurement is timer noise; further is an error
 
 
 def experts_touched(experts: int, rows: int, topk: int | None) -> float:
-    """Expected distinct experts a grouped GEMM reads, under uniform routing.
-
-    ``rows`` = tokens x top-k, so tokens B = rows / k and E_eff = E * (1 - (1 - k/E)^B): about
-    rows when rows << E, all E as rows grow. Skewed routing touches fewer; the per-point
-    clamp (a bound never above what was measured) keeps that from inventing headroom.
-    Without top-k, k = 1 (rows routed independently), which slightly overestimates."""
+    """Expected distinct experts a grouped GEMM reads under uniform routing."""
     k = topk or 1
     if experts <= 1 or rows <= 0:
         return float(max(1, experts))
@@ -128,17 +100,11 @@ def _points(w: Workload) -> list[tuple[int | None, int, float]]:
 
 
 def _against(w: Workload, per_call_bound) -> tuple[float, float] | None:
-    """Sum a per-call bound over the captured points into (recoverable us, efficiency).
-
-    A point whose bound exceeds what was measured by up to ``NOISE`` is capped at the
-    measurement (timer noise): no headroom rather than invented headroom. A bound built on
-    an estimate (uniform routing) comes as (expected, guaranteed); where the measurement
-    beats the estimate, the guaranteed one is used. Beyond that the bound is impossible --
-    an input to it is wrong -- and the bound is unknown, never "at roofline"."""
+    """(recoverable us, efficiency) of a per-call bound; None if it exceeds a measurement."""
     recoverable = reached_total = 0.0
     for value, calls, us in _points(w):
         bound = per_call_bound(value)
-        if isinstance(bound, tuple):  # (expected, guaranteed): an estimate may be beaten
+        if isinstance(bound, tuple):  # (expected, guaranteed)
             expected, sure = bound
             bound = expected if calls * expected <= us * (1 + NOISE) else sure
         if bound is None or calls * bound > us * (1 + NOISE):
@@ -152,12 +118,7 @@ def _against(w: Workload, per_call_bound) -> tuple[float, float] | None:
 def gemm_bound(
     w: Workload, calib: dict | None, ctx: dict | None = None
 ) -> tuple[float, float] | None:
-    """Per token count M: max(bytes / bandwidth, 2*M*N*K / peak[compute dtype]), with
-    bytes = M*K*a + E_eff*K*N*w + M*N*o, summed over the weights the op multiplies by. ``w``/``a`` are bytes per element measured from the
-    captured tensors (scales and packing included); E_eff is the experts a grouped call
-    touches -- measured (``active_experts``) when an adapter supplies it, else the uniform-
-    routing estimate over the kernel's local E, else the model's experts / expert-parallel
-    size. A grouped call with no E at all has no bound: never E=1."""
+    """(recoverable us, efficiency) against the GEMM roofline; None if unbounded."""
     ctx = ctx or {}
     if not calib or not {"M", "N", "K"} <= set(w.dims) or "var" in (w.dims["N"], w.dims["K"]):
         return None
@@ -168,17 +129,14 @@ def gemm_bound(
     if not bw or not peaks:
         return None
     topk = ctx.get("topk")
-    # One part per weight the op multiplies by (the agent's gemm list); usually one.
     parts = w.attrs.get("parts") or [
         {**w.attrs, "N": w.dims["N"], "K": w.dims["K"], "E": w.dims.get("E")}
     ]
 
     def part_time(p: dict, m, sure: bool = False) -> float | None:
         if "w_bytes" not in p:
-            return None  # weight bytes unmeasured: no agent answer, or a weight the trace hides
+            return None
         a_b, w_b, o_b = p.get("a_bytes", size), p["w_bytes"], p.get("o_bytes", size)
-        # The compute dtype's measured peak; a dtype the card has no measured peak for runs
-        # at most at the fastest measured one -- still a lower bound on time.
         peak = peaks.get(p.get("compute", dtype)) or max(peaks.values())
         rows, e_eff = m, 1
         if p.get("grouped"):
@@ -186,11 +144,10 @@ def gemm_bound(
             if e is None and ctx.get("experts"):
                 e = ctx["experts"] / (ctx.get("ep") or 1)
             if e is None:
-                return None  # never E=1
-            # The agent says whether the call's rows are tokens or token x expert rows.
+                return None  # never assume E=1
             rows = m * (topk or 1) if p.get("rows") == "token" else m
             e_eff = w.attrs.get("active_experts") or (
-                # guaranteed: every token touches top-k experts, so at least that many
+                # guaranteed: at least top-k experts
                 min(e, topk or 1) if sure else experts_touched(e, rows, topk)
             )
         n, k = p["N"], p["K"]
@@ -211,48 +168,84 @@ def gemm_bound(
     return _against(w, per_call)
 
 
-def streaming_bound(
+def cost_bound(
     w: Workload, calib: dict | None, ctx: dict | None = None
 ) -> tuple[float, float] | None:
-    """Every tensor argument is read or written at least once: per token count, the bytes of
-    all of them over the card's bandwidth -- a lower bound for any op, family unknown.
-
-    Refused (None) for ops the naming agent marked ``paged`` -- a KV cache, a block or page
-    table: the part they touch depends on the context, not on the shape, so counting the
-    buffer whole overstates the bound and skipping it understates it."""
+    """(recoverable us, efficiency) against the naming agent's stated per-call cost."""
+    cost = w.attrs.get("cost") or {}
     bw = (calib or {}).get("bandwidth_gbs")
-    if not bw or not w.tensors or w.attrs.get("paged") or w.attrs.get("args_incomplete"):
+    if not bw or "bytes" not in cost:
         return None
-    if not any(f"{label}_D0" in w.dims for label, _ in w.tensors):
-        return None  # dims named by role (a GEMM's M/N/K), not per tensor: no shapes to sum
+    peaks = {k: v for k, v in (calib.get("matmul_tflops") or {}).items() if v}
+    dtype = next((d for d in w.dtypes if d.startswith(("bfloat", "float"))), None)
+    peak = peaks.get(dtype) or max(peaks.values(), default=None)
 
     def per_call(value):
         dims = resolve_dims(w, value)
-        total = 0
-        for label, dtype in w.tensors:
-            shape = [dims[f"{label}_D{j}"] for j in range(8) if f"{label}_D{j}" in dims]
-            size = tensor_bytes(shape, dtype)
-            if size is None:
-                return None
-            total += size
-        return total / (bw * 1e3)
+        moved = formula.evaluate(cost["bytes"], dims)
+        if moved is None:
+            return None
+        flops = formula.evaluate(cost["flops"], dims) if cost.get("flops") else 0.0
+        if flops is None or (flops and not peak):
+            return None
+        return max(moved / (bw * 1e3), (flops / (peak * 1e6)) if flops else 0.0)
 
     return _against(w, per_call)
 
 
-# family -> bound. A family without its own bounder gets the streaming bound; attention,
-# MLA, linear attention, SSM and collectives each become one entry here when they get one.
+def measured_sol(
+    w: Workload, calib: dict | None, ctx: dict | None = None
+) -> tuple[float, float] | None:
+    """(recoverable us, efficiency) from the run's hardware counters."""
+    parts = _sol_parts(w, calib, ctx)
+    if parts is None:
+        return None
+    eff = parts[0]
+    return w.device_us * (1 - eff), eff
+
+
+def _measured(measured: dict, name: str) -> dict | None:
+    """A kernel's counters; the trace may cut long names the counters keep whole."""
+    if name in measured:
+        return measured[name]
+    hits = [v for k, v in measured.items() if k.startswith(name)]
+    ns = sum(v["us"] for v in hits)
+    if not ns:
+        return None
+    return {f: sum(v[f] * v["us"] for v in hits) / ns for f in ("gb_per_s", "util_pct")}
+
+
+def _sol_parts(w: Workload, calib: dict | None, ctx: dict | None) -> tuple | None:
+    """(SOL, memory SOL, compute SOL); None when most of the time is unmeasured."""
+    measured = (ctx or {}).get("counters") or {}
+    bw = (calib or {}).get("bandwidth_gbs")
+    kernels = w.framework_meta.get("kernels") or {}
+    weight = sol = mem = comp = 0.0
+    for name, us in kernels.items():
+        k = _measured(measured, name)
+        if not k or not us:
+            continue
+        memory, compute = (k["gb_per_s"] / bw if bw else 0.0), k["util_pct"] / 100
+        sol += min(1.0, max(memory, compute)) * us
+        mem, comp, weight = mem + memory * us, comp + compute * us, weight + us
+    if not weight or weight < 0.5 * sum(kernels.values()):
+        return None
+    return sol / weight, mem / weight, comp / weight
+
+
+# A stated cost takes precedence over these (see ``bound``).
 BOUNDERS = {"gemm": gemm_bound}
 
 
 def bound(w: Workload, calib: dict | None, ctx: dict | None = None) -> tuple[float, float] | None:
-    """The family's bound; failing that, the streaming bound -- except for a grouped call,
-    whose unknown expert count must stay unknown (streaming would count every expert)."""
-    bounder = BOUNDERS.get(w.family, streaming_bound)
-    result = bounder(w, calib, ctx)
-    if result is None and bounder is not streaming_bound and not w.attrs.get("grouped"):
-        result = streaming_bound(w, calib, ctx)
-    return result
+    """(recoverable us, efficiency) of the stricter known bound; None if none."""
+    if w.attrs.get("cost"):
+        theory = cost_bound(w, calib, ctx)
+    else:
+        bounder = BOUNDERS.get(w.family)
+        theory = bounder(w, calib, ctx) if bounder else None
+    known = [b for b in (theory, measured_sol(w, calib, ctx)) if b is not None]
+    return min(known, key=lambda b: b[1]) if known else None
 
 
 def _decide(
@@ -266,7 +259,7 @@ def _decide(
         workload_id=w.workload_id,
         enabled=False,
         share=w.share,
-        gain=w.share,  # unbounded: the ceiling is the whole share
+        gain=w.share,
         calls=w.calls,
         mean_us=round(w.device_us / w.calls, 3) if w.calls else 0.0,
     )
@@ -297,12 +290,20 @@ def _decide(
     d.gates.append(("shaped", "PASS", f"{len(w.dims)} dims"))
     if bounded is None:
         why = (
-            "no bound for this op (paged buffers or unknown shapes)" if calib else "no calibration"
+            "no bound: no counters for its kernels and no GEMM or stated cost"
+            if calib
+            else "no calibration"
         )
         d.gates.append(("bounded", "UNKNOWN", f"{why}: ceiling taken as the full share"))
     else:
+        parts = _sol_parts(w, calib, ctx)
+        sol = f"; measured memory {parts[1]:.0%}, compute {parts[2]:.0%} of peak" if parts else ""
         d.gates.append(
-            ("bounded", "PASS", f"eff {d.eff:.2f} of its bound; recoverable {bounded[0]:.0f} us")
+            (
+                "bounded",
+                "PASS",
+                f"eff {d.eff:.2f} of its bound; recoverable {bounded[0]:.0f} us{sol}",
+            )
         )
     if d.gain < min_gain:
         d.gates.append(("worth", "REJECT", f"G={d.gain:.4%} < {min_gain:.4%}"))
@@ -313,6 +314,14 @@ def _decide(
     return d
 
 
+def _counted(workloads: list[Workload], measured: dict) -> float:
+    """% of device time whose kernels have counters."""
+    times = [(us, _measured(measured, k) is not None)
+             for w in workloads for k, us in (w.framework_meta.get("kernels") or {}).items()]  # fmt: skip
+    total = sum(us for us, _ in times)
+    return round(100 * sum(us for us, hit in times if hit) / total, 1) if total else 0.0
+
+
 def analyze(
     capture: CaptureRun,
     top: int = 3,
@@ -320,8 +329,9 @@ def analyze(
     calibration: dict | None = None,
     at_roofline: float = AT_ROOFLINE,
 ) -> Analysis:
-    facts = capture.run.get("model_facts") or {}  # the naming agent's: top-k, experts
+    facts = capture.run.get("model_facts") or {}
     ctx = {
+        "counters": capture.run.get("counters") or {},
         "topk": facts.get("topk"),
         "experts": facts.get("experts"),
         "ep": (capture.run.get("runtime") or {}).get("ep"),
@@ -339,8 +349,7 @@ def analyze(
     entries = []
     for (route, repo, name), ws in groups.items():
         ds = [decisions[w.workload_id] for w in ws]
-        # Worth is the kernel's, not one shape's: a kernel whose time is spread over many
-        # small workloads passes when they add up.
+        # Worth is per kernel: many small workloads pass when they add up.
         small = [d for d in ds if d.gates and d.gates[-1][:2] == ("worth", "REJECT")]
         total = sum(d.gain for d in ds if d.enabled or d in small)
         if small and total >= min_gain:
@@ -390,6 +399,7 @@ def analyze(
             "top": top,
             "min_gain": min_gain,
             "bound": "calibrated" if calibration else "unknown (no calibration)",
+            "counters_pct": _counted(capture.workloads, ctx["counters"]),
         },
     )
 
@@ -413,8 +423,10 @@ def report(analysis: Analysis, capture: CaptureRun) -> str:
         f"({r.get('attributed_pct')}% attributed to an op).",
         "",
         (
-            "Ceilings are bounded by the calibrated card (GEMMs: bandwidth and matmul peak; other "
-            "ops: bytes moved); an op with no bound takes its whole share."
+            "Ceilings are bounded by the calibrated card: the stricter of each kernel's measured "
+            "speed-of-light (hardware counters, covering "
+            f"{analysis.options.get('counters_pct') or 0}% of device time), a GEMM's roofline "
+            "and a cost the naming agent stated; an op with no bound takes its whole share."
             if analysis.options.get("bound") == "calibrated"
             else "Ceilings are unbounded (no calibration): each workload's ceiling is its whole share."
         )

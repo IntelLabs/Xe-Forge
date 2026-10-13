@@ -109,8 +109,8 @@ rebuilt.
 | framework | status | mechanism | framework-specific code |
 |---|---|---|---|
 | `torch` | done | profile any `module:factory` callable | ~60 lines; also the shared profiler region |
-| `vllm` | done | in-process `LLM` (`VLLM_ENABLE_V1_MULTIPROCESSING=0`, `enforce_eager`, TP 1); one warm-up request, then one profiled `generate` of `--batch` synthetic prompts of `--input-len` tokens and `--output-len` decode steps | ~100 lines |
-| `sglang` | done | runs SGLang's own `python -m sglang.benchmark.one_batch --profile --profile-record-shapes --profile-activities CPU XPU` (in-process `ModelRunner`; `--attention-backend intel_xpu --page-size 64 --disable-cuda-graph`, TP 1), one process per phase -- on XPU Kineto cannot open a second profiling session in a process -- and every decode step profiled; the two exported traces are parsed and merged. Depends on SGLang's command line, not its internals | ~90 lines |
+| `vllm` | done | in-process `LLM` (`VLLM_ENABLE_V1_MULTIPROCESSING=0`, `enforce_eager`) at TP 1; at `--tp N`, vLLM's own profiler in every worker writes one trace per rank -- rank 0's is analyzed, every rank's total kept in `run.ranks`; one warm-up request, then one profiled `generate` of `--batch` synthetic prompts of `--input-len` tokens and `--output-len` decode steps | ~100 lines |
+| `sglang` | done | runs SGLang's own `python -m sglang.benchmark.one_batch --profile --profile-record-shapes --profile-activities CPU XPU` (in-process `ModelRunner`; `--attention-backend intel_xpu --page-size 64 --disable-cuda-graph`, `--tp` passed as `--tp-size`, rank 0 profiled), one process per phase -- on XPU Kineto cannot open a second profiling session in a process -- and every decode step profiled; the two exported traces are parsed and merged. Depends on SGLang's command line, not its internals | ~90 lines |
 | `openvino` | done | optimum-intel `OVModelForCausalLM` on the exported IR, compiled with `PERF_COUNT`. The GPU plugin's counters are a node's mean over a run count the API does not expose, per compiled graph, so they are never taken apart across steps: a reference `generate` records the prefill infer and one decode infer (inputs, and variable states before each), and each phase is replayed `--phase-runs` times on a freshly loaded model, the first, cold run excluded. The runtime model gives port shapes and, where profiling says `undef`, `primitiveType`; which source each implementation is, is the naming agent's to say | ~200 lines |
 | `llamacpp` | planned | `llama-eval-callback` for the graph (op, tensor, ggml type, shape), each distinct op timed by `test-backend-ops perf`; GGUF metadata via `gguf` | `parse()` + perf runner + tables |
 | `fib` | planned | import FlashInfer-Bench `discovered.json` | `parse()` |
@@ -351,11 +351,28 @@ skipped.
   measured `active_experts` overrides the uniform-routing estimate. Each point's bound is
   capped at its measured time, so a violated assumption shows no headroom rather than
   invented headroom.
-- **A bound registry:** `gemm` gets the roofline. Every other op gets the streaming bound
-  (all its tensors read or written once, over bandwidth), except ops the agent marked
-  `paged` (KV cache, block or page tables), which stay unknown until a family bounder
-  (attention, MLA, linear attention, SSM, collective) is added as one entry. Ranking uses
-  recoverable time, so an op already streaming at its bandwidth is no longer offered.
+- **Every kernel's speed-of-light is measured.** `xe-forge run --counters` repeats the
+  capture under unitrace's ComputeBasic sampling (any framework, child processes and TP
+  workers included). Per kernel it records achieved DRAM bandwidth and how busy the busiest
+  execution pipe was. A workload's measured efficiency is the larger of memory SOL (achieved
+  over calibrated bandwidth) and compute SOL, time-weighted over its own kernels -- the
+  speed-of-light measure kernel-optimization agents use (KernelAgent, KernelOPT, MANTIS).
+  It needs no formula and no family, so a paged-attention kernel, whose real work depends
+  on values the shapes don't show, is bounded like any other.
+- **The stricter of what is known.** Measured SOL cannot see wasted work: a kernel moving
+  more than it needs at full bandwidth looks done. So where a theoretical bound exists --
+  a GEMM's roofline from its measured tensor bytes, or a cost formula the naming agent
+  wrote because it saw possible waste -- the efficiency is the lower of the two
+  (KernelPro's rule). A stated cost is checked against every measured shape when the
+  answer comes in; one above a measurement is dropped with the evidence. A kernel is
+  unknown only when it has neither counters nor a theoretical bound.
+- **Limits.** Collectives are bound by the link between cards and tiny kernels by launch
+  latency: both measure low SOL without rewrite headroom. Counters are per kernel name over
+  all its launches; very short kernels may go unsampled.
+- **OpenVINO matmul weights** are internal to the compiled model; their bytes are measured
+  from the original graph instead -- the constants feeding each node (weight, scales, zero
+  points, by structure) -- and attached to the compiled FullyConnected through
+  `originalLayersNames`.
 
 ## Mergeable patches: the stack check
 

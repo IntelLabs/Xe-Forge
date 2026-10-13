@@ -1,9 +1,5 @@
-"""Profile any Python callable, and the profiler region every PyTorch adapter shares.
-
-    xe-forge capture --framework torch --target my_pkg.bench:make -o capture.json
-
-``make()`` returns a zero-argument callable; it is called once to warm up and then
-``--iters`` times under the profiler.
+"""Profile any Python callable (``--target module:factory``), plus the profiler region every
+PyTorch adapter shares.
 """
 
 from __future__ import annotations

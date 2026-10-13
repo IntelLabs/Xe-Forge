@@ -1,20 +1,4 @@
-"""The prompt every adapter runs: one module, so captures from different frameworks see the
-same work.
-
-An adapter hands over its model's tokenizer as a ``Vocab`` -- ``encode(text) -> ids`` and
-the ids that are ordinary tokens -- and gets one list of token ids per sequence,
-``input_len`` long:
-
-- ``--prompt-file``: real text, tokenized by the model's own tokenizer; each sequence starts
-  at a different offset into it (wrapping), so a batch is not one sequence repeated. Text
-  matters where routing does: an MoE router picks experts from the tokens.
-- no file: deterministic ids spread over the ordinary tokens, distinct per sequence; special
-  and added tokens (EOS, chat markers, image placeholders) are never used, wherever a
-  vocabulary keeps them.
-
-``describe`` is what the capture records, and what ``compare`` matches arms on. A future
-framework (llama.cpp) builds its ``Vocab`` from its own tokenizer.
-"""
+"""The prompt every adapter runs, so captures from different frameworks see the same work."""
 
 from __future__ import annotations
 
@@ -27,11 +11,11 @@ from pathlib import Path
 @dataclass
 class Vocab:
     encode: Callable[[str], list[int]]
-    ordinary: Sequence[int]  # ids a synthetic prompt may use
+    ordinary: Sequence[int]
 
 
 def hf_vocab(tok) -> Vocab:
-    """A Hugging Face tokenizer's vocabulary, without its special and added tokens."""
+    """A Hugging Face tokenizer's vocabulary without its special tokens."""
     special = set(getattr(tok, "all_special_ids", ()) or ())
     size = getattr(tok, "vocab_size", None) or len(tok)
     ordinary = [i for i in range(size) if i not in special]

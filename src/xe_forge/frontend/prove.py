@@ -1,12 +1,4 @@
-"""The run's last stage: the winning patches measured in the model, not in a harness.
-
-Building a stack with a patch is each repository's own business, so an agent does it: a
-Claude session gets the patches (each with its ``PORT.txt``: repository, base commit) and
-the framework's interpreter, and builds two stacks the same way -- ``A`` at the patches'
-base, ``B`` with them -- writing ``arms.json``. Measuring is not delegated: the run
-captures the model under each arm ``repeat`` times, in alternation, and ``compare`` joins
-the two.
-"""
+"""Prove winning patches in the model: an agent builds both stacks, the run compares them."""
 
 from __future__ import annotations
 
@@ -35,12 +27,11 @@ def _build_arms(prove_dir: Path, patches: list[Path], python: str, max_turns: in
 def prove(
     run_dir: Path, capture, capture_args: list[str], python: str, repeat: int, max_turns: int
 ) -> str:
-    """Build, capture both arms, compare. Returns the SUMMARY.md section. ``capture_args``
-    carry ``--names``, so both arms name their ops -- and so key their workloads -- alike."""
+    """Build, capture both arms, compare; returns the SUMMARY.md section."""
     from xe_forge.frontend import compare
 
     rows = json.loads((run_dir / "results" / "summary.json").read_text())
-    best: dict[str, dict] = {}  # one winner per kernel: its variants' patches would overlap
+    best: dict[str, dict] = {}  # one per kernel: variants' patches overlap
     for r in rows:
         kernel = r.get("kernel", r.get("result"))
         if str(r.get("outcome", "")).startswith("win") and r.get("patches"):
@@ -60,7 +51,7 @@ def prove(
         for arm in ("A", "B"):  # alternate, so drift falls on both arms
             path = prove_dir / f"{arm}-r{i}" / "capture.json"
             if capture([*capture_args, "-o", str(path)], arms[arm]) != 0 or not path.is_file():
-                if arm == "B" and caps["A"]:  # the base ran the model; the patched stack did not
+                if arm == "B" and caps["A"]:
                     return (f"## In model\n\nFAIL: with the patches the model does not run "
                             f"where the base does ({path.parent}); the patches are not mergeable\n")  # fmt: skip
                 return f"## In model\n\nnot run: capture of arm {arm} failed ({path.parent})\n"

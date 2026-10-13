@@ -1,12 +1,4 @@
-"""Gather what the Xe-Forge runs produced into ``results/``, by the trial trees' own rule.
-
-For each (kernel, variant) workspace the trial tree is asked for its best *measured*
-non-baseline trial (``TrialManager.best_measured``); it is kept when ``keepable`` -- the
-test ``finalize`` and ``upstream patch`` apply, so a measured regression is never copied
-out. A kept result gets the workspace's ``output/`` (the finalized kernel, and the
-port-back patch when the session wrote one) and a ``result.json``; everything else is a
-row in SUMMARY.md saying why there is nothing to keep.
-"""
+"""Copy each workspace's best keepable measured trial into ``results/`` and write SUMMARY.md."""
 
 from __future__ import annotations
 
@@ -18,8 +10,7 @@ from xe_forge.core.trial_manager import TrialManager
 
 
 def _trees(workspace: Path, name: str) -> TrialManager | None:
-    """The trial tree for ``name`` in a workspace (default ``trials/``; any other
-    ``trials*`` directory a configuration chose)."""
+    """The trial tree for ``name`` under ``trials*/`` in a workspace."""
     for d in [workspace / "trials", *sorted(workspace.glob("trials*"))]:
         mgr = TrialManager(d)
         if d.is_dir() and mgr.exists(name):
@@ -28,13 +19,9 @@ def _trees(workspace: Path, name: str) -> TrialManager | None:
 
 
 def _port_status(port_txt: Path) -> dict:
-    """kind, stack verdict and mergeability from PORT.txt (``upstream patch`` writes it).
-
-    ``stack`` is None when no stack check ran: the patch is then as unverified as before.
-    Mergeable means an ``upstream`` port that passed the stack check -- built and tested
-    in its stack, including the repository's own tests for the op."""
+    """kind, stack verdict (None if unchecked) and mergeability from PORT.txt."""
     text = port_txt.read_text() if port_txt.is_file() else ""
-    text = text.split("\nnotes:", 1)[0]  # free text after this line is the session's, not a verdict
+    text = text.split("\nnotes:", 1)[0]  # notes are free text
     kind = next(
         (ln.split(":", 1)[1].split()[0] for ln in text.splitlines() if ln.startswith("kind:")), None
     )
@@ -75,7 +62,7 @@ def collect_one(
         return row
     speedup = best.get("speedup")
     row["outcome"] = "win" if speedup and speedup > 1.0 else "parity"
-    dest = results / f"{key or name}__{variant}"  # key: unique per manifest entry
+    dest = results / f"{key or name}__{variant}"
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True)
@@ -85,14 +72,11 @@ def collect_one(
         row["patches"] = sorted(str(p.relative_to(dest)) for p in dest.rglob("*.patch"))
         row.update(_port_status(dest / "output" / "PORT.txt"))
         if row["stack"] == "FAIL":
-            # Built into its stack and broke it: kept as evidence, not handed out as a patch.
             for p in dest.rglob("*.patch"):
                 p.rename(p.with_suffix(".patch.rejected"))
             row["patches"] = []
             row["outcome"] += " (stack check FAIL; patch rejected)"
     else:
-        # Not finalized by the session (e.g. it ran out of turns): the measured trial's own
-        # file is kept, but nothing was ported back and the outcome says so.
         row["outcome"] += " (measured trial, not finalized; no patch)"
         src = Path(best["file_path"])
         if src.is_dir():
@@ -107,8 +91,7 @@ def collect_one(
 
 
 def collect(run_dir: Path, manifest: dict, runs: list[tuple[str, str]]) -> Path:
-    """``runs``: the (kernel, variant) pairs optimize attempted. Writes results/SUMMARY.md
-    with one row per manifest entry, attempted or not."""
+    """Collect the attempted (kernel, variant) ``runs``; write results/SUMMARY.md."""
     from xe_forge.frontend.manifest import key as key_of
 
     results = run_dir / "results"

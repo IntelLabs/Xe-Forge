@@ -14,8 +14,7 @@ __all__ = [
 ]
 
 
-# Resolved on first use, so importing a submodule (e.g. ``xe_forge.frontend.capture``,
-# which runs inside a framework's own venv) does not pull in the config stack.
+# Lazy: frontend.capture runs inside a framework's venv and must not pull in the config stack.
 _LAZY = {
     "Config": "xe_forge.config",
     "get_config": "xe_forge.config",
