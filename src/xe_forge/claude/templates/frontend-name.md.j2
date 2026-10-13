@@ -18,8 +18,10 @@ repositories, not by guessing from names. Then write names.json:
        unnamed: none of these could be established -- say why in "via".
    "name": the symbol to grep for in the repository (the kernel, or the function making the
            library call); "repo": the repository's directory name under {{ repos }};
-   "dsl": one of {{ dsls | join(", ") }} -- the language the kernel is written in, or for a
-          library call the language the call is made in;
+   "dsl": one of {{ dsls | join(", ") }} -- the language the kernel is written in; for a
+          library call, the one from this list a baseline that makes the same library
+          call is written in (a C++ library such as oneDNN: sycl), even when the
+          framework makes the call from Python;
    "library": for a library call, which library (e.g. "onednn", "onemkl");
    "via": one line: how you established it (file:line);
    "family": one of {{ families | join(", ") }};
