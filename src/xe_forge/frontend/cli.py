@@ -1,0 +1,571 @@
+"""The framework frontend's commands: capture, analyze, optimize, run, compare, calibrate.
+
+Anything after ``--`` is passed unchanged to every Xe-Forge run ``optimize`` starts.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import xe_forge
+
+COMMANDS = ("capture", "analyze", "optimize", "run", "compare", "calibrate")
+SRC_DIR = Path(xe_forge.__file__).resolve().parents[1]
+REPO_DIR = SRC_DIR.parent
+
+
+# ── capture ────────────────────────────────────────────────────────────────
+
+
+def capture(argv: list[str], framework_python: str | None) -> int:
+    """Run the capture under the framework's interpreter with this package on its path."""
+    python = framework_python or sys.executable
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (str(SRC_DIR), env.get("PYTHONPATH")) if p)
+    cmd = [python, "-m", "xe_forge.frontend.capture", *argv]
+    print(f"capture: {shlex.join(cmd)}", flush=True)
+    return subprocess.call(cmd, env=env)
+
+
+def _agent(step: str, template: str, context: dict, cwd: Path, answer: str, python, turns):
+    """One agent step; None when it gave no answer (the reason is printed)."""
+    from xe_forge.frontend import agent
+
+    try:
+        return agent.run(template, context, cwd, answer, python or sys.executable, turns)
+    except (RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+        print(f"{step}: {exc}", file=sys.stderr)
+        return None
+
+
+def counters(capture_args: list[str], python: str | None, run_dir: Path, unitrace: str) -> int:
+    """Re-run the capture under unitrace metric sampling -> raw/counters.json."""
+    import tempfile
+
+    from xe_forge.core.compute_metrics import summarize_compute_metrics
+    from xe_forge.core.profiler import UnitraceXPUProfiler
+
+    env = UnitraceXPUProfiler(unitrace_bin=unitrace)._environment()
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (str(SRC_DIR), env.get("PYTHONPATH")) if p)
+    with tempfile.TemporaryDirectory(dir=run_dir) as tmp:
+        report = Path(tmp) / "unitrace.txt"
+        cmd = [unitrace, "--device-timing", "--opencl", "--metric-sampling", "--group", "ComputeBasic",
+               "-o", str(report), python or sys.executable, "-m", "xe_forge.frontend.capture",
+               *capture_args, "-o", str(Path(tmp) / "capture.json")]  # fmt: skip
+        print(f"counters: {shlex.join(cmd)}", flush=True)
+        code = subprocess.call(cmd, env=env)
+        metrics = sorted(Path(tmp).glob("unitrace.metrics.*"))
+        if code != 0 or not metrics:
+            print(
+                f"counters: no metrics (exit {code}); bounds use what else is known",
+                file=sys.stderr,
+            )
+            return 0
+        summary = {"records": []}
+        for path in metrics:  # one file per process
+            with open(path, errors="replace") as f:
+                summary["records"] += summarize_compute_metrics(f)["records"]
+    (run_dir / "raw" / "counters.json").write_text(json.dumps(summary, indent=1) + "\n")
+    print(f"counters: {len(summary['records'])} kernels measured", flush=True)
+    return 0
+
+
+def fits(capture_args: list[str], python: str | None, run_dir: Path, max_turns: int) -> int:
+    """Ask an agent whether the model fits; only a definite "no" returns nonzero."""
+    context = {"args": shlex.join(capture_args)}
+    answer = _agent("fit", "frontend-fit.md.j2", context, run_dir / "fit", "fit.json", python,
+                    max_turns)  # fmt: skip
+    if answer is None:
+        return 0
+    if answer.get("fits") is False:
+        print(f"fit: does not fit -- {answer.get('reason', '')}", file=sys.stderr)
+        return 3
+    print(f"fit: {answer.get('need_gb')} of {answer.get('have_gb')} GB -- {answer.get('reason')}")
+    return 0
+
+
+def prepare(capture_args: list[str], python: str | None, run_dir: Path, max_turns: int) -> int:
+    """Have an agent prepare the model when the adapter defines a ``prepare`` task."""
+    from xe_forge.frontend import adapters
+
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--framework")
+    framework = pre.parse_known_args(capture_args)[0].framework
+    adapter = adapters.get(framework) if framework else None
+    if not hasattr(adapter, "prepare"):
+        return 0
+    p = argparse.ArgumentParser(add_help=False)
+    adapter.add_arguments(p)
+    task = adapter.prepare(p.parse_known_args(capture_args)[0])
+    if task is None:
+        return 0
+    out, template, context = task
+    print(f"prepare: an agent prepares the model -> {out}", flush=True)
+    done = _agent("prepare", template, context, run_dir / "prepare", "prepared.json", python,
+                  max_turns)  # fmt: skip
+    return 0 if done is not None else 1
+
+
+def name(
+    capture_path: Path,
+    run_dir: Path,
+    python,
+    max_turns: int,
+    repos: Path,
+    coverage: float,
+    calibration: Path | None = None,
+) -> Path | None:
+    """Run the naming agent over the costliest ops; the written names.json, or None."""
+    from xe_forge.frontend import ir, naming
+    from xe_forge.frontend.canonical import _named_dims as named_dims
+    from xe_forge.frontend.canonical import arg_label
+
+    cap = ir.load(capture_path)
+    work = run_dir / "name"
+    work.mkdir(parents=True, exist_ok=True)
+    total = sum(op.device_us for op in cap.ops) or 1.0
+    by_key: dict[str, list] = {}
+    for op in cap.ops:
+        by_key.setdefault(op.framework_meta.get("name_key", op.framework_op), []).append(op)
+    ranked = sorted(by_key.items(), key=lambda kv: -sum(o.device_us for o in kv[1]))
+    listing, covered = {}, 0.0
+    for key, ops in ranked:
+        if covered >= coverage:
+            break
+        us = sum(o.device_us for o in ops)
+        covered += us / total
+        top = max(ops, key=lambda o: o.device_us)
+        kernels: dict[str, float] = {}
+        for o in ops:
+            for sym, k_us in o.kernel_symbols.items():
+                kernels[sym] = round(kernels.get(sym, 0.0) + k_us, 3)
+        listing[key] = {
+            "framework_op": top.framework_op,
+            "owner": top.framework_meta.get("owner"),
+            "share": round(us / total, 4),
+            "calls": sum(o.calls for o in ops),
+            "kernels": dict(sorted(kernels.items(), key=lambda kv: -kv[1])),
+            "args": [
+                {
+                    "name": arg_label(top, i),
+                    **(
+                        {"shape": a.shape, "dtype": a.dtype}
+                        if a
+                        else {"value": top.scalars[i] if i < len(top.scalars) else None}
+                    ),
+                }
+                for i, a in enumerate(top.args)
+            ],
+            "call_site": top.call_site,
+            **({"gemm": top.framework_meta["gemm"]} if top.framework_meta.get("gemm") else {}),
+            "dims": named_dims(top),
+            "shapes": [
+                {
+                    "dims": named_dims(o),
+                    "calls": o.calls,
+                    "us_per_call": round(o.device_us / o.calls, 3),
+                    "kernels_per_call": {
+                        k: round(t / o.calls, 3) for k, t in o.kernel_symbols.items()
+                    },
+                    "dtype": next(
+                        (a.dtype for a in o.args if a and a.dtype.startswith(("bfloat", "float"))),
+                        None,
+                    ),
+                }
+                for o in sorted(ops, key=lambda o: -o.device_us)[:12]
+                if o.calls
+            ],
+        }
+    (work / "ops.json").write_text(json.dumps(listing, indent=1) + "\n")
+    model = cap.run.get("model") or {}
+    (work / "config.json").write_text(json.dumps(model.get("config") or {}, indent=1) + "\n")
+    from xe_forge.models import DSL
+
+    calib = json.loads(calibration.read_text()) if calibration else None
+    context = {
+        "model": model.get("name"),
+        "framework": cap.run.get("framework"),
+        "coverage": f"{covered:.0%}",
+        "repos": repos,
+        "routes": naming.ROUTES,
+        "families": naming.FAMILIES,
+        "rows": naming.ROWS,
+        "dsls": [d.value for d in DSL],
+        "calibration": calib,
+    }
+    answer = _agent("name", "frontend-name.md.j2", context, work, "names.json", python, max_turns)
+    if answer is None:
+        return None
+    answer, problems = naming.keep_valid(answer, listing, repos)
+    if problems:
+        what = "the answer is not usable" if answer is None else "entries dropped, left unnamed"
+        print(f"name: {what} ({len(problems)} problems):", file=sys.stderr)
+        for line in problems[:20]:
+            print(f"  {line}", file=sys.stderr)
+    if answer is None:
+        return None
+    # A stated cost is a lower bound, so one above a measured call is wrong.
+    from xe_forge.frontend.analyze import NOISE
+
+    wrong = naming.refuted(answer, listing, calib, NOISE)
+    for k, sub, why in wrong:
+        print(f"name: cost dropped for {k}{f' [{sub}]' if sub else ''}: {why}", file=sys.stderr)
+    naming.drop_costs(answer, wrong)
+    missing = [k for k in listing if k not in answer["ops"]]
+    if missing:
+        print(f"name: {len(missing)} ops left unnamed: {', '.join(missing[:5])}", file=sys.stderr)
+    answer["capture"] = _stamp(cap)
+    path = run_dir / "names.json"
+    path.write_text(json.dumps(answer, indent=1) + "\n")
+    return path
+
+
+def _stamp(cap) -> dict:
+    """The capture's model, framework and runtime, to tie a names.json to it."""
+    run = cap.run
+    return {
+        "model": (run.get("model") or {}).get("name"),
+        "framework": run.get("framework"),
+        "runtime": {k: v for k, v in (run.get("runtime") or {}).items() if not isinstance(v, dict)},
+    }
+
+
+def _split_framework_python(argv: list[str]) -> tuple[list[str], str | None]:
+    out, python, it = [], None, iter(argv)
+    for a in it:
+        if a == "--framework-python":
+            python = next(it, None)
+        elif a.startswith("--framework-python="):
+            python = a.split("=", 1)[1]
+        else:
+            out.append(a)
+    return out, python
+
+
+# ── analyze ────────────────────────────────────────────────────────────────
+
+
+def _add_analyze_args(p: argparse.ArgumentParser) -> None:
+    from xe_forge.frontend import analyze as an
+    from xe_forge.frontend import manifest
+
+    p.add_argument("--top", type=int, default=3, help="kernels to optimize")
+    p.add_argument("--min-gain", type=float, default=0.005, help="smallest share worth it")
+    p.add_argument(
+        "--at-roofline", type=float, default=an.AT_ROOFLINE,
+        help="efficiency of its calibrated bound at which an op counts as done",
+    )  # fmt: skip
+    p.add_argument(
+        "--coverage", type=float, default=manifest.COVERAGE,
+        help="share of an op's time its benchmark variants must cover",
+    )  # fmt: skip
+    p.add_argument("--max-variants", type=int, default=manifest.MAX_VARIANTS)
+    p.add_argument(
+        "--tolerance", action="append", default=[], metavar="DTYPE=RTOL,ATOL",
+        help="spec tolerance for a dtype (repeatable; defaults per dtype in manifest.py)",
+    )  # fmt: skip
+    p.add_argument("--partition", help="Slurm partition recorded in kernels.yaml, if any")
+    p.add_argument("--calibration", type=Path, help="xe-forge calibrate output")
+
+
+def _tolerances(items: list[str]) -> dict:
+    out = {}
+    for item in items:
+        dtype, _, pair = item.partition("=")
+        rtol, _, atol = pair.partition(",")
+        out[dtype] = (float(rtol), float(atol or rtol))
+    return out
+
+
+def analyze(capture_path: Path, out_dir: Path, a: argparse.Namespace) -> Path:
+    from xe_forge.frontend import analyze as an
+    from xe_forge.frontend import ir, manifest
+
+    cap = ir.load(capture_path)
+    calib = json.loads(a.calibration.read_text()) if a.calibration else None
+    result = an.analyze(
+        cap, top=a.top, min_gain=a.min_gain, calibration=calib, at_roofline=a.at_roofline
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "analysis.json").write_text(json.dumps(result.as_dict(), indent=1) + "\n")
+    (out_dir / "gates.log").write_text(an.gates_log(result))
+    (out_dir / "report.md").write_text(an.report(result, cap))
+    path = manifest.emit(
+        result, cap, capture_path, out_dir, partition=a.partition,
+        coverage=a.coverage, max_variants=a.max_variants, tolerance=_tolerances(a.tolerance),
+    )  # fmt: skip
+    enabled = [e for e in result.entries if e.enabled]
+    if cap.run.get("counters"):
+        print(f"analyze: counters cover {result.options['counters_pct']}% of device time")
+    print(
+        f"analyze: {len(cap.workloads)} workloads -> {len(result.entries)} kernels, "
+        f"{len(enabled)} enabled ({', '.join(e.name for e in enabled) or 'none'}) -> {path}"
+    )
+    return path
+
+
+# ── optimize ───────────────────────────────────────────────────────────────
+
+
+def xe_forge_command(entry: dict, variant: str, repo: Path, workspace: Path, opts) -> list[str]:
+    cmd = [
+        sys.executable, "-m", "xe_forge.cli",
+        "--engine", opts.engine,
+        "--auto-launch",
+        "--dsl", entry["dsl"],
+        "--device", opts.device,
+        "--workspace", str(workspace),
+        "--max-turns", str(opts.max_turns),
+        "--name", entry["name"],
+        "--kernel-repo", str(repo),
+        "--spec", entry["spec"],
+        "--variant", variant,
+    ]  # fmt: skip
+    if entry.get("record"):
+        cmd += ["--dataset-record", entry["record"]]
+    if entry.get("target") == "library":
+        cmd += ["--target", "library"]
+    if getattr(opts, "stack_python", None):
+        cmd += ["--stack-python", opts.stack_python]
+    if entry["dsl"] == "sycl" and opts.compiler_flags:
+        cmd += ["--compiler-flags", opts.compiler_flags.replace("{kernel_repo}", str(repo))]
+    return cmd + list(opts.passthrough)
+
+
+def optimize(manifest_path: Path, run_dir: Path, opts) -> list[tuple[str, str]]:
+    """One Xe-Forge run per enabled (kernel, variant), in sequence; returns the pairs."""
+    from xe_forge.frontend import manifest
+
+    data = manifest.load(manifest_path)
+    repos_dir = Path(opts.kernel_repos).resolve() if opts.kernel_repos else REPO_DIR.parent
+    ws_root = run_dir / "workspaces"
+    ws_root.mkdir(parents=True, exist_ok=True)
+    if opts.engine == "claude" and shutil.which("claude") is None:
+        raise SystemExit("optimize: --engine claude needs the Claude Code CLI ('claude') on PATH")
+
+    pairs = []
+    for entry in data["kernels"]:
+        key = manifest.key(entry)
+        if not entry.get("enabled") or (opts.only and not {entry["name"], key} & set(opts.only)):
+            continue
+        variants = entry["variants"] if opts.all_variants else entry["variants"][:1]
+        for variant in variants:
+            pairs.append((key, variant))
+            workspace = ws_root / f"{key}__{variant}"
+            status_path = workspace.with_suffix(".status.json")
+            repo = manifest.resolve_repo(entry["repo"], repos_dir)
+            if not repo.is_dir():
+                status = {"skipped": f"kernel repo not found: {repo}"}
+                status_path.write_text(json.dumps(status, indent=1) + "\n")
+                print(f"optimize: {entry['name']} ({variant}): {status['skipped']}")
+                continue
+            cmd = xe_forge_command(entry, variant, repo, workspace, opts)
+            log = workspace.with_suffix(".log")
+            print(
+                f"optimize: {entry['name']} ({variant}) -> {workspace}\n  {shlex.join(cmd)}",
+                flush=True,
+            )
+            started = time.time()
+            with open(log, "w") as f:
+                code = subprocess.call(cmd, cwd=REPO_DIR, stdout=f, stderr=subprocess.STDOUT)
+            status = {
+                "exit_code": code,
+                "seconds": round(time.time() - started, 1),
+                "command": shlex.join(cmd),
+                "log": str(log),
+            }
+            status_path.write_text(json.dumps(status, indent=1) + "\n")
+            print(
+                f"optimize: {entry['name']} ({variant}) exit {code} in {status['seconds']}s; log {log}"
+            )
+    return pairs
+
+
+def _add_optimize_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--engine", default="claude", choices=("claude", "dspy-agent"))
+    p.add_argument("--device", default="xpu")
+    p.add_argument("--max-turns", type=int, default=80)
+    p.add_argument("--only", nargs="*", help="kernel names to run (default: every enabled)")
+    p.add_argument("--all-variants", action="store_true", help="run every listed variant")
+    p.add_argument(
+        "--kernel-repos",
+        help="directory holding the kernel repositories (default: beside this checkout)",
+    )
+    p.add_argument(
+        "--compiler-flags",
+        default=os.environ.get("XE_FORGE_SYCL_FLAGS"),
+        help="SYCL compile flags for sycl entries; {kernel_repo} expands (env XE_FORGE_SYCL_FLAGS)",
+    )
+
+
+# ── entry ──────────────────────────────────────────────────────────────────
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] not in COMMANDS:
+        raise SystemExit(f"usage: xe-forge {{{','.join(COMMANDS)}}} ...")
+    command, rest = argv[0], argv[1:]
+    passthrough: list[str] = []
+    if "--" in rest:
+        i = rest.index("--")
+        rest, passthrough = rest[:i], rest[i + 1 :]
+
+    if command == "capture":
+        rest, python = _split_framework_python(rest)
+        return capture(rest, python)
+
+    if command == "calibrate":
+        from xe_forge.frontend import calibrate
+
+        p = argparse.ArgumentParser(prog="xe-forge calibrate")
+        p.add_argument("-o", "--output", type=Path, help="default: the per-device cache")
+        p.add_argument("--read-bytes", type=int, default=1 << 30, help="> the card's caches")
+        p.add_argument("--matmul-n", type=int, default=8192, help="square matmul size")
+        p.add_argument("--iters", type=int, default=20)
+        p.add_argument("--dtypes", nargs="*", help="matmul dtypes to measure (default: all)")
+        a = p.parse_args(rest)
+        return calibrate.main(a.output, a.read_bytes, a.matmul_n, a.iters, a.dtypes)
+
+    if command == "compare":
+        from xe_forge.frontend import compare
+
+        p = argparse.ArgumentParser(prog="xe-forge compare")
+        p.add_argument("--a", nargs="+", type=Path, required=True, help="baseline capture.json(s)")
+        p.add_argument("--b", nargs="+", type=Path, required=True, help="candidate capture.json(s)")
+        p.add_argument("-o", "--output", type=Path, required=True, help="directory")
+        a = p.parse_args(rest)
+        rows = compare.compare(a.a, a.b)
+        path = compare.write(rows, a.output.resolve())
+        t = rows[0]
+        print(
+            f"compare: total {t['us_a']} -> {t['us_b']} us (x{t['speedup']}); {len(rows) - 1} workloads -> {path}"
+        )
+        return 0
+
+    if command == "analyze":
+        p = argparse.ArgumentParser(prog="xe-forge analyze")
+        p.add_argument("capture", type=Path)
+        p.add_argument("-o", "--output", type=Path, help="directory (default: the capture's)")
+        _add_analyze_args(p)
+        a = p.parse_args(rest)
+        analyze(a.capture.resolve(), (a.output or a.capture.parent).resolve(), a)
+        return 0
+
+    if command == "optimize":
+        from xe_forge.frontend import collect, manifest
+
+        p = argparse.ArgumentParser(prog="xe-forge optimize")
+        p.add_argument("manifest", type=Path)
+        _add_optimize_args(p)
+        a = p.parse_args(rest)
+        a.passthrough = passthrough
+        run_dir = a.manifest.resolve().parent
+        pairs = optimize(a.manifest.resolve(), run_dir, a)
+        summary = collect.collect(run_dir, manifest.load(a.manifest), pairs)
+        print(summary.read_text())
+        return 0
+
+    # run: fit -> [prepare ->] capture -> name -> analyze -> optimize -> collect [-> prove]
+    from xe_forge.frontend import collect, manifest
+
+    rest, python = _split_framework_python(rest)
+    p = argparse.ArgumentParser(prog="xe-forge run", allow_abbrev=False)
+    p.add_argument("-o", "--output", type=Path, required=True, help="run directory")
+    _add_analyze_args(p)
+    p.add_argument(
+        "--name-coverage", type=float, default=0.99,
+        help="share of device time whose ops the naming agent places",
+    )  # fmt: skip
+    p.add_argument("--analyze-only", action="store_true", help="stop after the manifest")
+    p.add_argument("--no-fit", action="store_true", help="skip the agent's fit check")
+    p.add_argument(
+        "--counters", nargs="?", const=os.environ.get("UNITRACE_BIN", "unitrace"),
+        default=os.environ.get("XE_FORGE_COUNTERS"), metavar="UNITRACE",
+        help="measure every kernel's speed-of-light with unitrace (default binary: $UNITRACE_BIN)",
+    )  # fmt: skip
+    p.add_argument(
+        "--agent-max-turns", type=int,
+        help="turn limit of the fit, prepare, name and prove agents (default: --max-turns)",
+    )  # fmt: skip
+    p.add_argument(
+        "--prove", action="store_true", help="build the stack with the winning patches and "
+        "measure them in the model (prove.py)"
+    )  # fmt: skip
+    p.add_argument("--prove-repeat", type=int, default=3, help="captures per arm")
+    p.add_argument(
+        "--stack-check", action="store_true", help="each port-back agent builds and tests "
+        "its port in the framework's stack (Xe-Forge --stack-python)"
+    )  # fmt: skip
+    _add_optimize_args(p)
+    a, capture_args = p.parse_known_args(rest)
+    a.passthrough = passthrough
+    turns = a.agent_max_turns or a.max_turns
+    run_dir = a.output.resolve()
+    capture_path = run_dir / "capture.json"
+    if not capture_path.is_file():
+        code = (
+            (0 if a.no_fit else fits(capture_args, python, run_dir, turns))
+            or prepare(capture_args, python, run_dir, turns)
+            or capture([*capture_args, "-o", str(capture_path)], python)
+        )
+        if code != 0:
+            why = f"killed by signal {-code}" if code < 0 else f"exit {code}"
+            print(f"run: stopped before analysis ({why})", file=sys.stderr)
+            return code if code > 0 else 1
+    else:
+        from xe_forge.frontend import ir
+        from xe_forge.frontend.capture import workload_args
+
+        before = ir.load(capture_path).run.get("capture_args")
+        if before is not None and before != workload_args(capture_args):
+            print(f"run: {capture_path} was captured with {before}, not "
+                  f"{workload_args(capture_args)}; remove it to capture again", file=sys.stderr)  # fmt: skip
+            return 1
+        print(f"run: reusing {capture_path}")
+    if a.counters and not (run_dir / "raw" / "counters.json").is_file():
+        counters(capture_args, python, run_dir, a.counters)
+    names = run_dir / "names.json"
+    if names.is_file():
+        from xe_forge.frontend import ir
+
+        stamp = json.loads(names.read_text()).get("capture")
+        if stamp != _stamp(ir.load(capture_path)):
+            print(f"run: {names} was written for another capture; naming again", file=sys.stderr)
+            names.unlink()
+    if not names.is_file():
+        repos = Path(a.kernel_repos).resolve() if a.kernel_repos else REPO_DIR.parent
+        if (
+            name(capture_path, run_dir, python, turns, repos, a.name_coverage, a.calibration)
+            is None
+        ):
+            print("run: no names.json; the ops stay unnamed", file=sys.stderr)
+    if names.is_file():
+        capture_args = [*capture_args, "--names", str(names)]
+    if names.is_file() or (run_dir / "raw" / "counters.json").is_file():
+        reparse = ["--reparse", str(run_dir / "raw"), "-o", str(capture_path)]
+        reparse += ["--names", str(names)] if names.is_file() else []
+        if capture(reparse, python) != 0:
+            print("run: re-reading the capture failed", file=sys.stderr)
+            return 1
+    path = analyze(capture_path, run_dir, a)
+    if a.analyze_only:
+        return 0
+    a.stack_python = (python or sys.executable) if a.stack_check else None
+    pairs = optimize(path, run_dir, a)
+    summary = collect.collect(run_dir, manifest.load(path), pairs)
+    if a.prove:
+        from xe_forge.frontend import prove
+
+        section = prove.prove(run_dir, capture, capture_args, python or sys.executable,
+                              a.prove_repeat, turns)  # fmt: skip
+        summary.write_text(summary.read_text() + "\n" + section)
+    print(summary.read_text())
+    return 0

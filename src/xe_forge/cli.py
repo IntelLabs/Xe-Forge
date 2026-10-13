@@ -103,7 +103,7 @@ Examples:
     parser.add_argument(
         "--dsl",
         type=str,
-        choices=["triton", "gluon", "sycl", "cuda"],
+        choices=["triton", "gluon", "sycl", "cuda", "opencl"],
         default=None,
         help="Kernel DSL (default: triton)",
     )
@@ -148,6 +148,13 @@ Examples:
         default=None,
         help="Optimization engine (default: dspy). dspy-agent runs a DSPy tool-calling "
         "agent in the Claude workspace",
+    )
+    parser.add_argument(
+        "--target",
+        choices=["kernel", "library"],
+        default=None,
+        help="Workspace engines: optimize a kernel (default) or tune how the repository "
+        "calls a library such as oneDNN",
     )
 
     # Trial management
@@ -202,6 +209,18 @@ Examples:
         type=str,
         help="Command template run instead of the built-in validator; placeholders: "
         "{kernel} {trial} {dsl} {stage} {workspace}",
+    )
+    host_group.add_argument(
+        "--external-stack-check",
+        type=str,
+        help="Command template run by `upstream patch` to build and test a port inside its "
+        "stack; placeholders: {clone} {kernel} {kind} {workspace}",
+    )
+    host_group.add_argument(
+        "--stack-python",
+        type=str,
+        help="Interpreter of the stack the kernel serves; the port-back agent then builds its "
+        "port into that stack (beside it, never into it), tests it there and records the verdict",
     )
     host_group.add_argument(
         "--dataset-record",
@@ -304,6 +323,8 @@ def _load_config(args) -> Config:
     # Engine/trial/profiler env var overrides
     if args.engine:
         os.environ["ENGINE"] = args.engine
+    if getattr(args, "target", None):
+        os.environ["TARGET"] = args.target
     if args.max_trials is not None:
         os.environ["MAX_TRIALS"] = str(args.max_trials)
     if args.trials_dir:
@@ -337,6 +358,10 @@ def _load_config(args) -> Config:
         os.environ["EXTERNAL_BENCHMARK"] = args.external_benchmark
     if getattr(args, "external_validate", None):
         os.environ["EXTERNAL_VALIDATE"] = args.external_validate
+    if getattr(args, "external_stack_check", None):
+        os.environ["EXTERNAL_STACK_CHECK"] = args.external_stack_check
+    if getattr(args, "stack_python", None):
+        os.environ["STACK_PYTHON"] = args.stack_python
     if getattr(args, "dataset_record", None):
         os.environ["DATASET_RECORD"] = args.dataset_record
     if getattr(args, "lessons", None):
@@ -357,6 +382,13 @@ def _load_config(args) -> Config:
 
 def main():
     sys.stdout.reconfigure(line_buffering=True)
+
+    from xe_forge.frontend.cli import COMMANDS
+
+    if len(sys.argv) > 1 and sys.argv[1] in COMMANDS:
+        from xe_forge.frontend.cli import main as frontend_main
+
+        return frontend_main(sys.argv[1:])
 
     parser, args = _parse_args()
 
