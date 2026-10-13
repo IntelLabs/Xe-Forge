@@ -2,11 +2,14 @@
 
 The model (an exported IR directory, or an HF id an agent exported once per
 ``--weight-format``, see ``prepare``) is compiled on the GPU with ``PERF_COUNT``.
-``generate`` runs one prefill and ``--output-len`` decode steps; a thin proxy around the
-model's infer request reads ``get_profiling_info()`` after every step. The plugin reports
-each node's *mean* time over the runs it executed in, so a step's own time is recovered as
-``n * mean_n - (n - 1) * mean_(n-1)``. The compiled runtime model gives each executed node
-its port shapes and precisions.
+
+The GPU plugin's counters are a node's mean over a count of runs the API does not expose,
+kept per compiled graph (``Graph::update_profiling_info``), so a step's time cannot be
+taken out of them once steps differ. Instead a reference ``generate`` records the prefill
+infer and one decode infer -- their inputs and the variable states before each -- and each
+phase is replayed ``--phase-runs`` times on a freshly loaded model, whose counters then hold
+identical runs only (``_phase``). The compiled runtime model gives each executed node its
+port shapes and precisions.
 
 OpenVINO reports no per-call shapes -- the runtime model's are dynamic -- so each row
 carries the call's token count and context length, and ``-1`` stays where a dim is
@@ -50,40 +53,75 @@ def add_arguments(parser) -> None:
     )
     parser.add_argument("--ov-xml", default="openvino_model.xml", help="the IR's model file")
     parser.add_argument(
+        "--phase-runs", type=int, default=5,
+        help="replays of each phase (prefill, decode); the first, cold one is excluded",
+    )  # fmt: skip
+    parser.add_argument(
         "--site-pattern", default=r"\.\d+(?=[./])",
         help="regex folding per-layer parts of node names into one call site",
     )  # fmt: skip
 
 
 class _Recorder:
-    """Stands in for the model's InferRequest; logs each step's own profiling info."""
+    """Stands in for the model's InferRequest during a reference run: keeps, for each infer,
+    the inputs it was given and the model's variable states just before it -- so each phase
+    can be replayed exactly, with no input names or model knowledge here."""
 
-    def __init__(self, request, steps: list, shapes: list):
-        self._request, self._steps, self._total, self._runs = request, steps, {}, {}
-        self._shapes = shapes
+    def __init__(self, request, calls: list):
+        self._request, self._calls = request, calls
 
     def __getattr__(self, name):
         return getattr(self._request, name)
 
-    def wait(self):
-        self._request.wait()
-        rows = []
-        for p in self._request.get_profiling_info():
-            node, ran = p.node_name, "EXECUTED" in str(p.status)
-            # The plugin reports a node's mean over the runs it executed in, in whole us.
-            # A step's own time is the change in mean * runs; rounding leaves +-n us per
-            # step, which cancels in any sum over steps -- so negatives are kept, not dropped.
-            self._runs[node] = self._runs.get(node, 0) + ran
-            total = p.real_time.total_seconds() * 1e6 * self._runs[node]
-            us = total - self._total.get(node, 0.0) if ran else 0.0
-            self._total[node] = total
-            rows.append({"node": node, "type": p.node_type, "exec": p.exec_type,
-                         "us": us, "status": str(p.status)})  # fmt: skip
-        self._steps.append(rows)
-        try:  # what this step fed the model: its rows and length, measured, not assumed
-            self._shapes.append(list(self._request.get_input_tensor(0).shape))
-        except Exception:
-            self._shapes.append(None)
+    def start_async(self, inputs=None, *args, **kwargs):
+        import numpy as np
+
+        def value(state):
+            try:
+                return np.array(state.state.data, copy=True)
+            except RuntimeError:  # reset (before a prefill): no shape yet -- replayed as reset
+                return None
+
+        self._calls.append({
+            "inputs": {k: np.array(v, copy=True) for k, v in (inputs or {}).items()},
+            "states": {s.name: value(s) for s in self._request.query_state()},
+        })  # fmt: skip
+        return self._request.start_async(inputs, *args, **kwargs)
+
+
+def _phase(request, call: dict, runs: int, tensor=None) -> tuple[list[dict], float]:
+    """One recorded infer, replayed ``runs`` times on a request whose counters are fresh.
+
+    The plugin reports a node's mean over the times it ran, and identical runs execute the
+    same primitives, so the warm per-run time is ``(runs * mean_after_all - mean_after_one)
+    / (runs - 1)`` -- the first, cold run excluded. Never a mean taken apart across different
+    steps (the plugin counts runs a profile does not show)."""
+    import statistics
+    import time
+
+    if tensor is None:
+        from openvino import Tensor as tensor
+
+    def once() -> float:
+        for state in request.query_state():  # an infer advances the states: restore them
+            if call["states"].get(state.name) is None:
+                state.reset()
+            else:
+                state.state = tensor(call["states"][state.name])
+        start = time.perf_counter()
+        request.infer(call["inputs"])
+        return (time.perf_counter() - start) * 1e6
+
+    once()
+    first = {p.node_name: p.real_time.total_seconds() * 1e6 for p in request.get_profiling_info()}
+    walls = [once() for _ in range(max(1, runs - 1))]
+    rows = []
+    for p in request.get_profiling_info():
+        mean, one = p.real_time.total_seconds() * 1e6, first.get(p.node_name, 0.0)
+        us = (runs * mean - one) / (runs - 1) if runs > 1 else mean
+        rows.append({"node": p.node_name, "type": p.node_type, "exec": p.exec_type,
+                     "us": us, "status": str(p.status)})  # fmt: skip
+    return rows, statistics.median(walls)
 
 
 def ir_dir(args) -> Path:
@@ -113,40 +151,46 @@ def capture(args, raw_dir: Path) -> dict:
     path = Path(args.model) if Path(args.model).is_dir() else ir_dir(args)
     if not (path / args.ov_xml).is_file():
         raise SystemExit(f"no OpenVINO IR at {path}; `xe-forge run` has an agent export it")
-    model = OVModelForCausalLM.from_pretrained(
-        path, device=args.device, ov_config={"PERF_COUNT": "YES"},
-        trust_remote_code=args.trust_remote_code,
-    )  # fmt: skip
-    model.compile()
+
+    def load():
+        m = OVModelForCausalLM.from_pretrained(
+            path, device=args.device, ov_config={"PERF_COUNT": "YES"},
+            trust_remote_code=args.trust_remote_code,
+        )  # fmt: skip
+        m.compile()
+        return m
+
     from transformers import AutoTokenizer
 
     source = args.model if not Path(args.model).is_dir() else path
     tok = AutoTokenizer.from_pretrained(source, trust_remote_code=args.trust_remote_code)
     ids = prompt.token_ids(prompt.hf_vocab(tok), args.batch, args.input_len, args.prompt_file)
     tokens = torch.tensor(ids, dtype=torch.int64)
-    steps: list = []
-    shapes: list = []
-    model.request = _Recorder(
-        model.request, steps, shapes
-    )  # from the first infer: means accumulate
-    warm_n = args.warmup_tokens
-    model.generate(tokens, max_new_tokens=warm_n, min_new_tokens=warm_n, do_sample=False)
-    warm = len(steps)
-    model.generate(
-        tokens, max_new_tokens=args.output_len, min_new_tokens=args.output_len, do_sample=False
-    )
 
+    # Reference run: the prefill infer and one decode infer, exactly as the framework feeds them.
+    model = load()
+    calls: list = []
+    model.request = _Recorder(model.request, calls)
+    model.generate(tokens, max_new_tokens=2, min_new_tokens=2, do_sample=False)
+    stateful, config = bool(getattr(model, "stateful", False)), model.config
+    del model
+    if len(calls) < 2:
+        raise SystemExit(f"OpenVINO: the reference run made {len(calls)} infer(s), not 2")
+
+    # Each phase on a freshly loaded model: its counters hold that phase's runs only.
     raw_dir.mkdir(parents=True, exist_ok=True)
+    context = 0
     with open(raw_dir / "ov_profile.jsonl", "w") as f:
-        context = 0
-        for i, rows in enumerate(steps[warm:]):
-            shape = shapes[warm + i]
-            if shape:  # [batch, tokens]: rows of a FullyConnected, context per sequence
-                m, context = math.prod(shape), context + shape[-1]
-            else:  # not readable: one prefill, then one token per sequence per step
-                m = args.batch * (args.input_len if i == 0 else 1)
-                context = args.input_len + i
-            f.write(json.dumps({"tokens": m, "context": context, "rows": rows}) + "\n")
+        for call in calls[:2]:
+            first = next(iter(call["inputs"].values()))  # [batch, tokens] fed this infer
+            m, context = math.prod(first.shape), context + first.shape[-1]
+            model = load()
+            rows, wall = _phase(model.request, call, args.phase_runs)
+            f.write(
+                json.dumps({"tokens": m, "context": context, "wall_us": wall, "rows": rows}) + "\n"
+            )
+            if call is not calls[1]:
+                del model
 
     def ports(ps):
         return [
@@ -156,7 +200,9 @@ def capture(args, raw_dir: Path) -> dict:
         ]  # fmt: skip
 
     nodes = {}
-    for op in model.request.get_compiled_model().get_runtime_model().get_ordered_ops():
+    for op in (
+        model.request.get_compiled_model().get_runtime_model().get_ordered_ops()
+    ):  # last phase's
         rt = {k: v.astype(str) for k, v in op.get_rt_info().items()}
         nodes[op.get_friendly_name()] = {
             "rt": rt,
@@ -168,9 +214,10 @@ def capture(args, raw_dir: Path) -> dict:
     return {
         "framework": "openvino",
         "framework_version": ov.__version__,
-        "model": {"name": args.model, "config": stored(model.config.to_dict())},
+        "model": {"name": args.model, "config": stored(config.to_dict())},
         "runtime": {"device": args.device, "batch": args.batch, "input_len": args.input_len,
-                    "output_len": args.output_len, "weight_format": args.weight_format, "site_pattern": args.site_pattern, "stateful": bool(getattr(model, "stateful", False))},
+                    "output_len": args.output_len, "weight_format": args.weight_format, "site_pattern": args.site_pattern, "stateful": stateful,
+                    "decode_context": context, "phase_runs": args.phase_runs},
         "device": {"type": args.device, "name": ov.Core().get_property(args.device, "FULL_DEVICE_NAME")},
     }  # fmt: skip
 
@@ -184,6 +231,13 @@ def parse(raw_dir: Path) -> TraceSummary:
     launches = 0
     kernels: dict[str, float] = defaultdict(float)
     steps = [json.loads(line) for line in (raw_dir / "ov_profile.jsonl").read_text().splitlines()]
+    for step in steps:  # node times beyond what the phase took on the clock are not times
+        busy = sum(r["us"] for r in step["rows"] if "EXECUTED" in r["status"])
+        if step.get("wall_us") and busy > 2 * step["wall_us"]:
+            raise SystemExit(
+                f"OpenVINO profiling: {busy:.0f} us of node time in a {step['wall_us']:.0f} us "
+                f"phase ({step['tokens']} tokens); the counters do not measure this run"
+            )
     # A step's time is recovered from a running mean in whole us: it may be off by about one
     # us per run, never by more. Anything below that is not a running mean for this model.
     floor = -2.0 * (len(steps) + 16)

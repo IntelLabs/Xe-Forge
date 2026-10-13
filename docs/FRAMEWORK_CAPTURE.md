@@ -56,7 +56,9 @@ trace (`record_shapes=True`, `with_stack=True`) and read by one parser,
 `torch_trace.py`:
 
 - **Attribution.** A device kernel names the host op that launched it through
-  `External id`. That op is charged to its *outermost* enclosing dispatched op
+  `External id` -- its own, or, where the kernel event lacks one, the one on the runtime
+  launch with the same `correlation` (Kineto's link from kernel to launch). That op is
+  charged to its *outermost* enclosing dispatched op
   (`namespace::op`), so an op whose work happens in nested calls collects its children's
   time and charges never overlap -- the rule FlashInfer-Bench's `device/attribution.py`
   applies to in-memory profiler events, here on the exported trace so a capture can be
@@ -109,7 +111,7 @@ rebuilt.
 | `torch` | done | profile any `module:factory` callable | ~60 lines; also the shared profiler region |
 | `vllm` | done | in-process `LLM` (`VLLM_ENABLE_V1_MULTIPROCESSING=0`, `enforce_eager`, TP 1); one warm-up request, then one profiled `generate` of `--batch` synthetic prompts of `--input-len` tokens and `--output-len` decode steps | ~100 lines |
 | `sglang` | done | runs SGLang's own `python -m sglang.benchmark.one_batch --profile --profile-record-shapes --profile-activities CPU XPU` (in-process `ModelRunner`; `--attention-backend intel_xpu --page-size 64 --disable-cuda-graph`, TP 1), one process per phase -- on XPU Kineto cannot open a second profiling session in a process -- and every decode step profiled; the two exported traces are parsed and merged. Depends on SGLang's command line, not its internals | ~90 lines |
-| `openvino` | done | optimum-intel `OVModelForCausalLM` on the exported IR, compiled with `PERF_COUNT`; a proxy around its infer request reads `get_profiling_info()` after every prefill/decode step; the runtime model gives port shapes and, where profiling says `undef`, `primitiveType`. OpenCL primitives are named as their source names them (`ocl::sdpa::opt__f16` -> `sdpa_opt`, repo `openvino`, dsl `opencl`); `undef` FullyConnected is oneDNN (ONEDNN_VERBOSE: matmul `jit:gemm:any`) -> library | ~150 lines |
+| `openvino` | done | optimum-intel `OVModelForCausalLM` on the exported IR, compiled with `PERF_COUNT`. The GPU plugin's counters are a node's mean over a run count the API does not expose, per compiled graph, so they are never taken apart across steps: a reference `generate` records the prefill infer and one decode infer (inputs, and variable states before each), and each phase is replayed `--phase-runs` times on a freshly loaded model, the first, cold run excluded. The runtime model gives port shapes and, where profiling says `undef`, `primitiveType`; which source each implementation is, is the naming agent's to say | ~200 lines |
 | `llamacpp` | planned | `llama-eval-callback` for the graph (op, tensor, ggml type, shape), each distinct op timed by `test-backend-ops perf`; GGUF metadata via `gguf` | `parse()` + perf runner + tables |
 | `fib` | planned | import FlashInfer-Bench `discovered.json` | `parse()` |
 

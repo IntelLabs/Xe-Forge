@@ -196,8 +196,21 @@ def _signature(tensors, scalars) -> str:
     )
 
 
+def _launch_ids(events: list[dict]) -> dict:
+    """``{correlation: External id}`` from the runtime launch events (``cudaLaunchKernel``,
+    ``urEnqueue*``, ...): a device event that lost its ``External id`` still has the
+    ``correlation`` of the launch that does -- Kineto's own link from kernel to op."""
+    out = {}
+    for e in events:
+        args = e.get("args") or {}
+        if e.get("cat") not in _DEVICE_CATS and "correlation" in args and "External id" in args:
+            out[args["correlation"]] = args["External id"]
+    return out
+
+
 def parse_events(events: list[dict]) -> TraceSummary:
     nodes = _nest(events)
+    launch = _launch_ids(events)
     rows: dict[tuple, CapturedOp] = {}
     counted: set[int] = set()
     kernels: dict[str, float] = defaultdict(float)
@@ -213,7 +226,8 @@ def parse_events(events: list[dict]) -> TraceSummary:
         total += us
         launches += 1
         kernels[kname] += us
-        node = nodes.get((e.get("args") or {}).get("External id"))
+        args = e.get("args") or {}
+        node = nodes.get(args.get("External id", launch.get(args.get("correlation"))))
         owner = _owner(node) if node is not None else None
         if owner is None:
             # Launched outside any dispatched op (e.g. a Triton launcher called directly):
