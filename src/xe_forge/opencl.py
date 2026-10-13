@@ -23,7 +23,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-CACHE = Path(os.environ.get("XE_FORGE_OPENCL_CACHE", Path.home() / ".cache/xe_forge/opencl"))
+CACHE = Path(
+    os.environ.get("XE_FORGE_OPENCL_CACHE")
+    or Path(os.environ.get("XE_FORGE_CACHE", Path.home() / ".cache/xe_forge")) / "opencl"
+)
 # What turns OpenCL C into bitcode llvm-spirv takes: the pipeline itself, not a choice.
 _PIPELINE = ["-target", "spir64", "-Xclang", "-finclude-default-header", "-emit-llvm", "-c"]
 # Choices, with per-run defaults: clang `options` go after these (the last flag wins);
@@ -106,6 +109,24 @@ def _tool(name: str) -> str:
     return found
 
 
+_TOOLS: str | None = None
+
+
+def _versions() -> str:
+    global _TOOLS
+    if _TOOLS is None:
+        out = []
+        for name in ("clang", "llvm-spirv"):
+            try:
+                tool = _tool(name)
+                r = subprocess.run([tool, "--version"], capture_output=True, text=True)
+                out.append(f"{tool}:{r.stdout.strip().splitlines()[:1]}")
+            except (RuntimeError, OSError):
+                out.append(f"{name}:?")
+        _TOOLS = ";".join(out)
+    return _TOOLS
+
+
 def compile_spirv(
     source: str,
     defines: dict | None = None,
@@ -116,7 +137,8 @@ def compile_spirv(
     flags = [f"-D{k}={v}" if v is not None else f"-D{k}" for k, v in (defines or {}).items()]
     clang = [*_PIPELINE, *OPTIONS.split(), *options.split(), *flags]
     spirv = (SPIRV_OPTIONS if spirv_options is None else spirv_options).split()
-    key = hashlib.sha256("\0".join([source, *clang, "|", *spirv]).encode()).hexdigest()[:24]
+    tools = _versions()  # another compiler makes another module
+    key = hashlib.sha256("\0".join([source, *clang, "|", *spirv, tools]).encode()).hexdigest()[:24]
     cached = CACHE / f"{key}.spv"
     if cached.is_file():
         return cached.read_bytes()

@@ -20,6 +20,7 @@ in the plugin, a oneDNN call -- is the naming agent's to establish (``name_key``
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -30,7 +31,9 @@ from xe_forge.frontend.model_meta import stored
 from xe_forge.frontend.torch_trace import TraceSummary
 
 _DTYPES = {"f16": "float16", "bf16": "bfloat16", "f32": "float32", "i64": "int64",
-           "i32": "int32", "i8": "int8", "u8": "uint8", "boolean": "bool"}  # fmt: skip
+           "i32": "int32", "i8": "int8", "u8": "uint8", "boolean": "bool",
+           "u4": "uint4", "i4": "int4", "nf4": "nf4", "f4e2m1": "float4_e2m1",
+           "f8e4m3": "float8_e4m3fn", "f8e5m2": "float8_e5m2", "f8e8m0": "float8_e8m0fnu"}  # fmt: skip
 
 
 def add_arguments(parser) -> None:
@@ -45,13 +48,19 @@ def add_arguments(parser) -> None:
         help="weight format of an HF id's export, as OpenVINO names it (int4, fp8, ...); "
         "an agent exports it once and it is cached",
     )
+    parser.add_argument("--ov-xml", default="openvino_model.xml", help="the IR's model file")
+    parser.add_argument(
+        "--site-pattern", default=r"\.\d+(?=[./])",
+        help="regex folding per-layer parts of node names into one call site",
+    )  # fmt: skip
 
 
 class _Recorder:
     """Stands in for the model's InferRequest; logs each step's own profiling info."""
 
-    def __init__(self, request, steps: list):
+    def __init__(self, request, steps: list, shapes: list):
         self._request, self._steps, self._total, self._runs = request, steps, {}, {}
+        self._shapes = shapes
 
     def __getattr__(self, name):
         return getattr(self._request, name)
@@ -71,6 +80,10 @@ class _Recorder:
             rows.append({"node": node, "type": p.node_type, "exec": p.exec_type,
                          "us": us, "status": str(p.status)})  # fmt: skip
         self._steps.append(rows)
+        try:  # what this step fed the model: its rows and length, measured, not assumed
+            self._shapes.append(list(self._request.get_input_tensor(0).shape))
+        except Exception:
+            self._shapes.append(None)
 
 
 def ir_dir(args) -> Path:
@@ -84,7 +97,7 @@ def prepare(args) -> tuple[Path, str, dict] | None:
     it -- or None when it has one. Export is per model (formats, calibration, shapes), so an
     agent does it rather than code here."""
     out = Path(args.model) if Path(args.model).is_dir() else ir_dir(args)
-    if (out / "openvino_model.xml").is_file():
+    if (out / args.ov_xml).is_file():
         return None
     context = {"model": args.model, "out": out, "fmt": args.weight_format}
     return out, "frontend-prepare-openvino.md.j2", context
@@ -98,22 +111,24 @@ def capture(args, raw_dir: Path) -> dict:
     from optimum.intel import OVModelForCausalLM
 
     path = Path(args.model) if Path(args.model).is_dir() else ir_dir(args)
-    if not (path / "openvino_model.xml").is_file():
+    if not (path / args.ov_xml).is_file():
         raise SystemExit(f"no OpenVINO IR at {path}; `xe-forge run` has an agent export it")
     model = OVModelForCausalLM.from_pretrained(
-        path, device=args.device, ov_config={"PERF_COUNT": "YES"}
-    )
+        path, device=args.device, ov_config={"PERF_COUNT": "YES"},
+        trust_remote_code=args.trust_remote_code,
+    )  # fmt: skip
     model.compile()
     from transformers import AutoTokenizer
 
-    tok = AutoTokenizer.from_pretrained(args.model if not Path(args.model).is_dir() else path)
-    ids = prompt.token_ids(
-        lambda text: tok.encode(text, add_special_tokens=False), len(tok), args.batch,
-        args.input_len, args.prompt_file,
-    )  # fmt: skip
+    source = args.model if not Path(args.model).is_dir() else path
+    tok = AutoTokenizer.from_pretrained(source, trust_remote_code=args.trust_remote_code)
+    ids = prompt.token_ids(prompt.hf_vocab(tok), args.batch, args.input_len, args.prompt_file)
     tokens = torch.tensor(ids, dtype=torch.int64)
     steps: list = []
-    model.request = _Recorder(model.request, steps)  # from the first infer: means accumulate
+    shapes: list = []
+    model.request = _Recorder(
+        model.request, steps, shapes
+    )  # from the first infer: means accumulate
     warm_n = args.warmup_tokens
     model.generate(tokens, max_new_tokens=warm_n, min_new_tokens=warm_n, do_sample=False)
     warm = len(steps)
@@ -123,9 +138,15 @@ def capture(args, raw_dir: Path) -> dict:
 
     raw_dir.mkdir(parents=True, exist_ok=True)
     with open(raw_dir / "ov_profile.jsonl", "w") as f:
+        context = 0
         for i, rows in enumerate(steps[warm:]):
-            m = args.batch * (args.input_len if i == 0 else 1)  # rows of a FullyConnected
-            f.write(json.dumps({"tokens": m, "context": args.input_len + i, "rows": rows}) + "\n")
+            shape = shapes[warm + i]
+            if shape:  # [batch, tokens]: rows of a FullyConnected, context per sequence
+                m, context = math.prod(shape), context + shape[-1]
+            else:  # not readable: one prefill, then one token per sequence per step
+                m = args.batch * (args.input_len if i == 0 else 1)
+                context = args.input_len + i
+            f.write(json.dumps({"tokens": m, "context": context, "rows": rows}) + "\n")
 
     def ports(ps):
         return [
@@ -149,22 +170,34 @@ def capture(args, raw_dir: Path) -> dict:
         "framework_version": ov.__version__,
         "model": {"name": args.model, "config": stored(model.config.to_dict())},
         "runtime": {"device": args.device, "batch": args.batch, "input_len": args.input_len,
-                    "output_len": args.output_len, "weight_format": args.weight_format, "stateful": bool(getattr(model, "stateful", False))},
+                    "output_len": args.output_len, "weight_format": args.weight_format, "site_pattern": args.site_pattern, "stateful": bool(getattr(model, "stateful", False))},
         "device": {"type": args.device, "name": ov.Core().get_property(args.device, "FULL_DEVICE_NAME")},
     }  # fmt: skip
 
 
 def parse(raw_dir: Path) -> TraceSummary:
     nodes = json.loads((raw_dir / "runtime_model.json").read_text())
+    runtime = json.loads((raw_dir / "run.json").read_text()).get("runtime") or {}
+    fold = re.compile(runtime.get("site_pattern") or r"\.\d+(?=[./])")
     rows: dict[tuple, CapturedOp] = {}
     total = 0.0
     launches = 0
     kernels: dict[str, float] = defaultdict(float)
-    for line in (raw_dir / "ov_profile.jsonl").read_text().splitlines():
-        step = json.loads(line)
+    steps = [json.loads(line) for line in (raw_dir / "ov_profile.jsonl").read_text().splitlines()]
+    # A step's time is recovered from a running mean in whole us: it may be off by about one
+    # us per run, never by more. Anything below that is not a running mean for this model.
+    floor = -2.0 * (len(steps) + 16)
+    for step in steps:
         for r in step["rows"]:
             if "EXECUTED" not in r["status"]:
                 continue  # fused away or not run: no time of its own
+            # Profiling names a node "<type>:<name>"; the runtime model names it "<name>".
+            r["node"] = re.sub(r"^[a-z0-9_]+:(?!:)", "", r["node"])
+            if r["us"] < floor:
+                raise SystemExit(
+                    f"OpenVINO profiling: {r['node']} has {r['us']:.0f} us in a step; the "
+                    "plugin's counters are not a running mean per run for this model"
+                )
             if r["exec"] in ("", "undef"):  # the runtime model knows what profiling does not
                 r["exec"] = (nodes.get(r["node"]) or {}).get("rt", {}).get(
                     "primitiveType"
@@ -172,7 +205,7 @@ def parse(raw_dir: Path) -> TraceSummary:
             total += r["us"]
             launches += 1
             kernels[r["exec"]] += r["us"]
-            site = re.sub(r"\.\d+(?=[./])", ".*", r["node"])
+            site = fold.sub(".*", r["node"])
             key = (r["type"], r["exec"], site, step["tokens"], step["context"])
             op = rows.get(key)
             if op is None:

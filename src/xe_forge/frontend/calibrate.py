@@ -43,7 +43,9 @@ def _time_us(fn, dev, iters: int) -> float:
     return statistics.median(times)
 
 
-def measure(read_bytes: int = 1 << 30, n: int = 8192, iters: int = 20) -> dict:
+def measure(
+    read_bytes: int = 1 << 30, n: int = 8192, iters: int = 20, dtypes: tuple | None = None
+) -> dict:
     """``read_bytes`` must exceed the card's caches; ``n`` is the square matmul size."""
     import torch
 
@@ -88,6 +90,8 @@ def measure(read_bytes: int = 1 << 30, n: int = 8192, iters: int = 20) -> dict:
     kernels = {**{name: (lambda name=name: fp(getattr(torch, name))) for name in DTYPES},
                "int8": int8, "float8_e4m3fn": fp8}  # fmt: skip
     for name, make in kernels.items():
+        if dtypes and name not in dtypes:
+            continue
         try:
             us = _time_us(make(), dev, max(1, iters // 2))
             rec["matmul_tflops"][name] = round(2 * n**3 / us / 1e6, 1)
@@ -108,8 +112,10 @@ def load(path: str | Path) -> dict:
     return json.loads(Path(path).read_text())
 
 
-def main(out: Path | None, read_bytes: int = 1 << 30, n: int = 8192, iters: int = 20) -> int:
-    rec = measure(read_bytes, n, iters)
+def main(
+    out: Path | None, read_bytes: int = 1 << 30, n: int = 8192, iters: int = 20, dtypes=None
+) -> int:
+    rec = measure(read_bytes, n, iters, dtypes)
     path = out or default_path(rec)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(rec, indent=1) + "\n")

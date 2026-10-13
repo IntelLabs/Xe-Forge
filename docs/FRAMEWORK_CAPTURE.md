@@ -167,14 +167,16 @@ analysis. Abridged, from a Qwen2.5-0.5B capture:
 ### Canonicalization rules (`canonical.py`)
 
 - **Dims** are named after the op's schema: `INPUT_D1` is dim 1 of the argument called
-  `input`; an integer scalar argument is a dim too (`MAX_SEQLEN_K`, `HEAD_SIZE`). GEMM-shaped
-  ATen ops (`linear`, `mm`, `addmm`, `bmm`, `matmul`) get `M`/`N`/`K`[`/B`] instead.
+  `input`; an integer scalar argument is a dim too (`MAX_SEQLEN_K`, `HEAD_SIZE`). An op without
+  a schema (OpenVINO) names its arguments `arg<i>`. A matrix multiply -- ATen's or a
+  provider's, as the naming agent identified it -- gets `M`/`N`/`K`[`/E`] instead.
 - **Layout class** per tensor is read from the innermost dimension only (`c` contiguous,
   `t` last two transposed, `s` strided). Outer pitches depend on the token count -- a
   one-row view of a fused QKV output reads as contiguous -- so they stay in the op's raw
   strides instead of splitting a workload.
-- **Var axes are measured, not declared.** The token count of a call is the leading dim of
-  its first tensor (`M` for a GEMM). A dim is var when it equals the token count in every
+- **Var axes are measured, not declared.** The token count of a call is the axis the naming
+  agent named (`token_arg`/`token_axis`), else the leading dim of its first tensor (`M` for
+  a GEMM). A dim is var when it equals the token count in every
   call of its group and the token count varied. Integer arguments that still differ once
   the tensor shapes agree are runtime sizes -- a context length growing every decode step --
   and are var too; the value each token count was captured with is kept beside it
@@ -184,8 +186,9 @@ analysis. Abridged, from a Qwen2.5-0.5B capture:
   at one token count are two workloads (two norms of different width).
 - **Identity.** `workload_id = family/sha1(op, dtypes, layout, attrs, dims with var
   masked)[:10]`. Two calls are one workload exactly when one kernel at one configuration
-  could serve both. Family (gemm, attention, norm, rope, activation, moe, cache, sampling,
-  copy, elementwise, other) is a regex on the op name, falling back to the Python owner's.
+  could serve both -- and where it is implemented is part of it: one op that runs
+  different kernels per shape, or that the agent split into kernel groups, is that many
+  workloads. The family is the naming agent's answer (`other` without one).
 - **Aggregation.** Ops sum per (op, signature, call site); workloads sum over ops, layers
   collapsed by the call site and phases folded into the var histogram.
 
@@ -201,14 +204,23 @@ model config and the kernel repositories on the machine. The agent answers per o
 |---|---|
 | `route` | `kernel` (a kernel in a repository Xe-Forge rewrites), `library` (a library primitive: tune the call), `aten` (inside PyTorch), `unnamed` (not established, with the reason) |
 | `name`, `repo`, `dsl`, `via` | what the kernel-locator greps for, where, in which language, and the evidence |
-| `family`, `paged` | the op family; whether it reads a paged buffer (no streaming bound) |
-| `gemm` | for a matrix multiply: which argument is the activation, the weight, what is read with the weight, the output, where N sits, packing along K, grouping and the expert-count argument |
+| `library` | for a library call, which library |
+| `family`, `paged`, `args_complete` | the op family; whether it reads a paged or slot-indexed pool, or state its arguments don't show (either way: no streaming bound) |
+| `token_arg`, `token_axis` | where the tokens are, when not the first tensor's first axis |
+| `kernels` | for an op whose kernels live in different places: one entry per kernel group; the capture splits the op's time per group |
+| `gemm` (or a list of them) | for a matrix multiply: which argument is the activation, the weight, what is read with the weight, the output, where N sits, packing along K, grouping, the expert-count argument, and whether the rows are tokens or token x expert rows |
 
-It also answers once per model with `model.topk` and `model.experts`. The capture is then
-rebuilt with `--names`, and so are the prove arms' captures, so both arms key their
-workloads alike. The key is the implementing op (OpenVINO: node type plus implementation),
-which a patched build keeps. Without `names.json`, only `aten::` ops are named, by
-PyTorch's own rule.
+It also answers once per model with `model.topk` and `model.experts`. Every answer is
+checked before it is used (`naming.validate`): an answer that names an argument the op
+does not have, an axis the weight does not have, a repository that is not there or a
+language Xe-Forge does not write is reported and not used. The answer is stamped with
+the capture it describes, and a later run with another capture names again. The
+capture is then rebuilt with `--names`, and so are the prove arms' captures, so both
+arms key their workloads alike. The key is the implementing op (OpenVINO: node type plus
+implementation), which a patched build keeps. Without `names.json`, nothing is named.
+
+Inside an op registered in Python, the ATen ops it runs (an absorbed `bmm`, a shared
+expert's `linear`) are rows of their own, under that owner -- not hidden in its time.
 
 ## Analyze: the decision
 

@@ -35,7 +35,7 @@ class CapturedOp:
     calls: int = 0
     device_us: float = 0.0
     call_site: str = ""
-    impl_class: str = "unknown"  # onednn | provider | triton | aten | python | unknown
+    impl_class: str = "unknown"  # provider | <library the agent named> | aten | unknown
     framework_meta: dict[str, Any] = field(default_factory=dict)
 
 
@@ -43,7 +43,8 @@ class CapturedOp:
 class Naming:
     """What the kernel-locator is told to look for. ``route`` says whether Xe-Forge can
     take it: ``kernel`` (a named kernel in a repository), ``library`` (a library call --
-    change the call, not the kernel) or ``unnamed`` (no rule matched)."""
+    change the call, not the kernel), ``aten`` (inside PyTorch) or ``unnamed`` (the naming
+    agent did not place it)."""
 
     route: str
     name: str | None = None

@@ -1,8 +1,10 @@
 Before anything is downloaded, exported or captured: will this capture run on this machine's
 GPU?  xe-forge capture {{ args }}
 
-Answer from the model's config (the hub's metadata, no weight download), the device's memory,
-and how this framework executes this model at this workload -- weights in the requested
-format, KV cache for batch x (input + output) tokens, and the working memory of its layers
-as the framework runs them. Do not run the model. Write fit.json {"fits": true|false,
-"need_gb": <n>, "have_gb": <n>, "reason": "<one line>"}.
+The capture runs the model on token ids only, as a text-generating decoder. A model that
+cannot run that way -- one that needs images or audio, an encoder-decoder -- does not fit:
+say so. Otherwise answer from the model's config (the hub's metadata, no weight download),
+the device's memory, and how this framework executes this model at this workload -- weights
+in the requested format, KV cache for batch x (input + output) tokens, and the working
+memory of its layers as the framework runs them. Do not run the model. Write fit.json
+{"fits": true|false, "need_gb": <n>, "have_gb": <n>, "reason": "<one line>"}.

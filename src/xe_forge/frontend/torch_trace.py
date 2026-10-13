@@ -26,7 +26,8 @@ from typing import Any
 from xe_forge.frontend.ir import CapturedOp, TensorArg
 
 # Runtime-API frames interleaved with ops; never owners (FIB attribution._NOT_OPS).
-_NOT_OPS = ("cudaLaunch", "cudaMemcpy", "ze", "ur", "cl", "Runtime Triggered")
+_NOT_OPS = ("cudaLaunch", "cudaMemcpy", "Runtime Triggered")
+_RUNTIME_NS = {"ze", "ur", "cl"}  # runtime namespaces, matched whole: "clip::" is an op
 _DEVICE_CATS = ("kernel", "gpu_memcpy", "gpu_memset")
 _MODULE_PREFIX = "nn.Module: "
 
@@ -53,7 +54,9 @@ _DTYPES = {
 
 def is_op_name(name: str) -> bool:
     """A dispatched op (``namespace::op``), not a runtime frame."""
-    return "::" in name and not name.startswith(_NOT_OPS)
+    return (
+        "::" in name and not name.startswith(_NOT_OPS) and name.split("::", 1)[0] not in _RUNTIME_NS
+    )
 
 
 @dataclass
@@ -152,6 +155,16 @@ def _launcher(node: _Node, owner: _Node) -> _Node | None:
     return None
 
 
+def _below(node: _Node, owner: _Node) -> _Node | None:
+    """The dispatched op directly under ``owner`` on the way down to ``node``."""
+    child = None
+    while node is not None and node is not owner:
+        if is_op_name(node.name):
+            child = node
+        node = node.parent
+    return child
+
+
 def _parse_args(args: dict) -> tuple[list[TensorArg | None], list[Any]]:
     dims = args.get("Input Dims") or []
     types = args.get("Input type") or []
@@ -162,15 +175,13 @@ def _parse_args(args: dict) -> tuple[list[TensorArg | None], list[Any]]:
     for i, typ in enumerate(types):
         value = concrete[i] if i < len(concrete) else ""
         shape = dims[i] if i < len(dims) else []
-        # A concrete value means a scalar, whatever its type name ("double" is both).
-        if (
-            value == ""
-            and typ in _DTYPES
-            and isinstance(shape, list)
-            and all(isinstance(d, int) for d in shape)
-        ):
+        # A concrete value means a scalar, whatever its type name ("double" is both). A
+        # shaped argument of a type not mapped here is still a tensor: its bytes are unknown
+        # (so is any bound over them), but it is not lost.
+        shaped = isinstance(shape, list) and all(isinstance(d, int) for d in shape)
+        if value == "" and shaped and (typ in _DTYPES or (typ and shape)):
             stride = strides[i] if i < len(strides) and isinstance(strides[i], list) else None
-            tensors.append(TensorArg(shape=list(shape), dtype=_DTYPES[typ], stride=stride))
+            tensors.append(TensorArg(shape=list(shape), dtype=_DTYPES.get(typ, typ), stride=stride))
             scalars.append(None)
         else:
             tensors.append(None)
@@ -220,6 +231,10 @@ def parse_events(events: list[dict]) -> TraceSummary:
         # owner is registered in Python -- the provider op inside it that launched the
         # kernel, with that op's own arguments. Each kernel still lands in exactly one row.
         impl = _launcher(node, owner) or owner
+        if impl is owner and not owner.name.startswith("aten::"):
+            # An owner registered in Python runs ATen ops too (an absorbed bmm, a shared
+            # expert's linear): each is its own row, under the owner, not part of the owner's.
+            impl = _below(node, owner) or owner
         tensors, scalars = _parse_args(impl.args)
         site = "/".join(owner.modules)
         key = (impl.name, _signature(tensors, scalars), site)

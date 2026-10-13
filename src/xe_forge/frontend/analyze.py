@@ -38,8 +38,8 @@ from xe_forge.models import DSL
 
 _ROUTE_REASONS = {
     "library": "library primitive: change the call, not the kernel",
-    "aten": "ATen op inside PyTorch: no kernel repository to edit",
-    "unnamed": "no naming rule matched",
+    "aten": "implemented inside PyTorch: no kernel repository here to edit",
+    "unnamed": "not placed by the naming agent",
 }
 
 
@@ -103,6 +103,7 @@ class Analysis:
 
 # At or above this fraction of its roofline bound a GEMM has nothing left worth an agent run.
 AT_ROOFLINE = 0.8  # default of --at-roofline
+NOISE = 0.1  # a bound this far above its measurement is noise; further is an error
 
 
 def experts_touched(experts: int, rows: int, topk: int | None) -> float:
@@ -129,13 +130,18 @@ def _points(w: Workload) -> list[tuple[int | None, int, float]]:
 def _against(w: Workload, per_call_bound) -> tuple[float, float] | None:
     """Sum a per-call bound over the captured points into (recoverable us, efficiency).
 
-    A point whose bound exceeds what was measured is capped at the measurement: an
-    assumption behind the bound does not hold there (e.g. uniform routing), or the timer is
-    noisy, so that point shows no headroom rather than invented headroom."""
+    A point whose bound exceeds what was measured by up to ``NOISE`` is capped at the
+    measurement (timer noise): no headroom rather than invented headroom. A bound built on
+    an estimate (uniform routing) comes as (expected, guaranteed); where the measurement
+    beats the estimate, the guaranteed one is used. Beyond that the bound is impossible --
+    an input to it is wrong -- and the bound is unknown, never "at roofline"."""
     recoverable = reached_total = 0.0
     for value, calls, us in _points(w):
         bound = per_call_bound(value)
-        if bound is None:
+        if isinstance(bound, tuple):  # (expected, guaranteed): an estimate may be beaten
+            expected, sure = bound
+            bound = expected if calls * expected <= us * (1 + NOISE) else sure
+        if bound is None or calls * bound > us * (1 + NOISE):
             return None
         reached = min(calls * bound, us)
         recoverable += us - reached
@@ -147,7 +153,7 @@ def gemm_bound(
     w: Workload, calib: dict | None, ctx: dict | None = None
 ) -> tuple[float, float] | None:
     """Per token count M: max(bytes / bandwidth, 2*M*N*K / peak[compute dtype]), with
-    bytes = M*K*a + E_eff*K*N*w + M*N*o. ``w``/``a`` are bytes per element measured from the
+    bytes = M*K*a + E_eff*K*N*w + M*N*o, summed over the weights the op multiplies by. ``w``/``a`` are bytes per element measured from the
     captured tensors (scales and packing included); E_eff is the experts a grouped call
     touches -- measured (``active_experts``) when an adapter supplies it, else the uniform-
     routing estimate over the kernel's local E, else the model's experts / expert-parallel
@@ -157,34 +163,50 @@ def gemm_bound(
         return None
     dtype = w.dtypes[0] if w.dtypes else None
     size = storage_bytes(dtype)
-    if "w_bytes" not in w.attrs:
-        return None  # weight bytes unmeasured: no agent answer, or a weight the trace hides
-    a_bytes, w_bytes = w.attrs.get("a_bytes", size), w.attrs["w_bytes"]
-    o_bytes = w.attrs.get("o_bytes", size)  # measured from the output when the agent named it
     bw = calib.get("bandwidth_gbs")
     peaks = {k: v for k, v in (calib.get("matmul_tflops") or {}).items() if v}
-    # The compute dtype's measured peak; a dtype the card has no measured peak for runs at
-    # most at the fastest measured one -- still a lower bound on time.
-    peak = peaks.get(w.attrs.get("compute", dtype)) or max(peaks.values(), default=None)
-    if not (bw and peak and a_bytes and w_bytes):
+    if not bw or not peaks:
         return None
-    grouped = bool(w.attrs.get("grouped"))
-    e = w.dims.get("E")
-    if grouped and e is None and ctx.get("experts"):
-        e = ctx["experts"] / (ctx.get("ep") or 1)
-    if grouped and e is None:
-        return None
-    e = e or 1
-    n, k = w.dims["N"], w.dims["K"]
+    topk = ctx.get("topk")
+    # One part per weight the op multiplies by (the agent's gemm list); usually one.
+    parts = w.attrs.get("parts") or [
+        {**w.attrs, "N": w.dims["N"], "K": w.dims["K"], "E": w.dims.get("E")}
+    ]
+
+    def part_time(p: dict, m, sure: bool = False) -> float | None:
+        if "w_bytes" not in p:
+            return None  # weight bytes unmeasured: no agent answer, or a weight the trace hides
+        a_b, w_b, o_b = p.get("a_bytes", size), p["w_bytes"], p.get("o_bytes", size)
+        # The compute dtype's measured peak; a dtype the card has no measured peak for runs
+        # at most at the fastest measured one -- still a lower bound on time.
+        peak = peaks.get(p.get("compute", dtype)) or max(peaks.values())
+        rows, e_eff = m, 1
+        if p.get("grouped"):
+            e = p.get("E")
+            if e is None and ctx.get("experts"):
+                e = ctx["experts"] / (ctx.get("ep") or 1)
+            if e is None:
+                return None  # never E=1
+            # The agent says whether the call's rows are tokens or token x expert rows.
+            rows = m * (topk or 1) if p.get("rows") == "token" else m
+            e_eff = w.attrs.get("active_experts") or (
+                # guaranteed: every token touches top-k experts, so at least that many
+                min(e, topk or 1) if sure else experts_touched(e, rows, topk)
+            )
+        n, k = p["N"], p["K"]
+        moved = rows * k * a_b + e_eff * k * n * w_b + rows * n * o_b
+        return max(moved / (bw * 1e3), 2 * rows * n * k / (peak * 1e6))
+
+    estimated = any(p.get("grouped") for p in parts) and not w.attrs.get("active_experts")
 
     def per_call(m):
         m = w.dims["M"] if m is None else m
-        if grouped:
-            e_eff = w.attrs.get("active_experts") or experts_touched(e, m, ctx.get("topk"))
-        else:
-            e_eff = e
-        moved = m * k * a_bytes + e_eff * k * n * w_bytes + m * n * o_bytes
-        return max(moved / (bw * 1e3), 2 * m * n * k / (peak * 1e6))
+        times = [part_time(p, m) for p in parts]
+        if None in times:
+            return None
+        if not estimated:
+            return sum(times)
+        return sum(times), sum(part_time(p, m, sure=True) for p in parts)
 
     return _against(w, per_call)
 
@@ -199,7 +221,7 @@ def streaming_bound(
     table: the part they touch depends on the context, not on the shape, so counting the
     buffer whole overstates the bound and skipping it understates it."""
     bw = (calib or {}).get("bandwidth_gbs")
-    if not bw or not w.tensors or w.attrs.get("paged"):
+    if not bw or not w.tensors or w.attrs.get("paged") or w.attrs.get("args_incomplete"):
         return None
     if not any(f"{label}_D0" in w.dims for label, _ in w.tensors):
         return None  # dims named by role (a GEMM's M/N/K), not per tensor: no shapes to sum
@@ -317,6 +339,14 @@ def analyze(
     entries = []
     for (route, repo, name), ws in groups.items():
         ds = [decisions[w.workload_id] for w in ws]
+        # Worth is the kernel's, not one shape's: a kernel whose time is spread over many
+        # small workloads passes when they add up.
+        small = [d for d in ds if d.gates and d.gates[-1][:2] == ("worth", "REJECT")]
+        total = sum(d.gain for d in ds if d.enabled or d in small)
+        if small and total >= min_gain:
+            for d in small:
+                d.gates[-1] = ("worth", "PASS", f"kernel total G={total:.4%} >= {min_gain:.4%}")
+                d.enabled, d.reason = True, ""
         e = Entry(
             name=name or ws[0].workload_id,
             repo=repo,

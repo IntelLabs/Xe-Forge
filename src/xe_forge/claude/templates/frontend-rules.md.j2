@@ -2,6 +2,7 @@
 The framework's interpreter is {{ python }}; its venv must not change -- install nothing into
 it, never use uv. Anything missing goes into a venv you create here, layered over it (a .pth
 calling site.addsitedir on its site-packages, after the venv's own). Run builds and exports
-with the ANTHROPIC_* and OPENAI_* variables unset, so no log carries them. Long builds and
-exports are expected: this session ends when you stop and anything still running is killed,
-so wait for all of it, and stop only once {{ answer }} is written.
+with the ANTHROPIC_* and OPENAI_* variables unset, so no log carries them, and never print
+the environment or any credential. Long builds and exports are expected: this session ends
+when you stop and anything still running is killed, so wait for all of it, and stop only
+once {{ answer }} is written.

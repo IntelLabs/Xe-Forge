@@ -12,6 +12,8 @@ re-run on its own (``--reparse``) without running the framework again.
 from __future__ import annotations
 
 import argparse
+import copy
+import importlib
 import json
 import os
 import re
@@ -25,7 +27,12 @@ from xe_forge.frontend.torch_trace import parse_traces
 
 # Environment worth recording for reproducibility. Anything that could carry a credential
 # is left out by name, whatever its prefix.
-_ENV_PREFIXES = ("VLLM_", "ONEAPI_", "SYCL_", "ZE_", "IGC_", "TORCH_", "PYTORCH_", "HF_HUB_")
+_ENV_PREFIXES = tuple(
+    os.environ.get(
+        "XE_FORGE_CAPTURE_ENV",
+        "VLLM_,SGLANG_,SGL_,OV_,ONEDNN_,DNNL_,ONEAPI_,SYCL_,UR_,ZE_,IGC_,CCL_,TORCH_,PYTORCH_,HF_HUB_",
+    ).split(",")
+)  # environment that shapes a capture, recorded with it
 _SECRET_WORDS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "AUTH")
 
 
@@ -63,16 +70,44 @@ def build(raw_dir: Path, out: Path, names: dict | None = None) -> ir.CaptureRun:
     _annotate_schemas(summary.ops, raw_dir / "schemas.json")
     key = getattr(adapter, "name_key", naming.key)  # stable across a patched build
     entries = (names or {}).get("ops") or {}
+    ops = []
     for op in summary.ops:
         op.framework_meta["name_key"] = key(op)
         if key(op) in entries:
             op.framework_meta["named"] = entries[key(op)]
+        ops.extend(_split(op))
+    summary.ops = ops
     if names is not None:
         run["model_facts"] = names.get("model") or {}
     capture = ir.CaptureRun(run=run, ops=summary.ops)
     capture.workloads = canonical.workloads(capture.ops, summary.total_us, naming.name_op)
     ir.dump(capture, out)
     return capture
+
+
+def _split(op) -> list:
+    """An op whose kernels live in different places (a Python op running several Triton
+    kernels) is one row per kernel group the naming agent names (``named["kernels"]``:
+    symbol substring -> entry): same arguments and calls, each group's own time."""
+    named = op.framework_meta.get("named") or {}
+    groups = named.get("kernels")
+    if not isinstance(groups, dict) or not groups:
+        return [op]
+    by: dict = {}
+    for sym, us in op.kernel_symbols.items():
+        sub = next((g for g in groups if g in sym), None)
+        by.setdefault(sub, {})[sym] = us
+    parts = []
+    for sub, syms in by.items():
+        part = copy.deepcopy(op)
+        part.kernel_symbols = syms
+        part.device_us = round(sum(syms.values()), 3)
+        entry = {k: v for k, v in named.items() if k != "kernels"}
+        if sub is not None and isinstance(groups[sub], dict):
+            entry.update(groups[sub])
+        part.framework_meta["named"] = entry
+        parts.append(part)
+    return parts
 
 
 def _schema_args(op_name: str, nargs: int) -> list[str] | None:
@@ -110,7 +145,24 @@ def _annotate_schemas(ops: list[ir.CapturedOp], cache: Path) -> None:
         cache.write_text(json.dumps(known, indent=1, sort_keys=True) + "\n")
 
 
-_NO_FIT = re.compile(r"OUT_OF_RESOURCES|OUT_OF_DEVICE_MEMORY|out of memory|OutOfMemory", re.I)
+def workload_args(argv: list[str]) -> list[str]:
+    """The arguments that decide what was captured: all but where it was written to."""
+    out, skip = [], False
+    for a in argv:
+        if skip:
+            skip = False
+        elif a in ("-o", "--output", "--names", "--reparse"):
+            skip = True
+        elif not a.startswith(("--output=", "--names=", "--reparse=")):
+            out.append(a)
+    return out
+
+
+_NO_FIT = re.compile(
+    r"OUT_OF_RESOURCES|OUT_OF_DEVICE_MEMORY|out of memory|OutOfMemory"
+    r"|not enough (KV cache|memory)|KV cache is needed|No available memory for the cache",
+    re.I,
+)  # what runtimes say when the model does not fit at this workload
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -127,6 +179,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-o", "--output", type=Path, required=True, help="capture.json to write")
     parser.add_argument("--reparse", type=Path, help="rebuild from an existing raw/ directory")
     parser.add_argument("--names", type=Path, help="the naming agent's names.json")
+    parser.add_argument(
+        "--import-ops", nargs="*", default=[], metavar="MODULE",
+        help="modules registering the providers' torch ops, so their schemas resolve",
+    )  # fmt: skip
     prompt.add_arguments(parser)
     if known.framework in adapters.ADAPTERS:
         adapters.get(known.framework).add_arguments(parser)
@@ -134,6 +190,8 @@ def main(argv: list[str] | None = None) -> int:
 
     out = args.output.resolve()
     names = json.loads(args.names.read_text()) if args.names else None
+    for module in args.import_ops:  # providers register their ops on import
+        importlib.import_module(module)
     if args.reparse:
         capture = build(args.reparse.resolve(), out, names)
     else:
@@ -149,11 +207,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"capture: does not fit on the device at this workload: {line.strip()}",
                   file=sys.stderr, flush=True)  # fmt: skip
             os._exit(3)  # a runtime can abort in teardown after a device OOM; exit with the reason
-        run.setdefault("runtime", {})["prompt"] = prompt.describe(args.prompt_file)
+        runtime = run.setdefault("runtime", {})
+        runtime.update(prompt=prompt.describe(args.prompt_file), inputs="text")
         stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
         model = str((run.get("model") or {}).get("name", "model")).split("/")[-1]
         run.update(
             id=f"{model}-{args.framework}-{stamp}",
+            capture_args=workload_args(argv),
             command=shlex.join([sys.executable, "-m", "xe_forge.frontend.capture", *argv]),
             env=_env_subset(),
         )

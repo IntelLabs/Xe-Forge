@@ -5,10 +5,11 @@ runs the model in a scheduler subprocess, out of reach of a profiler), warms up,
 one prefill and ``--output-len`` decode steps. With ``--profile`` it records them with
 torch.profiler -- XPU activity, ``with_stack``, and shapes with ``--profile-record-shapes``
 -- and exports one chrome trace per phase into ``SGLANG_TORCH_PROFILER_DIR``. This adapter
-runs it once per phase, with every decode step profiled, and leaves the traces in ``raw/``; the
-shared parser reads them. Depending on SGLang's command line rather than its internals
-is deliberate: those move between releases. Tensor parallel 1; graph capture is disabled
-so every op is dispatched.
+runs it once per phase, with every decode step profiled, and leaves the traces in ``raw/``;
+the shared parser reads them. It runs one_batch's own command line, with one internal
+touched: its input builder is handed the shared prompt's token ids (``sglang_one_batch``),
+and checked first, since internals move between releases. Tensor parallel 1; graph capture
+is disabled so every op is dispatched.
 """
 
 from __future__ import annotations
@@ -60,6 +61,8 @@ def _command(args, dev: str, stage: str, ids_file: Path) -> list[str]:
     ]  # fmt: skip
     if args.quantization:
         cmd += ["--quantization", args.quantization]
+    if args.trust_remote_code:
+        cmd += ["--trust-remote-code"]
     backend = args.attention_backend or ("intel_xpu" if dev == "xpu" else None)
     if backend:
         cmd += ["--attention-backend", backend]
@@ -79,11 +82,8 @@ def capture(args, raw_dir: Path) -> dict:
     # and decode as two sessions.
     from transformers import AutoTokenizer
 
-    tok = AutoTokenizer.from_pretrained(args.model)
-    ids = prompt.token_ids(
-        lambda text: tok.encode(text, add_special_tokens=False), len(tok), args.batch,
-        args.input_len, args.prompt_file,
-    )  # fmt: skip
+    tok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
+    ids = prompt.token_ids(prompt.hf_vocab(tok), args.batch, args.input_len, args.prompt_file)
     ids_file = raw_dir / "prompt_ids.json"
     ids_file.write_text(json.dumps(ids))
     for stage in ("prefill", "decode"):
@@ -106,7 +106,8 @@ def capture(args, raw_dir: Path) -> dict:
     try:
         from transformers import AutoConfig
 
-        model_cfg["config"] = stored(AutoConfig.from_pretrained(args.model).to_dict())
+        config = AutoConfig.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
+        model_cfg["config"] = stored(config.to_dict())
     except Exception as exc:  # the config is context, not a requirement
         model_cfg["config_error"] = repr(exc)
 
@@ -118,6 +119,8 @@ def capture(args, raw_dir: Path) -> dict:
             "tp": 1,
             "cuda_graph": False,
             "batch": args.batch,
+            "dtype": args.dtype,
+            "quantization": args.quantization,
             "input_len": args.input_len,
             "output_len": args.output_len,
             "attention_backend": args.attention_backend or ("intel_xpu" if dev == "xpu" else None),

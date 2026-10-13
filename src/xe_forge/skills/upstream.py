@@ -214,6 +214,12 @@ def _patch(args) -> int:
         lines.append(f"stack check {names}: {verdict.upper()} {evidence}".rstrip())
     built = all(ok for _, (_, ok) in ported)  # a port that does not compile is not checked
     checked = _stack_check([c for c, _ in ported], args.kernel_name, args.kind) if built else None
+    from xe_forge.config import get_config
+
+    if built and not verdict and checked is None and get_config().external.stack_python:
+        print("A stack check is configured: check the port in its stack, then pass "
+              '--stack "PASS|FAIL <evidence>".')  # fmt: skip
+        return 1
     if checked is not None:
         passed, reason = checked
         stack_ok &= passed

@@ -31,11 +31,8 @@ def add_arguments(parser) -> None:
 def _prompts(llm, args, length: int):
     from vllm.inputs import TokensPrompt
 
-    tok = llm.get_tokenizer()
-    ids = prompt.token_ids(
-        lambda text: tok.encode(text, add_special_tokens=False), len(tok), args.batch, length,
-        args.prompt_file,
-    )  # fmt: skip
+    ids = prompt.token_ids(prompt.hf_vocab(llm.get_tokenizer()), args.batch, length,
+                           args.prompt_file)  # fmt: skip
     return [TokensPrompt(prompt_token_ids=seq) for seq in ids]
 
 
@@ -56,6 +53,10 @@ def capture(args, raw_dir: Path) -> dict:
         max_model_len=max_len,
         dtype=args.dtype,
         quantization=args.quantization,
+        # A cached prefix (from the warm-up, or another sequence) shortens the prefill the
+        # profile sees: every call must run the input_len it says it runs.
+        enable_prefix_caching=False,
+        trust_remote_code=args.trust_remote_code,
     )
     warm = SamplingParams(max_tokens=args.warmup_tokens, ignore_eos=True, temperature=0.0)
     llm.generate(_prompts(llm, args, min(args.input_len, 64)), warm, use_tqdm=False)
@@ -80,6 +81,7 @@ def capture(args, raw_dir: Path) -> dict:
         "runtime": {
             "tp": 1,
             "enforce_eager": True,
+            "prefix_caching": False,
             "batch": args.batch,
             "input_len": args.input_len,
             "output_len": args.output_len,

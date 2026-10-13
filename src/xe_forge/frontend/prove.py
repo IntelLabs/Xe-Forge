@@ -11,6 +11,7 @@ the two.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -23,6 +24,11 @@ def _build_arms(prove_dir: Path, patches: list[Path], python: str, max_turns: in
     )
     if set(arms) != {"A", "B"} or arms["A"] == arms["B"]:
         raise RuntimeError(f"build agent gave no two distinct arms: {arms} (see {prove_dir})")
+    for arm, python_ in arms.items():
+        if not (
+            isinstance(python_, str) and Path(python_).is_file() and os.access(python_, os.X_OK)
+        ):
+            raise RuntimeError(f"arm {arm}: {python_!r} is not an interpreter (see {prove_dir})")
     return arms
 
 
@@ -34,12 +40,13 @@ def prove(
     from xe_forge.frontend import compare
 
     rows = json.loads((run_dir / "results" / "summary.json").read_text())
-    patches = [
-        Path(r["result"]) / p
-        for r in rows
-        if str(r.get("outcome", "")).startswith("win")
-        for p in r.get("patches") or []
-    ]
+    best: dict[str, dict] = {}  # one winner per kernel: its variants' patches would overlap
+    for r in rows:
+        kernel = r.get("kernel", r.get("result"))
+        if str(r.get("outcome", "")).startswith("win") and r.get("patches"):
+            if (r.get("speedup") or 0) >= (best.get(kernel, {}).get("speedup") or 0):
+                best[kernel] = r
+    patches = [Path(r["result"]) / p for r in best.values() for p in r["patches"]]
     if not patches:
         return "## In model\n\nnot run: no winning patch to prove\n"
     prove_dir = run_dir / "prove"
@@ -53,6 +60,9 @@ def prove(
         for arm in ("A", "B"):  # alternate, so drift falls on both arms
             path = prove_dir / f"{arm}-r{i}" / "capture.json"
             if capture([*capture_args, "-o", str(path)], arms[arm]) != 0 or not path.is_file():
+                if arm == "B" and caps["A"]:  # the base ran the model; the patched stack did not
+                    return (f"## In model\n\nFAIL: with the patches the model does not run "
+                            f"where the base does ({path.parent}); the patches are not mergeable\n")  # fmt: skip
                 return f"## In model\n\nnot run: capture of arm {arm} failed ({path.parent})\n"
             caps[arm].append(path)
     table = compare.compare(caps["A"], caps["B"])

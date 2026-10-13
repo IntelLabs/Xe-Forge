@@ -29,7 +29,8 @@ COLUMNS = [
     "calls_a", "calls_b", "us_a", "us_b", "per_call_a", "per_call_b",
     "speedup", "delta_us", "share_a", "spread_a", "spread_b",
 ]  # fmt: skip
-_SAME_WORK = ("batch", "input_len", "output_len", "weight_format", "quantization", "prompt")
+# A capture's whole ``runtime`` is its work, except what only describes how it was launched.
+_NOT_WORK = ("one_batch",)
 
 
 def _arm(paths: list[Path]) -> tuple[list[ir.CaptureRun], dict]:
@@ -37,7 +38,11 @@ def _arm(paths: list[Path]) -> tuple[list[ir.CaptureRun], dict]:
     key = lambda c: (  # noqa: E731
         c.run.get("framework"),
         (c.run.get("model") or {}).get("name"),
-        tuple((c.run.get("runtime") or {}).get(k) for k in _SAME_WORK),
+        tuple(
+            sorted(
+                (k, str(v)) for k, v in (c.run.get("runtime") or {}).items() if k not in _NOT_WORK
+            )
+        ),
     )
     if len({key(c) for c in caps}) != 1:
         raise SystemExit(

@@ -75,7 +75,10 @@ def _variants(
 
 
 def build_spec(
-    e: Entry, coverage: float = COVERAGE, max_variants: int = MAX_VARIANTS
+    e: Entry,
+    coverage: float = COVERAGE,
+    max_variants: int = MAX_VARIANTS,
+    tolerance: dict | None = None,
 ) -> tuple[dict, dict[str, str]] | None:
     rows = _variants(e, coverage, max_variants)
     if not rows:
@@ -84,7 +87,7 @@ def build_spec(
     record: dict[str, str] = {}
     smallest = min(rows, key=lambda r: r[3] if r[3] is not None else 0)
     for name, w, axis, value, _ in [("ci", *smallest[1:]), *rows]:
-        rtol, atol = _TOLERANCE.get(_dtype(w), (0.05, 0.05))
+        rtol, atol = {**_TOLERANCE, **(tolerance or {})}.get(_dtype(w), (0.05, 0.05))
         spec[name] = [
             {"dtype": _dtype(w), "rtol": rtol, "atol": atol, "dims": resolve_dims(w, value)}
         ]
@@ -101,6 +104,7 @@ def emit(
     partition: str | None = None,
     coverage: float = COVERAGE,
     max_variants: int = MAX_VARIANTS,
+    tolerance: dict | None = None,
 ) -> Path:
     """Write kernels.yaml, specs/ and records/ under ``out_dir``; return the manifest."""
     from xe_forge.core.spec_loader import load_spec
@@ -128,7 +132,7 @@ def emit(
             item["target"] = "library"
         # A library call gets a spec only once it is to be tuned: unbounded, it stays skipped.
         wanted = e.repo and (e.target == "kernel" or e.enabled)
-        built = build_spec(e, coverage, max_variants) if wanted else None
+        built = build_spec(e, coverage, max_variants, tolerance) if wanted else None
         if built is not None:
             spec, variants = built
             stem = next(

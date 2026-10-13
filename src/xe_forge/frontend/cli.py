@@ -98,7 +98,8 @@ def name(
 ) -> Path | None:
     """The naming agent: where each costly op is implemented, and which argument is what
     (``frontend-name.md.j2``). Writes ``<run>/names.json``; None when it gave no answer."""
-    from xe_forge.frontend import ir
+    from xe_forge.frontend import ir, naming
+    from xe_forge.frontend.canonical import arg_label
 
     cap = ir.load(capture_path)
     work = run_dir / "name"
@@ -115,15 +116,19 @@ def name(
         us = sum(o.device_us for o in ops)
         covered += us / total
         top = max(ops, key=lambda o: o.device_us)
-        arg_names = top.framework_meta.get("arg_names") or []
+        kernels: dict[str, float] = {}  # every kernel the key ran, at any shape
+        for o in ops:
+            for sym, k_us in o.kernel_symbols.items():
+                kernels[sym] = round(kernels.get(sym, 0.0) + k_us, 3)
         listing[key] = {
             "framework_op": top.framework_op,
             "owner": top.framework_meta.get("owner"),
             "share": round(us / total, 4),
-            "kernels": dict(sorted(top.kernel_symbols.items(), key=lambda kv: -kv[1])[:5]),
+            "calls": sum(o.calls for o in ops),
+            "kernels": dict(sorted(kernels.items(), key=lambda kv: -kv[1])),
             "args": [
                 {
-                    "name": arg_names[i] if i < len(arg_names) else f"arg{i}",
+                    "name": arg_label(top, i),
                     **(
                         {"shape": a.shape, "dtype": a.dtype}
                         if a
@@ -137,18 +142,45 @@ def name(
     (work / "ops.json").write_text(json.dumps(listing, indent=1) + "\n")
     model = cap.run.get("model") or {}
     (work / "config.json").write_text(json.dumps(model.get("config") or {}, indent=1) + "\n")
+    from xe_forge.models import DSL
+
     context = {
         "model": model.get("name"),
         "framework": cap.run.get("framework"),
         "coverage": f"{covered:.0%}",
         "repos": repos,
+        # The answer's vocabulary, from the code that checks it (naming.validate).
+        "routes": naming.ROUTES,
+        "families": naming.FAMILIES,
+        "rows": naming.ROWS,
+        "dsls": [d.value for d in DSL],
     }
     answer = _agent("name", "frontend-name.md.j2", context, work, "names.json", python, max_turns)
     if answer is None:
         return None
+    problems = naming.validate(answer, listing, repos)
+    if problems:  # kept in name/ for reading; never the run's names.json
+        print(f"name: the answer is not usable ({len(problems)} problems):", file=sys.stderr)
+        for line in problems[:20]:
+            print(f"  {line}", file=sys.stderr)
+        return None
+    missing = [k for k in listing if k not in answer["ops"]]
+    if missing:
+        print(f"name: {len(missing)} ops left unnamed: {', '.join(missing[:5])}", file=sys.stderr)
+    answer["capture"] = _stamp(cap)  # the capture this answer describes
     path = run_dir / "names.json"
     path.write_text(json.dumps(answer, indent=1) + "\n")
     return path
+
+
+def _stamp(cap) -> dict:
+    """What a names.json was written for: the capture's model, framework and workload."""
+    run = cap.run
+    return {
+        "model": (run.get("model") or {}).get("name"),
+        "framework": run.get("framework"),
+        "runtime": {k: v for k, v in (run.get("runtime") or {}).items() if not isinstance(v, dict)},
+    }
 
 
 def _split_framework_python(argv: list[str]) -> tuple[list[str], str | None]:
@@ -181,8 +213,21 @@ def _add_analyze_args(p: argparse.ArgumentParser) -> None:
         help="share of an op's time its benchmark variants must cover",
     )  # fmt: skip
     p.add_argument("--max-variants", type=int, default=manifest.MAX_VARIANTS)
+    p.add_argument(
+        "--tolerance", action="append", default=[], metavar="DTYPE=RTOL,ATOL",
+        help="spec tolerance for a dtype (repeatable; defaults per dtype in manifest.py)",
+    )  # fmt: skip
     p.add_argument("--partition", help="Slurm partition recorded in kernels.yaml, if any")
     p.add_argument("--calibration", type=Path, help="xe-forge calibrate output")
+
+
+def _tolerances(items: list[str]) -> dict:
+    out = {}
+    for item in items:
+        dtype, _, pair = item.partition("=")
+        rtol, _, atol = pair.partition(",")
+        out[dtype] = (float(rtol), float(atol or rtol))
+    return out
 
 
 def analyze(capture_path: Path, out_dir: Path, a: argparse.Namespace) -> Path:
@@ -200,7 +245,7 @@ def analyze(capture_path: Path, out_dir: Path, a: argparse.Namespace) -> Path:
     (out_dir / "report.md").write_text(an.report(result, cap))
     path = manifest.emit(
         result, cap, capture_path, out_dir, partition=a.partition,
-        coverage=a.coverage, max_variants=a.max_variants,
+        coverage=a.coverage, max_variants=a.max_variants, tolerance=_tolerances(a.tolerance),
     )  # fmt: skip
     enabled = [e for e in result.entries if e.enabled]
     print(
@@ -328,8 +373,9 @@ def main(argv: list[str]) -> int:
         p.add_argument("--read-bytes", type=int, default=1 << 30, help="> the card's caches")
         p.add_argument("--matmul-n", type=int, default=8192, help="square matmul size")
         p.add_argument("--iters", type=int, default=20)
+        p.add_argument("--dtypes", nargs="*", help="matmul dtypes to measure (default: all)")
         a = p.parse_args(rest)
-        return calibrate.main(a.output, a.read_bytes, a.matmul_n, a.iters)
+        return calibrate.main(a.output, a.read_bytes, a.matmul_n, a.iters, a.dtypes)
 
     if command == "compare":
         from xe_forge.frontend import compare
@@ -382,6 +428,11 @@ def main(argv: list[str]) -> int:
         help="share of device time whose ops the naming agent places",
     )  # fmt: skip
     p.add_argument("--analyze-only", action="store_true", help="stop after the manifest")
+    p.add_argument("--no-fit", action="store_true", help="skip the agent's fit check")
+    p.add_argument(
+        "--agent-max-turns", type=int,
+        help="turn limit of the fit, prepare, name and prove agents (default: --max-turns)",
+    )  # fmt: skip
     p.add_argument(
         "--prove", action="store_true", help="build the stack with the winning patches and "
         "measure them in the model (prove.py)"
@@ -394,23 +445,40 @@ def main(argv: list[str]) -> int:
     _add_optimize_args(p)
     a, capture_args = p.parse_known_args(rest)
     a.passthrough = passthrough
+    turns = a.agent_max_turns or a.max_turns
     run_dir = a.output.resolve()
     capture_path = run_dir / "capture.json"
     if not capture_path.is_file():
         code = (
-            fits(capture_args, python, run_dir, a.max_turns)
-            or prepare(capture_args, python, run_dir, a.max_turns)
+            (0 if a.no_fit else fits(capture_args, python, run_dir, turns))
+            or prepare(capture_args, python, run_dir, turns)
             or capture([*capture_args, "-o", str(capture_path)], python)
         )
         if code != 0:
-            print(f"run: stopped before analysis (exit {code})", file=sys.stderr)
-            return code
+            why = f"killed by signal {-code}" if code < 0 else f"exit {code}"
+            print(f"run: stopped before analysis ({why})", file=sys.stderr)
+            return code if code > 0 else 1
     else:
+        from xe_forge.frontend import ir
+        from xe_forge.frontend.capture import workload_args
+
+        before = ir.load(capture_path).run.get("capture_args")
+        if before is not None and before != workload_args(capture_args):
+            print(f"run: {capture_path} was captured with {before}, not "
+                  f"{workload_args(capture_args)}; remove it to capture again", file=sys.stderr)  # fmt: skip
+            return 1
         print(f"run: reusing {capture_path}")
     names = run_dir / "names.json"
+    if names.is_file():
+        from xe_forge.frontend import ir
+
+        stamp = json.loads(names.read_text()).get("capture")
+        if stamp != _stamp(ir.load(capture_path)):
+            print(f"run: {names} was written for another capture; naming again", file=sys.stderr)
+            names.unlink()
     if not names.is_file():
         repos = Path(a.kernel_repos).resolve() if a.kernel_repos else REPO_DIR.parent
-        if name(capture_path, run_dir, python, a.max_turns, repos, a.name_coverage) is None:
+        if name(capture_path, run_dir, python, turns, repos, a.name_coverage) is None:
             print("run: no names.json; only ATen ops are named", file=sys.stderr)
     if names.is_file():
         # Rebuild the capture with the agent's names; later captures (prove) carry them too.
@@ -436,7 +504,7 @@ def main(argv: list[str]) -> int:
         from xe_forge.frontend import prove
 
         section = prove.prove(run_dir, capture, capture_args, python or sys.executable,
-                              a.prove_repeat, a.max_turns)  # fmt: skip
+                              a.prove_repeat, turns)  # fmt: skip
         summary.write_text(summary.read_text() + "\n" + section)
     print(summary.read_text())
     return 0
