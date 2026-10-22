@@ -31,7 +31,7 @@ def run(template: str, context: dict, cwd: Path, answer: str, python: str, max_t
     env = claude_env(get_config())
     # Headless claude kills background work after this ceiling; builds need longer.
     env["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] = str(TIMEOUT * 1000)
-    prompt = render(template, **context) + render(
+    prompt = render(template, **{"python": python, **context}) + render(
         "frontend-rules.md.j2", python=python, answer=answer
     )
     (cwd / "prompt.md").write_text(prompt)
@@ -73,7 +73,8 @@ def run(template: str, context: dict, cwd: Path, answer: str, python: str, max_t
     if not isinstance(got, dict):
         raise RuntimeError(f"agent: {answer} is not a JSON object (see {cwd})")
     if "error" in got or not got:
-        raise RuntimeError(f"agent: {got.get('error', f'no {answer}')} (see {cwd})")
+        hint = f"; next: {got['next_step']}" if got.get("next_step") else ""
+        raise RuntimeError(f"agent: {got.get('error', f'no {answer}')}{hint} (see {cwd})")
     return got
 
 

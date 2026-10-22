@@ -133,7 +133,10 @@ def prepare(args) -> tuple[Path, str, dict] | None:
     out = Path(args.model) if Path(args.model).is_dir() else ir_dir(args)
     if (out / args.ov_xml).is_file():
         return None
-    context = {"model": args.model, "out": out, "fmt": args.weight_format}
+    context = {
+        "model": args.model, "out": out, "fmt": args.weight_format,
+        "preflight": Path(__file__).with_name("openvino_preflight.py"),
+    }  # fmt: skip
     return out, "frontend-prepare-openvino.md.j2", context
 
 

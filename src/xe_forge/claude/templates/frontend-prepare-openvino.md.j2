@@ -1,5 +1,31 @@
 Export {{ model }} to an OpenVINO IR directory at {{ out }}, loadable by optimum-intel's
 OVModelForCausalLM, with {{ fmt }} weights. Download what you need (unset HF_HUB_OFFLINE for
-it). Check that, under the framework's interpreter,
+it).
+
+First run `{{ python }} -I {{ preflight }} {{ model }}`; it prints JSON and exits with:
+0 exportable; 4 no optimum-intel export config for the model_type (or no transformers
+integration at all); 5 supported, but the installed transformers is outside the config's
+range (`transformers.pin` is the pin); 6 the installed transformers is too old to know the
+model_type (`minimum_transformers`); 7 the Hub repo is gated, private or missing. For 5 and
+6 make the pinned transformers part of the layered venv, and use that same version for the
+export and for the final load check: tokenizer files are version-specific. For 4 and 7 write
+{"error": ...} with the preflight's `next_step` -- do not patch optimum-intel, and never look
+for, print or log a Hub token. `extra_pip_deps` lists what the family needs besides
+optimum-intel[openvino]. A model that is not a text-generating decoder (a VLM, ASR,
+diffusion) cannot be captured: write {"error": ...}.
+
+Export with `optimum-cli export openvino -m {{ model }} --weight-format {{ fmt }} <tmp>`:
+ - a node-local TMPDIR and output directory, then copy to {{ out }}: temp files on NFS
+   break the export (`.nfs...` FileNotFoundError at the end);
+ - "Maximum required is X, got: Y" after tracing starts is an upper transformers cap:
+   pin transformers<=X (with transformers 5.0 also huggingface-hub>=1.3,<2 and
+   datasets>=4,<5) and export again;
+ - some ids (Qwen3-1.7B/4B/8B, ...) have data-aware quantization defaults for int4/int8
+   that need the `datasets` package;
+ - `--trust-remote-code` only after reading the model's code; a hub 504 is worth a retry;
+ - the weights must fit the device: if the export is too large for it, say so in the error.
+
+Check that, under the framework's interpreter,
 OVModelForCausalLM.from_pretrained("{{ out }}", device="GPU") loads it and generates 4 tokens.
-Write prepared.json {"model": "{{ out }}"}, or {"error": "<why>"}.
+Write prepared.json {"model": "{{ out }}", "transformers": "<version used>"}, or
+{"error": "<why>", "stage": "preflight|export|load", "next_step": "<what a person would do>"}.
