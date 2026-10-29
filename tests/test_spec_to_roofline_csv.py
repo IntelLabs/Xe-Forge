@@ -85,6 +85,18 @@ def test_huge_exponent_rejected():
         eval_formula("9 ** 9 ** 9", DIMS)
 
 
+def test_nested_powers_intermediate_size_rejected():
+    # Each ** 64 passes the exponent cap but the intermediate int grows
+    # exponentially; a trailing % 7 would shrink the final result.
+    formula = "(" * 8 + "2" + " ** 64)" * 8 + " % 7"
+    with pytest.raises(ValueError, match="too large"):
+        eval_formula(formula, DIMS)
+
+
+def test_moderate_power_still_allowed():
+    assert eval_formula("2 ** 64", DIMS) == float(2**64)
+
+
 def test_eval_injection_payload_does_not_execute(tmp_path):
     canary = tmp_path / "canary"
     with pytest.raises(ValueError):

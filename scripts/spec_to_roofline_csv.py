@@ -83,6 +83,9 @@ _BIN_OPS = {
 }
 _UNARY_OPS = {ast.UAdd: operator.pos, ast.USub: operator.neg}
 _MAX_EXPONENT = 64
+# Cap on the bit length of any integer produced by `**`, so nested powers
+# (e.g. ((2**64)**64)**64 ...) cannot grow without bound before float().
+_MAX_POW_BITS = 4096
 
 
 def _eval_node(node: ast.AST, dims: dict[str, int]):
@@ -102,6 +105,14 @@ def _eval_node(node: ast.AST, dims: dict[str, int]):
         right = _eval_node(node.right, dims)
         if isinstance(node.op, ast.Pow) and abs(right) > _MAX_EXPONENT:
             raise ValueError("exponent too large in flop formula")
+        if (
+            isinstance(node.op, ast.Pow)
+            and type(left) is int
+            and type(right) is int
+            and right > 0
+            and left.bit_length() * right > _MAX_POW_BITS
+        ):
+            raise ValueError("intermediate value too large in flop formula")
         return _BIN_OPS[type(node.op)](left, right)
     if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPS:
         return _UNARY_OPS[type(node.op)](_eval_node(node.operand, dims))
