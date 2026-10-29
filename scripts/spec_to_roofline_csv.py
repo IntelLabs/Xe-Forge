@@ -55,7 +55,9 @@ Usage
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
+import operator
 import re
 import sys
 
@@ -70,10 +72,53 @@ QUANT_MODEL: dict[int, tuple[int, int, str]] = {
 }
 
 
+_BIN_OPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+}
+_UNARY_OPS = {ast.UAdd: operator.pos, ast.USub: operator.neg}
+_MAX_EXPONENT = 64
+
+
+def _eval_node(node: ast.AST, dims: dict[str, int]):
+    if isinstance(node, ast.Expression):
+        return _eval_node(node.body, dims)
+    if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+        return node.value
+    if isinstance(node, ast.Name):
+        if node.id not in dims:
+            raise ValueError(f"unknown name in flop formula: {node.id!r}")
+        value = dims[node.id]
+        if type(value) not in (int, float):
+            raise ValueError(f"dim {node.id!r} is not a number")
+        return value
+    if isinstance(node, ast.BinOp) and type(node.op) in _BIN_OPS:
+        left = _eval_node(node.left, dims)
+        right = _eval_node(node.right, dims)
+        if isinstance(node.op, ast.Pow) and abs(right) > _MAX_EXPONENT:
+            raise ValueError("exponent too large in flop formula")
+        return _BIN_OPS[type(node.op)](left, right)
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPS:
+        return _UNARY_OPS[type(node.op)](_eval_node(node.operand, dims))
+    raise ValueError(f"unsupported syntax in flop formula: {type(node).__name__}")
+
+
 def eval_formula(formula: str, dims: dict[str, int]) -> float:
-    """Evaluate a flop formula like 'M*TOPK*N*K*2' against the dims dict."""
-    # Only names from dims and integer arithmetic — no builtins.
-    return float(eval(formula, {"__builtins__": {}}, dict(dims)))
+    """Evaluate a flop formula like 'M*TOPK*N*K*2' against the dims dict.
+
+    The formula comes from an untrusted spec file, so it is parsed and walked
+    as an AST that permits only numbers, dim names and arithmetic operators —
+    never passed to eval().
+    """
+    if not isinstance(formula, str):
+        raise ValueError("flop formula must be a string")
+    tree = ast.parse(formula.strip(), mode="eval")
+    return float(_eval_node(tree, dims))
 
 
 def moe_bytes(dims: dict[str, int]) -> float:
