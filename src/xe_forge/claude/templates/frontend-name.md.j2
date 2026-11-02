@@ -1,0 +1,67 @@
+Name the ops a model ran, so each can be optimized where it lives. The model is {{ model }},
+run by {{ framework }}; its config is config.json here. ops.json lists the ops that took
+{{ coverage }} of device time, keyed by op: the framework op, the op that owns it, its share
+and calls, every kernel it launched with their device time, its arguments (name, shape and
+dtype, or value), its dims (the names a cost formula uses), every captured shape with its
+measured time per call ("shapes"), and its call site. The kernel
+repositories on this machine are in {{ repos }}.
+
+For each key, find where the op is implemented -- the registration of its namespace, the
+kernels it launches, the source behind them -- by reading the framework and the
+repositories, not by guessing from names. Then write names.json:
+
+{"ops": {"<key>": {
+   "route": one of {{ routes | join(", ") }}:
+       kernel:  a kernel in one of the repositories that Xe-Forge can rewrite;
+       library: the op's time is a library primitive -- what is tuned is the call, in the
+                repository that makes it;
+       aten:    implemented inside PyTorch, with no repository here to edit;
+       unnamed: none of these could be established -- say why in "via".
+   "name": the symbol to grep for in the repository (the kernel, or the function making the
+           library call); "repo": the repository's directory name under {{ repos }};
+   "dsl": one of {{ dsls | join(", ") }} -- the language the kernel is written in; for a
+          library call, the one from this list a baseline that makes the same library
+          call is written in (a C++ library such as oneDNN: sycl), even when the
+          framework makes the call from Python;
+   "library": for a library call, which library (e.g. "onednn", "onemkl");
+   "via": one line: how you established it (file:line);
+   "family": one of {{ families | join(", ") }};
+   "token_arg", "token_axis": the argument and axis that hold the tokens, when that is not
+            the first tensor's first axis;
+   "cost": only where you see a kernel may do more work than it needs -- read more than
+           its inputs (all experts instead of the routed ones), re-read what an unfused
+           neighbour wrote, recompute -- because every kernel's achieved speed is measured
+           anyway and that cannot see wasted work. Then {"bytes": "<expression>", "flops":
+           "<expression>"}: a lower bound on one call, the least any implementation must
+           move and compute, over the op's "dims" in ops.json, with numbers from the config
+           and the kernel; only + - * / // ** and parentheses. It must hold at every shape
+           under "shapes" in ops.json: on this card
+           {%- if calibration %} ({{ calibration.bandwidth_gbs }} GB/s, matmul TFLOP/s
+           {{ calibration.matmul_tflops }}){% endif %}, bytes / bandwidth and flops / peak
+           may not exceed that shape's us_per_call (a kernel group: its kernels_per_call); a
+           cost that does is dropped;
+   "kernels": only when the op's kernels live in different places (a Python op launching
+            several kernels): {"<kernel symbol substring>": {route, name, repo, dsl, via,
+            family, cost}} -- each group of kernels is then measured, bounded and optimized
+            on its own;
+   "gemm": only for a matrix multiply whose weight is one of its arguments, and not where
+           ops.json already gives the op's "gemm" -- which argument is what, from the
+           kernel's source; a list when the op multiplies by more than one weight:
+     {"activation": "<arg>", "weight": "<arg>",
+      "act_per_stored": <logical K elements per stored activation element, 1 unless packed>,
+      "n_axis": <index of N in the weight's shape>,
+      "weight_side": ["<arg>", ...]   every tensor read with the weight: weight, scales,
+                                      zero points, bias -- not activation-side scales,
+      "output": "<arg>" or null,
+      "grouped": true for one call over several experts' matrices,
+      "experts": "<integer argument holding this call's (local) expert count>" or null,
+      "rows": one of {{ rows | join(", ") }} -- whether the activation's rows are tokens or
+              token x expert rows}
+ }},
+ "model": {"topk": <experts each token is routed to, or null>,
+           "experts": <routed experts in the model, or null>}}
+
+Use the keys exactly as ops.json gives them, and argument names exactly as it lists them.
+Before writing, check each name greps in its repository and each argument you name is one
+the op has. An op you cannot place is "unnamed" with the reason, never a guess; an entry that
+fails these checks is dropped and its op left unnamed.

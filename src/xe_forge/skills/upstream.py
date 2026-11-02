@@ -19,6 +19,7 @@ engine does it the same way and none needs a shell:
 
 from __future__ import annotations
 
+import os
 import py_compile
 import subprocess
 import sys
@@ -124,6 +125,50 @@ def _port_one(clone: Path) -> tuple[list[str], bool] | None:
     return lines, ok
 
 
+STACK_TIMEOUT = int(
+    os.environ.get("XE_FORGE_STACK_TIMEOUT", 4 * 3600)
+)  # seconds: a build plus its tests
+
+
+def _stack_check(clones: list[Path], kernel: str, kind: str) -> tuple[bool, str] | None:
+    """(passed, reason) of the host stack check over all clones of a port; None if unset."""
+    from xe_forge.config import get_config
+    from xe_forge.external import ExternalCommandError, render_command
+
+    template = get_config().external.stack_check
+    if not template:
+        return None
+    log = OUTPUT / "stack_check.log"
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "OPENAI_"))}
+    try:
+        argv = render_command(
+            template,
+            clone=str(clones[0].resolve()),
+            clones=os.pathsep.join(str(c.resolve()) for c in clones),
+            kernel=kernel,
+            kind=kind,
+            workspace=str(Path.cwd()),
+        )
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=STACK_TIMEOUT, env=env)
+    except subprocess.TimeoutExpired as exc:
+        log.write_text(f"{exc.stdout or ''}{exc.stderr or ''}")
+        return False, f"stack check timed out after {STACK_TIMEOUT}s; see {log}"
+    except (ExternalCommandError, OSError) as exc:
+        return False, f"stack check did not run: {exc}"
+    log.write_text(proc.stdout + proc.stderr)
+    lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+    if not lines or lines[-1] != "DONE":
+        return False, f"stack check did not complete (no DONE, exit {proc.returncode}); see {log}"
+    verdict = next((ln for ln in reversed(lines) if ln.upper().startswith("STACK:")), "")
+    if not verdict:
+        return False, f"no STACK: line (log {log})"
+    token, _, detail = verdict.split(":", 1)[1].strip().partition(" ")
+    passed = token.upper() == "PASS" and proc.returncode == 0
+    if token.upper() == "PASS" and not passed:
+        detail = f"PASS printed but exit {proc.returncode}; {detail}"
+    return passed, f"{detail} (log {log})".strip()
+
+
 def _patch(args) -> int:
     clones = sorted(p for p in Path(".").glob(f"{UPSTREAM}*") if (p / ".git").exists())
     if not clones:
@@ -153,12 +198,30 @@ def _patch(args) -> int:
     ]
     for _, (block, _) in ported:
         lines += block
+    stack_ok = True
+    names = "+".join(c.name for c, _ in ported)
+    verdict, _, evidence = getattr(args, "stack", "").strip().partition(" ")
+    if verdict:
+        stack_ok &= verdict.upper() == "PASS"
+        lines.append(f"stack check {names}: {verdict.upper()} {evidence}".rstrip())
+    built = all(ok for _, (_, ok) in ported)
+    checked = _stack_check([c for c, _ in ported], args.kernel_name, args.kind) if built else None
+    from xe_forge.config import get_config
+
+    if built and not verdict and checked is None and get_config().external.stack_python:
+        print("A stack check is configured: check the port in its stack, then pass "
+              '--stack "PASS|FAIL <evidence>".')  # fmt: skip
+        return 1
+    if checked is not None:
+        passed, reason = checked
+        stack_ok &= passed
+        lines.append(f"stack check {names}: {'PASS' if passed else 'FAIL'} {reason}")
     if args.notes:
         lines += ["notes:", args.notes]
     (OUTPUT / "PORT.txt").write_text("\n".join(lines) + "\n")
     print(f"Wrote {', '.join(f'output/{c.name}.patch' for c, _ in ported)} and output/PORT.txt")
     print("\n".join(lines))
-    return 0 if all(ok for _, (_, ok) in ported) else 1
+    return 0 if stack_ok and all(ok for _, (_, ok) in ported) else 1
 
 
 def run(args):
