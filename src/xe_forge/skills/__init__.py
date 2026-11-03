@@ -235,8 +235,12 @@ def main():
     pc = patch_sub.add_parser("check", help="git diff, fresh apply, import, tokens vs transformers")
     pc.add_argument("dir", help="holds patch.json and generate.sh")
     pc.add_argument("--repos", required=True, help="the clones' directory (--kernel-repos)")
-    pc.add_argument("--framework-python", required=True, help="the unpatched framework's interpreter")
-    pc.add_argument("--reference-python", default=None, help="GPU torch + transformers, if not that")
+    pc.add_argument(
+        "--framework-python", required=True, help="the unpatched framework's interpreter"
+    )
+    pc.add_argument(
+        "--reference-python", default=None, help="GPU torch + transformers, if not that"
+    )
     pc.add_argument("--model", required=True)
     pc.add_argument("--batch", type=int, required=True)
     pc.add_argument("--input-len", type=int, required=True)
