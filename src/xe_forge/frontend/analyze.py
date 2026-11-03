@@ -212,7 +212,7 @@ def _measured(measured: dict, name: str) -> dict | None:
     hits = [v for k, v in measured.items() if k.startswith(name)]
     if not sum(v["us"] for v in hits):
         return None
-    out = {}
+    out = {"us": sum(v["us"] for v in hits)}
     for f in ("gb_per_s", "util_pct"):  # None = not measured, averaged over those that were
         known = [v for v in hits if v.get(f) is not None]
         ns = sum(v["us"] for v in known)
@@ -223,12 +223,18 @@ def _measured(measured: dict, name: str) -> dict | None:
 def _sol_parts(w: Workload, calib: dict | None, ctx: dict | None) -> tuple | None:
     """(SOL, memory SOL, compute SOL); None when most of the time is unmeasured."""
     measured = (ctx or {}).get("counters") or {}
+    shared = (ctx or {}).get("shared") or set()
     bw = calib_peaks(calib)[0]
     kernels = w.framework_meta.get("kernels") or {}
     weight = sol = mem = comp = 0.0
     for name, us in kernels.items():
-        k = _measured(measured, name)
-        if not k or not us:
+        # Counters are per kernel name, over every launch the process made: a name several
+        # workloads run (one library GEMM for every matmul, prefill and decode of one norm)
+        # averages their shapes, so it bounds none of them.
+        k = None if name in shared else _measured(measured, name)
+        # Metric sampling misses short launches: counters that sampled under half of the
+        # kernel's measured time describe a few launches, not the kernel.
+        if not k or not us or (k.get("us") or 0.0) < 0.5 * us:
             continue
         # SOL is the max of both sides; an unknown side (or no bandwidth peak) is not 0% of
         # peak, so such a kernel counts as unmeasured.
@@ -296,14 +302,18 @@ def _decide(
     return d
 
 
-def _counted(workloads: list[Workload], measured: dict) -> float:
-    """% of device time whose kernels have counters."""
+def _counted(workloads: list[Workload], measured: dict, shared: set = frozenset()) -> float:
+    """% of device time whose kernels have counters that bound them (a name of one workload)."""
 
     def hit(name):
-        k = _measured(measured, name)
+        k = None if name in shared else _measured(measured, name)
         return bool(k) and k["gb_per_s"] is not None and k["util_pct"] is not None
 
-    times = [(us, hit(k))
+    def bounds(name, us):
+        k = None if name in shared else _measured(measured, name)
+        return hit(name) and (k.get("us") or 0.0) >= 0.5 * us
+
+    times = [(us, bounds(k, us))
              for w in workloads for k, us in (w.framework_meta.get("kernels") or {}).items()]  # fmt: skip
     total = sum(us for us, _ in times)
     return round(100 * sum(us for us, hit in times if hit) / total, 1) if total else 0.0
@@ -312,8 +322,13 @@ def _counted(workloads: list[Workload], measured: dict) -> float:
 def context(capture: CaptureRun) -> dict:
     """What every bound reads besides the workload and calibration."""
     facts = capture.run.get("model_facts") or {}
+    runs: dict[str, set] = defaultdict(set)
+    for w in capture.workloads:
+        for name in w.framework_meta.get("kernels") or {}:
+            runs[name].add(w.workload_id)
     return {
         "counters": capture.run.get("counters") or {},
+        "shared": {name for name, ws in runs.items() if len(ws) > 1},
         "topk": facts.get("topk"),
         "experts": facts.get("experts"),
         "ep": (capture.run.get("runtime") or {}).get("ep"),
@@ -387,6 +402,6 @@ def analyze(
             "top": top,
             "min_gain": min_gain,
             "bound": "calibrated" if calibration else "unknown (no calibration)",
-            "counters_pct": _counted(capture.workloads, ctx["counters"]),
+            "counters_pct": _counted(capture.workloads, ctx["counters"], ctx["shared"]),
         },
     )

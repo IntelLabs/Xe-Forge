@@ -211,6 +211,12 @@ Kernel, Calls, Time (ns), Time (%), Average (ns), Min (ns), Max (ns)
 "rms_opt_123_0_0__sa[SIMD16 {1; 1; 1} {16; 1; 1}]", 4, 8000, 40, 2000, 2000, 2000
 "gemm_kernel", 2, 12000, 60, 6000, 6000, 6000
 T
+# --chrome-kernel-logging: one gpu_op per launch, into the working directory.
+r='rms_opt_123_0_0__sa[SIMD16 {1; 1; 1} {16; 1; 1}]'
+ev() { printf '{"ph": "X", "cat": "gpu_op", "name": "%s", "ts": %s, "dur": %s},' "$1" "$2" "$3"; }
+{ printf '{"traceEvents": ['; ev gemm_kernel 1 6.0; ev "$r" 10 2.0; ev "$r" 20 2.0
+  ev gemm_kernel 30 6.0; ev "$r" 40 2.0; ev "$r" 50 2.0
+  printf '{"ph": "M", "name": "process_name"}]}'; } > python.123.json
 """
 
 LAUNCHER = """#!/bin/bash
@@ -293,3 +299,74 @@ def test_bound_tool_lists_workloads_by_share(tmp_path):
     rows = json.loads(out)
     assert [r["op"] for r in rows] == ["toy::FC", "toy::RMS"]  # costliest first
     assert rows[0]["share"] == 0.6 and rows[0]["eff"] is None  # no calibration, no counters
+
+
+def test_naming_family_is_free_text_and_a_bad_gemm_spec_degrades(tmp_path):
+    from xe_forge.frontend import canonical, naming
+    from xe_forge.frontend.ir import CapturedOp, TensorArg
+
+    (tmp_path / "repo").mkdir()
+    listing = {"op": {"args": [{"name": "x", "shape": [4, 8]}, {"name": "w", "shape": [16, 8]}],
+                      "dims": {}}}  # fmt: skip
+    entry = {"route": "kernel", "name": "k", "repo": "repo", "dsl": "sycl", "family": "ssm_scan",
+             "gemm": {"activation": "x", "weight": "w", "n_axis": "zero", "grouped": "yes"}}  # fmt: skip
+    assert naming.validate({"ops": {"op": entry}}, listing, tmp_path) == []
+    bad = dict(entry, family="Not A Word")
+    assert any(
+        "lowercase word" in p for p in naming.validate({"ops": {"op": bad}}, listing, tmp_path)
+    )
+    op = CapturedOp(id="op-0", framework_op="op", args=[TensorArg([4, 8], "float16"),
+                    TensorArg([16, 8], "float16")], framework_meta={"arg_names": ["x", "w"]})  # fmt: skip
+    got = canonical._one_gemm(op, entry["gemm"])  # malformed n_axis/grouped: no N, no crash
+    assert got == {"M": 4, "K": 8, "grouped": False}
+
+
+SPLIT_LAUNCHER = """#!/bin/bash
+cat > "$RAW_DIR/meta.json" <<'J'
+{"framework": "toyfw", "model": {"name": "toy"}, "runtime": {"batch": 1}, "device": {}}
+J
+cat > "$RAW_DIR/ops.json" <<'J'
+{"rms": {"framework_op": "toy::RMS", "kernels": ["^rms_opt"]},
+ "fc_q": {"framework_op": "toy::FC", "kernels": ["^gemm_kernel$"], "launches": [[0, 1]],
+          "args": [{"name": "x", "shape": [4, 896], "dtype": "float16"}]},
+ "fc_o": {"framework_op": "toy::FC", "kernels": ["^gemm_kernel$"], "launches": [%s],
+          "args": [{"name": "x", "shape": [4, 128], "dtype": "float16"}]}}
+J
+"""
+
+
+@pytest.mark.parametrize(
+    "fc_o, problem",
+    [("[3, 4]", None), ("[0, 1]", "claimed by both"), ("[1, 2]", "matches none of its kernel")],
+)
+def test_capture_parse_splits_a_shared_kernel_by_launch(tmp_path, fc_o, problem):
+    unitrace = _exe(tmp_path / "unitrace", UNITRACE_STUB)
+    launcher = _exe(tmp_path / "run.sh", SPLIT_LAUNCHER % fc_o)
+    raw, cap = tmp_path / "raw", tmp_path / "capture.json"
+    code, out = _tool("capture", "run", str(launcher), "-o", str(raw), "--unitrace", str(unitrace))
+    assert code == 0, out
+    assert len(json.loads((raw / "unitrace_launches.json").read_text())["launches"]) == 6
+    code, out = _tool("capture", "parse", str(raw), "-o", str(cap))
+    if problem:
+        assert code == 1 and problem in out, out
+        return
+    assert code == 0, out
+    ops = json.loads(cap.read_text())["ops"]
+    fcs = sorted((o["args"][0]["shape"][1], o["device_us"], o["calls"]) for o in ops
+                 if o["framework_op"] == "toy::FC")  # fmt: skip
+    assert fcs == [(128, 6.0, 1), (896, 6.0, 1)]  # one gemm_kernel launch each
+
+
+def test_counters_bound_only_a_kernel_of_one_workload_that_they_sampled():
+    calib = {"bandwidth_gbs": 100.0}
+    w1, w2 = _workload({"gemm_kernel": 10.0}), _workload({"gemm_kernel": 10.0})
+    w1.workload_id, w2.workload_id = "gemm/a", "gemm/b"
+    good = {"gb_per_s": 50.0, "util_pct": 10.0, "us": 20.0}
+    # One library kernel for two matmuls: its averaged counters bound neither.
+    ctx = {"counters": {"gemm_kernel": good}, "shared": {"gemm_kernel"}}
+    assert analyze._sol_parts(w1, calib, ctx) is None
+    # Its own kernel, but sampled for 2 of its 10 us: a few launches, not the kernel.
+    ctx = {"counters": {"gemm_kernel": dict(good, us=2.0)}, "shared": set()}
+    assert analyze._sol_parts(w1, calib, ctx) is None
+    ctx = {"counters": {"gemm_kernel": good}, "shared": set()}
+    assert analyze._sol_parts(w1, calib, ctx)[0] == pytest.approx(0.5)

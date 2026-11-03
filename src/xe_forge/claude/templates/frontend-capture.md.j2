@@ -33,7 +33,11 @@ build of the stack is measured) and {{ python }} otherwise, and writes into $RAW
    {"<node>": {"framework_op": "<its type>", "kernels": ["<regex over the kernel names
    unitrace reports>"], "args": [{"name", "shape", "dtype"}], "call_site": "<node name>",
    "calls": <runs in one workload>}} with concrete shapes, read from the framework's own
-   runtime API; which kernels a node ran is what you establish, not guess from names.
+   runtime API; which kernels a node ran is what you establish, not guess from names. When
+   one kernel name serves several nodes (a library's GEMM for every matmul), give each node
+   "launches": [[start, end], ...] as well -- index ranges into raw/unitrace_launches.json,
+   the measured run's launches in device order, which `capture run` writes: run it once,
+   read that, and have the launcher write the ranges.
 
 Then run, under any interpreter that imports xe_forge (PYTHONPATH is set):
   xe-forge-skill capture run launcher/run.sh -o raw

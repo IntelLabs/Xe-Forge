@@ -53,13 +53,33 @@ def _env() -> dict:
 
 
 def _launch(
-    launcher: Path, raw: Path, prefix: list[str], log: Path, base: dict | None = None
+    launcher: Path,
+    raw: Path,
+    prefix: list[str],
+    log: Path,
+    base: dict | None = None,
+    cwd: Path | None = None,
 ) -> int:
     env = dict(base or _env(), RAW_DIR=str(raw))
     with open(log, "w") as f:
         return subprocess.call(
-            [*prefix, str(launcher)], env=env, stdout=f, stderr=subprocess.STDOUT
+            [*prefix, str(launcher)], env=env, stdout=f, stderr=subprocess.STDOUT, cwd=cwd
         )
+
+
+def _timeline(scratch: Path) -> list[list]:
+    """[[kernel, us], ...] of every launch, in device order, from --chrome-kernel-logging."""
+    events = []
+    for path in scratch.glob("*.json"):
+        try:
+            data = json.loads(path.read_text(errors="replace"), strict=False)
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(data, dict):
+            events += [e for e in data.get("traceEvents") or []
+                       if e.get("ph") == "X" and e.get("cat") == "gpu_op"]  # fmt: skip
+    events.sort(key=lambda e: float(e["ts"]))
+    return [[_SIMD.sub("", e["name"]).strip(), round(float(e["dur"]), 3)] for e in events]
 
 
 def _tail(log: Path, n: int = 25) -> str:
@@ -78,6 +98,34 @@ def _unitrace_kernels(reports: list[Path]) -> dict:
             k["us"] += t["time_ns"] / 1e3
             k["calls"] += int(t["calls"])
     return {k: {"us": round(v["us"], 3), "calls": v["calls"]} for k, v in out.items()}
+
+
+_SAMPLING_SHM = Path("/dev/shm/uctrlunitrace_metric_sampling_control")  # unitrace prefixes /uctrl
+
+
+def _sampling_free() -> bool:
+    """Whether unitrace can open its metric-sampling session here.
+
+    The session has one fixed name for every user: a killed unitrace leaves it behind and every
+    later one fails ("Failed to create shared memory ... File exists"). Ours is removed when no
+    unitrace of ours runs; another user's cannot be, and the counters are then not measured.
+    """
+    if not _SAMPLING_SHM.exists():
+        return True
+    alive = subprocess.run(["pgrep", "-u", str(os.getuid()), "-x", "unitrace"],
+                           capture_output=True).returncode == 0  # fmt: skip
+    if not alive:
+        try:
+            _SAMPLING_SHM.unlink()
+            print(f"capture run: removed {_SAMPLING_SHM}, left by a unitrace that no longer runs")
+            return True
+        except OSError:
+            pass
+    print(
+        f"capture run: {_SAMPLING_SHM} is held by another unitrace session on this node: "
+        "no counters this time (bounds take them as unknown)"
+    )
+    return False
 
 
 def run_capture(args) -> int:
@@ -107,14 +155,16 @@ def run_capture(args) -> int:
             return 1
         # Pass 2, under unitrace: every kernel the device ran, by its real name, with counters.
         report = scratch / "unitrace.txt"
-        cmd = [args.unitrace, "--device-timing", "--opencl", "--metric-sampling",
-               "--group", "ComputeBasic", "-o", str(report)]  # fmt: skip
+        cmd = [args.unitrace, "--device-timing", "--chrome-kernel-logging", "--opencl",
+               "-o", str(report)]  # fmt: skip
+        if _sampling_free():
+            cmd[-2:-2] = ["--metric-sampling", "--group", "ComputeBasic"]
         from xe_forge.core.profiler import UnitraceXPUProfiler
 
         # The profiler's own setup: its Metrics Library on LD_LIBRARY_PATH, a flat hierarchy.
         env = UnitraceXPUProfiler(unitrace_bin=args.unitrace)._environment()
         env = {k: v for k, v in env.items() if not k.startswith(("ANTHROPIC_", "OPENAI_"))}
-        code = _launch(launcher, scratch / "raw", cmd, raw.parent / "unitrace.log", env)
+        code = _launch(launcher, scratch / "raw", cmd, raw.parent / "unitrace.log", env, scratch)
         reports = [p for p in scratch.glob("unitrace*") if ".metrics." not in p.name]
         kernels = _unitrace_kernels(reports)
         if not kernels:
@@ -122,6 +172,14 @@ def run_capture(args) -> int:
                   f"{_tail(raw.parent / 'unitrace.log')}")  # fmt: skip
             return 2
         (raw / "unitrace_kernels.json").write_text(json.dumps(kernels, indent=1) + "\n")
+        # The measured run's launches: the last 1/repeats of the process's timeline.
+        launches = _timeline(scratch)
+        repeats = int(json.loads((raw / "meta.json").read_text()).get("repeats") or 1)
+        if launches:
+            (raw / "unitrace_launches.json").write_text(json.dumps({
+                "repeats": repeats, "total": len(launches),
+                "launches": launches[len(launches) - len(launches) // repeats:],
+            }) + "\n")  # fmt: skip
         from xe_forge.core.compute_metrics import summarize_compute_metrics
 
         records = []
@@ -145,45 +203,80 @@ def run_capture(args) -> int:
     return 0
 
 
-def _ops_summary(ops_map: dict, kernels: dict):
-    """An agent's op -> kernel map, timed by unitrace; problems where it does not hold."""
+def _ops_summary(ops_map: dict, window: list, by_launch: bool):
+    """An agent's op map over ``window`` ([kernel, us, calls] per launch, or per kernel name
+    without a timeline), timed by unitrace; problems where it does not hold.
+
+    An op claims every item whose kernel matches one of its ``kernels`` patterns, or, given
+    ``launches`` ([[start, end], ...] into the timeline), exactly those launches -- each of
+    which must then match one of its patterns, when it gives any.
+    """
     from xe_forge.frontend.ir import CapturedOp, TensorArg
     from xe_forge.frontend.torch_trace import TraceSummary
 
     problems, owner, ops = [], {}, []
     for key, e in ops_map.items():
-        pats = e.get("kernels") or []
-        hits = set()
-        for pat in pats:
+        regs = []
+        for pat in e.get("kernels") or []:
             try:
-                found = {k for k in kernels if re.search(pat, k)}
+                regs.append(re.compile(pat))
             except re.error as exc:
                 problems.append(f"{key}: kernel pattern {pat!r} is not a regex ({exc})")
-                continue
-            if not found:
-                problems.append(f"{key}: kernel pattern {pat!r} matches no kernel unitrace saw")
-            hits |= found
-        for k in hits:
-            if k in owner:
-                problems.append(f"kernel {k!r} claimed by both {owner[k]!r} and {key!r}")
-            owner[k] = key
+        matches = {i for i, item in enumerate(window) if any(r.search(item[0]) for r in regs)}
+        for r in regs:
+            if not any(r.search(item[0]) for item in window):
+                problems.append(
+                    f"{key}: kernel pattern {r.pattern!r} matches no kernel unitrace saw"
+                )
+        ranges = e.get("launches")
+        if ranges is None:
+            idx = matches
+        elif not by_launch:
+            problems.append(f"{key}: launches need unitrace's per-launch timeline; none recorded")
+            idx = set()
+        else:
+            idx = set()
+            for rg in ranges if isinstance(ranges, list) else [ranges]:
+                ok = (isinstance(rg, list) and len(rg) == 2 and all(type(v) is int for v in rg)
+                      and 0 <= rg[0] < rg[1] <= len(window))  # fmt: skip
+                if not ok:
+                    problems.append(f"{key}: launch range {rg!r} is not [start, end) within "
+                                    f"the {len(window)} launches")  # fmt: skip
+                    continue
+                idx |= set(range(*rg))
+            stray = sorted(i for i in idx if regs and i not in matches)
+            if stray:
+                problems.append(f"{key}: launch {stray[0]} ({window[stray[0]][0]!r}) matches "
+                                f"none of its kernel patterns")  # fmt: skip
+        for i in sorted(idx):
+            if i in owner and owner[i] != key:
+                problems.append(f"kernel {window[i][0]!r} (launch {i}) claimed by both "
+                                f"{owner[i]!r} and {key!r}")  # fmt: skip
+            owner[i] = key
+        symbols: dict = {}
+        counts: dict = {}
+        for i in idx:
+            name, us, calls = window[i]
+            symbols[name] = round(symbols.get(name, 0.0) + us, 3)
+            counts[name] = counts.get(name, 0) + calls
         arg_list = e.get("args") or []
         args = [TensorArg(list(a.get("shape") or []), a.get("dtype")) for a in arg_list]
         meta = dict(e.get("meta") or {}, arg_names=[a.get("name") for a in arg_list])
         op = CapturedOp(id="", framework_op=e.get("framework_op") or key, args=args,
                         call_site=e.get("call_site") or "", framework_meta=meta)  # fmt: skip
-        op.calls = int(e.get("calls") or max((kernels[k]["calls"] for k in hits), default=0))
-        op.kernel_symbols = {k: kernels[k]["us"] for k in sorted(hits)}
-        op.device_us = round(sum(op.kernel_symbols.values()), 3)
+        op.calls = int(e.get("calls") or max(counts.values(), default=0))
+        op.kernel_symbols = dict(sorted(symbols.items()))
+        op.device_us = round(sum(symbols.values()), 3)
         ops.append(op)
     ops.sort(key=lambda o: -o.device_us)
     for i, op in enumerate(ops):
         op.id = f"op-{i:04d}"
-    total = sum(k["us"] for k in kernels.values())
-    attributed = sum(kernels[k]["us"] for k in owner)
-    summary = TraceSummary(ops=ops, total_us=total, attributed_us=attributed,
-                           kernels={k: v["us"] for k, v in kernels.items()},
-                           launches=sum(v["calls"] for v in kernels.values()))  # fmt: skip
+    kernels: dict = {}
+    for name, us, _ in window:
+        kernels[name] = round(kernels.get(name, 0.0) + us, 3)
+    summary = TraceSummary(ops=ops, total_us=sum(item[1] for item in window),
+                           attributed_us=sum(window[i][1] for i in owner), kernels=kernels,
+                           launches=sum(item[2] for item in window))  # fmt: skip
     return summary, problems
 
 
@@ -198,18 +291,31 @@ def parse_capture(args) -> int:
     if changed:
         print(f"capture parse: raw/ changed since `capture run`: {changed[:5]}")
         return 1
-    kernels = json.loads((raw / "unitrace_kernels.json").read_text())
+    problems = []
     # unitrace times the whole process; a launcher that ran the identical workload N times
-    # (its warm-up included) says so, and one run's share is 1/N of it.
-    repeats = int(json.loads((raw / "run.json").read_text()).get("repeats") or 1)
-    if repeats > 1:
-        kernels = {k: {"us": v["us"] / repeats, "calls": round(v["calls"] / repeats)}
-                   for k, v in kernels.items()}  # fmt: skip
-    truth = sum(k["us"] for k in kernels.values())
+    # (its warm-up included) says so, and one run is the last 1/N of the timeline.
+    timeline = raw / "unitrace_launches.json"
+    if timeline.is_file():
+        t = json.loads(timeline.read_text())
+        if t["total"] % t["repeats"]:
+            problems.append(f"the timeline's {t['total']} launches are not {t['repeats']} "
+                            "identical runs (repeats in meta.json)")  # fmt: skip
+        window, by_launch = [[n, us, 1] for n, us in t["launches"]], True
+    else:
+        repeats = int(json.loads((raw / "run.json").read_text()).get("repeats") or 1)
+        per_name = json.loads((raw / "unitrace_kernels.json").read_text())
+        window = [[k, v["us"] / repeats, round(v["calls"] / repeats)] for k, v in per_name.items()]
+        by_launch = False
+    kernels = {}
+    for name, us, _ in window:
+        kernels[name] = kernels.get(name, 0.0) + us
+    truth = sum(kernels.values())
     names = json.loads(Path(args.names).read_text()) if args.names else None
-    summary, problems = None, []
+    summary = None
     if (raw / "ops.json").is_file():
-        summary, problems = _ops_summary(json.loads((raw / "ops.json").read_text()), kernels)
+        ops_map = json.loads((raw / "ops.json").read_text())
+        summary, more = _ops_summary(ops_map, window, by_launch)
+        problems += more
     elif not list(raw.glob("trace*.json*")):
         print("capture parse: raw/ has neither a torch trace nor ops.json")
         return 1
