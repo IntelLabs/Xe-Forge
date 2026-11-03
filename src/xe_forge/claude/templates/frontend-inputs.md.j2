@@ -1,0 +1,27 @@
+Choose the shapes each kernel below is optimized and scored on. {{ model }} ran under
+{{ framework }}. A kernel serves configurations -- one per captured workload: a different
+set of parameters, such as each weight matrix's N and K for a GEMM, a dtype, a flag -- and
+each configuration ran at several token counts. The kernel replaces the original in all of
+them, so it must hold at every configuration: each needs a shape of its own, and a trial
+that is wrong or slower at any of them is refused.
+
+{% for k in kernels %} - `{{ k.name }}` ({{ k.repo }}, {{ k.dsl }}): spec {{ k.spec }} (every
+   captured shape is a variant, its dims as the baseline's get_inputs take them), record
+   {{ k.record }} (the workload, the configuration, and token count of each variant; its
+   "read_with" says how to read the capture behind it).
+{% endfor %}
+The kernels' sources are in {{ repos }}. `{{ check_cmd }}` prints each variant's share of
+its kernel's captured device time, its calls and its time per call.
+
+Within each configuration, merge the token counts that take the same path through the
+kernel -- read the source for where it branches (a tile choice, a split, a small-batch
+path) -- and name one of them to stand for the group; keep apart the ones that take
+different paths, decode against prefill typically. Every captured shape stands in exactly
+one group, and a group never spans two configurations. Each named shape is timed in every
+trial, so merge what the code lets you. Give each a weight: the share of the kernel's time
+in the model its group stands for, summing to 1 -- its group's captured share unless the
+kernel or the capture tell you otherwise, and then say so. Run the check until it prints PASS.
+
+Write {{ answer }}: {"<kernel name>": {"shapes": {"<variant>": {"stands_for": ["<variant>",
+...], "weight": <w>}, ...}, "why": "<the paths you found and why these groups, one line>"},
+...} for every kernel above.
