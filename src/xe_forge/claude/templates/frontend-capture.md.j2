@@ -18,6 +18,13 @@ that runs on token ids -- write {"fits": false, "reason": "<one line>"} as {{ an
 stop. A framework that runs a converted model (an exported IR, an engine) needs it converted
 once: into {{ cache }}/models/<framework>/<model id with / as -->, reused when it is there.
 
+If the framework has no implementation of this architecture on this device (a generic
+fallback, such as a transformers backend, is none), or an op the model needs fails, runs on
+the CPU, or is emulated in plain torch in place of a kernel (a portable Triton kernel is a
+kernel), do not work around it: write {"unsupported": "model" or "op", "what": "<the
+architecture or op>", "reason": "<file:line where the framework shows it>"} as {{ answer }}
+and stop. A patch that adds it is established first, and you are run again on it.
+
 Write launcher/run.sh here: an executable that runs that workload once more with every
 setting it needs, the framework under $FRAMEWORK_PYTHON when that is set (it is when another
 build of the stack is measured) and {{ python }} otherwise, and writes into $RAW_DIR:

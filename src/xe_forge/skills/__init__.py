@@ -229,6 +229,21 @@ def main():
     c_parse.add_argument("-o", "--output", required=True, help="capture.json to write")
     c_parse.add_argument("--names", default=None, help="names.json to apply")
 
+    # -- patch --
+    p_patch = subparsers.add_parser("patch", help="Gate a patch that makes a framework run a model")
+    patch_sub = p_patch.add_subparsers(dest="patch_command", required=True)
+    pc = patch_sub.add_parser("check", help="git diff, fresh apply, import, tokens vs transformers")
+    pc.add_argument("dir", help="holds patch.json and generate.sh")
+    pc.add_argument("--repos", required=True, help="the clones' directory (--kernel-repos)")
+    pc.add_argument("--framework-python", required=True, help="the unpatched framework's interpreter")
+    pc.add_argument("--reference-python", default=None, help="GPU torch + transformers, if not that")
+    pc.add_argument("--model", required=True)
+    pc.add_argument("--batch", type=int, required=True)
+    pc.add_argument("--input-len", type=int, required=True)
+    pc.add_argument("--output-len", type=int, required=True)
+    pc.add_argument("--min-match", type=int, default=8, help="greedy tokens that must agree")
+    pc.add_argument("--trust-remote-code", action="store_true")
+
     # -- bound --
     p_bound = subparsers.add_parser("bound", help="Each workload's efficiency against its bound")
     p_bound.add_argument("capture", help="capture.json")
@@ -254,6 +269,8 @@ def main():
         from xe_forge.skills.capture import run
     elif args.skill == "bound":
         from xe_forge.skills.bound import run
+    elif args.skill == "patch":
+        from xe_forge.skills.patch import run
 
     # A tool's verdict is its exit code: a failed check must not exit 0.
     return run(args)

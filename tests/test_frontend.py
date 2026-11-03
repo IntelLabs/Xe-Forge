@@ -370,3 +370,83 @@ def test_counters_bound_only_a_kernel_of_one_workload_that_they_sampled():
     assert analyze._sol_parts(w1, calib, ctx) is None
     ctx = {"counters": {"gemm_kernel": good}, "shared": set()}
     assert analyze._sol_parts(w1, calib, ctx)[0] == pytest.approx(0.5)
+
+
+# ── a framework patch: the agent writes it, `patch check` and `run` gate it ─
+
+
+def _patch_dir(tmp_path, tokens, base_from="parent"):
+    """A clone with base + one patch commit, generate.sh emitting ``tokens``, and stubs for the
+    framework interpreter (its sys.prefix) and the GPU reference (fixed tokens)."""
+    repos = tmp_path / "repos"
+    repo = repos / "fw"
+    repo.mkdir(parents=True)
+
+    def git(*a):
+        return subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t",
+                               *a], check=True, capture_output=True, text=True).stdout.strip()  # fmt: skip
+
+    git("init", "-q")
+    (repo / "model.py").write_text("ARCHS = []\n")
+    git("add", "."), git("commit", "-q", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    (repo / "model.py").write_text("ARCHS = ['Toy']\n")
+    git("commit", "-q", "-am", "add Toy")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "patch.json").write_text(json.dumps({
+        "python": sys.executable, "repo": "fw", "package": "json",
+        "base": base if base_from == "parent" else "0" * 40}))  # fmt: skip
+    (work / "generate.sh").write_text(f"echo '{json.dumps(tokens)}' > \"$OUT/tokens.json\"\n")
+    fw = _exe(tmp_path / "fw-python", "#!/bin/bash\necho /no/such/prefix\n")
+    ref = _exe(tmp_path / "ref-python", "#!/bin/bash\necho '[[1, 2, 3, 4], [5, 6, 7, 8]]'\n")
+    return work, repos, fw, ref
+
+
+def _check(work, repos, fw, ref):
+    return _tool("patch", "check", str(work), "--repos", str(repos), "--framework-python",
+                 str(fw), "--reference-python", str(ref), "--model", "toy", "--batch", "2",
+                 "--input-len", "4", "--output-len", "4", "--min-match", "4")  # fmt: skip
+
+
+def test_patch_check_passes_a_patch_that_generates_the_reference(tmp_path):
+    work, repos, fw, ref = _patch_dir(tmp_path, [[1, 2, 3, 4], [5, 6, 7, 8]])
+    code, out = _check(work, repos, fw, ref)
+    assert code == 0, out
+    rec = json.loads((work / "check.json").read_text())
+    assert rec["pass"] and rec["matched"] == [4, 4] and rec["files"] == ["model.py"]
+    assert "ARCHS = ['Toy']" in (work / "fw.patch").read_text()  # git's diff, written by the tool
+
+
+@pytest.mark.parametrize("tokens, base, problem", [
+    ([[1, 2, 3, 4], [5, 6, 9, 9]], "parent", "greedy tokens differ"),
+    ([[1, 2, 3, 4], [5, 6, 7, 8]], "unknown", "not an ancestor"),
+])  # fmt: skip
+def test_patch_check_fails_a_wrong_patch(tmp_path, tokens, base, problem):
+    work, repos, fw, ref = _patch_dir(tmp_path, tokens, base)
+    code, out = _check(work, repos, fw, ref)
+    assert code == 1 and problem in out, out
+
+
+def test_run_establishes_a_patch_then_captures_on_it(tmp_path, monkeypatch):
+    from xe_forge.frontend import cli
+
+    answers = iter([{"unsupported": "model", "what": "Toy", "reason": "registry.py:1"},
+                    {"notes": "patched"}, {"launcher": "launcher/run.sh"}])  # fmt: skip
+    seen = []
+
+    def agent(step, template, ctx, cwd, answer, python, turns):
+        seen.append((step, python))
+        if step == "patch":
+            cwd.mkdir(parents=True, exist_ok=True)
+            (cwd / "patch.json").write_text('{"python": "/patched/python"}')
+        return next(answers)
+
+    monkeypatch.setattr(cli, "_agent", agent)
+    monkeypatch.setattr(cli, "_tool", lambda py, *argv, **env: seen.append((argv[0], py)) or 0)
+    a = SimpleNamespace(model="m", framework="fw", batch=1, input_len=4, output_len=2)
+    code, python = cli.capture(a, "/fw/python", tmp_path, 5, tmp_path / "repos")
+    assert (code, python) == (0, "/patched/python")
+    assert seen == [("capture", "/fw/python"), ("patch", "/fw/python"), ("patch", "/fw/python"),
+                    ("capture", "/patched/python"), ("capture", "/patched/python")]  # fmt: skip
+    assert json.loads((tmp_path / "stack.json").read_text())["python"] == "/patched/python"

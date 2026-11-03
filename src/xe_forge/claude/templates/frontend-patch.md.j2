@@ -1,0 +1,30 @@
+{{ framework }} cannot run {{ model }} on this machine's GPU as it is: {{ what }} -- {{ reason }}.
+Establish the patch that makes it run, correctly, before anything is measured. The framework's
+interpreter is {{ python }}.
+
+ - Clone the upstream source of the package that needs the change (the one {{ python }} has
+   installed, at its latest default branch) into {{ repos }}/<its name>, unless a clone is
+   there; record its HEAD as the base. Work on a branch `xe-forge/<what>` and commit the patch
+   there, so HEAD is the base plus the patch.
+ - Add it the way the framework adds one: read its docs for new models or ops and copy the
+   structure of the closest one it already has. A plain, correct implementation first --
+   torch, or the framework's own portable kernels; making it fast is Xe-Forge's job later.
+   Nothing that only hides the gap: no generic fallback backend, no CPU path.
+ - Build it into a venv layered over {{ python }}, holding only what you rebuilt, and check
+   that the patched package imports from there and the framework still imports.
+ - Write generate.sh here: under $FRAMEWORK_PYTHON, run {{ model }} with the framework, on
+   the GPU, eagerly and greedy, on `xe_forge.frontend.profile.token_ids(profile.hf_vocab(tok),
+   {{ batch }}, {{ input_len }})`, generating {{ output_len }} tokens with no stop at EOS, and
+   write the generated ids to $OUT/tokens.json as [[ids of sequence 0], ...].
+ - Write patch.json here: {"python": "<the layered venv's python>", "repo": "<the clone's
+   directory name under {{ repos }}>", "base": "<base commit>", "package": "<the module the
+   patch changes, importable>"}, then run
+     xe-forge-skill patch check . --repos {{ repos }} --framework-python {{ python }} \
+       --model {{ model }} --batch {{ batch }} --input-len {{ input_len }} --output-len {{ output_len }}
+   It diffs base..HEAD itself, applies that to a fresh clone, checks the import, runs
+   generate.sh and compares its tokens with a Hugging Face transformers reference it computes
+   afterwards on the GPU. Exit 0 passes; on FAIL fix the patch, never the check.
+
+Write {{ answer }}: patch.json's content with "notes": "<what the patch adds and how it was
+verified>", once the check passes; or {"error": "<why>", "next_step": "<what a person would
+do>"}.

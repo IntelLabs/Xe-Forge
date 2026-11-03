@@ -45,23 +45,51 @@ def _agent(step: str, template: str, context: dict, cwd: Path, answer: str, pyth
         return None
 
 
-def capture(a, python: str, run_dir: Path, turns: int) -> int:
-    """The capture agent writes and runs a launcher; the tool's own verdict decides."""
+def capture(a, python: str, run_dir: Path, turns: int, repos: Path) -> tuple[int, str]:
+    """(exit code, the interpreter the run continues under).
+
+    The capture agent writes and runs a launcher; the tool's own verdict decides. When the
+    framework lacks the model's architecture or an op, a patch agent establishes the patch
+    first and capture runs again on the patched stack (``stack.json``), a few rounds at most.
+    """
     from xe_forge.frontend import CACHE
 
     context = {"model": a.model, "framework": a.framework, "batch": a.batch,
                "input_len": a.input_len, "output_len": a.output_len, "cache": CACHE}  # fmt: skip
-    got = _agent("capture", "frontend-capture.md.j2", context, run_dir, "captured.json", python,
-                 turns)  # fmt: skip
-    if got is None:
-        return 1
-    if got.get("fits") is False:
-        print(f"capture: does not fit -- {got.get('reason', '')}", file=sys.stderr)
-        return 3
-    # What the agent reports is not the verdict: the tool checks raw/ again here.
-    return _tool(
-        python, "capture", "parse", str(run_dir / "raw"), "-o", str(run_dir / "capture.json")
-    )
+    for round_ in range(1, 4):
+        got = _agent("capture", "frontend-capture.md.j2", context, run_dir, "captured.json",
+                     python, turns)  # fmt: skip
+        if got is None:
+            return 1, python
+        if got.get("fits") is False:
+            print(f"capture: does not fit -- {got.get('reason', '')}", file=sys.stderr)
+            return 3, python
+        if "unsupported" not in got:
+            # What the agent reports is not the verdict: the tool checks raw/ again here.
+            raw, out = str(run_dir / "raw"), str(run_dir / "capture.json")
+            return _tool(python, "capture", "parse", raw, "-o", out), python
+        print(f"capture: {a.framework} lacks {got['unsupported']} {got.get('what')} "
+              f"({got.get('reason')}); a patch first", flush=True)  # fmt: skip
+        work = run_dir / f"patch-{round_}"
+        ctx = {**context, "what": got.get("what"), "reason": got.get("reason"), "repos": repos}
+        if (
+            _agent("patch", "frontend-patch.md.j2", ctx, work, "patched.json", python, turns)
+            is None
+        ):
+            return 1, python
+        check = ["patch", "check", str(work), "--repos", str(repos), "--framework-python",
+                 python, "--model", a.model, "--batch", str(a.batch), "--input-len",
+                 str(a.input_len), "--output-len", str(a.output_len)]  # fmt: skip
+        if _tool(python, *check) != 0:  # the gate is the tool's, not the agent's word
+            print(f"capture: the patch in {work} does not pass its check", file=sys.stderr)
+            return 1, python
+        python = json.loads((work / "patch.json").read_text())["python"]
+        stack = run_dir / "stack.json"
+        rounds = json.loads(stack.read_text())["patches"] if stack.is_file() else []
+        stack.write_text(json.dumps({"python": python, "patches": [*rounds, str(work)]},
+                                    indent=1) + "\n")  # fmt: skip
+    print("capture: still unsupported after 3 patches", file=sys.stderr)
+    return 1, python
 
 
 def recapture(run_dir: Path, out_dir: Path, python: str) -> int:
@@ -420,12 +448,14 @@ def main(argv: list[str]) -> int:
     _add_optimize_args(p)
     a = p.parse_args(rest)
     a.passthrough = passthrough
-    python = a.framework_python
     turns = a.agent_max_turns or a.max_turns
     run_dir = a.output.resolve()
+    repos = Path(a.kernel_repos).resolve() if a.kernel_repos else REPO_DIR.parent
+    stack = run_dir / "stack.json"  # a patched framework, when one was needed
+    python = json.loads(stack.read_text())["python"] if stack.is_file() else a.framework_python
     capture_path = run_dir / "capture.json"
     if not capture_path.is_file():
-        code = capture(a, python, run_dir, turns)
+        code, python = capture(a, python, run_dir, turns, repos)
         if code != 0:
             why = f"killed by signal {-code}" if code < 0 else f"exit {code}"
             print(f"run: stopped before analysis ({why})", file=sys.stderr)
@@ -449,7 +479,6 @@ def main(argv: list[str]) -> int:
             print(f"run: {names} was written for another capture; naming again", file=sys.stderr)
             names.unlink()
     if not names.is_file():
-        repos = Path(a.kernel_repos).resolve() if a.kernel_repos else REPO_DIR.parent
         named = name(
             capture_path, run_dir, python, turns, repos, a.name_coverage, a.calibration, cap=cap
         )
