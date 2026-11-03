@@ -88,6 +88,10 @@ class KernelSpec:
     # Optional default variant declared in the YAML spec.
     default_variant: str | None = None
 
+    # Optional {variant: weight}, summing to 1: the shapes a trial is scored on together,
+    # each by the share of the kernel's time it stands for (see skills/benchmark.py).
+    weights: dict[str, float] = field(default_factory=dict)
+
     # Base-prefix → attribute name for the four standard families.
     _VARIANT_MAP_KEYS: ClassVar[dict[str, str]] = {
         "ci": "ci",
@@ -420,7 +424,7 @@ def parse_spec(data: dict) -> KernelSpec:
     }
 
     # Non-variant scalar/dict keys that should never be treated as variants.
-    NON_VARIANT_KEYS = {SpecKey.INS, SpecKey.INITS, "default_variant"}
+    NON_VARIANT_KEYS = {SpecKey.INS, SpecKey.INITS, "default_variant", "weights"}
 
     ci: list[VariantSpec] = []
     bench_cpu: list[VariantSpec] = []
@@ -463,6 +467,7 @@ def parse_spec(data: dict) -> KernelSpec:
         bench_xpu=bench_xpu,
         _named_variants=named_variants,
         default_variant=default_variant,
+        weights={str(k): float(v) for k, v in (data.get("weights") or {}).items()},
     )
 
 

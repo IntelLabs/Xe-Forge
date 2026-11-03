@@ -21,7 +21,8 @@ code measures and checks it**, through `xe-forge-skill` tools the agents call th
 | capture | agent (`frontend-capture.md.j2`): decides whether the model fits, converts it if the framework needs that, writes `launcher/run.sh` | `raw/`, `capture.json` | `capture run`, `capture parse` (below); `run` re-runs `parse` itself |
 | name | agent (`frontend-name.md.j2`): finds each op's kernel source, clones or fast-forwards its repository | `names.json` | `naming.validate`: the symbol greps in the repo, the dsl exists, every stated cost holds at every measured shape |
 | analyze | code (`analyze.py`) | `kernels.yaml`, `specs/`, `analysis.json` | bound arithmetic: GEMM roofline, counter speed-of-light, agent-stated costs |
-| optimize | Xe-Forge, one workspace per kernel and variant | `workspaces/`, `results/` | Xe-Forge's benchmark and trial gates |
+| inputs | agent (`frontend-inputs.md.j2`): per kernel, one shape per configuration (each captured workload), merging only the token counts that take the same path, with weights | `inputs/inputs.json`, the specs' `weights:` | `inputs check`: every captured shape stands in one group, a group within one configuration, weights summing to 1 |
+| optimize | Xe-Forge, one workspace per kernel | `workspaces/`, `results/` | Xe-Forge's benchmark and trial gates; `benchmark` times every weighted shape: all correct, none slower, scored on the time-weighted total |
 | prove (`--prove`) | agent builds two stacks; code re-runs the cached launcher in each | `prove/` | median and spread over `--prove-repeat` alternating captures |
 
 `run` reuses `capture.json` and `names.json` when they exist (remove one to redo that step);
@@ -34,6 +35,7 @@ code measures and checks it**, through `xe-forge-skill` tools the agents call th
 | `xe-forge-skill capture run <launcher> -o raw` | runs the launcher once as is (its own trace), once under `unitrace --device-timing --metric-sampling --group ComputeBasic` (every kernel by its real name, its time and counters); records the launcher's sha256 and a `MANIFEST.json` of raw/ |
 | `xe-forge-skill capture parse raw -o capture.json [--names names.json]` | builds the op list and checks it: raw/ unchanged since `run`; >= 90% of op time in kernels unitrace saw; for an op map, every kernel pattern matches a kernel unitrace saw and none is claimed twice. Exit 1 prints each problem |
 | `xe-forge-skill bound capture.json [--calibration c.json]` | each workload's efficiency against the stricter known bound, recoverable us and gain |
+| `xe-forge-skill inputs check inputs.json --manifest kernels.yaml` | each chosen shape's captured share beside its weight, and the captured time they cover; exit 1 on a shape the capture did not run or weights that do not sum to 1 |
 | `xe-forge calibrate` | the card's read bandwidth and matmul TFLOP/s per dtype |
 
 ## The launcher contract

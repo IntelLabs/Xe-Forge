@@ -23,7 +23,9 @@ fallback, such as a transformers backend, is none), or an op the model needs fai
 the CPU, or is emulated in plain torch in place of a kernel (a portable Triton kernel is a
 kernel), do not work around it: write {"unsupported": "model" or "op", "what": "<the
 architecture or op>", "reason": "<file:line where the framework shows it>"} as {{ answer }}
-and stop. A patch that adds it is established first, and you are run again on it.
+and stop. A patch that adds it is established first, and you are run again on it. If
+{{ python }}'s build of the framework departs from what its own docs say to use on this
+device (a build option, a backend), measure it as it is and name the departure in "notes".
 
 Write launcher/run.sh here: an executable that runs that workload once more with every
 setting it needs, the framework under $FRAMEWORK_PYTHON when that is set (it is when another
@@ -38,7 +40,7 @@ build of the stack is measured) and {{ python }} otherwise, and writes into $RAW
    another process profiles it there, with its own profiler, into $RAW_DIR);
  - for any other framework: ops.json, every node that ran on the device:
    {"<node>": {"framework_op": "<its type>", "kernels": ["<regex over the kernel names
-   unitrace reports>"], "args": [{"name", "shape", "dtype"}], "call_site": "<node name>",
+   unitrace reports>"], "args": [{"name", "shape", "dtype": <torch's name: float16, int8, ...>}], "call_site": "<node name>",
    "calls": <runs in one workload>}} with concrete shapes, read from the framework's own
    runtime API; which kernels a node ran is what you establish, not guess from names. When
    one kernel name serves several nodes (a library's GEMM for every matmul), give each node

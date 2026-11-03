@@ -255,6 +255,13 @@ def main():
     p_bound.add_argument("--min-share", type=float, default=0.005, help="smallest share listed")
     p_bound.add_argument("--json", action="store_true", help="rows as JSON")
 
+    # -- inputs --
+    p_inputs = subparsers.add_parser("inputs", help="Gate the shapes and weights trials use")
+    inputs_sub = p_inputs.add_subparsers(dest="inputs_command", required=True)
+    ic = inputs_sub.add_parser("check", help="each chosen shape captured, weights sum to 1")
+    ic.add_argument("inputs", help="inputs.json: {kernel: {weights, why}}")
+    ic.add_argument("--manifest", required=True, help="kernels.yaml")
+
     args = parser.parse_args()
 
     if args.skill == "analyze":
@@ -275,6 +282,8 @@ def main():
         from xe_forge.skills.bound import run
     elif args.skill == "patch":
         from xe_forge.skills.patch import run
+    elif args.skill == "inputs":
+        from xe_forge.skills.inputs import run
 
     # A tool's verdict is its exit code: a failed check must not exit 0.
     return run(args)

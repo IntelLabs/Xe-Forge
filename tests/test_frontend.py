@@ -443,10 +443,53 @@ def test_run_establishes_a_patch_then_captures_on_it(tmp_path, monkeypatch):
         return next(answers)
 
     monkeypatch.setattr(cli, "_agent", agent)
-    monkeypatch.setattr(cli, "_tool", lambda py, *argv, **env: seen.append((argv[0], py)) or 0)
-    a = SimpleNamespace(model="m", framework="fw", batch=1, input_len=4, output_len=2)
+    checks = []
+    monkeypatch.setattr(cli, "_tool", lambda py, *argv, **env: seen.append((argv[0], py))
+                        or (argv[0] == "patch" and checks.append(argv)) or 0)  # fmt: skip
+    a = SimpleNamespace(model="m", framework="fw", batch=1, input_len=4, output_len=2,
+                        reference_python="/ref/python")  # fmt: skip
     code, python = cli.capture(a, "/fw/python", tmp_path, 5, tmp_path / "repos")
     assert (code, python) == (0, "/patched/python")
     assert seen == [("capture", "/fw/python"), ("patch", "/fw/python"), ("patch", "/fw/python"),
                     ("capture", "/patched/python"), ("capture", "/patched/python")]  # fmt: skip
     assert json.loads((tmp_path / "stack.json").read_text())["python"] == "/patched/python"
+    assert checks[0][-2:] == ("--reference-python", "/ref/python")
+
+
+def test_naming_listing_merges_identical_shapes_so_rare_ones_show():
+    """Many identical decode calls must not crowd a prefill shape out of the agent's view."""
+    from xe_forge.frontend import cli
+
+    def op(rows, us):
+        return SimpleNamespace(calls=1, device_us=us, kernel_symbols={"k": us}, framework_meta={},
+                               args=[SimpleNamespace(shape=[rows, 896], dtype="float32")],
+                               scalars=[], arg_names=["x"])  # fmt: skip
+
+    shapes = cli._shapes([op(4, 10.0) for _ in range(20)] + [op(2048, 19.0)])
+    assert [(s["calls"], s["us_per_call"]) for s in shapes] == [(20, 10.0), (1, 19.0)]
+
+
+def test_capture_parse_refuses_a_dtype_name_the_bounds_cannot_size(tmp_path):
+    unitrace = _exe(tmp_path / "unitrace", UNITRACE_STUB)
+    launcher = _exe(tmp_path / "run.sh", (LAUNCHER % "").replace('"float16"', '"f16"', 1))
+    raw = tmp_path / "raw"
+    assert (
+        _tool("capture", "run", str(launcher), "-o", str(raw), "--unitrace", str(unitrace))[0] == 0
+    )
+    code, out = _tool("capture", "parse", str(raw), "-o", str(tmp_path / "capture.json"))
+    assert code == 1 and "dtype 'f16'" in out, out
+
+
+def test_naming_checks_a_cost_on_shapes_beyond_the_ones_listed():
+    from xe_forge.frontend import cli, naming
+
+    def op(rows, us):
+        return SimpleNamespace(calls=1, device_us=us, kernel_symbols={"k": us}, framework_meta={},
+                               args=[SimpleNamespace(shape=[rows, 896], dtype="float32")],
+                               scalars=[], arg_names=["x"])  # fmt: skip
+
+    ops = [op(r, 100.0) for r in range(1, 13)] + [op(4096, 1.0)]  # the 13th, cheapest, refutes
+    names = {"ops": {"K": {"cost": {"bytes": "ARG0_D0 * 1000000", "flops": "0"}}}}
+    calib = {"bandwidth_gbs": 1000.0, "matmul_tflops": {"float32": 1.0}}
+    assert not naming.refuted(names, {"K": {"shapes": cli._shapes(ops)}}, calib, 0.05)
+    assert naming.refuted(names, {"K": {"shapes": cli._shapes(ops, top=None)}}, calib, 0.05)

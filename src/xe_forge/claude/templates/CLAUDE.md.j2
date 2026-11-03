@@ -94,7 +94,8 @@ reset-plus-forward benchmark. Never infer end-to-end speedup from trace timings.
    constant — and taking a different path for it is not optimization; it is defeating the
    measurement, and every number it produces is void. The test is whether the kernel would
    still be right, and still be fast, on a workload from the same distribution that is not
-   in this dataset.
+   in this dataset. A threshold on a real argument of the op (N, K, a head dim, the rows
+   the caller passes) is specialization; recognizing a benchmark shape is not.
 {%- endif %}
 {%- if lessons %}
 {{ 8 if dataset else 7 }}. **A lesson is a record of a past measurement, never a substitute for one.** The ledger
@@ -133,7 +134,18 @@ the correctness oracle: every trial's outputs and buffers must match it. Once th
 gate passes, never modify it; a trial that disagrees with it is wrong. Its
 `get_init_inputs()` and `get_inputs()` define the workload.
 {% endif %}
-{% if has_spec %}
+{% if has_spec and weights %}
+`benchmark` (without `--variant`) times every shape this kernel is scored on and records one
+result: {% for n, w in weights.items() %}`{{ n }}` (weight {{ w }}){{ ", " if not loop.last }}{% endfor %} --
+the shares of its time in the model they stand for. Every shape must pass; a shape slower
+than the baseline makes the trial a regression at that shape's ratio (`VERDICT: SLOWER_ON`,
+the next line names it), whatever the others gain; otherwise the speedup is the
+time-weighted total over them. A change that helps one shape and hurts another must take
+its path on a real argument of the op (N, K, a head dim, the rows the caller passes), not
+be given up. The first passing `benchmark --trial-id` pins the tree to these shapes;
+`--variant <name>` times one of them alone, as a probe, without `--trial-id`. `profile`
+defaults to `{{ variant }}`, the heaviest; give it `--variant` for another.
+{% elif has_spec %}
 The commands above default to variant `{{ variant }}`, the one this run was started with.
 Append `--variant <name>` to measure another variant the spec lists; the last `--variant`
 wins. A trial tree is measured on one variant: the first passing `benchmark --trial-id`
@@ -450,8 +462,9 @@ For each trial:
      not a regression and not an improvement**. The two arms were closer together than the
      part's measured timing floor, so there is no result. It is recorded with its verdict
      and no speedup; do not branch away from the kernel on it. If no trial separates from
-     the baseline, stop and say the shape is unmeasurable here: the tree is pinned to its
-     variant, so a larger shape is a new run started on it{% if dataset %}
+     the baseline, stop and say the shape is unmeasurable here{% if weights %} (a
+     weighted shape too close to call counts as parity in the total){% else %}: the tree is
+     pinned to its variant, so a larger shape is a new run started on it{% endif %}{% if dataset %}
      (`{{ dataset.profile_path }}` says which variants carry the real work){% endif %}.
    - `VERDICT: NO_CALIBRATION` or `VERDICT: EXTERNAL_ERROR` → STOP and report. The gate could
      not be evaluated, so no trial after this one means anything.

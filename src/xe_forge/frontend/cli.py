@@ -34,6 +34,31 @@ def _tool(python: str, *argv: str, **env: str) -> int:
     return subprocess.call(cmd, env=full)
 
 
+def _shapes(ops, top: int | None = 12) -> list[dict]:
+    """The op's distinct shapes, most device time first: identical ones merged, so a shape
+    that runs rarely (prefill next to many decode steps) is never crowded out."""
+    from xe_forge.frontend.canonical import _named_dims as named_dims
+
+    merged: dict[str, dict] = {}
+    for o in ops:
+        if not o.calls:
+            continue
+        dims, dtypes = named_dims(o), [a.dtype if a else None for a in o.args]
+        m = merged.setdefault(json.dumps([dims, dtypes], sort_keys=True), {"dims": dims,
+                              "calls": 0, "us": 0.0, "kernels": {}, "dtype": next((d for d in dtypes
+                              if d and d.startswith(("bfloat", "float"))), None)})  # fmt: skip
+        m["calls"] += o.calls
+        m["us"] += o.device_us
+        for k, t in o.kernel_symbols.items():
+            m["kernels"][k] = m["kernels"].get(k, 0.0) + t
+    return [
+        {"dims": m["dims"], "calls": m["calls"], "us_per_call": round(m["us"] / m["calls"], 3),
+         "kernels_per_call": {k: round(t / m["calls"], 3) for k, t in m["kernels"].items()},
+         "dtype": m["dtype"]}
+        for m in sorted(merged.values(), key=lambda m: -m["us"])[:top]
+    ]  # fmt: skip
+
+
 def _agent(step: str, template: str, context: dict, cwd: Path, answer: str, python, turns):
     """One agent step; None when it gave no answer (the reason is printed)."""
     from xe_forge.frontend import agent
@@ -80,6 +105,8 @@ def capture(a, python: str, run_dir: Path, turns: int, repos: Path) -> tuple[int
         check = ["patch", "check", str(work), "--repos", str(repos), "--framework-python",
                  python, "--model", a.model, "--batch", str(a.batch), "--input-len",
                  str(a.input_len), "--output-len", str(a.output_len)]  # fmt: skip
+        if getattr(a, "reference_python", None):  # the framework's own has no GPU transformers
+            check += ["--reference-python", a.reference_python]
         if _tool(python, *check) != 0:  # the gate is the tool's, not the agent's word
             print(f"capture: the patch in {work} does not pass its check", file=sys.stderr)
             return 1, python
@@ -154,22 +181,7 @@ def name(
             "call_site": top.call_site,
             **({"gemm": top.framework_meta["gemm"]} if top.framework_meta.get("gemm") else {}),
             "dims": named_dims(top),
-            "shapes": [
-                {
-                    "dims": named_dims(o),
-                    "calls": o.calls,
-                    "us_per_call": round(o.device_us / o.calls, 3),
-                    "kernels_per_call": {
-                        k: round(t / o.calls, 3) for k, t in o.kernel_symbols.items()
-                    },
-                    "dtype": next(
-                        (a.dtype for a in o.args if a and a.dtype.startswith(("bfloat", "float"))),
-                        None,
-                    ),
-                }
-                for o in sorted(ops, key=lambda o: -o.device_us)[:12]
-                if o.calls
-            ],
+            "shapes": _shapes(ops),  # what the namer reads; its costs are checked on all
         }
     (work / "ops.json").write_text(json.dumps(listing, indent=1) + "\n")
     model = cap.run.get("model") or {}
@@ -205,7 +217,8 @@ def name(
     # A stated cost is a lower bound, so one above a measured call is wrong.
     from xe_forge.frontend.analyze import NOISE
 
-    wrong = naming.refuted(answer, listing, calib, NOISE)
+    every = {k: {"shapes": _shapes(by_key[k], top=None)} for k in listing}
+    wrong = naming.refuted(answer, every, calib, NOISE)
     for k, sub, why in wrong:
         print(f"name: cost dropped for {k}{f' [{sub}]' if sub else ''}: {why}", file=sys.stderr)
     naming.drop_costs(answer, wrong)
@@ -237,7 +250,7 @@ def _add_analyze_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--calibration", type=Path, help="xe-forge calibrate output")
 
 
-def analyze(capture_path: Path, out_dir: Path, a: argparse.Namespace) -> Path:
+def analyze(capture_path: Path, out_dir: Path, a: argparse.Namespace, weights=None) -> Path:
     from xe_forge.frontend import analyze as an
     from xe_forge.frontend import ir, manifest
 
@@ -246,7 +259,7 @@ def analyze(capture_path: Path, out_dir: Path, a: argparse.Namespace) -> Path:
     result = an.analyze(cap, top=a.top, min_gain=a.min_gain, calibration=calib)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "analysis.json").write_text(json.dumps(result.as_dict(), indent=1) + "\n")
-    path = manifest.emit(result, cap, capture_path, out_dir)
+    path = manifest.emit(result, cap, capture_path, out_dir, weights)
     enabled = [e for e in result.entries if e.enabled]
     if cap.run.get("counters"):
         print(f"analyze: counters cover {result.options['counters_pct']}% of device time")
@@ -255,6 +268,30 @@ def analyze(capture_path: Path, out_dir: Path, a: argparse.Namespace) -> Path:
         f"{len(enabled)} enabled ({', '.join(e.name for e in enabled) or 'none'}) -> {path}"
     )
     return path
+
+
+def inputs(manifest_path: Path, run_dir: Path, a, python, turns, repos) -> dict:
+    """{kernel: {shape: weight}} for each enabled kernel whose trial shapes the inputs
+    agent chose and ``inputs check`` passed; the others are not optimized."""
+    from xe_forge.frontend import manifest
+    from xe_forge.skills import inputs as tool
+
+    m = manifest.load(manifest_path)
+    kernels = [e for e in m["kernels"] if e.get("enabled") and e.get("record")]
+    if not kernels:
+        return {}
+    work = run_dir / "inputs"
+    work.mkdir(parents=True, exist_ok=True)
+    check = ["xe-forge-skill", "inputs", "check", str(work / "inputs.json"), "--manifest",
+             str(manifest_path)]  # fmt: skip
+    ctx = {"model": a.model, "framework": a.framework, "repos": repos,
+           "check_cmd": shlex.join(check), "kernels": kernels}  # fmt: skip
+    answer = _agent("inputs", "frontend-inputs.md.j2", ctx, work, "inputs.json", python, turns)
+    problems, _ = tool.check(answer if isinstance(answer, dict) else {}, m)  # the tool's verdict
+    for kernel, bad in problems.items():
+        print(f"inputs: {kernel} not optimized: {'; '.join(bad)}", file=sys.stderr)
+    passed = [e["name"] for e in kernels if e["name"] not in problems]
+    return tool.weights(answer, passed) if passed else {}
 
 
 # ── optimize ───────────────────────────────────────────────────────────────
@@ -301,8 +338,7 @@ def optimize(manifest_path: Path, run_dir: Path, opts) -> list[tuple[str, str]]:
         key = manifest.key(entry)
         if not entry.get("enabled") or (opts.only and not {entry["name"], key} & set(opts.only)):
             continue
-        variants = entry["variants"] if opts.all_variants else entry["variants"][:1]
-        for variant in variants:
+        for variant in entry["variants"][:1]:  # the heaviest; the spec's weights score all
             pairs.append((key, variant))
             workspace = ws_root / f"{key}__{variant}"
             status_path = manifest.sidecar(workspace, ".status.json")
@@ -365,7 +401,6 @@ def _add_optimize_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--device", default="xpu")
     p.add_argument("--max-turns", type=int, default=80)
     p.add_argument("--only", nargs="*", help="kernel names to run (default: every enabled)")
-    p.add_argument("--all-variants", action="store_true", help="run every listed variant")
     p.add_argument(
         "--kernel-repos",
         help="directory holding the kernel repositories (default: beside this checkout)",
@@ -423,6 +458,10 @@ def main(argv: list[str]) -> int:
     p.add_argument("--framework", required=True, help="what runs the model (vllm, openvino, ...)")
     p.add_argument("--model", required=True, help="HF id or local path")
     p.add_argument("--framework-python", required=True, help="the framework's interpreter")
+    p.add_argument(
+        "--reference-python",
+        help="GPU torch + transformers, for a patch's reference tokens (default: the framework's)",
+    )
     p.add_argument("--batch", type=int, default=1)
     p.add_argument("--input-len", type=int, default=512)
     p.add_argument("--output-len", type=int, default=32, help="tokens generated")
@@ -479,6 +518,12 @@ def main(argv: list[str]) -> int:
             print(f"run: {names} was written for another capture; naming again", file=sys.stderr)
             names.unlink()
     if not names.is_file():
+        # A capture.json a previous names.json annotated would show the namer its own old
+        # answers (an op's "gemm" as given) and it would leave them out: name a clean one.
+        if any("named" in o.framework_meta for o in cap.ops):
+            if _tool(python, "capture", "parse", str(run_dir / "raw"), "-o", str(capture_path)):
+                return 1
+            cap = ir.load(capture_path)
         named = name(
             capture_path, run_dir, python, turns, repos, a.name_coverage, a.calibration, cap=cap
         )
@@ -490,6 +535,7 @@ def main(argv: list[str]) -> int:
             print("run: re-reading the capture with names.json failed", file=sys.stderr)
             return 1
     path = analyze(capture_path, run_dir, a)
+    path = analyze(capture_path, run_dir, a, inputs(path, run_dir, a, python, turns, repos))
     if a.analyze_only:
         return 0
     a.stack_python = python if a.stack_check else None

@@ -87,7 +87,9 @@ def generate_workspace(
         str(Path(p).expanduser().resolve()) for p in config.external.integration_repos
     ]
 
-    spec_has_inputs = bool(spec_path and load_spec(spec_path).inputs)
+    spec = load_spec(spec_path) if spec_path else None
+    spec_has_inputs = bool(spec and spec.inputs)
+    weights = spec.weights if spec else {}  # benchmark then scores every weighted shape
     # Without a PyTorch reference, the baseline -- a copy of the repo's kernel that also
     # builds the inputs the repo's own test builds -- is what every trial must agree with.
     baseline_oracle = (
@@ -101,7 +103,7 @@ def generate_workspace(
         if baseline_oracle
         else f"test_kernels/{kernel_name}_pytorch.py"
     )
-    variant_args = ["--variant", variant_type] if spec_path and variant_type else []
+    variant_args = ["--variant", variant_type] if spec_path and variant_type and not weights else []
 
     benchmark_args = ["--device", str(device), "--dsl", str(dsl)]
     if spec_path:
@@ -172,6 +174,7 @@ def generate_workspace(
             reference_workload=reference_workload,
             has_spec=bool(spec_path),
             variant=variant_type,
+            weights=weights,
             baseline_oracle=baseline_oracle,
             dataset=dataset,
             lessons=lessons,
@@ -202,6 +205,7 @@ def generate_workspace(
         _render(
             "optimize-kernel.md.j2",
             dsl=dsl,
+            weights=weights,
             require_profiles=require_profiles,
             measurement=measurement,
             benchmark_options=benchmark_options,

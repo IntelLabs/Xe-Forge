@@ -26,6 +26,7 @@ import subprocess
 from pathlib import Path
 
 from xe_forge.frontend import canonical, ir, naming
+from xe_forge.frontend.dtypes import STORAGE_BYTES
 from xe_forge.frontend.torch_trace import parse_traces
 
 _SIMD = re.compile(r"\[SIMD\d+ \{[^}]*\} \{[^}]*\}\]$")
@@ -214,7 +215,7 @@ def _ops_summary(ops_map: dict, window: list, by_launch: bool):
     from xe_forge.frontend.ir import CapturedOp, TensorArg
     from xe_forge.frontend.torch_trace import TraceSummary
 
-    problems, owner, ops = [], {}, []
+    problems, owner, ops, unknown = [], {}, [], {}
     for key, e in ops_map.items():
         regs = []
         for pat in e.get("kernels") or []:
@@ -228,6 +229,10 @@ def _ops_summary(ops_map: dict, window: list, by_launch: bool):
                 problems.append(
                     f"{key}: kernel pattern {r.pattern!r} matches no kernel unitrace saw"
                 )
+        # Bounds size tensors by dtype: a name they do not know leaves the op unbounded.
+        for a in e.get("args") or []:
+            if isinstance(a, dict) and a.get("dtype") and a["dtype"] not in STORAGE_BYTES:
+                unknown.setdefault(a["dtype"], key)
         ranges = e.get("launches")
         if ranges is None:
             idx = matches
@@ -277,6 +282,9 @@ def _ops_summary(ops_map: dict, window: list, by_launch: bool):
     summary = TraceSummary(ops=ops, total_us=sum(item[1] for item in window),
                            attributed_us=sum(window[i][1] for i in owner), kernels=kernels,
                            launches=sum(item[2] for item in window))  # fmt: skip
+    for name, key in unknown.items():
+        problems.append(f"dtype {name!r} (first at {key}) is not one of {', '.join(STORAGE_BYTES)}: "
+                        "the bounds size tensors by torch's names")  # fmt: skip
     return summary, problems
 
 

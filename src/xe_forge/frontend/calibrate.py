@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import re
-import statistics
 from pathlib import Path
 
 from xe_forge import frontend
@@ -38,7 +37,7 @@ def _time_us(fn, dev, iters: int) -> float:
         end.record()
         mod.synchronize()
         times.append(start.elapsed_time(end) * 1e3)
-    return statistics.median(times)
+    return min(times)  # a peak is the best the card did; a median moves with clocks
 
 
 def measure(
