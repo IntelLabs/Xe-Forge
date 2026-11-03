@@ -35,8 +35,10 @@ def _port_status(port_txt: Path) -> dict:
 def collect_one(
     workspace: Path, name: str, variant: str, results: Path, key: str | None = None
 ) -> dict:
+    from xe_forge.frontend.manifest import sidecar
+
     row = {"kernel": name, "variant": variant, "workspace": str(workspace)}
-    status = workspace.with_suffix(".status.json")
+    status = sidecar(workspace, ".status.json")
     if status.is_file():
         row.update(json.loads(status.read_text()))
     if not workspace.is_dir():

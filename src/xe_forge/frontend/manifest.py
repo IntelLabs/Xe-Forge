@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -123,11 +124,9 @@ def emit(
         built = build_spec(e, coverage, max_variants, tolerance) if wanted else None
         if built is not None:
             spec, variants = built
-            stem = next(
-                s
-                for s in (e.name, f"{e.name}__{e.repo}", f"{e.name}__{e.repo}__{e.target}")
-                if s not in used
-            )
+            repo = _flat(e.repo)
+            stems = (e.name, f"{e.name}__{repo}", f"{e.name}__{repo}__{e.target}")
+            stem = next(s for s in stems if s not in used)
             used.add(stem)
             spec_path = specs / f"{stem}.yaml"
             header = (
@@ -198,6 +197,16 @@ def load(path: str | Path) -> dict:
 def resolve_repo(repo: str, repos_dir: Path) -> Path:
     p = Path(repo).expanduser()
     return p if p.is_absolute() else (repos_dir / p).resolve()
+
+
+def _flat(repo: str) -> str:
+    """A repo path (``vllm/csrc``) as one filename part."""
+    return re.sub(r"[^\w.-]+", "-", repo)
+
+
+def sidecar(workspace: Path, suffix: str) -> Path:
+    """``<workspace>.<suffix>`` beside it; ``with_suffix`` would cut a dotted kernel name."""
+    return workspace.parent / f"{workspace.name}{suffix}"
 
 
 def key(entry: dict) -> str:

@@ -6,6 +6,7 @@ Numbers, names and ``+ - * / // **`` with parentheses; no calls, attributes or i
 from __future__ import annotations
 
 import ast
+import math
 import operator
 
 _OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
@@ -46,18 +47,22 @@ def evaluate(expr, dims: dict) -> float | None:
     def walk(n):
         if isinstance(n, ast.Expression):
             return walk(n.body)
+        # Floats throughout: an int ** int (``10**10**10``, from agent-written costs) would
+        # run unbounded; a float one overflows at once.
         if isinstance(n, ast.Constant):
-            return n.value
+            return float(n.value)
         if isinstance(n, ast.Name):
             v = dims.get(n.id)
             if type(v) not in (int, float) or v < 0:
                 raise ValueError(n.id)
-            return v
+            return float(v)
         if isinstance(n, ast.UnaryOp):
             return -walk(n.operand)
         return _OPS[type(n.op)](walk(n.left), walk(n.right))
 
     try:
-        return float(walk(tree))
+        value = walk(tree)
     except (ValueError, ZeroDivisionError, OverflowError):
         return None
+    # A negative base to a fractional power is complex; inf/nan is no cost.
+    return value if isinstance(value, float) and math.isfinite(value) else None

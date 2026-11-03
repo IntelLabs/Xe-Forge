@@ -81,6 +81,9 @@ def build(raw_dir: Path, out: Path, names: dict | None = None) -> ir.CaptureRun:
         run["model_facts"] = names.get("model") or {}
     if (raw_dir / "counters.json").is_file():
         run["counters"] = _counters(json.loads((raw_dir / "counters.json").read_text()))
+        family = getattr(adapter, "counter_family", None)
+        if family is not None:  # the trace and the counters name a kernel differently
+            run["counters"] = _rekey(run["counters"], summary.kernels, family)
     capture = ir.CaptureRun(run=run, ops=summary.ops)
     capture.workloads = canonical.workloads(capture.ops, summary.total_us, naming.name_op)
     ir.dump(capture, out)
@@ -91,25 +94,55 @@ _SIMD = re.compile(r"\[SIMD\d+ \{\d+;\s*\d+;\s*\d+\} \{\d+;\s*\d+;\s*\d+\}\]$")
 
 
 def _counters(summary: dict) -> dict:
-    """unitrace ComputeBasic records -> {kernel: {gb_per_s, util_pct, us}}, time-weighted."""
+    """unitrace ComputeBasic records -> {kernel: {gb_per_s, util_pct, us}}, time-weighted.
+
+    compute_metrics reports an incomplete counter as None (unknown); a rate is averaged over
+    the records that measured it, and stays None when none did -- never 0.
+    """
     acc: dict = {}
     for r in summary.get("records") or []:
         time_ns = r.get("time_ns")
         if not time_ns:
             continue
         name = _SIMD.sub("", r["kernel"])
-        moved = sum((r["memory"].get(d) or {}).get("bytes") or 0 for d in ("read", "write"))
+        a = acc.setdefault(
+            name, {"ns": 0.0, "bytes": 0.0, "bytes_ns": 0.0, "util": 0.0, "util_ns": 0.0}
+        )
+        a["ns"] += time_ns
+        moved = [((r.get("memory") or {}).get(d) or {}).get("bytes") for d in ("read", "write")]
+        if None not in moved:
+            a["bytes"] += sum(moved)
+            a["bytes_ns"] += time_ns
         utils = [v for k, v in (r.get("counters") or {}).items()
                  if k.endswith("_UTILIZATION[%]") and v is not None]  # fmt: skip
-        a = acc.setdefault(name, {"bytes": 0.0, "ns": 0.0, "util_ns": 0.0})
-        a["bytes"] += moved
-        a["ns"] += time_ns
-        a["util_ns"] += (max(utils) if utils else 0.0) * time_ns
+        if utils:
+            a["util"] += max(utils) * time_ns
+            a["util_ns"] += time_ns
     return {
-        k: {"gb_per_s": round(a["bytes"] / a["ns"], 3), "util_pct": round(a["util_ns"] / a["ns"], 2),
+        k: {"gb_per_s": round(a["bytes"] / a["bytes_ns"], 3) if a["bytes_ns"] else None,
+            "util_pct": round(a["util"] / a["util_ns"], 2) if a["util_ns"] else None,
             "us": round(a["ns"] / 1e3, 3)}
         for k, a in acc.items()
     }  # fmt: skip
+
+
+def _rekey(counters: dict, kernels, family) -> dict:
+    """Counters keyed by the trace's kernel names, joined on ``family`` of both names.
+
+    Instances of one family are merged time-weighted; a field none measured stays None.
+    """
+    groups: dict = {}
+    for name, v in counters.items():
+        groups.setdefault(family(name), []).append(v)
+    merged = {}
+    for key, vs in groups.items():
+        m = {"us": round(sum(v["us"] for v in vs), 3)}
+        for f in ("gb_per_s", "util_pct"):
+            known = [v for v in vs if v.get(f) is not None]
+            ns = sum(v["us"] for v in known)
+            m[f] = round(sum(v[f] * v["us"] for v in known) / ns, 3) if ns else None
+        merged[key] = m
+    return {k: merged[family(k)] for k in kernels if family(k) in merged}
 
 
 def _split(op) -> list:

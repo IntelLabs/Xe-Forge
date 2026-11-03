@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from xe_forge.frontend import formula
+from xe_forge.frontend.calibrate import peaks as calib_peaks
 from xe_forge.frontend.ir import CapturedOp, Naming
 
 _IMPL = {"kernel": "provider", "aten": "aten"}
@@ -162,10 +163,9 @@ def keep_valid(names, listing: dict, repos) -> tuple[dict | None, list[str]]:
 
 def refuted(names: dict, listing: dict, calib: dict | None, noise: float) -> list[tuple]:
     """(key, kernel group or None, evidence) per stated cost a measured call contradicts."""
-    bw = (calib or {}).get("bandwidth_gbs")
+    bw, peaks = calib_peaks(calib)
     if not bw:
         return []
-    peaks = {k: v for k, v in (calib.get("matmul_tflops") or {}).items() if v}
     out = []
 
     def check(key, sub, cost, shapes):

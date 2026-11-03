@@ -8,7 +8,11 @@ repositories on this machine are in {{ repos }}.
 
 For each key, find where the op is implemented -- the registration of its namespace, the
 kernels it launches, the source behind them -- by reading the framework and the
-repositories, not by guessing from names. Then write names.json:
+repositories, not by guessing from names. A kernel whose source is in a repository that is
+not under {{ repos }} (the upstream of the installed package that ships it -- its metadata
+or source says which): clone it there. A repository you name that is on a branch with no
+local changes: `git pull --ff-only`, so the kernel is optimized in its latest code; a
+detached or modified checkout was put there on purpose: leave it. Then write names.json:
 
 {"ops": {"<key>": {
    "route": one of {{ routes | join(", ") }}:

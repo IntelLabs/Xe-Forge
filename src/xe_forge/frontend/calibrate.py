@@ -16,6 +16,13 @@ CACHE = frontend.CACHE / "calibration"
 DTYPES = ("bfloat16", "float16")
 
 
+def peaks(calib: dict | None) -> tuple[float | None, dict[str, float]]:
+    """(read bandwidth GB/s, {dtype: matmul TFLOP/s}) of a calibration, unmeasured left out."""
+    calib = calib or {}
+    tflops = {k: v for k, v in (calib.get("matmul_tflops") or {}).items() if v}
+    return calib.get("bandwidth_gbs") or None, tflops
+
+
 def _time_us(fn, dev, iters: int) -> float:
     import torch
 

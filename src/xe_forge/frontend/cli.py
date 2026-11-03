@@ -122,13 +122,14 @@ def name(
     repos: Path,
     coverage: float,
     calibration: Path | None = None,
+    cap=None,
 ) -> Path | None:
     """Run the naming agent over the costliest ops; the written names.json, or None."""
     from xe_forge.frontend import ir, naming
     from xe_forge.frontend.canonical import _named_dims as named_dims
     from xe_forge.frontend.canonical import arg_label
 
-    cap = ir.load(capture_path)
+    cap = cap or ir.load(capture_path)
     work = run_dir / "name"
     work.mkdir(parents=True, exist_ok=True)
     total = sum(op.device_us for op in cap.ops) or 1.0
@@ -360,7 +361,7 @@ def optimize(manifest_path: Path, run_dir: Path, opts) -> list[tuple[str, str]]:
         for variant in variants:
             pairs.append((key, variant))
             workspace = ws_root / f"{key}__{variant}"
-            status_path = workspace.with_suffix(".status.json")
+            status_path = manifest.sidecar(workspace, ".status.json")
             repo = manifest.resolve_repo(entry["repo"], repos_dir)
             if not repo.is_dir():
                 status = {"skipped": f"kernel repo not found: {repo}"}
@@ -368,25 +369,51 @@ def optimize(manifest_path: Path, run_dir: Path, opts) -> list[tuple[str, str]]:
                 print(f"optimize: {entry['name']} ({variant}): {status['skipped']}")
                 continue
             cmd = xe_forge_command(entry, variant, repo, workspace, opts)
-            log = workspace.with_suffix(".log")
+            log = manifest.sidecar(workspace, ".log")
             print(
                 f"optimize: {entry['name']} ({variant}) -> {workspace}\n  {shlex.join(cmd)}",
                 flush=True,
             )
             started = time.time()
             with open(log, "w") as f:
-                code = subprocess.call(cmd, cwd=REPO_DIR, stdout=f, stderr=subprocess.STDOUT)
+                code = subprocess.call(
+                    cmd, cwd=REPO_DIR, stdout=f, stderr=subprocess.STDOUT, env=_session_env()
+                )
             status = {
                 "exit_code": code,
                 "seconds": round(time.time() - started, 1),
                 "command": shlex.join(cmd),
                 "log": str(log),
+                "repo": _git_revision(repo),
             }
             status_path.write_text(json.dumps(status, indent=1) + "\n")
             print(
                 f"optimize: {entry['name']} ({variant}) exit {code} in {status['seconds']}s; log {log}"
             )
     return pairs
+
+
+def _session_env() -> dict:
+    """This interpreter's bin first on PATH: the session's ``python`` and ``xe-forge-skill``
+    are then the ones running it, however ``run`` itself was started."""
+    env = dict(os.environ)
+    env["PATH"] = os.pathsep.join([str(Path(sys.executable).parent), env.get("PATH", "")])
+    return env
+
+
+def _git_revision(repo: Path) -> dict:
+    """Which code a kernel was optimized in: the clone's origin and HEAD, dirty or not."""
+
+    def git(*args):
+        r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+        return r.stdout.strip() if r.returncode == 0 else None
+
+    return {
+        "path": str(repo),
+        "url": git("remote", "get-url", "origin"),
+        "commit": git("rev-parse", "HEAD"),
+        "dirty": bool(git("status", "--porcelain", "--untracked-files=no")),
+    }
 
 
 def _add_optimize_args(p: argparse.ArgumentParser) -> None:
@@ -510,7 +537,8 @@ def main(argv: list[str]) -> int:
     turns = a.agent_max_turns or a.max_turns
     run_dir = a.output.resolve()
     capture_path = run_dir / "capture.json"
-    if not capture_path.is_file():
+    captured_now = not capture_path.is_file()
+    if captured_now:
         code = (
             (0 if a.no_fit else fits(capture_args, python, run_dir, turns))
             or prepare(capture_args, python, run_dir, turns)
@@ -520,11 +548,13 @@ def main(argv: list[str]) -> int:
             why = f"killed by signal {-code}" if code < 0 else f"exit {code}"
             print(f"run: stopped before analysis ({why})", file=sys.stderr)
             return code if code > 0 else 1
-    else:
-        from xe_forge.frontend import ir
+    from xe_forge.frontend import ir
+
+    cap = ir.load(capture_path)  # once; the reparse below rewrites it for analyze
+    if not captured_now:
         from xe_forge.frontend.capture import workload_args
 
-        before = ir.load(capture_path).run.get("capture_args")
+        before = cap.run.get("capture_args")
         if before is not None and before != workload_args(capture_args):
             print(f"run: {capture_path} was captured with {before}, not "
                   f"{workload_args(capture_args)}; remove it to capture again", file=sys.stderr)  # fmt: skip
@@ -534,18 +564,16 @@ def main(argv: list[str]) -> int:
         counters(capture_args, python, run_dir, a.counters)
     names = run_dir / "names.json"
     if names.is_file():
-        from xe_forge.frontend import ir
-
         stamp = json.loads(names.read_text()).get("capture")
-        if stamp != _stamp(ir.load(capture_path)):
+        if stamp != _stamp(cap):
             print(f"run: {names} was written for another capture; naming again", file=sys.stderr)
             names.unlink()
     if not names.is_file():
         repos = Path(a.kernel_repos).resolve() if a.kernel_repos else REPO_DIR.parent
-        if (
-            name(capture_path, run_dir, python, turns, repos, a.name_coverage, a.calibration)
-            is None
-        ):
+        named = name(
+            capture_path, run_dir, python, turns, repos, a.name_coverage, a.calibration, cap=cap
+        )
+        if named is None:
             print("run: no names.json; the ops stay unnamed", file=sys.stderr)
     if names.is_file():
         capture_args = [*capture_args, "--names", str(names)]

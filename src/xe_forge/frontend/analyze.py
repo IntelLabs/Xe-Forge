@@ -9,6 +9,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 
 from xe_forge.frontend import formula
+from xe_forge.frontend.calibrate import peaks as calib_peaks
 from xe_forge.frontend.canonical import resolve_dims
 from xe_forge.frontend.dtypes import storage_bytes
 from xe_forge.frontend.ir import CaptureRun, Workload
@@ -124,8 +125,7 @@ def gemm_bound(
         return None
     dtype = w.dtypes[0] if w.dtypes else None
     size = storage_bytes(dtype)
-    bw = calib.get("bandwidth_gbs")
-    peaks = {k: v for k, v in (calib.get("matmul_tflops") or {}).items() if v}
+    bw, peaks = calib_peaks(calib)
     if not bw or not peaks:
         return None
     topk = ctx.get("topk")
@@ -173,10 +173,9 @@ def cost_bound(
 ) -> tuple[float, float] | None:
     """(recoverable us, efficiency) against the naming agent's stated per-call cost."""
     cost = w.attrs.get("cost") or {}
-    bw = (calib or {}).get("bandwidth_gbs")
+    bw, peaks = calib_peaks(calib)
     if not bw or "bytes" not in cost:
         return None
-    peaks = {k: v for k, v in (calib.get("matmul_tflops") or {}).items() if v}
     dtype = next((d for d in w.dtypes if d.startswith(("bfloat", "float"))), None)
     peak = peaks.get(dtype) or max(peaks.values(), default=None)
 
@@ -209,23 +208,31 @@ def _measured(measured: dict, name: str) -> dict | None:
     if name in measured:
         return measured[name]
     hits = [v for k, v in measured.items() if k.startswith(name)]
-    ns = sum(v["us"] for v in hits)
-    if not ns:
+    if not sum(v["us"] for v in hits):
         return None
-    return {f: sum(v[f] * v["us"] for v in hits) / ns for f in ("gb_per_s", "util_pct")}
+    out = {}
+    for f in ("gb_per_s", "util_pct"):  # None = not measured, averaged over those that were
+        known = [v for v in hits if v.get(f) is not None]
+        ns = sum(v["us"] for v in known)
+        out[f] = sum(v[f] * v["us"] for v in known) / ns if ns else None
+    return out
 
 
 def _sol_parts(w: Workload, calib: dict | None, ctx: dict | None) -> tuple | None:
     """(SOL, memory SOL, compute SOL); None when most of the time is unmeasured."""
     measured = (ctx or {}).get("counters") or {}
-    bw = (calib or {}).get("bandwidth_gbs")
+    bw = calib_peaks(calib)[0]
     kernels = w.framework_meta.get("kernels") or {}
     weight = sol = mem = comp = 0.0
     for name, us in kernels.items():
         k = _measured(measured, name)
         if not k or not us:
             continue
-        memory, compute = (k["gb_per_s"] / bw if bw else 0.0), k["util_pct"] / 100
+        # SOL is the max of both sides; an unknown side (or no bandwidth peak) is not 0% of
+        # peak, so such a kernel counts as unmeasured.
+        if not bw or k.get("gb_per_s") is None or k.get("util_pct") is None:
+            continue
+        memory, compute = k["gb_per_s"] / bw, k["util_pct"] / 100
         sol += min(1.0, max(memory, compute)) * us
         mem, comp, weight = mem + memory * us, comp + compute * us, weight + us
     if not weight or weight < 0.5 * sum(kernels.values()):
@@ -316,7 +323,12 @@ def _decide(
 
 def _counted(workloads: list[Workload], measured: dict) -> float:
     """% of device time whose kernels have counters."""
-    times = [(us, _measured(measured, k) is not None)
+
+    def hit(name):
+        k = _measured(measured, name)
+        return bool(k) and k["gb_per_s"] is not None and k["util_pct"] is not None
+
+    times = [(us, hit(k))
              for w in workloads for k, us in (w.framework_meta.get("kernels") or {}).items()]  # fmt: skip
     total = sum(us for us, _ in times)
     return round(100 * sum(us for us, hit in times if hit) / total, 1) if total else 0.0

@@ -151,7 +151,12 @@ def _stack_check(clones: list[Path], kernel: str, kind: str) -> tuple[bool, str]
         )
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=STACK_TIMEOUT, env=env)
     except subprocess.TimeoutExpired as exc:
-        log.write_text(f"{exc.stdout or ''}{exc.stderr or ''}")
+        # TimeoutExpired carries bytes even under text=True.
+        out = (
+            o.decode(errors="replace") if isinstance(o, bytes) else o or ""
+            for o in (exc.stdout, exc.stderr)
+        )
+        log.write_text("".join(out))
         return False, f"stack check timed out after {STACK_TIMEOUT}s; see {log}"
     except (ExternalCommandError, OSError) as exc:
         return False, f"stack check did not run: {exc}"

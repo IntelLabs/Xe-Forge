@@ -303,3 +303,18 @@ def name_key(op: CapturedOp) -> str:
     """names.json key: node type and the implementation the plugin picked for it."""
     impl = max(op.kernel_symbols, key=op.kernel_symbols.get) if op.kernel_symbols else ""
     return f"{op.framework_op}|{impl}"
+
+
+def counter_family(name: str) -> str:
+    """One key for a kernel's two names: the plugin's implementation (``rms_gpu_bfyx_opt__f16``,
+    ``ocl::rope::opt___f16``) and the compiled instance unitrace sees
+    (``rms_gpu_bfyx_opt_1933771266323936851_0_0__sa``, ``rope_opt__4308312662623125788__sa``).
+
+    Instances of one implementation at several dtypes share a key. ``ocl::sdpa::opt`` runs
+    ``sdpa_micro__*`` kernels its name does not predict, and oneDNN's ``gemm_kernel`` serves
+    the ``undef`` FullyConnected rows: those stay unmatched (a GEMM has its own bound).
+    """
+    if name.endswith("__sa"):
+        return re.sub(r"[_\d]*__sa$", "", name)
+    name = re.sub(r"_*__[a-z0-9]+$", "", name)
+    return name.removeprefix("ocl::").replace("::", "_")

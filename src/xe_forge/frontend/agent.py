@@ -37,38 +37,47 @@ def run(template: str, context: dict, cwd: Path, answer: str, python: str, max_t
     (cwd / "prompt.md").write_text(prompt)
     log_path, deadline = cwd / "session.log", time.monotonic() + TIMEOUT
     cmd = [claude, "-p", prompt]
-    for _ in range(1 + RESUMES):
-        start = log_path.stat().st_size if log_path.is_file() else 0
-        with open(log_path, "a") as log:
-            # Own process group, so a timeout also kills the detached builds it started.
-            proc = subprocess.Popen(
-                [*cmd, "--dangerously-skip-permissions", "--max-turns", str(max_turns),
-                 "--output-format", "stream-json", "--verbose"],
-                cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
-            )  # fmt: skip
-            try:
-                proc.wait(timeout=max(1.0, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
-                proc.wait()
-                raise RuntimeError(f"agent timed out after {TIMEOUT} s (see {cwd})") from None
-        if path.is_file():
-            break
-        text = log_path.read_text()[start:]
-        result = _result(text)
-        # Resume a session that stopped while its detached work ran; not one that errored.
-        failed = proc.returncode != 0 and result.get("subtype") != "error_max_turns"
-        session = re.findall(r'"session_id":"([^"]+)"', text)
-        if failed or not session:
-            why = result.get("result") or result.get("subtype") or f"exit {proc.returncode}"
-            raise RuntimeError(f"agent stopped: {str(why)[:300]} (see {log_path})")
-        cmd = [
-            claude,
-            "--resume",
-            session[-1],
-            "-p",
-            render("frontend-resume.md.j2", answer=answer),
-        ]
+    groups: list[int] = []  # every session's process group, for the work it detached
+    try:
+        for _ in range(1 + RESUMES):
+            start = log_path.stat().st_size if log_path.is_file() else 0
+            with open(log_path, "a") as log:
+                # Own process group, so the detached builds it started can be killed.
+                proc = subprocess.Popen(
+                    [*cmd, "--dangerously-skip-permissions", "--max-turns", str(max_turns),
+                     "--output-format", "stream-json", "--verbose"],
+                    cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )  # fmt: skip
+                groups.append(proc.pid)
+                try:
+                    proc.wait(timeout=max(1.0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait()
+                    raise RuntimeError(f"agent timed out after {TIMEOUT} s (see {cwd})") from None
+            if path.is_file():
+                break
+            # st_size is a byte offset: slice the bytes, then decode.
+            text = log_path.read_bytes()[start:].decode(errors="replace")
+            result = _result(text)
+            # Resume a session that stopped while its detached work ran; not one that errored.
+            failed = proc.returncode != 0 and result.get("subtype") != "error_max_turns"
+            session = re.findall(r'"session_id":"([^"]+)"', text)
+            if failed or not session:
+                why = result.get("result") or result.get("subtype") or f"exit {proc.returncode}"
+                raise RuntimeError(f"agent stopped: {str(why)[:300]} (see {log_path})")
+            cmd = [
+                claude,
+                "--resume",
+                session[-1],
+                "-p",
+                render("frontend-resume.md.j2", answer=answer),
+            ]
+    finally:
+        # Detached work must outlive a resume, but not the step: left running, an export or
+        # build holds the device memory the capture that follows needs.
+        _kill_groups(groups)
     got = json.loads(path.read_text()) if path.is_file() else {}
     if not isinstance(got, dict):
         raise RuntimeError(f"agent: {answer} is not a JSON object (see {cwd})")
@@ -87,3 +96,24 @@ def _result(stream: str) -> dict:
             except json.JSONDecodeError:
                 return {}
     return {}
+
+
+def _kill_groups(groups: list[int], grace: float = 10.0) -> None:
+    """SIGTERM each process group, then SIGKILL what is left after ``grace`` seconds."""
+
+    def signal_all(sig) -> list[int]:
+        alive = []
+        for pg in groups:
+            try:
+                os.killpg(pg, sig)
+                alive.append(pg)
+            except (ProcessLookupError, PermissionError):
+                pass
+        return alive
+
+    if not signal_all(signal.SIGTERM):
+        return
+    stop = time.monotonic() + grace
+    while time.monotonic() < stop and signal_all(0):
+        time.sleep(0.2)
+    signal_all(signal.SIGKILL)
