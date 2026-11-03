@@ -25,7 +25,7 @@ _TOLERANCE = {
 }
 
 _READ_WITH = """\
-`{capture}` is an `xe_forge.capture/v1` file written by `xe-forge capture` from a run of
+`{capture}` is an `xe_forge.capture/v1` file written by `xe-forge-skill capture parse` from a run of
 `{model}` under {framework}. Each variant above names a workload in its `workloads` list
 by `workload_id`, followed by `@AXIS=value`: the token count that variant was captured at.
 The workload's `ops` name rows of the file's `ops` list, whose `args` hold the exact shapes,

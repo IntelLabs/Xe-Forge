@@ -14,7 +14,7 @@ __all__ = [
 ]
 
 
-# Lazy: frontend.capture runs inside a framework's venv and must not pull in the config stack.
+# Lazy: the capture tools run inside a framework's venv and must not pull in the config stack.
 _LAZY = {
     "Config": "xe_forge.config",
     "get_config": "xe_forge.config",

@@ -24,9 +24,7 @@ def _build_arms(prove_dir: Path, patches: list[Path], python: str, max_turns: in
     return arms
 
 
-def prove(
-    run_dir: Path, capture, capture_args: list[str], python: str, repeat: int, max_turns: int
-) -> str:
+def prove(run_dir: Path, recapture, python: str, repeat: int, max_turns: int) -> str:
     """Build, capture both arms, compare; returns the SUMMARY.md section."""
     from xe_forge.frontend import compare
 
@@ -50,7 +48,8 @@ def prove(
     for i in range(1, repeat + 1):
         for arm in ("A", "B"):  # alternate, so drift falls on both arms
             path = prove_dir / f"{arm}-r{i}" / "capture.json"
-            if capture([*capture_args, "-o", str(path)], arms[arm]) != 0 or not path.is_file():
+            # The run's own cached launcher, under the arm's interpreter: identical work.
+            if recapture(run_dir, path.parent, arms[arm]) != 0 or not path.is_file():
                 if arm == "B" and caps["A"]:
                     return (f"## In model\n\nFAIL: with the patches the model does not run "
                             f"where the base does ({path.parent}); the patches are not mergeable\n")  # fmt: skip

@@ -1,13 +1,12 @@
-"""Profile any Python callable (``--target module:factory``), plus the profiler region every
-PyTorch adapter shares.
+"""Helpers a capture launcher imports: the device torch sees, and one torch.profiler region
+written as ``trace.json.gz`` -- what ``xe-forge-skill capture parse`` reads for a torch
+framework.
 """
 
 from __future__ import annotations
 
 import gzip
-import importlib
 import shutil
-import sys
 from pathlib import Path
 
 
@@ -58,29 +57,3 @@ def profile_region(fn, raw_dir: Path, with_stack: bool = True) -> Path:
         shutil.copyfileobj(src, dst)
     plain.unlink()
     return out
-
-
-def add_arguments(parser) -> None:
-    parser.add_argument("--target", help="module:factory returning a zero-arg callable")
-    parser.add_argument("--iters", type=int, default=3)
-
-
-def capture(args, raw_dir: Path) -> dict:
-    if not args.target or ":" not in args.target:
-        raise SystemExit("--framework torch needs --target module:factory")
-    mod_name, attr = args.target.split(":", 1)
-    sys.path.insert(0, str(Path.cwd()))
-    fn = getattr(importlib.import_module(mod_name), attr)()
-    fn()
-
-    def region():
-        for _ in range(args.iters):
-            fn()
-
-    profile_region(region, raw_dir)
-    return {
-        "framework": "torch",
-        "model": {"name": args.target},
-        "runtime": {"iters": args.iters},
-        "device": device_info(),
-    }

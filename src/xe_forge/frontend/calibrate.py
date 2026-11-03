@@ -47,7 +47,7 @@ def measure(
     """``read_bytes`` must exceed the card's caches; ``n`` is the square matmul size."""
     import torch
 
-    from xe_forge.frontend.adapters.pytorch import device_info, device_type
+    from xe_forge.frontend.profile import device_info, device_type
 
     dev = device_type()
     rec: dict = {

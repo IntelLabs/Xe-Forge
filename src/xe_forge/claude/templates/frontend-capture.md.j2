@@ -1,0 +1,49 @@
+Capture one profiled run of {{ model }} in {{ framework }} on this machine's GPU, so the
+kernels it spends its time in can be named and optimized. The framework's interpreter is
+{{ python }}; {{ framework }} is installed there. Read its own code and docs for how to do
+this; nothing here knows that framework.
+
+The workload: a batch of {{ batch }} sequences of {{ input_len }} prompt tokens each, greedy,
+generating {{ output_len }} tokens with no stop at EOS -- one prefill of the batch and the
+decode steps after it. Prompt token ids are fixed: the same for every framework and run,
+`from xe_forge.frontend import tokens; tokens.token_ids(tokens.hf_vocab(tokenizer), {{ batch }},
+{{ input_len }})` (tokenizer: the model's Hugging Face tokenizer). Run eagerly: no graph
+capture or compilation, no prefix caching, nothing cached between requests; a warm-up run
+first, outside what is measured.
+
+Before downloading or running anything large, decide whether this fits the device: the
+model's config (hub metadata, no weights), the device's memory, and how the framework runs
+it at this workload. If it cannot run here -- it does not fit, or it is not a text decoder
+that runs on token ids -- write {"fits": false, "reason": "<one line>"} as {{ answer }} and
+stop. A framework that runs a converted model (an exported IR, an engine) needs it converted
+once: into {{ cache }}/models/<framework>/<model id with / as -->, reused when it is there.
+
+Write launcher/run.sh here: an executable that runs that workload once more with every
+setting it needs, the framework under $FRAMEWORK_PYTHON when that is set (it is when another
+build of the stack is measured) and {{ python }} otherwise, and writes into $RAW_DIR:
+ - meta.json: {"framework", "framework_version", "model": {"name", "config": <its config as
+   a dict>}, "runtime": {"batch", "input_len", "output_len", and every setting that changes
+   what runs}, "device": {"type", "name"}, "repeats": <how many times the process ran the
+   identical workload, warm-up included>};
+ - for a framework that runs on PyTorch: its torch.profiler trace of exactly the generation
+   (trace*.json.gz, record_shapes=True; `xe_forge.frontend.profile.profile_region(fn,
+   raw_dir)` does this for a callable in this process -- a framework that runs the model in
+   another process profiles it there, with its own profiler, into $RAW_DIR);
+ - for any other framework: ops.json, every node that ran on the device:
+   {"<node>": {"framework_op": "<its type>", "kernels": ["<regex over the kernel names
+   unitrace reports>"], "args": [{"name", "shape", "dtype"}], "call_site": "<node name>",
+   "calls": <runs in one workload>}} with concrete shapes, read from the framework's own
+   runtime API; which kernels a node ran is what you establish, not guess from names.
+
+Then run, under any interpreter that imports xe_forge (PYTHONPATH is set):
+  xe-forge-skill capture run launcher/run.sh -o raw
+  xe-forge-skill capture parse raw -o capture.json
+`capture run` runs the launcher twice, the second time under unitrace, and records every
+kernel the device ran (raw/unitrace_kernels.json) with its counters. `capture parse` builds
+capture.json and checks it: exit 0 passes; exit 1 prints each PROBLEM. Fix the launcher and
+run both again until parse passes. Report the numbers it prints; do not edit raw/ or
+capture.json yourself.
+
+Write {{ answer }}: {"launcher": "launcher/run.sh", "capture": "capture.json", "notes":
+"<what the launcher does and why, one paragraph>"}, or {"error": "<why it cannot be
+captured>", "next_step": "<what a person would do>"}.

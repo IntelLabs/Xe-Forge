@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import os
 
 
 def main():
@@ -214,6 +215,20 @@ def main():
     )
     u_patch.add_argument("--trials-dir", default="./trials")
 
+    # -- capture --
+    p_cap = subparsers.add_parser("capture", help="Run a launcher under the instruments; check it")
+    cap_sub = p_cap.add_subparsers(dest="capture_command", required=True)
+    c_run = cap_sub.add_parser(
+        "run", help="Launcher -> raw/ (its trace, unitrace kernels, counters)"
+    )
+    c_run.add_argument("launcher", help="executable that runs one profiled batch into $RAW_DIR")
+    c_run.add_argument("-o", "--raw", required=True, help="raw/ directory to write")
+    c_run.add_argument("--unitrace", default=os.environ.get("UNITRACE_BIN", "unitrace"))
+    c_parse = cap_sub.add_parser("parse", help="raw/ -> capture.json, checked against unitrace")
+    c_parse.add_argument("raw", help="raw/ directory capture run wrote")
+    c_parse.add_argument("-o", "--output", required=True, help="capture.json to write")
+    c_parse.add_argument("--names", default=None, help="names.json to apply")
+
     args = parser.parse_args()
 
     if args.skill == "analyze":
@@ -228,8 +243,11 @@ def main():
         from xe_forge.skills.profile import run
     elif args.skill == "upstream":
         from xe_forge.skills.upstream import run
+    elif args.skill == "capture":
+        from xe_forge.skills.capture import run
 
-    run(args)
+    # A tool's verdict is its exit code: a failed check must not exit 0.
+    return run(args)
 
 
 if __name__ == "__main__":

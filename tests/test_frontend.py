@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -187,41 +188,6 @@ def test_stack_check_timeout_log_is_text(tmp_path, monkeypatch):
     assert (tmp_path / "stack_check.log").read_text() == "line one\nline two\nerr\n"
 
 
-# ── OpenVINO: the trace and unitrace name a kernel differently ──────────────
-
-
-def test_openvino_counter_family_joins_both_names():
-    from xe_forge.frontend.adapters.openvino import counter_family as f
-
-    pairs = [
-        ("rms_gpu_bfyx_opt__f16", "rms_gpu_bfyx_opt_1933771266323936851_0_0__sa"),
-        ("ocl::rope::opt___f16", "rope_opt__4308312662623125788__sa"),
-        ("concatenation_gpu_simple_ref__f16", "concatenation_gpu_simple_ref_48809118_1_0__sa"),
-    ]
-    for trace, unitrace in pairs:
-        assert f(trace) == f(unitrace)
-    # Not predictable from the plugin's name: left unmatched rather than guessed.
-    assert f("ocl::sdpa::opt__f16") != f("sdpa_micro__prefill_14496116136220614062__sa")
-
-
-def test_rekey_merges_instances_onto_trace_names():
-    from xe_forge.frontend.adapters.openvino import counter_family
-    from xe_forge.frontend.capture import _rekey
-
-    counters = {
-        "concatenation_gpu_simple_ref_1_0_0__sa": {"gb_per_s": 100.0, "util_pct": 10.0, "us": 3.0},
-        "concatenation_gpu_simple_ref_2_1_0__sa": {"gb_per_s": 200.0, "util_pct": None, "us": 1.0},
-        "gemm_kernel": {"gb_per_s": 50.0, "util_pct": 50.0, "us": 9.0},
-    }
-    kernels = {"concatenation_gpu_simple_ref__f16": 1.0, "undef": 5.0}
-    out = _rekey(counters, kernels, counter_family)
-    assert set(out) == {"concatenation_gpu_simple_ref__f16"}
-    got = out["concatenation_gpu_simple_ref__f16"]
-    assert got["gb_per_s"] == 125.0  # (100*3 + 200*1) / 4
-    assert got["util_pct"] == 10.0  # only the instance that measured it
-    assert got["us"] == 4.0
-
-
 def test_optimize_records_the_repo_revision(tmp_path):
     from xe_forge.frontend.cli import _git_revision
 
@@ -253,3 +219,84 @@ def test_optimize_session_finds_this_interpreter_first():
 
     first = _session_env()["PATH"].split(os.pathsep)[0]
     assert first == str(Path(sys.executable).parent)
+
+
+# ── capture tools: the instruments and checks around an agent's launcher ────
+
+UNITRACE_STUB = """#!/bin/bash
+# Stub unitrace: run the launcher, then write a device-timing table where -o pointed.
+while [[ $1 == -* ]]; do [[ $1 == -o ]] && { out=$2; shift; }; [[ $1 == --group ]] && shift; shift; done
+"$@" || exit $?
+cat > "${out%.txt}.123.txt" <<'T'
+== Device timing ==
+Kernel, Calls, Time (ns), Time (%), Average (ns), Min (ns), Max (ns)
+"rms_opt_123_0_0__sa[SIMD16 {1; 1; 1} {16; 1; 1}]", 4, 8000, 40, 2000, 2000, 2000
+"gemm_kernel", 2, 12000, 60, 6000, 6000, 6000
+T
+"""
+
+LAUNCHER = """#!/bin/bash
+cat > "$RAW_DIR/meta.json" <<'J'
+{"framework": "toyfw", "framework_version": "1", "model": {"name": "toy"},
+ "runtime": {"batch": 1}, "device": {"type": "xpu"}}
+J
+cat > "$RAW_DIR/ops.json" <<'J'
+{"rms": {"framework_op": "toy::RMS", "kernels": ["^rms_opt"], "calls": 4,
+         "args": [{"name": "x", "shape": [4, 896], "dtype": "float16"}]},
+ "fc": {"framework_op": "toy::FC", "kernels": ["^gemm_kernel$"%s],
+        "args": [{"name": "x", "shape": [4, 896], "dtype": "float16"}]}}
+J
+"""
+
+
+def _tool(*argv):
+    r = subprocess.run([sys.executable, "-m", "xe_forge.skills", *argv], capture_output=True,
+                       text=True, env=dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path)))  # fmt: skip
+    return r.returncode, r.stdout + r.stderr
+
+
+def _exe(path: Path, text: str) -> Path:
+    path.write_text(text)
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    return path
+
+
+def test_capture_tools_on_an_agent_op_map(tmp_path):
+    unitrace = _exe(tmp_path / "unitrace", UNITRACE_STUB)
+    launcher = _exe(tmp_path / "run.sh", LAUNCHER % "")
+    raw = tmp_path / "raw"
+    code, out = _tool("capture", "run", str(launcher), "-o", str(raw), "--unitrace", str(unitrace))
+    assert code == 0, out
+    assert json.loads((raw / "unitrace_kernels.json").read_text())["rms_opt_123_0_0__sa"] == {
+        "us": 8.0, "calls": 4}  # fmt: skip
+    code, out = _tool("capture", "parse", str(raw), "-o", str(tmp_path / "capture.json"))
+    assert code == 0, out
+    cap = json.loads((tmp_path / "capture.json").read_text())
+    assert cap["run"]["attributed_pct"] == 100.0
+    assert cap["run"]["launcher_sha256"]
+    assert {o["framework_op"]: o["device_us"] for o in cap["ops"]} == {"toy::FC": 12.0,
+                                                                       "toy::RMS": 8.0}  # fmt: skip
+
+
+def test_capture_parse_refuses_invented_or_double_claimed_kernels(tmp_path):
+    unitrace = _exe(tmp_path / "unitrace", UNITRACE_STUB)
+    launcher = _exe(tmp_path / "run.sh", LAUNCHER % ', "^rms_opt", "^no_such_kernel"')
+    raw = tmp_path / "raw"
+    assert (
+        _tool("capture", "run", str(launcher), "-o", str(raw), "--unitrace", str(unitrace))[0] == 0
+    )
+    code, out = _tool("capture", "parse", str(raw), "-o", str(tmp_path / "capture.json"))
+    assert code == 1
+    assert "matches no kernel unitrace saw" in out and "claimed by both" in out
+
+
+def test_capture_parse_refuses_a_tampered_raw(tmp_path):
+    unitrace = _exe(tmp_path / "unitrace", UNITRACE_STUB)
+    launcher = _exe(tmp_path / "run.sh", LAUNCHER % "")
+    raw = tmp_path / "raw"
+    assert (
+        _tool("capture", "run", str(launcher), "-o", str(raw), "--unitrace", str(unitrace))[0] == 0
+    )
+    (raw / "unitrace_kernels.json").write_text("{}")
+    code, out = _tool("capture", "parse", str(raw), "-o", str(tmp_path / "capture.json"))
+    assert code == 1 and "changed since" in out

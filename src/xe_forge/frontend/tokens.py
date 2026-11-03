@@ -1,8 +1,10 @@
-"""The prompt every adapter runs, so captures from different frameworks see the same work."""
+"""The model's input token ids: fixed, so every framework and run gets the same work.
+
+Not an LLM prompt -- those are the ``claude/templates/*.j2`` files.
+"""
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,14 +24,6 @@ def hf_vocab(tok) -> Vocab:
     return Vocab(lambda text: tok.encode(text, add_special_tokens=False), ordinary)
 
 
-def add_arguments(parser) -> None:
-    parser.add_argument("--prompt-file", type=Path, help="text to tokenize (default: synthetic)")
-    parser.add_argument("--warmup-tokens", type=int, default=4, help="new tokens in the warm-up")
-    parser.add_argument(
-        "--trust-remote-code", action="store_true", help="the model's repo ships its own code"
-    )
-
-
 def token_ids(
     vocab: Vocab, batch: int, length: int, prompt_file: Path | None = None
 ) -> list[list[int]]:
@@ -45,10 +39,3 @@ def token_ids(
     return [
         [pool[(i * 7919 + j * 104729) % len(pool)] for i in range(length)] for j in range(batch)
     ]
-
-
-def describe(prompt_file: Path | None) -> str:
-    if not prompt_file:
-        return "synthetic"
-    digest = hashlib.sha1(Path(prompt_file).read_bytes()).hexdigest()[:10]
-    return f"{Path(prompt_file).name}@{digest}"

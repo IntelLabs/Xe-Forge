@@ -1,61 +1,37 @@
-"""Capture entry point, run under the framework's own interpreter.
+"""``raw/`` -> ``capture.json``: what ``xe-forge-skill capture parse`` builds from a launcher's run.
 
-Runs the adapter into ``raw/`` and builds ``capture.json`` from it; ``--reparse`` rebuilds only.
+A torch framework's ops come from its torch.profiler trace; any other framework's from the
+op map ``capture parse`` already checked against unitrace (``summary``).
 """
 
 from __future__ import annotations
 
-import argparse
 import copy
-import importlib
 import json
 import os
 import re
-import shlex
-import sys
-from datetime import datetime
 from pathlib import Path
 
-from xe_forge.frontend import adapters, canonical, ir, naming, prompt
+from xe_forge.frontend import canonical, ir, naming
 from xe_forge.frontend.torch_trace import parse_traces
 
-_ENV_PREFIXES = tuple(
-    os.environ.get(
-        "XE_FORGE_CAPTURE_ENV",
-        "VLLM_,SGLANG_,SGL_,OV_,ONEDNN_,DNNL_,ONEAPI_,SYCL_,UR_,ZE_,IGC_,CCL_,TORCH_,PYTORCH_,HF_HUB_",
-    ).split(",")
-)
-_SECRET_WORDS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "AUTH")
 
-
-def _env_subset() -> dict:
-    return {
-        k: v
-        for k, v in sorted(os.environ.items())
-        if k.startswith(_ENV_PREFIXES) and not any(w in k for w in _SECRET_WORDS)
-    }
-
-
-def build(raw_dir: Path, out: Path, names: dict | None = None) -> ir.CaptureRun:
+def build(raw_dir: Path, out: Path, names: dict | None = None, summary=None) -> ir.CaptureRun:
     """``raw/`` (run.json + traces) -> capture.json, with ops named from ``names``."""
     run = json.loads((raw_dir / "run.json").read_text())
-    adapter = adapters.get(run["framework"])
-    parse = getattr(adapter, "parse", None)
     traces = sorted(raw_dir.glob("trace*.json*"))
     ranks: dict[int, list[Path]] = {}
     for t in traces:
         found = re.search(r"rank(\d+)", t.name)
         ranks.setdefault(int(found.group(1)) if found else 0, []).append(t)
-    if parse is not None:
-        summary = parse(raw_dir)
-    elif traces:
+    if summary is None and traces:
         # TP ranks run the same shapes: rank 0 is the workload, per-rank totals show imbalance.
         summary = parse_traces(ranks[min(ranks)])
         if len(ranks) > 1:
             run["ranks"] = {
                 r: round(parse_traces(ts).total_us, 1) for r, ts in sorted(ranks.items())
             }
-    else:
+    elif summary is None:
         raise SystemExit(f"no trace in {raw_dir}")
 
     if not summary.launches:
@@ -68,7 +44,7 @@ def build(raw_dir: Path, out: Path, names: dict | None = None) -> ir.CaptureRun:
         os.path.relpath(p, out.parent) for p in sorted(raw_dir.iterdir()) if p.name != "run.json"
     ]
     _annotate_schemas(summary.ops, raw_dir / "schemas.json")
-    key = getattr(adapter, "name_key", naming.key)
+    key = naming.key
     entries = (names or {}).get("ops") or {}
     ops = []
     for op in summary.ops:
@@ -81,9 +57,6 @@ def build(raw_dir: Path, out: Path, names: dict | None = None) -> ir.CaptureRun:
         run["model_facts"] = names.get("model") or {}
     if (raw_dir / "counters.json").is_file():
         run["counters"] = _counters(json.loads((raw_dir / "counters.json").read_text()))
-        family = getattr(adapter, "counter_family", None)
-        if family is not None:  # the trace and the counters name a kernel differently
-            run["counters"] = _rekey(run["counters"], summary.kernels, family)
     capture = ir.CaptureRun(run=run, ops=summary.ops)
     capture.workloads = canonical.workloads(capture.ops, summary.total_us, naming.name_op)
     ir.dump(capture, out)
@@ -124,25 +97,6 @@ def _counters(summary: dict) -> dict:
             "us": round(a["ns"] / 1e3, 3)}
         for k, a in acc.items()
     }  # fmt: skip
-
-
-def _rekey(counters: dict, kernels, family) -> dict:
-    """Counters keyed by the trace's kernel names, joined on ``family`` of both names.
-
-    Instances of one family are merged time-weighted; a field none measured stays None.
-    """
-    groups: dict = {}
-    for name, v in counters.items():
-        groups.setdefault(family(name), []).append(v)
-    merged = {}
-    for key, vs in groups.items():
-        m = {"us": round(sum(v["us"] for v in vs), 3)}
-        for f in ("gb_per_s", "util_pct"):
-            known = [v for v in vs if v.get(f) is not None]
-            ns = sum(v["us"] for v in known)
-            m[f] = round(sum(v[f] * v["us"] for v in known) / ns, 3) if ns else None
-        merged[key] = m
-    return {k: merged[family(k)] for k in kernels if family(k) in merged}
 
 
 def _split(op) -> list:
@@ -199,92 +153,3 @@ def _annotate_schemas(ops: list[ir.CapturedOp], cache: Path) -> None:
         op.framework_meta["arg_names"] = known[key]
     if known:
         cache.write_text(json.dumps(known, indent=1, sort_keys=True) + "\n")
-
-
-def workload_args(argv: list[str]) -> list[str]:
-    """``argv`` without its output and naming paths."""
-    out, skip = [], False
-    for a in argv:
-        if skip:
-            skip = False
-        elif a in ("-o", "--output", "--names", "--reparse"):
-            skip = True
-        elif not a.startswith(("--output=", "--names=", "--reparse=")):
-            out.append(a)
-    return out
-
-
-_NO_FIT = re.compile(
-    r"OUT_OF_RESOURCES|OUT_OF_DEVICE_MEMORY|out of memory|OutOfMemory"
-    r"|not enough (KV cache|memory)|KV cache is needed|No available memory for the cache",
-    re.I,
-)
-
-
-def main(argv: list[str] | None = None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    pre = argparse.ArgumentParser(add_help=False)
-    pre.add_argument("--framework")
-    pre.add_argument("--reparse", type=Path)
-    known, _ = pre.parse_known_args(argv)
-
-    parser = argparse.ArgumentParser(prog="xe-forge capture", description=__doc__.splitlines()[0])
-    parser.add_argument(
-        "--framework", required=known.reparse is None, choices=sorted(adapters.ADAPTERS)
-    )
-    parser.add_argument("-o", "--output", type=Path, required=True, help="capture.json to write")
-    parser.add_argument("--reparse", type=Path, help="rebuild from an existing raw/ directory")
-    parser.add_argument("--names", type=Path, help="the naming agent's names.json")
-    parser.add_argument(
-        "--import-ops", nargs="*", default=[], metavar="MODULE",
-        help="modules registering the providers' torch ops, so their schemas resolve",
-    )  # fmt: skip
-    prompt.add_arguments(parser)
-    if known.framework in adapters.ADAPTERS:
-        adapters.get(known.framework).add_arguments(parser)
-    args = parser.parse_args(argv)
-
-    out = args.output.resolve()
-    names = json.loads(args.names.read_text()) if args.names else None
-    for module in args.import_ops:
-        importlib.import_module(module)
-    if args.reparse:
-        capture = build(args.reparse.resolve(), out, names)
-    else:
-        raw_dir = out.parent / "raw"
-        for stale in raw_dir.glob("trace*"):
-            stale.unlink()
-        try:
-            run = adapters.get(args.framework).capture(args, raw_dir)
-        except Exception as exc:
-            if not _NO_FIT.search(str(exc)):
-                raise
-            line = next((ln for ln in str(exc).splitlines() if _NO_FIT.search(ln)), str(exc))
-            print(f"capture: does not fit on the device at this workload: {line.strip()}",
-                  file=sys.stderr, flush=True)  # fmt: skip
-            os._exit(3)  # a runtime can abort in teardown after a device OOM
-        runtime = run.setdefault("runtime", {})
-        runtime.update(prompt=prompt.describe(args.prompt_file), inputs="text")
-        stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
-        model = str((run.get("model") or {}).get("name", "model")).split("/")[-1]
-        run.update(
-            id=f"{model}-{args.framework}-{stamp}",
-            capture_args=workload_args(argv),
-            command=shlex.join([sys.executable, "-m", "xe_forge.frontend.capture", *argv]),
-            env=_env_subset(),
-        )
-        raw_dir.mkdir(parents=True, exist_ok=True)
-        (raw_dir / "run.json").write_text(json.dumps(run, indent=1) + "\n")
-        capture = build(raw_dir, out, names)
-
-    r = capture.run
-    print(
-        f"capture: {len(capture.ops)} ops, {len(capture.workloads)} workloads, "
-        f"{r['kernel_invocations']} invocations, {r['total_device_us'] / 1e3:.1f} ms device time, "
-        f"{r['attributed_pct']}% attributed -> {out}"
-    )
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
