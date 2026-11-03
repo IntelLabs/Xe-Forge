@@ -103,10 +103,6 @@ def default_path(rec: dict) -> Path:
     return CACHE / f"{name}.json"
 
 
-def load(path: str | Path) -> dict:
-    return json.loads(Path(path).read_text())
-
-
 def main(
     out: Path | None, read_bytes: int = 1 << 30, n: int = 8192, iters: int = 20, dtypes=None
 ) -> int:

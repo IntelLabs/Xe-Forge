@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import re
+
 from xe_forge.frontend import formula
 from xe_forge.frontend.calibrate import peaks as calib_peaks
 from xe_forge.frontend.ir import CapturedOp, Naming
-
-_IMPL = {"kernel": "provider", "aten": "aten"}
 
 
 def key(op: CapturedOp) -> str:
@@ -21,9 +21,6 @@ def _base(op: str) -> str:
 def name_op(op: CapturedOp) -> Naming:
     entry = op.framework_meta.get("named")
     if entry and entry.get("route") in ROUTES:
-        route = entry.get("route")
-        library = entry.get("library") or "library"
-        op.impl_class = library if route == "library" else _IMPL.get(route, "unknown")
         return Naming(
             entry.get("route", "unnamed"),
             entry.get("name") or _base(op.framework_op),
@@ -31,14 +28,10 @@ def name_op(op: CapturedOp) -> Naming:
             entry.get("dsl"),
             via=entry.get("via", "named by the naming agent"),
         )
-    op.impl_class = "unknown"
     return Naming("unnamed", _base(op.framework_op), via="not named (no names.json entry)")
 
 
 ROUTES = ("kernel", "library", "aten", "unnamed")
-FAMILIES = ("gemm", "attention", "mla", "indexer", "linear_attention", "ssm", "norm",
-            "activation", "moe", "rope", "cache", "sampling", "copy", "collective", "elementwise",
-            "other")  # fmt: skip
 ROWS = ("token", "token_expert")
 
 
@@ -74,8 +67,11 @@ def validate(names, listing: dict, repos) -> list[str]:
                 out.append(f"{where}: repo {repo!r} not found under {repos}")
             if e.get("dsl") not in dsls:
                 out.append(f"{where}: dsl {e.get('dsl')!r} not one of {sorted(dsls)}")
-        if e.get("family") is not None and e["family"] not in FAMILIES:
-            out.append(f"{where}: family {e['family']!r} not one of {FAMILIES}")
+        family = e.get("family")
+        if family is not None and not (
+            isinstance(family, str) and re.fullmatch(r"[a-z_]+", family)
+        ):
+            out.append(f"{where}: family {family!r} is not a lowercase word")
         cost = e.get("cost")
         if cost is not None:
             if not isinstance(cost, dict) or "bytes" not in cost:
@@ -95,8 +91,6 @@ def validate(names, listing: dict, repos) -> list[str]:
             return
         if e.get("token_arg") is not None and e["token_arg"] not in args:
             out.append(f"{where}: token_arg {e['token_arg']!r} is not an argument")
-        if "token_axis" in e and type(e["token_axis"]) is not int:
-            out.append(f"{where}: token_axis must be an integer")
         specs = e.get("gemm")
         for i, g in enumerate(specs if isinstance(specs, list) else [specs] if specs else []):
             gw = f"{where}.gemm[{i}]"
@@ -109,19 +103,8 @@ def validate(names, listing: dict, repos) -> list[str]:
             for role in ("output", "experts"):
                 if g.get(role) is not None and g[role] not in args:
                     out.append(f"{gw}: {role} {g[role]!r} is not an argument")
-            side = g.get("weight_side", [])
-            if not isinstance(side, list) or any(a not in args for a in side):
-                out.append(f"{gw}: weight_side must list arguments")
-            rank = len(args.get(g.get("weight")) or [])
-            axis = g.get("n_axis")
-            if axis is not None and not (type(axis) is int and 0 <= axis < rank):
-                out.append(f"{gw}: n_axis {axis!r} is not an axis of the weight (rank {rank})")
-            if "act_per_stored" in g and not _pos_int(g["act_per_stored"]):
-                out.append(f"{gw}: act_per_stored must be a positive integer")
-            if "grouped" in g and type(g["grouped"]) is not bool:
-                out.append(f"{gw}: grouped must be true or false")
-            if g.get("rows") is not None and g["rows"] not in ROWS:
-                out.append(f"{gw}: rows {g['rows']!r} not one of {ROWS}")
+            # Its other fields are read defensively (canonical._one_gemm): a malformed one
+            # gives a partial GEMM, not a wrong one.
         kernels = e.get("kernels")
         if kernels is not None:
             if not isinstance(kernels, dict):

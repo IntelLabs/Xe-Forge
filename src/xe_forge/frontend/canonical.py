@@ -11,7 +11,7 @@ import math
 import re
 from collections import defaultdict
 
-from xe_forge.frontend.dtypes import storage_bytes, tensor_bytes
+from xe_forge.frontend.dtypes import tensor_bytes
 from xe_forge.frontend.ir import CapturedOp, Naming, TensorArg, Workload
 
 
@@ -86,14 +86,6 @@ def _gemm_dims(op: CapturedOp) -> dict[str, int] | None:
         op.framework_meta["gemm"] = gemm
         keys = ("M", "N", "K", "E") if gemm.get("grouped") else ("M", "N", "K")
         return {k: gemm[k] for k in keys if k in gemm}
-    stated = op.framework_meta.get("gemm")
-    if stated and "tokens" in op.framework_meta:
-        m, n, k = op.framework_meta["tokens"], stated["N"], stated["K"]
-        act = next((t for t in op.args if t is not None), None)
-        if stated.get("weight_bytes") and act is not None and min(n, k) > 0:
-            stated.update(w_bytes=round(stated["weight_bytes"] / (n * k), 5),
-                          a_bytes=storage_bytes(act.dtype), compute=act.dtype)  # fmt: skip
-        return {"M": m, "N": n, "K": k}
     return None
 
 
@@ -111,9 +103,6 @@ def _named_dims(op: CapturedOp) -> dict[str, int]:
                 dims[f"{label}_D{j}"] = size
         elif i < len(op.scalars) and _int(op.scalars[i]) is not None:
             dims[label] = _int(op.scalars[i])
-    for key in ("tokens", "context"):
-        if key in op.framework_meta:
-            dims[key.upper()] = op.framework_meta[key]
     return dims
 
 
@@ -123,8 +112,6 @@ def _token(op: CapturedOp, dims: dict[str, int]) -> tuple[str, int] | None:
         key = f"{named['token_arg'].upper()}_D{named.get('token_axis', 0)}"
         if key in dims:
             return key, dims[key]
-    if "TOKENS" in dims:
-        return "TOKENS", dims["TOKENS"]
     if "M" in dims and (op.framework_op.startswith("aten::") or "gemm" in op.framework_meta):
         return "M", dims["M"]
     first = next((a for a in op.args if a is not None and a.shape), None)
@@ -239,9 +226,6 @@ def _workload(members, var: set[str], moving: set[str], total_us: float, naming_
                 heaviest[value] = op.device_us
                 h["with"] = {k: op_dims[k] for k in sorted(moving)}
     ident = {k: v for k, v in base.items() if k != "dim_names"} | {"dims": dims}
-    for m in members:
-        if m[0] is not top:
-            naming_fn(m[0])  # stamps impl_class
     naming: Naming = naming_fn(top)
     kernels: dict[str, float] = {}
     for m in members:
@@ -259,15 +243,9 @@ def _workload(members, var: set[str], moving: set[str], total_us: float, naming_
         device_us=round(device_us, 3),
         share=round(device_us / total_us, 6) if total_us else 0.0,
         ops=[m[0].id for m in members],
-        call_sites=sorted({m[0].call_site for m in members if m[0].call_site}),
         naming=naming,
         framework_meta={"framework_op": base["op"], "kernels": kernels},
-        tensors=_tensor_labels(top),
     )
-
-
-def _tensor_labels(op: CapturedOp) -> list[list[str]]:
-    return [[arg_label(op, i).upper(), t.dtype] for i, t in enumerate(op.args) if t is not None]
 
 
 def resolve_dims(w: Workload, value: int | None) -> dict:

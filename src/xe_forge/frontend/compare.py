@@ -5,20 +5,11 @@ Arms must run the same work; several captures per arm reduce to a median with it
 
 from __future__ import annotations
 
-import csv
 import json
 import statistics
 from pathlib import Path
 
 from xe_forge.frontend import ir
-
-COLUMNS = [
-    "framework", "model", "workload_id", "op", "kernel", "route", "status",
-    "calls_a", "calls_b", "us_a", "us_b", "per_call_a", "per_call_b",
-    "speedup", "delta_us", "share_a", "spread_a", "spread_b",
-]  # fmt: skip
-# Runtime keys that describe how a capture was launched, not its work.
-_NOT_WORK = ("one_batch",)
 
 
 def _arm(paths: list[Path]) -> tuple[list[ir.CaptureRun], dict]:
@@ -26,11 +17,7 @@ def _arm(paths: list[Path]) -> tuple[list[ir.CaptureRun], dict]:
     key = lambda c: (  # noqa: E731
         c.run.get("framework"),
         (c.run.get("model") or {}).get("name"),
-        tuple(
-            sorted(
-                (k, str(v)) for k, v in (c.run.get("runtime") or {}).items() if k not in _NOT_WORK
-            )
-        ),
+        tuple(sorted((k, str(v)) for k, v in (c.run.get("runtime") or {}).items())),
     )
     if len({key(c) for c in caps}) != 1:
         raise SystemExit(
@@ -109,19 +96,13 @@ def compare(a_paths: list[Path], b_paths: list[Path]) -> list[dict]:
 
 def write(rows: list[dict], out_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
-    with open(out_dir / "compare.csv", "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=COLUMNS)
-        w.writeheader()
-        w.writerows(rows)
-    (out_dir / "compare.json").write_text(
-        json.dumps({"columns": COLUMNS, "rows": rows}, indent=1) + "\n"
-    )
+    (out_dir / "compare.json").write_text(json.dumps({"rows": rows}, indent=1) + "\n")
     fmt = lambda v: "-" if v is None else (f"{v:.3f}" if isinstance(v, float) else str(v))  # noqa: E731
     shown = [r for r in rows if r["status"] != "matched" or (r["share_a"] or 0) >= 0.001]
     md = [
         f"# Compare: {rows[0]['model']} under {rows[0]['framework']}",
         "",
-        "Arm a is the baseline. speedup = us_a / us_b; workloads under 0.1% of a are in compare.csv only.",
+        "Arm a is the baseline. speedup = us_a / us_b; workloads under 0.1% of a are in compare.json only.",
         "",
         "| workload | kernel | route | status | us_a | us_b | speedup | share_a |",
         "|---|---|---|---|---|---|---|---|",
@@ -132,4 +113,4 @@ def write(rows: list[dict], out_dir: Path) -> Path:
             f"{fmt(r['us_a'])} | {fmt(r['us_b'])} | {fmt(r['speedup'])} | {fmt(r['share_a'])} |"
         )
     (out_dir / "compare.md").write_text("\n".join(md) + "\n")
-    return out_dir / "compare.csv"
+    return out_dir / "compare.md"

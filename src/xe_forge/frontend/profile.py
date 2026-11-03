@@ -1,12 +1,14 @@
-"""Helpers a capture launcher imports: the device torch sees, and one torch.profiler region
-written as ``trace.json.gz`` -- what ``xe-forge-skill capture parse`` reads for a torch
-framework.
+"""What a capture launcher imports: the model's fixed input token ids (the same work for every
+framework and run -- not an LLM prompt; those are claude/templates/*.j2), the device torch
+sees, and one torch.profiler region written as ``trace.json.gz`` for ``capture parse``.
 """
 
 from __future__ import annotations
 
 import gzip
 import shutil
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -57,3 +59,34 @@ def profile_region(fn, raw_dir: Path, with_stack: bool = True) -> Path:
         shutil.copyfileobj(src, dst)
     plain.unlink()
     return out
+
+
+@dataclass
+class Vocab:
+    encode: Callable[[str], list[int]]
+    ordinary: Sequence[int]
+
+
+def hf_vocab(tok) -> Vocab:
+    """A Hugging Face tokenizer's vocabulary without its special tokens."""
+    special = set(getattr(tok, "all_special_ids", ()) or ())
+    size = getattr(tok, "vocab_size", None) or len(tok)
+    ordinary = [i for i in range(size) if i not in special]
+    return Vocab(lambda text: tok.encode(text, add_special_tokens=False), ordinary)
+
+
+def token_ids(
+    vocab: Vocab, batch: int, length: int, prompt_file: Path | None = None
+) -> list[list[int]]:
+    if prompt_file:
+        ids = vocab.encode(Path(prompt_file).read_text())
+        if not ids:
+            raise SystemExit(f"{prompt_file} tokenizes to nothing")
+        stride = max(1, len(ids) // batch)
+        return [[ids[(j * stride + i) % len(ids)] for i in range(length)] for j in range(batch)]
+    pool = vocab.ordinary
+    if not pool:
+        raise SystemExit("the tokenizer has no ordinary tokens for a synthetic prompt")
+    return [
+        [pool[(i * 7919 + j * 104729) % len(pool)] for i in range(length)] for j in range(batch)
+    ]

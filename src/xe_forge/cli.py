@@ -211,12 +211,6 @@ Examples:
         "{kernel} {trial} {dsl} {stage} {workspace}",
     )
     host_group.add_argument(
-        "--external-stack-check",
-        type=str,
-        help="Command template run by `upstream patch` to build and test a port inside its "
-        "stack; placeholders: {clone} {kernel} {kind} {workspace}",
-    )
-    host_group.add_argument(
         "--stack-python",
         type=str,
         help="Interpreter of the stack the kernel serves; the port-back agent then builds its "
@@ -358,8 +352,6 @@ def _load_config(args) -> Config:
         os.environ["EXTERNAL_BENCHMARK"] = args.external_benchmark
     if getattr(args, "external_validate", None):
         os.environ["EXTERNAL_VALIDATE"] = args.external_validate
-    if getattr(args, "external_stack_check", None):
-        os.environ["EXTERNAL_STACK_CHECK"] = args.external_stack_check
     if getattr(args, "stack_python", None):
         os.environ["STACK_PYTHON"] = args.stack_python
     if getattr(args, "dataset_record", None):

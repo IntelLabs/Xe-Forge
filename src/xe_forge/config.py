@@ -181,8 +181,6 @@ class ExternalConfig:
     # Repositories a kernel from kernel_repo is wired into (e.g. vLLM). With one, a winner
     # may change the op's interface and call sites: the port patches those repos too.
     integration_repos: list[str] = field(default_factory=list)
-    # Builds and tests a port in its stack; prints "STACK: PASS|FAIL <reason>", DONE last.
-    stack_check: str | None = None
     # The stack's interpreter; set, the port-back agent builds and tests the port there.
     stack_python: str | None = None
     timeout: int = DEFAULT_TIMEOUT
@@ -320,7 +318,6 @@ class ConfigManager:
         external_cfg = ExternalConfig(
             benchmark=self._get_env("EXTERNAL_BENCHMARK", None),
             validate=self._get_env("EXTERNAL_VALIDATE", None),
-            stack_check=self._get_env("EXTERNAL_STACK_CHECK", None),
             stack_python=self._get_env("STACK_PYTHON", None),
             dataset_record=self._get_env("DATASET_RECORD", None),
             lessons=self._get_env("LESSONS_DIR", None),

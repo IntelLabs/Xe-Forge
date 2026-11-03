@@ -229,6 +229,13 @@ def main():
     c_parse.add_argument("-o", "--output", required=True, help="capture.json to write")
     c_parse.add_argument("--names", default=None, help="names.json to apply")
 
+    # -- bound --
+    p_bound = subparsers.add_parser("bound", help="Each workload's efficiency against its bound")
+    p_bound.add_argument("capture", help="capture.json")
+    p_bound.add_argument("--calibration", default=None, help="xe-forge calibrate output")
+    p_bound.add_argument("--min-share", type=float, default=0.005, help="smallest share listed")
+    p_bound.add_argument("--json", action="store_true", help="rows as JSON")
+
     args = parser.parse_args()
 
     if args.skill == "analyze":
@@ -245,6 +252,8 @@ def main():
         from xe_forge.skills.upstream import run
     elif args.skill == "capture":
         from xe_forge.skills.capture import run
+    elif args.skill == "bound":
+        from xe_forge.skills.bound import run
 
     # A tool's verdict is its exit code: a failed check must not exit 0.
     return run(args)

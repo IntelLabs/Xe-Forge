@@ -29,7 +29,6 @@ class CapturedOp:
     calls: int = 0
     device_us: float = 0.0
     call_site: str = ""
-    impl_class: str = "unknown"  # provider | <library the agent named> | aten | unknown
     framework_meta: dict[str, Any] = field(default_factory=dict)
 
 
@@ -57,11 +56,8 @@ class Workload:
     device_us: float
     share: float
     ops: list[str]
-    call_sites: list[str]
     naming: Naming
     framework_meta: dict[str, Any] = field(default_factory=dict)
-    # [label, dtype] per tensor argument; its shape is the dims named <LABEL>_D<j>.
-    tensors: list[list[str]] = field(default_factory=list)
 
 
 @dataclass

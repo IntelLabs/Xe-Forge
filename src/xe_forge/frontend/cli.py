@@ -1,4 +1,4 @@
-"""The framework frontend's commands: analyze, optimize, run, compare, calibrate.
+"""The framework frontend's commands: run, optimize (an existing kernels.yaml again), calibrate.
 
 Anything after ``--`` is passed unchanged to every Xe-Forge run ``optimize`` starts.
 """
@@ -17,7 +17,7 @@ from pathlib import Path
 
 import xe_forge
 
-COMMANDS = ("analyze", "optimize", "run", "compare", "calibrate")
+COMMANDS = ("optimize", "run", "calibrate")
 SRC_DIR = Path(xe_forge.__file__).resolve().parents[1]
 REPO_DIR = SRC_DIR.parent
 
@@ -155,10 +155,13 @@ def name(
         "coverage": f"{covered:.0%}",
         "repos": repos,
         "routes": naming.ROUTES,
-        "families": naming.FAMILIES,
         "rows": naming.ROWS,
         "dsls": [d.value for d in DSL],
         "calibration": calib,
+        "bound_cmd": shlex.join(
+            ["xe-forge-skill", "bound", str(capture_path)]
+            + (["--calibration", str(calibration)] if calibration else [])
+        ),
     }
     answer = _agent("name", "frontend-name.md.j2", context, work, "names.json", python, max_turns)
     if answer is None:
@@ -201,35 +204,9 @@ def _stamp(cap) -> dict:
 
 
 def _add_analyze_args(p: argparse.ArgumentParser) -> None:
-    from xe_forge.frontend import analyze as an
-    from xe_forge.frontend import manifest
-
     p.add_argument("--top", type=int, default=3, help="kernels to optimize")
     p.add_argument("--min-gain", type=float, default=0.005, help="smallest share worth it")
-    p.add_argument(
-        "--at-roofline", type=float, default=an.AT_ROOFLINE,
-        help="efficiency of its calibrated bound at which an op counts as done",
-    )  # fmt: skip
-    p.add_argument(
-        "--coverage", type=float, default=manifest.COVERAGE,
-        help="share of an op's time its benchmark variants must cover",
-    )  # fmt: skip
-    p.add_argument("--max-variants", type=int, default=manifest.MAX_VARIANTS)
-    p.add_argument(
-        "--tolerance", action="append", default=[], metavar="DTYPE=RTOL,ATOL",
-        help="spec tolerance for a dtype (repeatable; defaults per dtype in manifest.py)",
-    )  # fmt: skip
-    p.add_argument("--partition", help="Slurm partition recorded in kernels.yaml, if any")
     p.add_argument("--calibration", type=Path, help="xe-forge calibrate output")
-
-
-def _tolerances(items: list[str]) -> dict:
-    out = {}
-    for item in items:
-        dtype, _, pair = item.partition("=")
-        rtol, _, atol = pair.partition(",")
-        out[dtype] = (float(rtol), float(atol or rtol))
-    return out
 
 
 def analyze(capture_path: Path, out_dir: Path, a: argparse.Namespace) -> Path:
@@ -238,17 +215,10 @@ def analyze(capture_path: Path, out_dir: Path, a: argparse.Namespace) -> Path:
 
     cap = ir.load(capture_path)
     calib = json.loads(a.calibration.read_text()) if a.calibration else None
-    result = an.analyze(
-        cap, top=a.top, min_gain=a.min_gain, calibration=calib, at_roofline=a.at_roofline
-    )
+    result = an.analyze(cap, top=a.top, min_gain=a.min_gain, calibration=calib)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "analysis.json").write_text(json.dumps(result.as_dict(), indent=1) + "\n")
-    (out_dir / "gates.log").write_text(an.gates_log(result))
-    (out_dir / "report.md").write_text(an.report(result, cap))
-    path = manifest.emit(
-        result, cap, capture_path, out_dir, partition=a.partition,
-        coverage=a.coverage, max_variants=a.max_variants, tolerance=_tolerances(a.tolerance),
-    )  # fmt: skip
+    path = manifest.emit(result, cap, capture_path, out_dir)
     enabled = [e for e in result.entries if e.enabled]
     if cap.run.get("counters"):
         print(f"analyze: counters cover {result.options['counters_pct']}% of device time")
@@ -402,31 +372,6 @@ def main(argv: list[str]) -> int:
         p.add_argument("--dtypes", nargs="*", help="matmul dtypes to measure (default: all)")
         a = p.parse_args(rest)
         return calibrate.main(a.output, a.read_bytes, a.matmul_n, a.iters, a.dtypes)
-
-    if command == "compare":
-        from xe_forge.frontend import compare
-
-        p = argparse.ArgumentParser(prog="xe-forge compare")
-        p.add_argument("--a", nargs="+", type=Path, required=True, help="baseline capture.json(s)")
-        p.add_argument("--b", nargs="+", type=Path, required=True, help="candidate capture.json(s)")
-        p.add_argument("-o", "--output", type=Path, required=True, help="directory")
-        a = p.parse_args(rest)
-        rows = compare.compare(a.a, a.b)
-        path = compare.write(rows, a.output.resolve())
-        t = rows[0]
-        print(
-            f"compare: total {t['us_a']} -> {t['us_b']} us (x{t['speedup']}); {len(rows) - 1} workloads -> {path}"
-        )
-        return 0
-
-    if command == "analyze":
-        p = argparse.ArgumentParser(prog="xe-forge analyze")
-        p.add_argument("capture", type=Path)
-        p.add_argument("-o", "--output", type=Path, help="directory (default: the capture's)")
-        _add_analyze_args(p)
-        a = p.parse_args(rest)
-        analyze(a.capture.resolve(), (a.output or a.capture.parent).resolve(), a)
-        return 0
 
     if command == "optimize":
         from xe_forge.frontend import collect, manifest

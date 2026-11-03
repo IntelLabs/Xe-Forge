@@ -15,8 +15,8 @@ import pytest
 
 from xe_forge.dsl_registry import get_stages_for_dsl
 from xe_forge.frontend import analyze, formula, manifest
-from xe_forge.frontend.capture import _counters
 from xe_forge.models import DSL, OptimizationStage
+from xe_forge.skills.capture import _counters
 
 # ── OpenCL ──────────────────────────────────────────────────────────────────
 
@@ -166,28 +166,6 @@ def test_agent_resumes_after_non_ascii_and_kills_detached_work(tmp_path, monkeyp
     assert not _alive(pid), "the session's detached work outlived the step"
 
 
-# ── stack check timeout log ─────────────────────────────────────────────────
-
-
-def test_stack_check_timeout_log_is_text(tmp_path, monkeypatch):
-    from xe_forge import config, external
-    from xe_forge.skills import upstream
-
-    monkeypatch.setattr(upstream, "OUTPUT", tmp_path)
-    monkeypatch.setattr(
-        config, "get_config", lambda: SimpleNamespace(external=SimpleNamespace(stack_check="x"))
-    )
-    monkeypatch.setattr(external, "render_command", lambda *a, **k: ["true"])
-
-    def timeout(*a, **k):
-        raise subprocess.TimeoutExpired("x", 1, output=b"line one\nline two\n", stderr=b"err\n")
-
-    monkeypatch.setattr(upstream.subprocess, "run", timeout)
-    ok, why = upstream._stack_check([tmp_path], "k", "upstream")
-    assert ok is False and "timed out" in why
-    assert (tmp_path / "stack_check.log").read_text() == "line one\nline two\nerr\n"
-
-
 def test_optimize_records_the_repo_revision(tmp_path):
     from xe_forge.frontend.cli import _git_revision
 
@@ -300,3 +278,18 @@ def test_capture_parse_refuses_a_tampered_raw(tmp_path):
     (raw / "unitrace_kernels.json").write_text("{}")
     code, out = _tool("capture", "parse", str(raw), "-o", str(tmp_path / "capture.json"))
     assert code == 1 and "changed since" in out
+
+
+def test_bound_tool_lists_workloads_by_share(tmp_path):
+    unitrace = _exe(tmp_path / "unitrace", UNITRACE_STUB)
+    launcher = _exe(tmp_path / "run.sh", LAUNCHER % "")
+    raw, cap = tmp_path / "raw", tmp_path / "capture.json"
+    assert (
+        _tool("capture", "run", str(launcher), "-o", str(raw), "--unitrace", str(unitrace))[0] == 0
+    )
+    assert _tool("capture", "parse", str(raw), "-o", str(cap))[0] == 0
+    code, out = _tool("bound", str(cap), "--json", "--min-share", "0")
+    assert code == 0, out
+    rows = json.loads(out)
+    assert [r["op"] for r in rows] == ["toy::FC", "toy::RMS"]  # costliest first
+    assert rows[0]["share"] == 0.6 and rows[0]["eff"] is None  # no calibration, no counters

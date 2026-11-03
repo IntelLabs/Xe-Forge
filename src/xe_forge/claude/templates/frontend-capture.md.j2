@@ -6,7 +6,7 @@ this; nothing here knows that framework.
 The workload: a batch of {{ batch }} sequences of {{ input_len }} prompt tokens each, greedy,
 generating {{ output_len }} tokens with no stop at EOS -- one prefill of the batch and the
 decode steps after it. Prompt token ids are fixed: the same for every framework and run,
-`from xe_forge.frontend import tokens; tokens.token_ids(tokens.hf_vocab(tokenizer), {{ batch }},
+`from xe_forge.frontend import profile; profile.token_ids(profile.hf_vocab(tokenizer), {{ batch }},
 {{ input_len }})` (tokenizer: the model's Hugging Face tokenizer). Run eagerly: no graph
 capture or compilation, no prefix caching, nothing cached between requests; a warm-up run
 first, outside what is measured.

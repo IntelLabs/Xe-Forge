@@ -1,12 +1,14 @@
-"""Rank captured workloads by recoverable share of device time and gate them into entries.
+"""Rank captured workloads by recoverable share of device time and decide which to optimize.
 
-Gates (routable, buildable, shaped, bounded, worth, top) each write one line to gates.log.
+A workload is skipped with one reason: at roofline, not routable, no Xe-Forge DSL, no shapes,
+below --min-gain, or beyond --top. The arithmetic (bounds) is here; the reasons go to
+kernels.yaml and analysis.json.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 
 from xe_forge.frontend import formula
 from xe_forge.frontend.calibrate import peaks as calib_peaks
@@ -30,8 +32,8 @@ class Decision:
     gain: float
     calls: int
     mean_us: float
-    gates: list[tuple[str, str, str]] = field(default_factory=list)
     reason: str = ""
+    small: bool = False  # below --min-gain on its own; its kernel's total may still pass
     eff: float | None = None  # fraction of its bound
 
 
@@ -276,47 +278,20 @@ def _decide(
         d.eff = round(bounded[1], 3)
         d.gain = w.share * (bounded[0] / w.device_us) if w.device_us else 0.0
         if d.eff >= at_roofline:
-            d.gates.append(("bounded", "REJECT", f"at roofline: eff {d.eff:.2f} of its bound"))
             d.reason = f"at roofline (eff {d.eff:.2f} of the card's measured bound)"
             return d
-    if n.route == "kernel" or (n.route == "library" and bounded is not None and n.repo):
-        what = "library call" if n.route == "library" else "kernel"
-        d.gates.append(("routable", "PASS", f"{what} {n.name} in {n.repo} ({n.dsl}) via {n.via}"))
-    else:
-        d.gates.append(("routable", "REJECT", f"{n.route}: {_ROUTE_REASONS[n.route]} ({n.via})"))
+    if not (n.route == "kernel" or (n.route == "library" and bounded is not None and n.repo)):
         d.reason = _ROUTE_REASONS[n.route]
         return d
     if n.dsl not in {x.value for x in DSL}:
-        d.gates.append(("buildable", "REJECT", f"dsl {n.dsl!r} not in {[x.value for x in DSL]}"))
         d.reason = f"Xe-Forge has no {n.dsl} path"
         return d
     if not w.dims:
-        d.gates.append(("shaped", "REJECT", "no argument shapes recorded"))
         d.reason = "launched outside any op: no argument shapes for a spec"
         return d
-    d.gates.append(("shaped", "PASS", f"{len(w.dims)} dims"))
-    if bounded is None:
-        why = (
-            "no bound: no counters for its kernels and no GEMM or stated cost"
-            if calib
-            else "no calibration"
-        )
-        d.gates.append(("bounded", "UNKNOWN", f"{why}: ceiling taken as the full share"))
-    else:
-        parts = _sol_parts(w, calib, ctx)
-        sol = f"; measured memory {parts[1]:.0%}, compute {parts[2]:.0%} of peak" if parts else ""
-        d.gates.append(
-            (
-                "bounded",
-                "PASS",
-                f"eff {d.eff:.2f} of its bound; recoverable {bounded[0]:.0f} us{sol}",
-            )
-        )
-    if d.gain < min_gain:
-        d.gates.append(("worth", "REJECT", f"G={d.gain:.4%} < {min_gain:.4%}"))
-        d.reason = f"below --min-gain {min_gain:.2%}"
+    if d.gain < min_gain:  # with no bound, the ceiling is the whole share
+        d.reason, d.small = f"below --min-gain {min_gain:.2%}", True
         return d
-    d.gates.append(("worth", "PASS", f"G={d.gain:.4%} >= {min_gain:.4%}"))
     d.enabled = True
     return d
 
@@ -334,6 +309,17 @@ def _counted(workloads: list[Workload], measured: dict) -> float:
     return round(100 * sum(us for us, hit in times if hit) / total, 1) if total else 0.0
 
 
+def context(capture: CaptureRun) -> dict:
+    """What every bound reads besides the workload and calibration."""
+    facts = capture.run.get("model_facts") or {}
+    return {
+        "counters": capture.run.get("counters") or {},
+        "topk": facts.get("topk"),
+        "experts": facts.get("experts"),
+        "ep": (capture.run.get("runtime") or {}).get("ep"),
+    }
+
+
 def analyze(
     capture: CaptureRun,
     top: int = 3,
@@ -341,13 +327,7 @@ def analyze(
     calibration: dict | None = None,
     at_roofline: float = AT_ROOFLINE,
 ) -> Analysis:
-    facts = capture.run.get("model_facts") or {}
-    ctx = {
-        "counters": capture.run.get("counters") or {},
-        "topk": facts.get("topk"),
-        "experts": facts.get("experts"),
-        "ep": (capture.run.get("runtime") or {}).get("ep"),
-    }
+    ctx = context(capture)
     decisions = {
         w.workload_id: _decide(w, min_gain, calibration, ctx, at_roofline)
         for w in capture.workloads
@@ -362,11 +342,10 @@ def analyze(
     for (route, repo, name), ws in groups.items():
         ds = [decisions[w.workload_id] for w in ws]
         # Worth is per kernel: many small workloads pass when they add up.
-        small = [d for d in ds if d.gates and d.gates[-1][:2] == ("worth", "REJECT")]
-        total = sum(d.gain for d in ds if d.enabled or d in small)
+        small = [d for d in ds if d.small]
+        total = sum(d.gain for d in ds if d.enabled or d.small)
         if small and total >= min_gain:
             for d in small:
-                d.gates[-1] = ("worth", "PASS", f"kernel total G={total:.4%} >= {min_gain:.4%}")
                 d.enabled, d.reason = True, ""
         e = Entry(
             name=name or ws[0].workload_id,
@@ -393,12 +372,9 @@ def analyze(
         if not e.enabled:
             continue
         rank += 1
-        verdict = "PASS" if rank <= top else "REJECT"
-        for d in e.decisions:
-            if d.enabled:
-                d.gates.append(("top", verdict, f"kernel rank {rank} of top {top}"))
-                d.enabled = verdict == "PASS"
-        if verdict == "REJECT":
+        if rank > top:
+            for d in e.decisions:
+                d.enabled = False
             e.enabled = False
             e.reason += f"; rank {rank}, beyond --top {top}"
 
@@ -414,60 +390,3 @@ def analyze(
             "counters_pct": _counted(capture.workloads, ctx["counters"]),
         },
     )
-
-
-def gates_log(analysis: Analysis) -> str:
-    lines = []
-    for wid, d in analysis.decisions.items():
-        for gate, verdict, evidence in d.gates:
-            lines.append(f"GATE {wid} {gate} {verdict} {evidence}")
-    return "\n".join(lines) + "\n"
-
-
-def report(analysis: Analysis, capture: CaptureRun) -> str:
-    r = capture.run
-    out = [
-        f"# Kernel analysis: {r.get('model', {}).get('name', '?')} under {r.get('framework')}",
-        "",
-        f"Run `{analysis.run_id}`: {r.get('kernel_invocations')} kernel invocations, "
-        f"{len(capture.ops)} ops, {len(capture.workloads)} workloads, "
-        f"{analysis.total_device_us / 1e3:.1f} ms device time "
-        f"({r.get('attributed_pct')}% attributed to an op).",
-        "",
-        (
-            "Ceilings are bounded by the calibrated card: the stricter of each kernel's measured "
-            "speed-of-light (hardware counters, covering "
-            f"{analysis.options.get('counters_pct') or 0}% of device time), a GEMM's roofline "
-            "and a cost the naming agent stated; an op with no bound takes its whole share."
-            if analysis.options.get("bound") == "calibrated"
-            else "Ceilings are unbounded (no calibration): each workload's ceiling is its whole share."
-        )
-        + f" `--top {analysis.options['top']}`, `--min-gain {analysis.options['min_gain']}`.",
-        "",
-        "## Manifest entries",
-        "",
-        "| # | kernel | repo | dsl | enabled | share | priority | reason |",
-        "|---|---|---|---|---|---|---|---|",
-    ]
-    for i, e in enumerate(analysis.entries, 1):
-        share = sum(w.share for w in e.workloads)
-        out.append(
-            f"| {i} | `{e.name}` | {e.repo or '-'} | {e.dsl or '-'} | "
-            f"{'yes' if e.enabled else 'no'} | {share:.2%} | {e.priority:.4f} | {e.reason} |"
-        )
-    out += [
-        "",
-        "## Workloads",
-        "",
-        "| workload | op | calls | mean us | share | dims | decision |",
-        "|---|---|---|---|---|---|---|",
-    ]
-    for w in capture.workloads:
-        d = analysis.decisions[w.workload_id]
-        dims = ", ".join(f"{k}={v}" for k, v in w.dims.items())
-        out.append(
-            f"| `{w.workload_id}` | `{w.framework_meta.get('framework_op')}` | {w.calls} | "
-            f"{d.mean_us} | {w.share:.2%} | {dims} | "
-            f"{'optimize' if d.enabled else 'skip: ' + d.reason} |"
-        )
-    return "\n".join(out) + "\n"
