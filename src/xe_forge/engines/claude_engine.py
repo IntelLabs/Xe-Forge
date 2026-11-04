@@ -16,6 +16,29 @@ logger = logging.getLogger(__name__)
 LOG_NAME = "claude-session.log"
 
 
+def claude_env(config) -> dict[str, str]:
+    """Environment for the CLI, mapped from ``config.llm``.
+
+    The config names an endpoint the litellm way (``OPENAI_API_BASE`` and
+    friends, which is what the DSPy engine wants); the CLI reads the
+    ``ANTHROPIC_*`` spelling. Mapping here means one configured endpoint has
+    two consumers and the key exists in no second place -- not in a file
+    under the workspace, not in the rendered instructions, not in the log.
+    """
+    env = os.environ.copy()
+    llm = config.llm
+    if llm.api_base:
+        env.setdefault("ANTHROPIC_BASE_URL", llm.api_base)
+    if llm.api_key:
+        env.setdefault("ANTHROPIC_AUTH_TOKEN", llm.api_key)
+    if llm.model:
+        # litellm prefixes a provider ("openai/gpt-4o"); the CLI wants the
+        # bare model id.
+        env.setdefault("ANTHROPIC_MODEL", llm.model.split("/")[-1])
+    env.setdefault("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "1")
+    return env
+
+
 class ClaudeEngine(BaseEngine):
     """Generate a Claude Code workspace and optionally launch ``claude``.
 
@@ -140,26 +163,7 @@ class ClaudeEngine(BaseEngine):
         return best
 
     def _child_env(self) -> dict[str, str]:
-        """Environment for the CLI, mapped from ``config.llm``.
-
-        The config names an endpoint the litellm way (``OPENAI_API_BASE`` and
-        friends, which is what the DSPy engine wants); the CLI reads the
-        ``ANTHROPIC_*`` spelling. Mapping here means one configured endpoint has
-        two consumers and the key exists in no second place -- not in a file
-        under the workspace, not in the rendered instructions, not in the log.
-        """
-        env = os.environ.copy()
-        llm = self.config.llm
-        if llm.api_base:
-            env.setdefault("ANTHROPIC_BASE_URL", llm.api_base)
-        if llm.api_key:
-            env.setdefault("ANTHROPIC_AUTH_TOKEN", llm.api_key)
-        if llm.model:
-            # litellm prefixes a provider ("openai/gpt-4o"); the CLI wants the
-            # bare model id.
-            env.setdefault("ANTHROPIC_MODEL", llm.model.split("/")[-1])
-        env.setdefault("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "1")
-        return env
+        return claude_env(self.config)
 
     def _launch_claude(self, workspace: Path, kernel_name: str) -> tuple[int, str | None]:
         """Run one headless ``claude`` session to completion.

@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import os
 
 
 def main():
@@ -31,7 +32,9 @@ def main():
     p_validate.add_argument(
         "kernel_file", help="Path to the kernel: one source file, or a directory of them"
     )
-    p_validate.add_argument("--dsl", default="triton", choices=["triton", "sycl", "gluon", "cuda"])
+    p_validate.add_argument(
+        "--dsl", default="triton", choices=["triton", "sycl", "gluon", "cuda", "opencl"]
+    )
     p_validate.add_argument("--stage", default=None, help="Current optimization stage")
     p_validate.add_argument(
         "--external-validate",
@@ -54,7 +57,9 @@ def main():
     )
     p_bench.add_argument("--baseline-us", type=float, default=None, help="Cached baseline time")
     p_bench.add_argument("--device", default="xpu", help="Target device")
-    p_bench.add_argument("--dsl", default="triton", choices=["triton", "sycl", "gluon", "cuda"])
+    p_bench.add_argument(
+        "--dsl", default="triton", choices=["triton", "sycl", "gluon", "cuda", "opencl"]
+    )
     p_bench.add_argument("--triton-baseline", action="store_true", help="Baseline is Triton kernel")
     p_bench.add_argument(
         "--external-benchmark",
@@ -205,7 +210,61 @@ def main():
     u_patch.add_argument("kernel_name")
     u_patch.add_argument("--kind", choices=["upstream", "serving-only"], default="upstream")
     u_patch.add_argument("--notes", default="", help="What the patch changes and why")
+    u_patch.add_argument(
+        "--stack", default="", help='your stack check verdict: "PASS|FAIL <evidence>"'
+    )
     u_patch.add_argument("--trials-dir", default="./trials")
+
+    # -- capture --
+    p_cap = subparsers.add_parser("capture", help="Run a launcher under the instruments; check it")
+    cap_sub = p_cap.add_subparsers(dest="capture_command", required=True)
+    c_run = cap_sub.add_parser(
+        "run", help="Launcher -> raw/ (its trace, unitrace kernels, counters)"
+    )
+    c_run.add_argument("launcher", help="executable that runs one profiled batch into $RAW_DIR")
+    c_run.add_argument("-o", "--raw", required=True, help="raw/ directory to write")
+    c_run.add_argument("--unitrace", default=os.environ.get("UNITRACE_BIN", "unitrace"))
+    c_parse = cap_sub.add_parser("parse", help="raw/ -> capture.json, checked against unitrace")
+    c_parse.add_argument("raw", help="raw/ directory capture run wrote")
+    c_parse.add_argument("-o", "--output", required=True, help="capture.json to write")
+    c_parse.add_argument("--names", default=None, help="names.json to apply")
+
+    # -- patch --
+    p_patch = subparsers.add_parser("patch", help="Gate a patch that makes a framework run a model")
+    patch_sub = p_patch.add_subparsers(dest="patch_command", required=True)
+    pc = patch_sub.add_parser(
+        "check", help="git diff, fresh apply, import, tokens scored by transformers"
+    )
+    pc.add_argument("dir", help="holds patch.json and generate.sh")
+    pc.add_argument("--repos", required=True, help="the clones' directory (--kernel-repos)")
+    pc.add_argument(
+        "--framework-python", required=True, help="the unpatched framework's interpreter"
+    )
+    pc.add_argument(
+        "--reference-python", default=None, help="GPU torch + transformers, if not that"
+    )
+    pc.add_argument("--model", required=True)
+    pc.add_argument("--batch", type=int, required=True)
+    pc.add_argument("--input-len", type=int, required=True)
+    pc.add_argument("--min-match", type=int, default=32, help="tokens scored per sequence")
+    pc.add_argument("--tolerance", type=float, default=0.3,
+                    help="nat a token may fall below transformers' best")  # fmt: skip
+    pc.add_argument("--trust-remote-code", action="store_true")
+
+    # -- bound --
+    p_bound = subparsers.add_parser("bound", help="Each workload's efficiency against its bound")
+    p_bound.add_argument("capture", help="capture.json")
+    p_bound.add_argument("--calibration", default=None, help="xe-forge calibrate output")
+    p_bound.add_argument("--min-share", type=float, default=0.005, help="smallest share listed")
+    p_bound.add_argument("--json", action="store_true", help="rows as JSON")
+    p_bound.add_argument("--names", default=None, help="a draft names.json to apply first")
+
+    # -- inputs --
+    p_inputs = subparsers.add_parser("inputs", help="Gate the shapes and weights trials use")
+    inputs_sub = p_inputs.add_subparsers(dest="inputs_command", required=True)
+    ic = inputs_sub.add_parser("check", help="each chosen shape captured, weights sum to 1")
+    ic.add_argument("inputs", help="inputs.json: {kernel: {weights, why}}")
+    ic.add_argument("--manifest", required=True, help="kernels.yaml")
 
     args = parser.parse_args()
 
@@ -221,8 +280,17 @@ def main():
         from xe_forge.skills.profile import run
     elif args.skill == "upstream":
         from xe_forge.skills.upstream import run
+    elif args.skill == "capture":
+        from xe_forge.skills.capture import run
+    elif args.skill == "bound":
+        from xe_forge.skills.bound import run
+    elif args.skill == "patch":
+        from xe_forge.skills.patch import run
+    elif args.skill == "inputs":
+        from xe_forge.skills.inputs import run
 
-    run(args)
+    # A tool's verdict is its exit code: a failed check must not exit 0.
+    return run(args)
 
 
 if __name__ == "__main__":

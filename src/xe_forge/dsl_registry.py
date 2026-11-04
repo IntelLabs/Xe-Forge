@@ -37,6 +37,16 @@ DSL_SUPPORTED_STAGES: dict[DSL, set[OptimizationStage]] = {
         OptimizationStage.DEVICE_SPECIFIC,
         OptimizationStage.DISCOVERY,
     },
+    # Hand-launched OpenCL C: no Triton autotune, descriptors or persistent rewrites.
+    DSL.OPENCL: {
+        OptimizationStage.ANALYSIS,
+        OptimizationStage.ALGORITHMIC,
+        OptimizationStage.DTYPE_FIX,
+        OptimizationStage.FUSION,
+        OptimizationStage.MEMORY_ACCESS,
+        OptimizationStage.DEVICE_SPECIFIC,
+        OptimizationStage.DISCOVERY,
+    },
     DSL.CUDA: {
         OptimizationStage.ANALYSIS,
         OptimizationStage.ALGORITHMIC,

@@ -13,6 +13,7 @@ class DSL(StrEnum):
     GLUON = "gluon"
     SYCL = "sycl"
     CUDA = "cuda"
+    OPENCL = "opencl"
 
     @property
     def code_language(self) -> str:
@@ -25,7 +26,8 @@ class DSL(StrEnum):
         """Suffix a kernel in this DSL is written to.
 
         A compiled DSL stored under ``.py`` is not cosmetic: the extension is
-        what a builder, an editor and a compiler driver dispatch on.
+        what a builder, an editor and a compiler driver dispatch on. An OpenCL kernel is a
+        Python file holding the OpenCL C source as a string (launched via ``xe_forge.opencl``).
         """
         if self == DSL.SYCL:
             return ".cpp"
