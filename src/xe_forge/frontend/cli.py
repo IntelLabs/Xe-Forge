@@ -120,11 +120,12 @@ def capture(a, python: str, run_dir: Path, turns: int, repos: Path) -> tuple[int
 
 
 def recapture(run_dir: Path, out_dir: Path, python: str) -> int:
-    """Re-run the cached launcher under ``python``'s venv, then parse; no agent."""
+    """Re-run the cached launcher under ``python``'s venv, then parse; no agent. The tools
+    run here: the stack's interpreter need not import them (llama.cpp's has no torch)."""
     launcher = str(run_dir / "launcher" / "run.sh")
-    return _tool(python, "capture", "run", launcher, "-o", str(out_dir / "raw"),
+    return _tool(sys.executable, "capture", "run", launcher, "-o", str(out_dir / "raw"),
                  FRAMEWORK_PYTHON=python) or _tool(
-        python, "capture", "parse", str(out_dir / "raw"), "-o", str(out_dir / "capture.json"))  # fmt: skip
+        sys.executable, "capture", "parse", str(out_dir / "raw"), "-o", str(out_dir / "capture.json"))  # fmt: skip
 
 
 def name(
