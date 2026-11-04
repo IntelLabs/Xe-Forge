@@ -7,10 +7,13 @@ patch committed on top of "base">, "base": <commit>, "package": <the module it p
 ``xe_forge.frontend.profile.token_ids``, and writes $OUT/tokens.json ([[generated ids], ...]).
 
 Checks, in order: the patch is git's own diff of base..HEAD and applies to a fresh clone at
-base; the patched package imports from outside the framework's venv; generate.sh's tokens
-equal a Hugging Face transformers reference -- computed here, after them, on the GPU in bf16,
-under the framework's interpreter or --reference-python -- for the first --min-match tokens of
-every sequence. Exit 0 passes.
+base; the patched package imports from outside the framework's venv; then each of generate.sh's
+first --min-match tokens of every sequence is within --tolerance nat of the best token of a
+Hugging Face transformers reference fed the same prefix (teacher forcing: one forward per
+sequence, on the GPU in bf16) -- under patch.json's "reference_python" (the
+agent's, when the framework's transformers cannot load the model), else --reference-python,
+else the framework's interpreter. The agent owns that environment; the scoring is fixed here.
+Exit 0 passes.
 """
 
 from __future__ import annotations
@@ -24,17 +27,25 @@ from pathlib import Path
 _REFERENCE = """
 import json, sys, torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import transformers
 from xe_forge.frontend import profile
-model_id, batch, input_len, output_len, trust = sys.argv[1], *map(int, sys.argv[2:5]), sys.argv[5] == "1"
+model_id, batch, input_len, n, trust = sys.argv[1], *map(int, sys.argv[2:5]), sys.argv[5] == "1"
+got = json.load(open(sys.argv[6]))
 dev = profile.device_type()
 if dev == "cpu":
     sys.exit("the reference interpreter sees no GPU")
 tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=trust)
-ids = torch.tensor(profile.token_ids(profile.hf_vocab(tok), batch, input_len), device=dev)
-m = AutoModelForCausalLM.from_pretrained(model_id, dtype=torch.bfloat16, trust_remote_code=trust).to(dev)
-out = m.generate(ids, attention_mask=torch.ones_like(ids), max_new_tokens=output_len,
-                 min_new_tokens=output_len, do_sample=False)
-print(json.dumps(out[:, input_len:].tolist()))
+m = AutoModelForCausalLM.from_pretrained(model_id, dtype=torch.bfloat16, trust_remote_code=trust)
+m = m.to(dev).eval()
+gaps = []
+for p, g in zip(profile.token_ids(profile.hf_vocab(tok), batch, input_len), got):
+    g = g[:n]  # one row, the whole sequence's logits: no batch, no last-token slice
+    with torch.no_grad():
+        x = torch.tensor([p + g], device=dev)
+        lp = m(input_ids=x, use_cache=False).logits[0, len(p) - 1:-1].float().log_softmax(-1)
+    best = lp.max(-1).values
+    gaps.append((best - lp[torch.arange(len(g), device=dev), torch.tensor(g, device=dev)]).tolist())
+print(json.dumps({"gaps": gaps, "transformers": [transformers.__version__, transformers.__file__]}))
 """
 
 
@@ -98,25 +109,26 @@ def check(args) -> tuple[list[str], dict]:
                 f"generate.sh failed (exit {run.returncode}): {run.stderr.strip()[-400:]}"
             ], record
         got = json.loads(got_path.read_text())
-    # On the GPU, in bf16 -- the framework's interpreter unless it has no XPU torch.
-    ref = subprocess.run([args.reference_python or args.framework_python, "-c", _REFERENCE,
-                          args.model, str(args.batch),
-                          str(args.input_len), str(args.output_len),
-                          "1" if args.trust_remote_code else "0"],
-                         capture_output=True, text=True, env=_env())  # fmt: skip
+        # Teacher forcing on the candidate's own tokens, on the GPU in bf16.
+        ref = subprocess.run([meta.get("reference_python") or args.reference_python
+                              or args.framework_python, "-c", _REFERENCE, args.model,
+                              str(args.batch), str(args.input_len), str(args.min_match),
+                              "1" if args.trust_remote_code or meta.get("trust_remote_code") else "0",
+                              str(got_path)], capture_output=True, text=True, env=_env())  # fmt: skip
     if ref.returncode != 0:
         return [
-            f"the transformers reference failed ({ref.stderr.strip()[-400:]}); a "
-            "--reference-python with GPU torch and transformers runs it"
+            f"the transformers reference failed ({ref.stderr.strip()[-400:]}); patch.json's "
+            '"reference_python" (GPU torch and a transformers that loads the model) and '
+            '"trust_remote_code" set it up'
         ], record
-    want = json.loads(ref.stdout.strip().splitlines()[-1])
-    n = args.min_match
-    matched = [next((i for i, (a, b) in enumerate(zip(g, w, strict=False)) if a != b), min(len(g), len(w)))
-               for g, w in zip(got, want, strict=False)]  # fmt: skip
-    record.update(reference=want, tokens=got, matched=matched, required=n)
-    if len(got) != len(want) or any(m < n for m in matched):
-        problems.append(f"greedy tokens differ from transformers within the first {n}: "
-                        f"matched {matched} of {len(want)} sequences")  # fmt: skip
+    res = json.loads(ref.stdout.strip().splitlines()[-1])
+    gaps, n, tol = res["gaps"], args.min_match, args.tolerance
+    worst = [round(max(r, default=float("inf")), 4) for r in gaps]
+    record.update(tokens=got, gaps=gaps, worst=worst, tolerance=tol, required=n,
+                  transformers=res.get("transformers"))  # fmt: skip
+    if len(gaps) != len(got) or any(len(g) < n for g in got) or any(w > tol for w in worst):
+        problems.append(f"tokens fall more than {tol} nat below transformers' best within the "
+                        f"first {n}: worst per sequence {worst} ({len(got)} of {args.batch})")  # fmt: skip
     return problems, record
 
 
@@ -129,6 +141,6 @@ def run(args) -> int:
         print(f"patch check: FAIL {p}")
     if not problems:
         print(f"patch check: PASS {record['repo']} {record['base'][:12]}..{record['head'][:12]} "
-              f"({len(record['files'])} files); tokens match transformers ({record['matched']}) "
+              f"({len(record['files'])} files); tokens within {record['tolerance']} nat of transformers (worst {max(record['worst'])}) "
               f"-> {record['patch']}")  # fmt: skip
     return 0 if not problems else 1

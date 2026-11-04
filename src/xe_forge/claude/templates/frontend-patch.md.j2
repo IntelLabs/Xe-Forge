@@ -13,17 +13,23 @@ interpreter is {{ python }}.
  - Build it into a venv layered over {{ python }}, holding only what you rebuilt, and check
    that the patched package imports from there and the framework still imports.
  - Write generate.sh here: under $FRAMEWORK_PYTHON, run {{ model }} with the framework, on
-   the GPU, eagerly and greedy, on `xe_forge.frontend.profile.token_ids(profile.hf_vocab(tok),
-   {{ batch }}, {{ input_len }})`, generating {{ output_len }} tokens with no stop at EOS, and
-   write the generated ids to $OUT/tokens.json as [[ids of sequence 0], ...].
+   the GPU, eagerly, on `xe_forge.frontend.profile.token_ids(profile.hf_vocab(tok),
+   {{ batch }}, {{ input_len }})`, generating {{ output_len }} tokens with no stop at EOS, plain
+   greedy -- the argmax of the raw logits, no repetition, frequency or presence penalty, the
+   checkpoint's generation_config ignored -- and write the generated ids to $OUT/tokens.json
+   as [[ids of sequence 0], ...].
  - Write patch.json here: {"python": "<the layered venv's python>", "repo": "<the clone's
    directory name under {{ repos }}>", "base": "<base commit>", "package": "<the module the
-   patch changes, importable>"}, then run
+   patch changes, importable>"}, plus "reference_python": "<an interpreter with the GPU torch
+   and a transformers that loads {{ model }}>" when {{ python }}'s cannot (a venv over its
+   torch with the latest transformers), and "trust_remote_code": true when the model needs
+   its own code. Then run
      xe-forge-skill patch check . --repos {{ repos }} --framework-python {{ python }} \
-       --model {{ model }} --batch {{ batch }} --input-len {{ input_len }} --output-len {{ output_len }}
+       --model {{ model }} --batch {{ batch }} --input-len {{ input_len }}
    It diffs base..HEAD itself, applies that to a fresh clone, checks the import, runs
-   generate.sh and compares its tokens with a Hugging Face transformers reference it computes
-   afterwards on the GPU. Exit 0 passes; on FAIL fix the patch, never the check.
+   generate.sh, then has transformers score its tokens on the GPU: fed each sequence's prompt
+   and generated prefix, every one of the first 32 generated tokens must be within 0.3 nat of
+   transformers' best. A FAIL there is the patch's: fix it, never the check.
 
 Write {{ answer }}: patch.json's content with "notes": "<what the patch adds and how it was
 verified>", once the check passes; or {"error": "<why>", "next_step": "<what a person would

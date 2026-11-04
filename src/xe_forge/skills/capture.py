@@ -380,15 +380,7 @@ def build(raw_dir: Path, out: Path, names: dict | None = None, summary=None) -> 
     run["attributed_pct"] = round(summary.attributed_pct, 2)
     run["kernel_invocations"] = summary.launches
     _annotate_schemas(summary.ops, raw_dir / "schemas.json")
-    key = naming.key
-    entries = (names or {}).get("ops") or {}
-    ops = []
-    for op in summary.ops:
-        op.framework_meta["name_key"] = key(op)
-        if key(op) in entries:
-            op.framework_meta["named"] = entries[key(op)]
-        ops.extend(_split(op))
-    summary.ops = ops
+    summary.ops = apply_names(summary.ops, names)
     if names is not None:
         run["model_facts"] = names.get("model") or {}
     if (raw_dir / "counters.json").is_file():
@@ -397,6 +389,18 @@ def build(raw_dir: Path, out: Path, names: dict | None = None, summary=None) -> 
     capture.workloads = canonical.workloads(capture.ops, summary.total_us, naming.name_op)
     ir.dump(capture, out)
     return capture
+
+
+def apply_names(ops: list, names: dict | None) -> list:
+    """``ops`` with names.json's entry on each (split per kernel group it names)."""
+    entries = (names or {}).get("ops") or {}
+    out = []
+    for op in ops:
+        op.framework_meta["name_key"] = naming.key(op)
+        if naming.key(op) in entries:
+            op.framework_meta["named"] = entries[naming.key(op)]
+        out.extend(_split(op))
+    return out
 
 
 def _counters(summary: dict) -> dict:

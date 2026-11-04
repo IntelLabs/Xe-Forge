@@ -89,6 +89,11 @@ def validate(names, listing: dict, repos) -> list[str]:
                         )
         if kernel_level:
             return
+        config = e.get("config_args")
+        scalars = {k for k, v in dims.items() if not re.search(r"_D\d+$", k) and type(v) is int}
+        if config is not None and not (isinstance(config, list) and set(config) <= scalars):
+            out.append(f"{where}: config_args {config!r} must be integer scalar dims of the op "
+                       f"({sorted(scalars)})")  # fmt: skip
         if e.get("token_arg") is not None and e["token_arg"] not in args:
             out.append(f"{where}: token_arg {e['token_arg']!r} is not an argument")
         specs = e.get("gemm")

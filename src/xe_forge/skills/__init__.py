@@ -232,7 +232,9 @@ def main():
     # -- patch --
     p_patch = subparsers.add_parser("patch", help="Gate a patch that makes a framework run a model")
     patch_sub = p_patch.add_subparsers(dest="patch_command", required=True)
-    pc = patch_sub.add_parser("check", help="git diff, fresh apply, import, tokens vs transformers")
+    pc = patch_sub.add_parser(
+        "check", help="git diff, fresh apply, import, tokens scored by transformers"
+    )
     pc.add_argument("dir", help="holds patch.json and generate.sh")
     pc.add_argument("--repos", required=True, help="the clones' directory (--kernel-repos)")
     pc.add_argument(
@@ -244,8 +246,9 @@ def main():
     pc.add_argument("--model", required=True)
     pc.add_argument("--batch", type=int, required=True)
     pc.add_argument("--input-len", type=int, required=True)
-    pc.add_argument("--output-len", type=int, required=True)
-    pc.add_argument("--min-match", type=int, default=8, help="greedy tokens that must agree")
+    pc.add_argument("--min-match", type=int, default=32, help="tokens scored per sequence")
+    pc.add_argument("--tolerance", type=float, default=0.3,
+                    help="nat a token may fall below transformers' best")  # fmt: skip
     pc.add_argument("--trust-remote-code", action="store_true")
 
     # -- bound --
@@ -254,6 +257,7 @@ def main():
     p_bound.add_argument("--calibration", default=None, help="xe-forge calibrate output")
     p_bound.add_argument("--min-share", type=float, default=0.005, help="smallest share listed")
     p_bound.add_argument("--json", action="store_true", help="rows as JSON")
+    p_bound.add_argument("--names", default=None, help="a draft names.json to apply first")
 
     # -- inputs --
     p_inputs = subparsers.add_parser("inputs", help="Gate the shapes and weights trials use")

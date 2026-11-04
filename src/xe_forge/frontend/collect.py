@@ -73,6 +73,7 @@ def collect_one(
         shutil.copytree(output, dest / "output")
         row["patches"] = sorted(str(p.relative_to(dest)) for p in dest.rglob("*.patch"))
         row.update(_port_status(dest / "output" / "PORT.txt"))
+        row["mergeable"] = row["mergeable"] and row["outcome"] == "win"  # parity is no change
         if row["stack"] == "FAIL":
             for p in dest.rglob("*.patch"):
                 p.rename(p.with_suffix(".patch.rejected"))

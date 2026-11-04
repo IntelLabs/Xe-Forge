@@ -495,7 +495,9 @@ either nothing was correct or nothing reached parity — `trial status` says whi
 result to report, not a thing to work around.
 
 {% if kernel_repo %}
-If finalize wrote `output/`, dispatch the **port-back** agent once. It turns the winner into
+If finalize wrote `output/` and the best trial is a measured win -- a speedup above 1, not a
+gate's parity -- dispatch the **port-back** agent once; a kernel at parity changes nothing
+worth porting, so say so in the summary instead. Port-back turns the winner into
 `output/upstream.patch` against `{{ kernel_repo }}` without touching the repository. Name
 the patch, or the reason there is none, in the summary.
 {%- if stack_check %} A stack check is on: port-back builds the port into its stack and runs

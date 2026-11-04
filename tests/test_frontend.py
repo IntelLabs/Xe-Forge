@@ -116,6 +116,51 @@ def test_formula_evaluates_costs():
     assert formula.evaluate("M//2 + 1", {"M": 7}) == 4.0
 
 
+def test_formula_caps_a_read_by_a_window():
+    """An attention's KV read: the context, capped by a window that is -1 for none."""
+    kv = "B*(K if W < 0 else min(K, W + 1))"
+    assert formula.names(kv) == {"B", "K", "W"}  # min is not a dim
+    assert formula.evaluate(kv, {"B": 8, "K": 4343, "W": -1}) == 8 * 4343
+    assert formula.evaluate(kv, {"B": 8, "K": 4343, "W": 255}) == 8 * 256
+    assert formula.evaluate("max(A, B) - 2*B", {"A": 1, "B": 2}) is None  # a cost is >= 0
+    assert formula.names("print(A)") is None and formula.names("min(*A)") is None
+
+
+def _windowed(window: int, us: float):
+    from xe_forge.frontend.ir import CapturedOp, TensorArg
+
+    return CapturedOp(id=f"op-{window}", framework_op="fa::fwd", args=[TensorArg([8, 128], "bfloat16"),
+                      None], scalars=[None, str(window)], kernel_symbols={"fmha": us}, calls=1,
+                      device_us=us)  # fmt: skip
+
+
+@pytest.mark.parametrize("config_args, n", [(None, 1), (["ARG1"], 2)])
+def test_config_args_make_each_value_a_workload(config_args, n):
+    """A window is a scalar like a size, so only the naming agent's config_args split on it."""
+    from xe_forge.frontend import canonical, naming
+
+    ops = [_windowed(-1, 130.0), _windowed(255, 14.0)]
+    for op in ops:
+        op.framework_meta["named"] = {"route": "kernel", "name": "fmha", "family": "attention",
+                                      **({"config_args": config_args} if config_args else {})}  # fmt: skip
+    got = canonical.workloads(ops, 144.0, naming.name_op)
+    assert len(got) == n
+    if n == 2:
+        assert sorted(w.dims["ARG1"] for w in got) == [-1, 255]
+
+
+def test_naming_refuses_config_args_that_are_not_scalar_dims(tmp_path):
+    from xe_forge.frontend import naming
+
+    listing = {"op": {"args": [{"name": "q", "shape": [8, 128]}, {"name": "w", "value": "255"}],
+                      "dims": {"ARG0_D0": 8, "ARG0_D1": 128, "ARG1": 255}}}  # fmt: skip
+    entry = {"route": "aten", "config_args": ["ARG1"]}
+    assert naming.validate({"ops": {"op": entry}}, listing, tmp_path) == []
+    for bad in (["ARG0_D0"], "ARG1", ["nope"]):
+        problems = naming.validate({"ops": {"op": dict(entry, config_args=bad)}}, listing, tmp_path)
+        assert any("config_args" in p for p in problems), bad
+
+
 # ── the agent runner, against a stub claude ─────────────────────────────────
 
 STUB = """\
@@ -299,6 +344,11 @@ def test_bound_tool_lists_workloads_by_share(tmp_path):
     rows = json.loads(out)
     assert [r["op"] for r in rows] == ["toy::FC", "toy::RMS"]  # costliest first
     assert rows[0]["share"] == 0.6 and rows[0]["eff"] is None  # no calibration, no counters
+    # A draft names.json is applied first: what the naming agent's answer makes of the capture.
+    names = tmp_path / "names.json"
+    names.write_text(json.dumps({"ops": {"toy::RMS": {"route": "kernel", "name": "rms_v2"}}}))
+    code, out = _tool("bound", str(cap), "--json", "--min-share", "0", "--names", str(names))
+    assert code == 0 and "rms_v2" in [r["kernel"] for r in json.loads(out)], out
 
 
 def test_naming_family_is_free_text_and_a_bad_gemm_spec_degrades(tmp_path):
@@ -375,9 +425,9 @@ def test_counters_bound_only_a_kernel_of_one_workload_that_they_sampled():
 # ── a framework patch: the agent writes it, `patch check` and `run` gate it ─
 
 
-def _patch_dir(tmp_path, tokens, base_from="parent"):
+def _patch_dir(tmp_path, tokens, base_from="parent", gaps=((0, 0, 0, 0), (0, 0.2, 0, 0))):
     """A clone with base + one patch commit, generate.sh emitting ``tokens``, and stubs for the
-    framework interpreter (its sys.prefix) and the GPU reference (fixed tokens)."""
+    framework interpreter (its sys.prefix) and the GPU reference (fixed per-token gaps)."""
     repos = tmp_path / "repos"
     repo = repos / "fw"
     repo.mkdir(parents=True)
@@ -399,14 +449,15 @@ def _patch_dir(tmp_path, tokens, base_from="parent"):
         "base": base if base_from == "parent" else "0" * 40}))  # fmt: skip
     (work / "generate.sh").write_text(f"echo '{json.dumps(tokens)}' > \"$OUT/tokens.json\"\n")
     fw = _exe(tmp_path / "fw-python", "#!/bin/bash\necho /no/such/prefix\n")
-    ref = _exe(tmp_path / "ref-python", "#!/bin/bash\necho '[[1, 2, 3, 4], [5, 6, 7, 8]]'\n")
+    out = json.dumps({"gaps": [list(g) for g in gaps], "transformers": ["5", "t"]})
+    ref = _exe(tmp_path / "ref-python", f"#!/bin/bash\necho '{out}'\n")
     return work, repos, fw, ref
 
 
 def _check(work, repos, fw, ref):
     return _tool("patch", "check", str(work), "--repos", str(repos), "--framework-python",
                  str(fw), "--reference-python", str(ref), "--model", "toy", "--batch", "2",
-                 "--input-len", "4", "--output-len", "4", "--min-match", "4")  # fmt: skip
+                 "--input-len", "4", "--min-match", "4")  # fmt: skip
 
 
 def test_patch_check_passes_a_patch_that_generates_the_reference(tmp_path):
@@ -414,16 +465,26 @@ def test_patch_check_passes_a_patch_that_generates_the_reference(tmp_path):
     code, out = _check(work, repos, fw, ref)
     assert code == 0, out
     rec = json.loads((work / "check.json").read_text())
-    assert rec["pass"] and rec["matched"] == [4, 4] and rec["files"] == ["model.py"]
+    assert rec["pass"] and rec["worst"] == [0, 0.2] and rec["files"] == ["model.py"]
     assert "ARCHS = ['Toy']" in (work / "fw.patch").read_text()  # git's diff, written by the tool
 
 
-@pytest.mark.parametrize("tokens, base, problem", [
-    ([[1, 2, 3, 4], [5, 6, 9, 9]], "parent", "greedy tokens differ"),
-    ([[1, 2, 3, 4], [5, 6, 7, 8]], "unknown", "not an ancestor"),
+def test_patch_check_uses_the_agents_reference_interpreter(tmp_path):
+    """patch.json's "reference_python" (the agent's environment) runs the fixed scoring."""
+    work, repos, fw, ref = _patch_dir(tmp_path, [[1, 2, 3, 4], [5, 6, 7, 8]])
+    meta = json.loads((work / "patch.json").read_text())
+    (work / "patch.json").write_text(json.dumps({**meta, "reference_python": str(ref)}))
+    code, out = _check(work, repos, fw, tmp_path / "no-such-python")
+    assert code == 0, out
+
+
+@pytest.mark.parametrize("tokens, base, gaps, problem", [
+    ([[1, 2, 3, 4], [5, 6, 9, 9]], "parent", [[0, 0, 0, 0], [0, 0, 4.1, 0]], "nat below"),
+    ([[1, 2, 3, 4], [5, 6]], "parent", [[0, 0, 0, 0], [0, 0]], "nat below"),  # too short
+    ([[1, 2, 3, 4], [5, 6, 7, 8]], "unknown", [[0] * 4] * 2, "not an ancestor"),
 ])  # fmt: skip
-def test_patch_check_fails_a_wrong_patch(tmp_path, tokens, base, problem):
-    work, repos, fw, ref = _patch_dir(tmp_path, tokens, base)
+def test_patch_check_fails_a_wrong_patch(tmp_path, tokens, base, gaps, problem):
+    work, repos, fw, ref = _patch_dir(tmp_path, tokens, base, gaps)
     code, out = _check(work, repos, fw, ref)
     assert code == 1 and problem in out, out
 
@@ -493,3 +554,26 @@ def test_naming_checks_a_cost_on_shapes_beyond_the_ones_listed():
     calib = {"bandwidth_gbs": 1000.0, "matmul_tflops": {"float32": 1.0}}
     assert not naming.refuted(names, {"K": {"shapes": cli._shapes(ops)}}, calib, 0.05)
     assert naming.refuted(names, {"K": {"shapes": cli._shapes(ops, top=None)}}, calib, 0.05)
+
+
+@pytest.mark.parametrize("speedup, mergeable", [(1.12, True), (None, False)])
+def test_collect_offers_only_a_win_for_merge(tmp_path, speedup, mergeable):
+    """A trial at parity changes nothing worth merging, even when its port passes."""
+    from xe_forge.core.trial_manager import TrialManager
+    from xe_forge.frontend import collect
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "base.py").write_text("x = 1\n")
+    (ws / "t0.py").write_text("x = 2\n")
+    mgr = TrialManager(ws / "trials")
+    mgr.init("k", ws / "base.py")
+    tid = mgr.save_trial("k", ws / "t0.py", strategy="try")
+    mgr.record_result("k", tid, correctness="pass", speedup=speedup, baseline_us=10.0,
+                      triton_us=10.0, verdict=None if speedup else "INDISTINGUISHABLE",
+                      source="measured")  # fmt: skip
+    (ws / "output").mkdir()
+    (ws / "output" / "PORT.txt").write_text("kind: upstream\nstack check python: PASS\n")
+    row = collect.collect_one(ws, "k", "v", tmp_path / "results")
+    assert row["outcome"] == ("win" if speedup else "parity")
+    assert row["mergeable"] is mergeable

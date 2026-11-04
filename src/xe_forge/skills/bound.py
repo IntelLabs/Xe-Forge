@@ -2,7 +2,9 @@
 
 The arithmetic ``analyze`` decides on, as a tool an agent can test its claims with: the GEMM
 roofline from shapes and the calibrated peaks, the counters' speed-of-light, and any cost
-names.json states. Exit 1 when the capture has no workloads.
+names.json states. ``--names`` applies a draft names.json first (its costs and config_args), so
+the naming agent sees what its answer makes of the capture before it answers.
+Exit 1 when the capture has no workloads.
 """
 
 from __future__ import annotations
@@ -12,9 +14,14 @@ from pathlib import Path
 
 
 def run(args) -> int:
-    from xe_forge.frontend import analyze, ir
+    from xe_forge.frontend import analyze, canonical, ir, naming
 
     cap = ir.load(args.capture)
+    if args.names and Path(args.names).is_file():  # none yet: the capture as it is
+        from xe_forge.skills.capture import apply_names
+
+        cap.ops = apply_names(cap.ops, json.loads(Path(args.names).read_text()))
+        cap.workloads = canonical.workloads(cap.ops, cap.run["total_device_us"], naming.name_op)
     calib = json.loads(Path(args.calibration).read_text()) if args.calibration else None
     ctx = analyze.context(cap)
     rows = []

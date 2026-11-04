@@ -104,7 +104,7 @@ def capture(a, python: str, run_dir: Path, turns: int, repos: Path) -> tuple[int
             return 1, python
         check = ["patch", "check", str(work), "--repos", str(repos), "--framework-python",
                  python, "--model", a.model, "--batch", str(a.batch), "--input-len",
-                 str(a.input_len), "--output-len", str(a.output_len)]  # fmt: skip
+                 str(a.input_len)]  # fmt: skip
         if getattr(a, "reference_python", None):  # the framework's own has no GPU transformers
             check += ["--reference-python", a.reference_python]
         if _tool(python, *check) != 0:  # the gate is the tool's, not the agent's word
@@ -199,7 +199,7 @@ def name(
         "dsls": [d.value for d in DSL],
         "calibration": calib,
         "bound_cmd": shlex.join(
-            ["xe-forge-skill", "bound", str(capture_path)]
+            ["xe-forge-skill", "bound", str(capture_path), "--names", str(work / "names.json")]
             + (["--calibration", str(calibration)] if calibration else [])
         ),
     }
