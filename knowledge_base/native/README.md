@@ -10,6 +10,11 @@ Read by the agent that writes a model's native C engine (`native-engine.md.j2`).
 - `examples/` -- hot-path kernels earlier engines kept (AMX prefill linear with fp32-accurate
   hi/lo split, AVX-512 decode GEMV over bf16 weights, full-team decode attention). Read, adapt,
   re-verify; their signatures are those engines', not a contract.
+- `examples/k3_amx.{c,h}` -- AMX-BF16 prefill GEMM and grouped per-expert GEMM over GGUF weight
+  formats, weight panels decoded once. It needs that project's `k3.h` and `k3_gq.h`, so read it
+  rather than build it. From [kimi-k3-in-c](https://github.com/libxsmm/kimi-k3-in-c), branch
+  `feauture_run_2bit_llamacpp_frontend_mtp` at `c1a19f7`, Apache-2.0, copyright 2026 the
+  kimi-k3-in-c authors.
 
 Implementations of low-bit formats worth reading before writing one: llama.cpp's CPU kernels
 (`ggml/src/ggml-cpu/` -- quants and the x86 paths) and the format definitions in

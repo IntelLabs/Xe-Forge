@@ -50,9 +50,15 @@ def main(argv: list[str]) -> int:
     p.add_argument("--new", type=int, default=16, help="greedy tokens verified")
     p.add_argument("--prefill", default="512,2048,8192,32768", help="prompt lengths profiled")
     p.add_argument("--depths", default="0,8192,32768", help="contexts decode is profiled at")
+    p.add_argument("--amx-tokens", type=int, default=64,
+                   help="prompt at which AMX must run and is verified")  # fmt: skip
     p.add_argument("--agent-max-turns", type=int, default=500)
     a = p.parse_args(argv)
     python = a.framework_python or sys.executable
+    cpu = _cpu()
+    if "amx_tile" not in cpu:
+        print(f"generate: AMX is required and this CPU has none: {cpu}", file=sys.stderr)
+        return 1
     run_dir = a.output.resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -68,7 +74,8 @@ def main(argv: list[str]) -> int:
             "model": info["model"], "model_dir": info["dir"], "modeling": info.get("modeling"),
             "transformers": info.get("transformers"),
             "reference_source": str(a.reference_source) if a.reference_source else None,
-            "kb": str(KB), "cpu": _cpu(), "threads": a.threads, "numa": a.numa,
+            "kb": str(KB), "cpu": cpu, "threads": a.threads, "numa": a.numa,
+            "amx_tokens": a.amx_tokens,
             "prefill": [int(x) for x in a.prefill.split(",")],
             "depths": [int(x) for x in a.depths.split(",")],
             "tool": f"PYTHONPATH={SRC_DIR} {python} -m",
@@ -81,12 +88,19 @@ def main(argv: list[str]) -> int:
     # the gate: the tools' verdict on the agent's engine, not the agent's
     results = {}
     reference = answer.get("reference")
-    for name, model_dir in (("surrogate", answer.get("surrogate")), ("model", info["dir"])):
+    long_prompt = ["--prompt-tokens", str(a.amx_tokens)]
+    for name, model_dir, extra in (
+        ("surrogate", answer.get("surrogate"), []),
+        ("model", info["dir"], []),
+        ("surrogate-amx", answer.get("surrogate"), long_prompt),
+        ("model-amx", info["dir"], [*long_prompt, "--require-amx"]),
+    ):
         if not model_dir:
             continue
         out = run_dir / f"gate-{name}.json"
+        out.unlink(missing_ok=True)
         args = ["--model-dir", str(model_dir), "--engine", answer["engine"], "--new", str(a.new),
-                "--threads", str(a.threads), "--numa", str(a.numa), "-o", str(out)]  # fmt: skip
+                "--threads", str(a.threads), "--numa", str(a.numa), "-o", str(out), *extra]  # fmt: skip
         if reference:
             args += ["--reference", reference]
         _py(python, "xe_forge.frontend.verify", *args)
@@ -97,6 +111,8 @@ def main(argv: list[str]) -> int:
             f"{g['level']} {'PASS' if g['pass'] else 'REJECT'}" for g in r.get("gates", [])))  # fmt: skip
     if answer.get("timing"):
         lines += ["", f"timing (agent's measurement): {json.dumps(answer['timing'])}"]
+    if answer.get("amx"):
+        lines += ["", f"amx (agent's report): {json.dumps(answer['amx'])}"]
     if answer.get("notes"):
         lines += ["", answer["notes"]]
     (run_dir / "GENERATE.md").write_text("\n".join(lines) + "\n")

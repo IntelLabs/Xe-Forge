@@ -87,6 +87,30 @@ the hot steps are at what this CPU's memory or arithmetic allows, or no change h
 Add what you established to `{{ kb }}/patterns.yaml` in its form: a rule, the pattern, and how to
 check it. No measured numbers, model names or CPU names.
 
+## 5. AMX (required)
+
+The engine must run AMX. This step is not optional, and the rule above about keeping only what is
+faster does not remove it. The tools check it with a hardware counter; an engine with no tile path
+running fails `generate`, whatever else it achieves.
+
+Give every linear that runs over many tokens at prefill a tile path, grouped experts included:
+choose the tile operation from how the checkpoint stores the weights (`_tile_dpbf16ps` for bf16,
+the `_tile_dpb*d` integer forms for low-bit codes). Read `{{ kb }}/examples/linear_bf16w_prefill_amx.c`
+and `{{ kb }}/examples/k3_amx.c` (grouped MoE, weight panels decoded once) and the `amx_*` patterns
+first. Request tile state from the OS and keep the vector kernel as the fallback.
+
+- Use a tile path above a token threshold you sweep end-to-end; the threshold must not exceed
+  {{ amx_tokens }} tokens.
+- `XF_NO_AMX=1` must turn every tile path off and run the vector kernels (contract.md).
+- If a tile path beats the vector kernel at no shape, keep it at a threshold of {{ amx_tokens }}
+  and report that with its times. Do not remove it.
+- A step that cannot use tiles goes in `amx.not_ported` with the reason.
+
+Check it; both must print `VERDICT: PASS`:
+
+    {{ tool }} xe_forge.frontend.verify --model-dir surrogate --engine engine/build/xf-run --prompt-tokens {{ amx_tokens }} --new 16 --threads {{ threads }} --numa {{ numa }} -o verify-surrogate-amx.json{% if reference_source %} --reference reference.py{% endif %}
+    {{ tool }} xe_forge.frontend.verify --model-dir {{ model_dir }} --engine engine/build/xf-run --prompt-tokens {{ amx_tokens }} --require-amx --new 16 --threads {{ threads }} --numa {{ numa }} -o verify-model-amx.json{% if reference_source %} --reference reference.py{% endif %}
+
 ## Answer
 
 Write `engine.json`:
@@ -94,6 +118,8 @@ Write `engine.json`:
  "reference": <"<path to reference.py>" or null>,
  "timing": {"prefill_ms": {"<prompt tokens>": <ms>, ...},
             "decode_ms_per_token": {"<context tokens>": <ms>, ...}},
+ "amx": {"steps": ["<step with a tile path>", ...], "min_tokens": <threshold>,
+         "not_ported": {"<step>": "<why>"}},
  "notes": "<what the hot paths are and what you did to them>"}
 or {"error": "<why>"}.
 

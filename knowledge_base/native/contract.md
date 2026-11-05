@@ -30,6 +30,11 @@ Call `xf_hook_step` after every step of the forward pass.
 - `XF_PROFILE=file`: one JSON row per (block.step, T) with summed time, which is what the
   profile tool ranks.
 
+## AMX switch
+
+`XF_NO_AMX=1` turns every tile path off, so the engine runs its vector kernels and gives the
+same tokens.
+
 ## Verification (`python -m xe_forge.frontend.verify`)
 
 The tool runs the engine and the reference model on the same prompt. Every gate must pass:
@@ -39,3 +44,5 @@ The tool runs the engine and the reference model on the same prompt. Every gate 
 - `logits`: the last-position logits match, and the argmax is equal.
 - `decode`: incremental decoding gives the same tokens as `--recompute`.
 - `tokens`: the greedy tokens equal the reference's greedy tokens.
+- `amx` (with `--require-amx`): `perf`'s `exe.amx_busy` is above zero at the prompt
+  (`--prompt-tokens`), zero with `XF_NO_AMX=1`, and both runs give the same tokens.

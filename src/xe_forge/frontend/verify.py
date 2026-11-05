@@ -7,6 +7,7 @@ Levels (each a ``GATE <level> PASS|REJECT <evidence>`` line, then ``VERDICT`` an
   logits  the prefill's last-position logits
   decode  incremental decode == full recompute, token for token
   tokens  greedy tokens == transformers' greedy tokens
+  amx     with --require-amx: the AMX unit ran, and XF_NO_AMX=1 turns it off with the same tokens
 
     python -m xe_forge.frontend.verify --model-dir DIR --engine xf-run -o v.json [--reference ref.py]
 """
@@ -16,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -24,14 +26,16 @@ import numpy as np
 
 STEP_RTOL = 1e-3  # max |native - reference| / max |reference| per step output
 LOGITS_RTOL = 1e-3
+AMX_EVENT = "exe.amx_busy"
 
 
-def _engine(engine: Path, weights: Path, ids: list[int], new: int, env: dict, extra=()) -> dict:
+def _engine(engine: Path, weights: Path, ids: list[int], new: int, env: dict, extra=(),
+            wrap=()) -> dict:  # fmt: skip
     cmd = [str(engine), str(weights), "--ids", ",".join(map(str, ids)), "--new", str(new), *extra]
     if env.get("XF_NUMA") is not None:
         node = env["XF_NUMA"]
         cmd = ["numactl", f"--cpunodebind={node}", f"--membind={node}", *cmd]
-    r = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    r = subprocess.run([*wrap, *cmd], env=env, capture_output=True, text=True)
     if r.returncode != 0 or "DONE" not in r.stdout:
         raise RuntimeError(f"engine failed ({r.returncode}): {r.stderr.strip()[-2000:]}")
     out: dict = {}
@@ -42,6 +46,49 @@ def _engine(engine: Path, weights: Path, ids: list[int], new: int, env: dict, ex
         elif key in ("LOAD_MS", "PREFILL_MS", "DECODE_MS_PER_TOKEN"):
             out[key.lower()] = float(value)
     return out
+
+
+def _perf_count(text: str, event: str) -> int | None:
+    """The event's count in ``perf stat -x,`` output; None when perf could not read it."""
+    for line in text.splitlines():
+        fields = line.split(",")
+        if len(fields) > 2 and fields[2] == event and fields[0].isdigit():
+            return int(fields[0])
+    return None
+
+
+def _amx_run(engine: Path, weights: Path, ids: list[int], env: dict) -> dict:
+    """One run under perf, with the cycles the AMX unit was busy."""
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "perf.csv"
+        wrap = ("perf", "stat", "-x,", "-e", AMX_EVENT, "-o", str(out), "--")
+        run = _engine(engine, weights, ids, 2, env, wrap=wrap)
+        run["amx_busy"] = _perf_count(out.read_text(), AMX_EVENT)
+    return run
+
+
+def amx_gate(engine: Path, weights: Path, ids: list[int], env: dict) -> tuple[str, bool, str]:
+    """The AMX unit ran at this prompt, and XF_NO_AMX=1 turns it off with the same tokens."""
+    if not shutil.which("perf"):
+        return "amx", False, "no perf on PATH"
+    base = {k: v for k, v in env.items() if k != "XF_NO_AMX"}
+    try:
+        on = _amx_run(engine, weights, ids, base)
+        off = _amx_run(engine, weights, ids, {**base, "XF_NO_AMX": "1"})
+    except (RuntimeError, OSError) as exc:
+        return "amx", False, str(exc)
+    busy, idle = on["amx_busy"], off["amx_busy"]
+    if busy is None or idle is None:
+        return "amx", False, f"perf could not read {AMX_EVENT}"
+    if busy == 0:
+        return "amx", False, f"{AMX_EVENT} is 0 at {len(ids)} tokens: no tile path ran"
+    if idle != 0:
+        return "amx", False, f"{AMX_EVENT} is {idle} with XF_NO_AMX=1: the switch does not work"
+    if on.get("tokens") != off.get("tokens"):
+        return "amx", False, f"tokens differ: {on.get('tokens')} vs {off.get('tokens')} no AMX"
+    return "amx", True, (f"{AMX_EVENT} {busy} at {len(ids)} tokens, 0 with XF_NO_AMX=1; prefill "
+                         f"{on.get('prefill_ms')} ms vs {off.get('prefill_ms')} ms without, "
+                         "one run each")  # fmt: skip
 
 
 def _rel(a: np.ndarray, b: np.ndarray) -> float:
@@ -100,7 +147,7 @@ def _reference(model_dir: Path, modules: list[str], config: dict, ids: list[int]
 
 def verify(
     model_dir: Path, engine: Path, ids: list[int], new: int, env: dict,
-    config: dict | None = None, reference: Path | None = None,
+    config: dict | None = None, reference: Path | None = None, require_amx: bool = False,
 ) -> dict:  # fmt: skip
     from xe_forge.frontend.surrogate import merged_config
 
@@ -167,6 +214,8 @@ def verify(
                   f"{len(ref_tokens)} greedy tokens" + ("" if first is None else
                   f"; first differs at {first}: native {run['tokens'][first]} vs "
                   f"reference {ref_tokens[first]}")))  # fmt: skip
+    if require_amx:
+        gates.append(amx_gate(engine, model_dir, ids, env))
     return {
         "model_dir": str(model_dir), "engine": str(engine),
         "ids": ids, "new": new, "tokens": run["tokens"], "reference_tokens": ref_tokens,
@@ -202,6 +251,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--engine", type=Path, required=True, help="the assembled xf-run")
     p.add_argument("--prompt", help="text; tokenized with the model's tokenizer when it has one")
+    p.add_argument("--prompt-tokens", type=int, default=12, help="ids when no text prompt is used")
+    p.add_argument("--require-amx", action="store_true", help="add the amx gate")
     p.add_argument("--new", type=int, default=8, help="greedy tokens to generate")
     p.add_argument("--threads", type=int, default=0, help="OMP threads (default: OMP_NUM_THREADS)")
     p.add_argument("--numa", type=int, help="bind the engine to this NUMA node (numactl)")
@@ -213,7 +264,7 @@ def main(argv: list[str] | None = None) -> int:
     from xe_forge.frontend.surrogate import merged_config
 
     config = merged_config(a.model_dir)
-    ids = prompt_ids(a.model_dir, a.prompt, int(config["vocab_size"]))
+    ids = prompt_ids(a.model_dir, a.prompt, int(config["vocab_size"]), a.prompt_tokens)
     env = dict(os.environ)
     if a.threads:
         env["OMP_NUM_THREADS"] = str(a.threads)
@@ -221,7 +272,8 @@ def main(argv: list[str] | None = None) -> int:
     env.setdefault("OMP_PLACES", "cores")
     if a.numa is not None:
         env["XF_NUMA"] = str(a.numa)
-    result = verify(a.model_dir, a.engine, ids, a.new, env, reference=a.reference)
+    result = verify(a.model_dir, a.engine, ids, a.new, env, reference=a.reference,
+                    require_amx=a.require_amx)  # fmt: skip
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_text(json.dumps(result, indent=1) + "\n")
     for g in result["gates"]:
