@@ -1,4 +1,5 @@
-"""The framework frontend's commands: run, optimize (an existing kernels.yaml again), calibrate.
+"""The framework frontend's commands: run, optimize (an existing kernels.yaml again), calibrate,
+generate (an agent writes a native engine for a model; tools verify it).
 
 Anything after ``--`` is passed unchanged to every Xe-Forge run ``optimize`` starts.
 """
@@ -17,7 +18,7 @@ from pathlib import Path
 
 import xe_forge
 
-COMMANDS = ("optimize", "run", "calibrate")
+COMMANDS = ("optimize", "run", "calibrate", "generate")
 SRC_DIR = Path(xe_forge.__file__).resolve().parents[1]
 REPO_DIR = SRC_DIR.parent
 
@@ -424,6 +425,11 @@ def main(argv: list[str]) -> int:
     if "--" in rest:
         i = rest.index("--")
         rest, passthrough = rest[:i], rest[i + 1 :]
+
+    if command == "generate":
+        from xe_forge.frontend import generate
+
+        return generate.main(rest)
 
     if command == "calibrate":
         from xe_forge.frontend import calibrate

@@ -1,0 +1,206 @@
+patterns:
+  - id: weights_as_stored
+    name: Keep weights in the checkpoint's dtype
+    rule: A bf16 checkpoint widened to fp32 at load wastes memory bandwidth and changes no value.
+    pattern: Store bf16 as uint16; widen in the kernel ((uint32_t)v << 16).
+    check: verify passes unchanged; the bound weights take half the memory.
+  - id: packed_formats_as_bytes
+    name: Decode quantized formats in the kernel
+    rule: Quantized checkpoints (MXFP4 blocks + scales, 2-bit codes) are read as raw bytes.
+    pattern: Bind the U8 tensors as stored; the kernel decodes nibbles and scales inline.
+    check: the kernel's output matches the reference's dequantized matmul.
+  - id: stacked_experts
+    name: One contiguous buffer per expert matrix
+    rule: Experts stored one tensor each make one call per expert.
+    pattern: Load expert e of a layer at offset e * size in one buffer; one op loops the routed experts.
+    check: the profile shows one expert step per MoE layer.
+  - id: full_thread_team
+    name: Every parallel region uses the whole team
+    rule: A smaller team or a serial region between full-team kernels idles threads, and the next kernel pays to wake them.
+    pattern: '"#pragma omp parallel ... num_threads(ctx->nthreads)"; split the work so that every thread gets some.'
+    check: decode time per token does not rise when the kernel is swapped in.
+  - id: decode_gemv
+    name: Decode linear is a GEMV over streamed weights
+    rule: At one token the weights are read once from memory; the arithmetic is not the bound.
+    pattern: Give each thread a block of weight rows that share x loads; keep several fp32 accumulators; mask the K tail.
+    check: GB/s from the profile approaches the node's memory bandwidth.
+  - id: amx_fp32_accuracy
+    name: AMX with fp32 accuracy
+    rule: Rounding fp32 activations to bf16 fails an fp32 check.
+    pattern: Split x into a bf16 high part and a bf16 remainder, and run tdpbf16ps on both against bf16 weights.
+    check: verify's layer error stays near 1e-6.
+  - id: decode_prefill_dispatch
+    name: Separate decode and prefill paths
+    rule: M=1 is bound by memory and M>8 by compute; one kernel does not serve both.
+    pattern: if (M <= 8) gemv(...); else gemm(...);
+    check: the profile improves at both T=1 and T=prompt.
+  - id: recurrent_state
+    name: Per-layer state lives in the arena
+    rule: KV caches, convolution histories and SSM or delta-rule states persist across calls and are cleared on reset.
+    pattern: One state region at the start of the arena; xf_reset clears it.
+    check: verify's decode gate (incremental == recompute).
+  - id: hot_path_assembly
+    name: Rewrite only measured hot paths
+    rule: Assembly is worth its cost only where the profile says the time goes.
+    pattern: Keep the C version as the fallback; add inline asm or intrinsics for the hot loop.
+    check: profile before and after, and verify after.
+  - id: decode_single_region
+    name: One parallel region per decode step
+    rule: At one token each kernel's work is small next to the cost of entering a parallel region, so a region per op spends a large share of the step forking and joining.
+    pattern: Open one region for the whole forward and separate phases with a spin barrier over per-thread flags on their own cache lines (dissemination, monotonically increasing epochs). With hooks on, thread 0 reports between two barriers.
+    check: decode time per token drops, and verify's decode and layer gates still pass with hooks on.
+  - id: team_sized_from_resolved_threads
+    name: Size per-thread state from the resolved thread count
+    rule: A thread count of 0 means "take it from the environment"; a buffer or barrier sized from the raw argument is empty and is overrun silently.
+    pattern: Resolve nthreads once (argument, else omp_get_max_threads()) and size every per-thread buffer and team from the resolved value.
+    check: the engine runs clean both with --threads N and with only OMP_NUM_THREADS set.
+  - id: redundant_norm_before_gemv
+    name: Recompute a vector norm per thread instead of sharing it
+    rule: A normalized vector written by one thread and read by all costs a barrier and a broadcast; recomputing it costs one pass over a vector that is already in cache.
+    pattern: Inside the decode region every thread normalizes x into its own buffer and then runs its rows of the following GEMV.
+    check: one barrier fewer per norm; layer outputs unchanged.
+  - id: virtual_concat_projections
+    name: Split rows over a virtual concatenation of projections
+    rule: Projections reading the same input (q|k|v, gate|up) launched separately each pay a split and a barrier, and each leaves a remainder of rows that does not divide evenly over the threads.
+    pattern: Treat the weights as one matrix of sum(N) rows; split the rows once and map each range back to its segment and output. In prefill pack the shared input once for all segments.
+    check: the profile shows the fused step faster than the sum of its parts; outputs match per segment.
+  - id: gemm_epilogue_activation
+    name: Interleave gate and up panels and apply the activation in the epilogue
+    rule: gate and up share their input and their output rows, and the activation reads both, so computing them separately writes two large outputs and reads them back.
+    pattern: For each output panel compute the gate tile and the up tile from the same packed input, then write act = silu(g) * u while both are in registers or L1.
+    check: the separate activation step disappears from the profile; act matches the reference.
+  - id: staggered_shared_reads
+    name: Stagger the order in which threads read a shared operand
+    rule: When every thread streams the same buffer from the same start, all of them request the same lines at once and the shared read is serialized.
+    pattern: Thread tid starts its k-block loop at block (tid * nkb / nth) and wraps around.
+    check: the GEMM step's time drops while its output is unchanged (an fp32 sum reordered within tolerance).
+  - id: avoid_rewriting_widely_shared_lines
+    name: Rewriting a buffer many cores have just read is expensive
+    rule: A store to a line cached by many cores must invalidate every copy, so repacking a broadcast operand costs far more than its size suggests. The cost depends on the number of sharers, not on the bytes.
+    pattern: Measure the pack separately from the compute before tuning the compute. Prefer designs that write broadcast data fewer times; keep a buffer's set of readers small where the algorithm allows it. Prefetch-for-write, cache-line demote, streaming stores and buffer rotation are worth measuring but do not reliably help.
+    check: a microbenchmark that rewrites a buffer after N threads read it shows the per-byte cost against N.
+  - id: query_blocked_prefill_attention
+    name: Prefill attention reuses one transposed key block across many queries
+    rule: Per-(query, key) dot products end in a horizontal reduction for every score, which dominates when the head dimension is small.
+    pattern: Per task (kv head, block of query rows), transpose a block of 16 keys to [D][16], then accumulate the scores of up to 16 query vectors (rows x heads of the group) with broadcast-FMA into one register each. Apply the causal mask per lane, use online softmax, and do PV with the 16 value rows held in registers. Schedule the tasks dynamically, longest first.
+    check: the attention step drops at T>1 and stays within verify's tolerance; decode keeps the split-K path.
+  - id: rope_table
+    name: Compute rotary cos/sin once at load
+    rule: cos/sin of position x frequency are the same every call; recomputing them is transcendental work on the hot path.
+    pattern: At load fill [ctx][D/2] tables in the reference's order of operations (inverse frequency rounded as the reference rounds it, product in fp32, cos/sin in double then cast); the kernel only gathers.
+    check: rope's step output matches the reference bit for bit or to ~1e-7.
+  - id: lowbit_decode_in_registers
+    name: Decode low-bit weights in registers, never to memory
+    rule: At decode a low-bit GEMV is bound by reading packed bytes; any dequantized copy in memory throws the saving away.
+    pattern: Load a block's packed codes, expand them with vpshufb/vpermb table lookups, apply the block scale, and FMA against fp32 x in registers.
+    check: GB/s of packed bytes from the profile approaches the node's memory bandwidth; verify layer error stays near the fp32 path's.
+  - id: lowbit_int8_activations
+    name: Integer dot products are a precision choice
+    rule: Quantizing x to int8 (once per row) unlocks VNNI (vpdpbusd), but it is no longer the reference's arithmetic.
+    pattern: Keep the exact fp32 path as the fallback; add the int8-activation path behind a switch.
+    check: keep it only if verify's tokens gate still passes; record the switch as a precision change.
+  - id: kquant_block_sums
+    name: Fold K-quant minimums into precomputed sums
+    rule: K-quant super-blocks of 256 carry per-sub-block scales and minimums; applying the minimum per weight wastes work.
+    pattern: Precompute sum(x) per sub-block once per row (llama.cpp's bsums); out = d*sum(scale_j*q.x) - dmin*sum(min_j*bsum_j).
+    check: the result matches dequantize-then-dot within fp32 rounding at the edge shapes.
+  - id: lowbit_prefill_tiles
+    name: Prefill dequantizes a tile once and reuses it
+    rule: At prefill many rows share each weight tile, so the arithmetic is the bound.
+    pattern: Dequantize a weight tile to bf16 in an L2-resident buffer and run AMX tdpbf16ps over all rows (hi/lo split x for fp32 accuracy).
+    check: profile improves at T=prompt; verify passes.
+  - id: lowbit_moe_gather
+    name: A routed MoE reads only the chosen experts
+    rule: At one token, only the top-k experts' blocks need to leave memory.
+    pattern: "Decode: gather the k experts' packed rows, parallelize over experts x rows. Prefill: group tokens by expert, then one GEMM per expert."
+    check: bytes read per decode token are close to k/E of the expert weights.
+  - id: exact_integer_block_dots
+    name: Match a quantized reference exactly with integer block sums
+    rule: A reference that quantizes activations to int8 per block and sums q*x in integers is reproduced bit for bit only if each block's integer sum is exact and the per-block float combine keeps the reference's operand order and precision.
+    pattern: vpdpbusd (u8 weights x s8 activations) per sub-block, vpdpwssd for 16-bit scale x partial sum, minimums through the activation block sums; combine each block in the reference's precision and order. Build with -ffp-contract=off so no FMA fuses what the reference rounds twice.
+    check: verify's layer gate reports a worst relative error of exactly zero; a reordered combine shows up as non-zero.
+  - id: lane_per_row_multi_token
+    name: One output row per vector lane, several tokens per pass
+    rule: A horizontal reduction per (row, token) dominates small-T low-bit GEMMs; reusing each decoded weight register across tokens divides the decode cost.
+    pattern: Transpose a group of 16 rows so lane r holds row r's codes, decode once, and accumulate 2-8 tokens into separate integer registers before the combine.
+    check: the linear step at small T drops while its output is unchanged.
+  - id: masked_load_shift_unpack
+    name: Unpack sub-byte codes with variable shifts
+    rule: 2/3/4-bit codes packed several per byte cost a shuffle chain per field when unpacked one field at a time.
+    pattern: Masked-load the packed bytes, broadcast, vpsrlvd/vpsrlvw by a per-lane shift vector, and AND with the field mask; vpermi2b/vpermt2b gathers per-group scales or minimums into lane order in one instruction.
+    check: a ctypes unit test of the kernel against the op's Python form over every edge shape passes.
+  - id: double_combine_vectorized
+    name: Vectorize the per-block double combine
+    rule: When exactness needs a double-precision combine per block, a scalar combine becomes the bound once the integer dots are vectorized.
+    pattern: Convert 8 int32 block sums to double with vcvtdq2pd and do the products and accumulate with vector double ops in the reference's order (separate mul and add when the reference rounds between them).
+    check: the integer kernel's time no longer tracks the number of blocks; the output stays bitwise.
+  - id: moe_group_by_expert_balanced
+    name: Group routed tokens by expert and balance tasks by work
+    rule: Prefill routing is skewed; some experts take many tokens, most take few, so one task per expert leaves threads idle behind the largest.
+    pattern: Bucket token ids per expert, then split each expert's rows into chunks sized so tokens x rows per task is roughly equal; run the chunks with a dynamic queue, largest first.
+    check: per-task busy time logged by tokens-per-expert is flat; the expert step's wall time approaches total busy time / threads.
+  - id: spinning_pool
+    name: A spinning worker pool instead of a fork per op
+    rule: Many small ops per step pay the parallel-region entry each time; sleeping workers pay a wake-up on top.
+    pattern: Persistent workers pinned where OpenMP would place them, spinning on a generation counter for a bounded time before a futex wait; one done flag per worker on its own cache line; static or atomic-counter task distribution.
+    check: decode time per token drops and does not rise with the number of ops per layer.
+  - id: parallel_activation_quantize
+    name: Parallelize the activation quantize, even at one token
+    rule: At one token a serial quantize of a wide input is a fixed cost on every linear and shows up once the GEMVs are near the bandwidth floor.
+    pattern: Quantize blocks of the input across the pool (or fuse it into the preceding norm or elementwise op), vectorized per block.
+    check: the quantize step vanishes or shrinks in the T=1 profile; outputs unchanged.
+  - id: hardware_half_conversion
+    name: Convert fp16 scales with hardware instructions
+    rule: A software half-to-float in the inner loop of a block-quantized dot costs more than the dot for small blocks.
+    pattern: vcvtph2ps (or _cvtsh_ss) on the block's scale field; it is exact for every fp16 value.
+    check: a unit test over all 65536 fp16 patterns matches the reference's conversion.
+  - id: row_block_width_fills_team
+    name: Choose the row-block width so every thread gets work
+    rule: A wide row block that suits big matrices leaves threads idle on narrow ones (few output rows over many threads).
+    pattern: Derive the block width from rows / threads, clamped to the kernel's tile width; fall back to a narrower tile when the wide one would idle part of the team.
+    check: per-step time for the narrowest projections drops; no step slows.
+  - id: fuse_elementwise_into_quantize
+    name: Fuse elementwise ops into the next quantize
+    rule: An activation, residual add or norm followed by an int8 quantize writes and re-reads the same vector.
+    pattern: Compute the elementwise result and its block quantization in the same pass, writing both the float result (if still needed) and the quantized blocks.
+    check: the elementwise step disappears from the profile; verify unchanged.
+  - id: speedup_must_move_end_to_end
+    name: A kernel speedup counts only if the end-to-end time moves
+    rule: A microbenchmark win can vanish in the model (different cache state, frequency, neighbouring steps), and a change can slow the next step.
+    pattern: After every kernel change re-run verify and the full profile, compare total prefill and decode time over at least two runs, and keep the change only if both gates pass and the total improved.
+    check: the profile's totals, not the kernel's own step, are the decision.
+  - id: bandwidth_floor_first
+    name: Measure the bandwidth floor before optimizing decode
+    rule: Decode is bound by bytes of weights read per token; without the floor, there is no way to tell how much is left.
+    pattern: Measure the node's achievable read bandwidth with the same thread placement, divide the bytes each step reads, and compare each step's time to that floor.
+    check: report each decode step's achieved fraction of bandwidth; steps at the floor are done.
+  - id: no_rebuild_under_running_process
+    name: Never rebuild a library a running process has loaded
+    rule: Overwriting a shared object while a test has it mapped crashes or corrupts that process in ways that look like kernel bugs.
+    pattern: Wait for running tests and benchmarks to finish before building, or build to a new file and rename it into place.
+    check: a crash that disappears on rerun with no code change points here.
+  - id: vector_libm_exactness
+    name: Check a vector libm against the scalar one bitwise before using it
+    rule: Vector exp/log variants may differ from the scalar libm the reference uses by an ulp, which breaks an exact gate.
+    pattern: Run the vector variant and the scalar call over a large sweep of inputs covering the op's range, and use the vector one only if they agree bit for bit (otherwise keep scalar or tolerate it as a precision change).
+    check: the sweep reports zero mismatches; verify stays bitwise.
+  - id: amx_lowbit_exact
+    name: Exact low-bit GEMM on AMX int8 tiles
+    rule: At many tokens a K-quant GEMM is compute-bound and AMX int8 tiles run the integer dots exactly, as long as every value fits its tile type and the per-group scales are applied where the reference applies them.
+    pattern: Fold each group's small integer scale into the weight codes (q*scale still fits u8), lay them out as the VNNI-transposed B tile, and use activations as signed A (_tile_dpbsud means signed A x unsigned B). A second B tile holding each group's minimum broadcast gives the minimum term from the same A. Pipeline the next block's tile ops before the current block's combine.
+    check: a standalone comparison against the vector integer kernel on random blocks is bitwise at every token count; verify stays bitwise.
+  - id: amx_pack_once_shared
+    name: Pack AMX activations once per call, in parallel, into persistent buffers
+    rule: Every task reads the same packed activations; packing per task repeats the work, one packer per buffer hot-spots the cache lines, and a fresh allocation per call pays page faults.
+    pattern: Pack all tokens once per linear before the row tasks, one token per pack task across the pool, into buffers kept between calls and grown on demand.
+    check: the pack's own time is small next to the GEMM's in the profile.
+  - id: amx_threshold_by_work
+    name: Gate AMX by tokens and rows per thread, and watch the next step
+    rule: Tile configuration, decode to the tile layout and the per-block combine are fixed costs that a few tokens do not amortize; heavy tile use can also lower the clock for the steps that follow.
+    pattern: Use AMX only above a measured token threshold and when each thread gets enough row chunks; otherwise keep the vector kernel. Compare neighbouring steps' times with AMX on and off, not only the AMX step.
+    check: sweep the threshold end-to-end; a step after the AMX one that slows with AMX on (with its own code unchanged) is the frequency effect.
+  - id: small_block_combine_bound
+    name: Small quantization blocks make a tile GEMM combine-bound
+    rule: When each short block (e.g. 32 elements) needs its own scale combine in the reference's precision, the combine per block costs about as much as the integer dot, so a faster dot engine gains little.
+    pattern: Count combine operations per block against dot operations before porting a format to tiles; prefer it only for formats with large blocks or integer group scales that fold into the codes.
+    check: estimate the combine share from a microbenchmark of the vector kernel with the dot replaced by a constant.

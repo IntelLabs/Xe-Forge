@@ -1,0 +1,101 @@
+Write a native C inference engine for {{ model }} that runs on this CPU and computes exactly
+what {% if reference_source %}its reference ({{ reference_source }}){% else %}transformers{% endif %} computes, then make its hot paths fast.
+
+Inputs:
+- `model.json` here: the config (`config`) and every checkpoint tensor (name, shape, dtype). The
+  checkpoint directory is {{ model_dir }}.
+{%- if reference_source %}
+- The model's Python is at {{ reference_source }}; transformers does not run it.
+{%- else %}
+- The model's Python: {{ modeling or "the transformers model named by the config's model_type" }}
+  (transformers {{ transformers }}).
+{%- endif %}
+- The knowledge base at {{ kb }}. Read `contract.md` first -- the tools measure the engine only
+  through it. `runtime/` is C to copy, and `patterns.yaml` holds what earlier engines
+  established.
+- This CPU: {{ cpu }}. Use {{ threads }} threads on NUMA node {{ numa }}.
+
+## 1. Extract
+
+Read the model's forward pass statement by statement. For every operation write
+`ops/<op>/op.py`: a PyTorch function copied from the model's code, with the semantics exact --
+norm placement and offsets, rotary layout and bases, scaling, masks and windows, caps,
+routing, state updates, how the checkpoint packs each weight. These functions are what your
+C must reproduce. Test every C kernel against its op.py yourself (e.g. through ctypes) before
+it goes into the engine.
+
+## 2. Design
+
+Lay the engine out under `engine/`:
+- the runtime copied from the knowledge base;
+- one C function per op in `engine/kernels/`, plain C first: obvious loops, long reductions in
+  double, OpenMP across independent outputs with `num_threads(ctx->nthreads)`;
+- `engine/model.c`: config constants, the weight table (names exactly as the checkpoint stores
+  them), the arena layout (persistent state first, then activations), and `xf_forward` -- the
+  layer loop, with any per-layer variation in it (layer kinds, windows, bases, experts);
+- a build (CMake or Makefile) producing `engine/build/xf-run` with
+  `-O3 -march=native -fopenmp`.
+
+After every step call `xf_hook_step` with the reference module whose output that step
+reproduces, as contract.md says. Those dumps are how a wrong step is found.
+
+## 3. Verify
+
+A surrogate first: the same architecture at a small config with random weights, saved in the
+checkpoint's own layout. Choose config overrides that keep every structural relation: head
+counts and ratios, every layer kind and the pattern that mixes them, windows smaller than the
+prompt, experts per token below the expert count, the checkpoint's packed formats.
+
+    {{ tool }} xe_forge.frontend.surrogate build --model {{ model_dir }} --overrides '<json>' -o surrogate{% if reference_source %} --reference reference.py{% endif %} [--saver surrogate_save.py]
+
+{%- if reference_source %}
+Write `reference.py` for this model first: `load(model_dir, config)` returns the reference model
+with that checkpoint loaded, decoding packed formats exactly; `random_model(config)` returns the
+same architecture with random weights that exercise every nonlinearity, cap and routing choice.
+Both models' `forward(ids)` returns logits `[1, T, vocab]`, or a tuple whose first item they
+are. Then write `surrogate_save.py`: `save(model, config, out)` writes `out/*.safetensors` in the
+original checkpoint's names, dtypes and packed formats.
+{%- else %}
+Pass `--saver surrogate_save.py` (`save(model, config, out)`) only where save_pretrained of
+the random model would not reproduce the original checkpoint's names, dtypes or packed
+formats.
+{%- endif %}
+
+    {{ tool }} xe_forge.frontend.verify --model-dir surrogate --engine engine/build/xf-run --new 16 --threads {{ threads }} --numa {{ numa }} -o verify-surrogate.json{% if reference_source %} --reference reference.py{% endif %}
+
+When a gate fails, read the first divergent step in the output, fix that step, and verify
+again. Once the surrogate passes, verify on {{ model_dir }} the same way
+(`-o verify-model.json`). Both must print `VERDICT: PASS`.
+
+## 4. Hot paths
+
+Profile at the shapes the engine will serve, never at a toy prompt: the cost of attention and
+of the KV cache grows with context, and a short prompt hides it. Prefill at prompts of
+{{ prefill | join(", ") }} tokens, and decode at contexts of {{ depths | join(", ") }} tokens (a
+prompt of that length, a few tokens for 0, then `--new 257`); size the engine's context for the largest of them.
+Long id lists go in a file (`--ids @FILE`, comma- or newline-separated):
+
+    XF_PROFILE=profile-<shape>.jsonl numactl --cpunodebind={{ numa }} --membind={{ numa }} engine/build/xf-run {{ model_dir }} --ids @ids-<n>.txt --new <1 or 257> --threads {{ threads }}
+
+Take the steps that dominate, at every one of those shapes: one that is small at a short prompt
+and dominant at a long one is a hot step. Rewrite each one for this CPU -- intrinsics or inline assembly
+(AVX-512, AVX512-BF16, AMX), packing, blocking, prefetch, a separate decode and prefill path --
+and keep the C version as the fallback. After each change verify the model again and time it
+again. Keep a change only if every gate passes, a shape got faster and none got slower. Stop when
+the hot steps are at what this CPU's memory or arithmetic allows, or no change helps; say which.
+
+Add what you established to `{{ kb }}/patterns.yaml` in its form: a rule, the pattern, and how to
+check it. No measured numbers, model names or CPU names.
+
+## Answer
+
+Write `engine.json`:
+{"engine": "<path to xf-run>", "surrogate": "<surrogate dir>",
+ "reference": <"<path to reference.py>" or null>,
+ "timing": {"prefill_ms": {"<prompt tokens>": <ms>, ...},
+            "decode_ms_per_token": {"<context tokens>": <ms>, ...}},
+ "notes": "<what the hot paths are and what you did to them>"}
+or {"error": "<why>"}.
+
+Rules: build and run everything here, on this node. Install nothing. Change nothing outside this
+directory and the knowledge base.
