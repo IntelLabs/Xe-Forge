@@ -125,7 +125,7 @@ def capture(a, python: str, run_dir: Path, turns: int, repos: Path) -> tuple[int
 
 def recapture(run_dir: Path, out_dir: Path, python: str) -> int:
     """Re-run the cached launcher under ``python``'s venv, then parse; no agent. The tools
-    run here: the stack's interpreter need not import them (llama.cpp's has no torch)."""
+    run here: the stack's interpreter need not import them."""
     from xe_forge.frontend.prove import PARSE_REFUSED
 
     launcher = str(run_dir / "launcher" / "run.sh")

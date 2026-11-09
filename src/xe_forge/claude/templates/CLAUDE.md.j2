@@ -270,24 +270,23 @@ came from `xe-forge-skill benchmark` here.
 {%- if target == "library" %}
 ## THIS WORKSPACE TUNES A LIBRARY CALL, NOT A KERNEL
 
-`{{ kernel_name }}` is where the repository calls a library -- a oneDNN primitive -- and that
+`{{ kernel_name }}` is where the repository calls a library (a GEMM, a convolution) and that
 call is what is optimized. The library itself is never edited and no new kernel is written.
 
 - **The baseline is the call exactly as the repository makes it.** Read, at the call site
-  the profile names, the primitive kind, its descriptors (shapes, data types, memory
-  formats), its attributes (fpmath mode, scratchpad, post-ops), and when it is created and
-  executed. The baseline `Model` reproduces that call through the library's own API, built
-  with `load_inline` against the oneDNN the stack itself loads (its bundled copy, torch's,
-  or the oneAPI one -- find which; another version picks other implementations), on
-  torch's queue. `ONEDNN_VERBOSE=1` prints the implementation oneDNN picked; record it for
-  the baseline and for every trial.
-- **A trial changes only how the call is made**: weight memory format `any` with a one-time
-  reorder (prepacking) outside the timed call, attributes, reusing the primitive instead
-  of re-creating it, splitting or batching the call (e.g. along M), or a different data
-  type where the repository's accuracy allows it. Name the change in the trial strategy.
+  the profile names, what it computes, its descriptors (shapes, data types, memory
+  formats), its attributes, and when it is created and executed. The baseline `Model`
+  reproduces that call through the library's own API, built with `load_inline` against the
+  copy of the library the stack itself loads (find which; another version picks other
+  implementations), on torch's queue. Find how the library reports the implementation it
+  picked, and record it for the baseline and for every trial.
+- **A trial changes only how the call is made**: the weight layout (prepacked once,
+  outside the timed call), attributes, reusing the call's setup instead of re-creating it,
+  splitting or batching the call, or a different data type where the repository's
+  accuracy allows it. Name the change in the trial strategy.
 - **The ceiling is the card, not the library's default.** The spec names the shapes; a
   call already at its bandwidth or compute bound has nothing left, and a trial that cannot
-  move the implementation oneDNN picks is a finding, not a failure. Say so in the lessons.
+  move the implementation the library picks is a finding, not a failure. Say so in the lessons.
   A hand-written GEMM is a different route (Xe-Forge's `--tile-tune`), not this one.
 - **Port back to the call site** the profile names (the framework's Python, or the
   plugin's implementation of the op over the library), never to the library itself.
@@ -550,8 +549,7 @@ worth more to the next one than a run that finished and said nothing.
   Change that identity when the implementation changes. A distinct `load_inline` module
   name alone does not isolate device kernel names; collisions can corrupt either arm.
 - **Use the caller's queue.** Do not create a `sycl::queue`. Obtain the one the framework
-  already runs on — for a TVM-FFI entry point that is
-  `static_cast<sycl::queue*>(TVMFFIEnvGetStream(dev.device_type, dev.device_id))`. A kernel
+  already runs on; its entry point's API says how. A kernel
   that submits to its own queue runs correctly, out of order with everything around it, and
   its measured time is not the time it would take in the model.
 - **Do not synchronize inside the kernel function.** No `queue.wait()`, no host-side barrier

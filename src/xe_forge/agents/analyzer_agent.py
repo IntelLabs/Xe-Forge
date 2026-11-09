@@ -19,7 +19,7 @@ _DSL_NAMES: dict[str, str] = {
 }
 
 _DEVICE_DESCS: dict[str, str] = {
-    "xpu": "Intel XPU (Data Center GPU Max / Ponte Vecchio)",
+    "xpu": "Intel XPU",
     "cuda": "NVIDIA CUDA GPU",
     "cpu": "CPU",
 }
@@ -32,8 +32,8 @@ _DEVICE_DESCS: dict[str, str] = {
 
 
 _SYCL_DESCRIPTIONS: dict[IssueType, str] = {
-    IssueType.SUBOPTIMAL_TILE_SIZE: "TileShape dimensions suboptimal for Intel BMG — try Shape<_256,_256,_32> or Shape<_128,_128,_64>",
-    IssueType.SUBOPTIMAL_WARPS: "SubgroupSize in MMA Atom suboptimal — try XE_DPAS_TT<8, float, bfloat16_t>",
+    IssueType.SUBOPTIMAL_TILE_SIZE: "TileShape dimensions suboptimal for this device and these shapes",
+    IssueType.SUBOPTIMAL_WARPS: "SubgroupSize in MMA Atom suboptimal for this device",
     IssueType.HIGH_REGISTER_PRESSURE: "Too many PipelineStages or large TileShape causing register spill",
     IssueType.CACHE_EVICTION_RISK: "PipelineStages too high or TileShape too large for L1/L2",
     IssueType.UNCOALESCED_ACCESS: "Memory layout mismatch (RowMajor vs ColumnMajor) causing non-coalesced access",
@@ -123,7 +123,7 @@ def _build_issue_categories(dsl: DSL = DSL.TRITON) -> str:
         IssueType.GEMM_SIMPLIFICATION: "GEMM has exploitable structure (symmetric, triangular, etc.)",
         IssueType.REDUCTION_TREE_SUBOPTIMAL: "naive serial reduction vs tree reduction",
         # DTYPE
-        IssueType.DTYPE_FLOAT64: "float64 accumulator or I/O — 16-32x slower than float32 on XPU",
+        IssueType.DTYPE_FLOAT64: "float64 accumulator or I/O — far slower than float32 on GPUs",
         IssueType.DTYPE_PRECISION: "unnecessary precision (e.g. float32 where float16 suffices)",
         IssueType.DTYPE_INPUT_CONVERSION: "redundant or wrong dtype conversion in hot path",
         # FUSION
@@ -303,7 +303,6 @@ class AnalyzerAgent:
                 ),
                 device_type=cfg.device_config.device,
                 device_description=_DEVICE_DESCS.get(cfg.device_config.device, "Intel XPU"),
-                defaults={},
                 issue_categories_block=issue_block,
             )
             sig = sig.append_instructions(template_instructions)

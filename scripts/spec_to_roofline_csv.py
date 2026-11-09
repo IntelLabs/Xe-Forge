@@ -48,7 +48,7 @@ with imperfect reuse sit at lower AI (further left).
 Usage
 ------------------------------------------------------------------------------
   uv run scripts/spec_to_roofline_csv.py examples/vllm/2_FusedMoE.yaml -o moe.csv
-  uv run scripts/roofline.py moe.csv --hardware arc-pro-b70 --annotate \
+  uv run scripts/roofline.py moe.csv --calibration calibration.json --annotate \
       --title "Roofline — Fused MoE (theoretical ceilings)" -o plots/moe.png
 """
 

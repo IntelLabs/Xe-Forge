@@ -158,7 +158,6 @@ patterns:
       ...code...
     pattern_after: |
       ...code...
-    expected_speedup: "2-4x"
 
 constraints:
   - id: grf_mode_constexpr        # stage inferred from keywords in the id
@@ -177,7 +176,6 @@ examples:
     description: ...
     unoptimized: gemm_activation_unoptimized.py    # or "file:" for optimized-only
     optimized: gemm_activation_optimized.py
-    expected_speedup: 2-4x
 ```
 
 `format_for_stage()` shows only the constraints/patterns/examples for the stage

@@ -10,7 +10,7 @@ STORAGE_BYTES = {
     "bfloat16": 2, "float16": 2, "int16": 2,
     "float8_e4m3fn": 1, "float8_e5m2": 1, "float8_e4m3fnuz": 1, "float8_e5m2fnuz": 1,
     "float8_e8m0fnu": 1, "float4_e2m1fn_x2": 1, "int8": 1, "uint8": 1, "bool": 1,
-    # OpenVINO reports 4-bit types at their logical shape.
+    # 4-bit types reported at their logical shape.
     "uint4": 0.5, "int4": 0.5, "nf4": 0.5, "float4_e2m1": 0.5,
 }  # fmt: skip
 

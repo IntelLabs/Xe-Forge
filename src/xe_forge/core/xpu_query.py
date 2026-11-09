@@ -99,6 +99,10 @@ def query_xpu_via_torch() -> XPUDeviceInfo | None:
                 info.has_fp64 = props.has_fp64
             if hasattr(props, "has_fp16"):
                 info.has_fp16 = props.has_fp16
+            if hasattr(props, "has_bfloat16_conversions"):
+                info.has_bf16 = props.has_bfloat16_conversions
+            if hasattr(props, "local_mem_size"):
+                info.local_mem_size_kb = props.local_mem_size // 1024
 
             # Store raw properties
             for attr in dir(props):
@@ -198,59 +202,16 @@ def query_xpu_via_xpu_smi() -> XPUDeviceInfo | None:
 def _set_recommendations(info: XPUDeviceInfo) -> XPUDeviceInfo:
     """Set recommended kernel parameters based on detected hardware."""
 
-    name_lower = info.name.lower()
-
-    # Detect Intel GPU architecture
-    if any(x in name_lower for x in ["arc", "a770", "a750", "a580", "a380", "a310"]):
-        # Intel Arc (Alchemist) - Xe-HPG
-        info.recommended_num_warps = 32
-        info.recommended_grf_mode = "large"  # 256 registers
-        info.recommended_tile_m = 256
-        info.recommended_tile_n = 256
-        info.recommended_tile_k = 32
-        info.recommended_group_size_m = 4
-        info.has_bf16 = True
-        info.has_fp16 = True
-
-    elif any(x in name_lower for x in ["max", "pvc", "ponte vecchio", "data center gpu"]):
-        # Intel Data Center GPU Max (Ponte Vecchio) - Xe-HPC
-        info.recommended_num_warps = 32
-        info.recommended_grf_mode = "large"
-        info.recommended_tile_m = 256
-        info.recommended_tile_n = 256
-        info.recommended_tile_k = 32
-        info.recommended_group_size_m = 8  # More SMs, can use larger group
-        info.has_bf16 = True
-        info.has_fp16 = True
-        info.has_fp64 = True  # PVC has good FP64
-
-    elif any(x in name_lower for x in ["flex", "170", "140"]):
-        # Intel Data Center GPU Flex (Arctic Sound-M)
-        info.recommended_num_warps = 32
-        info.recommended_grf_mode = "large"
-        info.recommended_tile_m = 128
-        info.recommended_tile_n = 128
-        info.recommended_tile_k = 32
-        info.recommended_group_size_m = 4
-        info.has_bf16 = True
-
-    elif any(x in name_lower for x in ["iris", "uhd", "integrated"]):
-        # Integrated graphics - more conservative
+    # From what the device reports, not its product name.
+    if info.raw_properties.get("is_integrated_gpu"):
         info.recommended_num_warps = 16
         info.recommended_grf_mode = "small"  # 128 registers
         info.recommended_tile_m = 64
         info.recommended_tile_n = 64
-        info.recommended_tile_k = 32
         info.recommended_group_size_m = 2
-
     else:
-        # Default for unknown Intel GPU
-        info.recommended_num_warps = 32
-        info.recommended_grf_mode = "large"
         info.recommended_tile_m = 128
         info.recommended_tile_n = 128
-        info.recommended_tile_k = 32
-        info.recommended_group_size_m = 4
 
     # Adjust based on memory size
     if info.global_mem_size_gb > 0:

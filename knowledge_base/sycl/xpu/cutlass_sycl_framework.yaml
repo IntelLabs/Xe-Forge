@@ -1,4 +1,4 @@
-# CUTLASS SYCL Framework Patterns for Intel Xe2 (Battlemage B580)
+# CUTLASS SYCL Framework Patterns for Intel Xe
 #
 # Covers: tile configurations, dispatch policies, epilogue fusion operations,
 # tile schedulers, and kernel type templates from the sycl-tla library.
@@ -8,7 +8,7 @@ tile_configurations:
   - id: cutlass_bmg_gemm_256x256x32
     name: "BF16 GEMM example tile: 256x256x32"
     description: |
-      A candidate tile for BF16 GEMM on Battlemage, not a universal default.
+      A candidate tile for BF16 GEMM, not a universal default.
       Used by examples 00-05, 08, 11, 13 in sycl-tla.
 
       ```cpp
@@ -22,11 +22,8 @@ tile_configurations:
       using DispatchPolicy = MainloopXeL1Staged<PipelineStages>;
       ```
 
-      Performance: ~37.9 TFLOPS on B580 at M=N=K=4096 (32% peak).
-      This historical figure lacks complete driver/compiler/timing provenance
-      here; treat it as unverified context, not a target or a portable baseline.
       Each subgroup handles 32x64 output (256/8 x 256/4).
-      SLM double-buffer: 2*(256*32 + 32*256)*2 = 64 KB (fits 128 KB budget).
+      SLM double-buffer: 2*(256*32 + 32*256)*2 = 64 KB; check it against the device's SLM.
     applies_to: [gemm, large_shapes, M_ge_256, N_ge_256]
 
   - id: cutlass_bmg_dual_gemm_128x128x64
@@ -46,10 +43,8 @@ tile_configurations:
       using DispatchPolicy = MainloopIntelXeXMX16<PipelineStages>;
       ```
 
-      Performance: ~3.8 TFLOPS on B580 (8% peak) — significantly lower than
-      standard GEMM due to smaller tiles and double memory reads (B0+B1).
-      This historical result lacks complete shape and build provenance here.
-      Establish a local baseline before drawing performance or causal conclusions.
+      Smaller tiles and double memory reads (B0+B1) than a standard GEMM.
+      Establish a local baseline before drawing performance conclusions.
 
       OPTIMIZATION OPPORTUNITIES:
       - Try larger tiles if register pressure allows (e.g., 256x128x32)
@@ -155,7 +150,7 @@ tile_configurations:
 
 dispatch_policies:
   - id: cutlass_mainloop_xe_l1_staged
-    name: "MainloopXeL1Staged - candidate for standard GEMM on BMG"
+    name: "MainloopXeL1Staged - candidate for standard GEMM"
     description: |
       L1-staged data movement using DPAS atoms (XE_DPAS_TT) and 2D block
       copy atoms. Compare this policy with supported alternatives on the actual
@@ -166,13 +161,12 @@ dispatch_policies:
       ```
 
       Used by: benchmarks, example 00 (basic GEMM), example 03 (Stream-K).
-      Achieves ~37.9 TFLOPS at 4096^3 on B580.
 
   - id: cutlass_mainloop_intel_xe_xmx16
     name: "MainloopIntelXeXMX16 — general-purpose Xe mainloop"
     description: |
       Base Xe mainloop for XMX (DPAS) with SIMD16 subgroups.
-      Works on both Battlemage (Xe2) and PVC (Xe-HPC).
+      Works across Xe architectures with XMX.
 
       ```cpp
       using DispatchPolicy = MainloopIntelXeXMX16<2>;
@@ -381,4 +375,4 @@ fused_kernel_patterns:
       - Stage 2: D = temp * C (read from SLM)
 
       Relevant for MLP blocks where output of one linear feeds another.
-      Requires intermediate fitting in SLM (128 KB on BMG).
+      Requires the intermediate to fit in the device's SLM.

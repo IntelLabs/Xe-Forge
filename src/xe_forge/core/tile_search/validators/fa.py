@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 DPAS_ATOM_M = 8
 DPAS_ATOM_N = 16
 MAX_SG = 32
-SLM_BYTES = 128 * 1024
 
 
 @dataclass

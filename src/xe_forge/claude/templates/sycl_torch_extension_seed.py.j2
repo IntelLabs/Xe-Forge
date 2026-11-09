@@ -22,11 +22,14 @@ implementation. A unique load_inline module name alone does not isolate device k
 
 import os
 
-# The XPU AOT arch list defaults to every architecture torch's runtime knows;
-# pin it to what is actually here.
-os.environ.setdefault("TORCH_XPU_ARCH_LIST", os.environ.get("XE_FORGE_XPU_ARCH", "bmg"))
-
 import torch
+
+# The XPU AOT arch list defaults to every architecture torch's runtime knows;
+# pin it to the device that is actually here (its PCI id, which ocloc accepts).
+os.environ.setdefault(
+    "TORCH_XPU_ARCH_LIST",
+    os.environ.get("XE_FORGE_XPU_ARCH") or hex(torch.xpu.get_device_properties().device_id),
+)
 import torch.nn as nn
 from torch.utils.cpp_extension import load_inline
 

@@ -8,7 +8,7 @@ used by the analyzer, optimizer, and planner agents.
 from __future__ import annotations
 
 _DEVICE_DESCRIPTIONS: dict[str, str] = {
-    "xpu": "Intel XPU (Data Center GPU Max / Ponte Vecchio)",
+    "xpu": "Intel XPU",
     "cuda": "NVIDIA CUDA GPU",
     "cpu": "CPU",
 }
@@ -18,28 +18,6 @@ _DSL_NAMES: dict[str, str] = {
     "gluon": "Gluon",
     "sycl": "SYCL/Sycl-tla",
     "cuda": "CUDA C++",
-}
-
-_DEVICE_TUNING_DEFAULTS: dict[str, dict[str, int | str]] = {
-    "xpu": {
-        "BLOCK_M": 256,
-        "BLOCK_N": 256,
-        "BLOCK_K": 32,
-        "num_warps": 32,
-        "grf_mode": "large (256 registers)",
-    },
-    "cuda": {
-        "BLOCK_M": 128,
-        "BLOCK_N": 128,
-        "BLOCK_K": 32,
-        "num_warps": 4,
-    },
-    "cpu": {
-        "BLOCK_M": 64,
-        "BLOCK_N": 64,
-        "BLOCK_K": 32,
-        "num_warps": 1,
-    },
 }
 
 
@@ -72,32 +50,19 @@ class PromptLibrary:
         }
         return labels.get(self.device_type, "DEVICE SPECIFIC")
 
-    def tuning_defaults(self) -> dict[str, int | str]:
-        return _DEVICE_TUNING_DEFAULTS.get(
-            self.device_type,
-            _DEVICE_TUNING_DEFAULTS["xpu"],
-        )
-
     def stage_guidance(self, stage: str) -> str:
         """Return device-specific guidance for a given optimization stage."""
-        defaults = self.tuning_defaults()
-
         if stage == "device_specific":
             if self.device_type == "xpu":
                 return (
-                    f"Intel XPU tuning: BLOCK_M={defaults['BLOCK_M']}, "
-                    f"BLOCK_N={defaults['BLOCK_N']}, BLOCK_K={defaults['BLOCK_K']}, "
-                    f"num_warps={defaults['num_warps']}, "
-                    f"grf_mode={defaults.get('grf_mode', 'large')}. "
-                    "Use tl.extra.intel.libdevice for exp2/sigmoid. "
-                    "Avoid .cpu() returns."
+                    "Intel XPU tuning: choose tile sizes, num_warps and grf_mode by "
+                    "autotuning on this device. Use tl.extra.intel.libdevice for "
+                    "exp2/sigmoid. Avoid .cpu() returns."
                 )
             if self.device_type == "cuda":
                 return (
-                    f"NVIDIA CUDA tuning: BLOCK_M={defaults['BLOCK_M']}, "
-                    f"BLOCK_N={defaults['BLOCK_N']}, BLOCK_K={defaults['BLOCK_K']}, "
-                    f"num_warps={defaults['num_warps']}. "
-                    "Use shared memory for reductions. "
+                    "NVIDIA CUDA tuning: choose tile sizes and num_warps by autotuning on "
+                    "this device. Use shared memory for reductions. "
                     "Consider warp-level primitives."
                 )
             return "Apply device-appropriate tuning parameters."
@@ -147,7 +112,6 @@ class PromptLibrary:
 
     def optimizer_signature_doc(self) -> str:
         """Return the docstring for the OptimizationSignature."""
-        defaults = self.tuning_defaults()
         dsl_name = self.dsl_name()
         device_desc = self.device_description()
 
@@ -162,18 +126,15 @@ class PromptLibrary:
             lines.extend(
                 [
                     "",
-                    f"DEVICE_SPECIFIC: BLOCK_M={defaults['BLOCK_M']}, BLOCK_N={defaults['BLOCK_N']}, "
-                    f"BLOCK_K={defaults['BLOCK_K']}, num_warps={defaults['num_warps']},",
-                    f"grf_mode={defaults.get('grf_mode', 'large')}, "
-                    "tl.extra.intel.libdevice for exp2/sigmoid.",
+                    "DEVICE_SPECIFIC: tile sizes, num_warps and grf_mode autotuned on this "
+                    "device; tl.extra.intel.libdevice for exp2/sigmoid.",
                 ]
             )
         elif self.device_type == "cuda" and self.dsl == "triton":
             lines.extend(
                 [
                     "",
-                    f"DEVICE_SPECIFIC: BLOCK_M={defaults['BLOCK_M']}, BLOCK_N={defaults['BLOCK_N']}, "
-                    f"BLOCK_K={defaults['BLOCK_K']}, num_warps={defaults['num_warps']}.",
+                    "DEVICE_SPECIFIC: tile sizes and num_warps autotuned on this device.",
                 ]
             )
 
@@ -209,7 +170,6 @@ class PromptLibrary:
             "dsl_name": self.dsl_name(),
             "device_type": self.device_type,
             "device_description": self.device_description(),
-            "defaults": self.tuning_defaults(),
             **extra_context,
         }
         try:
@@ -222,20 +182,16 @@ class PromptLibrary:
 
         Returns an empty string for the default XPU/Triton target (already hardcoded in
         Signature docstrings). For other device targets, returns a correction block so the
-        LLM uses the right tile sizes and hardware constraints.
+        LLM uses the right hardware constraints.
         """
-        defaults = self.tuning_defaults()
-
         if self.device_type == "xpu":
             return ""
 
         lines = [
             f"=== TARGET DEVICE OVERRIDE: {self.device_description()} ===",
             f"DSL: {self.dsl_name()}",
-            "Use the following hardware-specific defaults (override any XPU values above):",
+            "Ignore any XPU-specific guidance above; tune for this device.",
         ]
-        for k, v in defaults.items():
-            lines.append(f"  {k}: {v}")
 
         if self.device_type == "cuda" and self.dsl == "triton":
             lines.append("Use shared memory for reductions. Consider warp-level primitives.")

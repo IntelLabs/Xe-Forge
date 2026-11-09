@@ -6,9 +6,8 @@ patterns:
     stage: dtype_fix
     description: "Replace float64 accumulators with float32"
     rationale: |
-      float64 throughput is 16-32x slower than float32 on GPUs/XPUs.
-      This is the single biggest performance killer in many kernels.
-      Using float64 alone can cap performance at around 2 TFLOPS on Intel XPU.
+      float64 throughput is far below float32 on GPUs, and some have no native
+      float64 at all. This is the single biggest performance killer in many kernels.
     pattern_before: |
       acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float64)
       a = a_fp32.to(tl.float64)

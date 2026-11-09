@@ -1,6 +1,6 @@
 """
 Conv3d(32->64, 3x3x3, pad=1) + MaxPool3d(2) + LogSumExp(dim=1) + ReLU
-FULL Triton on Intel Arc B580 — no oneDNN
+FULL Triton on Intel XPU — no oneDNN
 
 Spatially-tiled Conv3d (all tensor descriptors) + fused Pool+LSE+ReLU.
 Padding in d/h: conditional skip. Padding in w: descriptor out-of-bounds zero fill.
@@ -347,7 +347,7 @@ def main():
     ]
 
     print(f"\n{'='*80}")
-    print(f"  Roofline -- Intel Arc B580 (110 TF/s fp16 peak, 456 GB/s)")
+    print(f"  Roofline -- {torch.xpu.get_device_name()}")
     print(f"{'='*80}")
     print(f"  FLOPs: {flops/1e9:.2f} GFLOP  |  Data: {data_bytes/1e6:.1f} MB  |  AI: {flops/data_bytes:.1f} FLOP/byte")
     print(f"{'='*80}")

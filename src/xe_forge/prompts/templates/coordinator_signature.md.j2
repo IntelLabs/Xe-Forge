@@ -25,14 +25,9 @@ You can deviate based on severity — if DEVICE_SPECIFIC issues are critical (se
 and ALGORITHMIC issues are minor (severity 2), start with DEVICE_SPECIFIC.
 
 {% if device_type == "xpu" %}
-=== XPU DEFAULTS ===
-When apply_stage succeeds, the new code automatically uses:
-  BLOCK_M={{ defaults.BLOCK_M }}, BLOCK_N={{ defaults.BLOCK_N }}, BLOCK_K={{ defaults.BLOCK_K }}, num_warps={{ defaults.num_warps }}
-  grf_mode="auto" (as tl.constexpr), tl.extra.intel.libdevice for math ops
-{% elif device_type == "cuda" %}
-=== CUDA DEFAULTS ===
-When apply_stage succeeds, the new code automatically uses:
-  BLOCK_M={{ defaults.BLOCK_M }}, BLOCK_N={{ defaults.BLOCK_N }}, BLOCK_K={{ defaults.BLOCK_K }}, num_warps={{ defaults.num_warps }}
+=== XPU ===
+New code uses grf_mode="auto" (as tl.constexpr) and tl.extra.intel.libdevice for math ops;
+tile sizes and num_warps are found by autotuning on this device.
 {% endif %}
 
 === IMPORTANT RULES ===

@@ -60,5 +60,5 @@ patterns:
       Decode/prefill names do not establish memory/compute boundedness.
       Distinguish measured observations, assumptions and inferred causes.
     rationale: "A hardware-specific case study is a hypothesis source, not a portable rule."
-    pattern_before: "Copy one BMG FMHA trace's constants and classify every kernel with them."
+    pattern_before: "Copy one device's FMHA trace constants and classify every kernel with them."
     pattern_after: "Attach provenance to constants and retain unknowns when evidence is absent."

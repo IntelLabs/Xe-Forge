@@ -1,14 +1,14 @@
 # Framework frontend: from a running model to optimized kernels
 
 ```
-xe-forge run --framework vllm --model Qwen/Qwen2.5-0.5B-Instruct \
-    --framework-python <framework-venv>/bin/python --batch 4 --input-len 512 --output-len 16 \
-    --calibration <calibration.json> --kernel-repos <dir> --top 3 -o runs/qwen
+xe-forge run --framework <framework> --model <hub id> \
+    --framework-python <framework-venv>/bin/python --batch <n> --input-len <n> --output-len <n> \
+    --calibration <calibration.json> --kernel-repos <dir> --top 3 -o runs/<name>
 ```
 
 profiles the model in its serving framework, names the kernel behind each op, picks the ones
 with the most recoverable device time, optimizes each with Xe-Forge and writes
-`runs/qwen/results/SUMMARY.md`: every kernel the model ran, what was done with it and why,
+`runs/<name>/results/SUMMARY.md`: every kernel the model ran, what was done with it and why,
 and each measured win with its patch.
 
 Nothing in the code knows a framework. **Agents do the framework- and model-specific work;
@@ -26,7 +26,7 @@ code measures and checks it**, through `xe-forge-skill` tools the agents call th
 | prove (`--prove`) | agent builds two stacks and makes the launcher hold on each; code re-runs it in each | `prove/` | median and spread over `--prove-repeat` alternating captures |
 
 `run` reuses `capture.json` and `names.json` when they exist (remove one to redo that step);
-`xe-forge optimize runs/qwen/kernels.yaml` re-runs only the optimize step.
+`xe-forge optimize runs/<name>/kernels.yaml` re-runs only the optimize step.
 
 ## Tools
 
