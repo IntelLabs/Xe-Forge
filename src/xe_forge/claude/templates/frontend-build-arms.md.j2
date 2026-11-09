@@ -8,5 +8,15 @@ Patches, each with the PORT.txt beside it naming its repository and base commit:
   layered over the framework's venv and holding only what you rebuilt.
 - Check that each arm imports its rebuilt package from its own venv and that the framework
   still imports.
+{%- if launcher %}
+- The run's launcher {{ launcher }} then measures each arm, under FRAMEWORK_PYTHON=<the
+  arm's python>. Whatever it established on the build it was written on -- which kernels a
+  node runs, laid out per launch -- it must establish again per arm, and work an arm does
+  once on first use (a weight prepack, a JIT) stays before what it measures. Under each arm
+  run `xe-forge-skill capture run {{ launcher }} -o <arm>-check/raw` and `xe-forge-skill
+  capture parse <arm>-check/raw -o <arm>-check/capture.json` until both pass for both arms,
+  changing the launcher but never the workload (meta.json's runtime the same for both).
+{%- endif %}
 - Write arms.json {"A": "<venv-A python>", "B": "<venv-B python>"}, or {"error": "<why>"}
-  if an arm cannot be built, and in report.md what you built and how.
+  if an arm cannot be built or measured, and in report.md what you built, how, and what you
+  changed in the launcher.

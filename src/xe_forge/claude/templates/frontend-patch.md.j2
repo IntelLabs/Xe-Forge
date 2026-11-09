@@ -14,7 +14,7 @@ interpreter is {{ python }}.
    that the patched package imports from there and the framework still imports.
  - Write generate.sh here: under $FRAMEWORK_PYTHON, run {{ model }} with the framework, on
    the GPU, eagerly, on `xe_forge.frontend.profile.token_ids(profile.hf_vocab(tok),
-   {{ batch }}, {{ input_len }})`, generating {{ output_len }} tokens with no stop at EOS, plain
+   {{ batch }}, {{ input_len }}{% if 'prompts' in inputs %}, prompt_file="{{ inputs.prompts.file }}"{% endif %})`, generating {{ output_len }} tokens with no stop at EOS, plain
    greedy -- the argmax of the raw logits, no repetition, frequency or presence penalty, the
    checkpoint's generation_config ignored -- and write the generated ids to $OUT/tokens.json
    as [[ids of sequence 0], ...].
@@ -25,11 +25,13 @@ interpreter is {{ python }}.
    torch with the latest transformers), and "trust_remote_code": true when the model needs
    its own code. Then run
      xe-forge-skill patch check . --repos {{ repos }} --framework-python {{ python }} \
-       --model {{ model }} --batch {{ batch }} --input-len {{ input_len }}
+       --model {{ model }} --batch {{ batch }} --input-len {{ input_len }}{% if 'prompts' in inputs %} \
+       --prompt-file {{ inputs.prompts.file }}{% endif %}
    It diffs base..HEAD itself, applies that to a fresh clone, checks the import, runs
    generate.sh, then has transformers score its tokens on the GPU: fed each sequence's prompt
    and generated prefix, every one of the first 32 generated tokens must be within 0.3 nat of
-   transformers' best. A FAIL there is the patch's: fix it, never the check.
+   transformers' best. It scores in bf16; a sequence that fails there is judged again in
+   float32, and that verdict is final. A FAIL there is the patch's: fix it, never the check.
 
 Write {{ answer }}: patch.json's content with "notes": "<what the patch adds and how it was
 verified>", once the check passes; or {"error": "<why>", "next_step": "<what a person would

@@ -4,7 +4,8 @@ wrote. The launcher owns the framework; these own what is measured and whether i
 A launcher runs one profiled batch and writes into ``$RAW_DIR``:
   meta.json   {"framework", "framework_version", "model": {"name", "config"}, "runtime": {...},
                "device": {...}, "repeats": <times the process ran the identical workload,
-               warm-up included; unitrace times the whole process>}
+               warm-up included; unitrace times the whole process, and first-use work
+               (model load, a prepack) stays before those runs>}
   and, for a torch framework, ``trace*.json.gz`` (torch.profiler, record_shapes=True; see
   ``xe_forge.frontend.profile.profile_region``), or, for any other framework, ``ops.json``:
   {"<op key>": {"framework_op", "kernels": ["<regex over unitrace kernel names>", ...],
@@ -69,18 +70,32 @@ def _launch(
 
 
 def _timeline(scratch: Path) -> list[list]:
-    """[[kernel, us], ...] of every launch, in device order, from --chrome-kernel-logging."""
-    events = []
+    """[[kernel, us], ...] of every launch, in submission order, from --chrome-kernel-logging.
+
+    Each process's launches are ordered by unitrace's launch id, which counts submissions: their
+    device start times can be skewed enough to swap neighbours (seen with oneDNN kernels), and
+    the order would then differ from run to run. Without ids, by start time. Processes follow
+    one another by their first launch."""
+    procs = []
     for path in scratch.glob("*.json"):
         try:
             data = json.loads(path.read_text(errors="replace"), strict=False)
         except (json.JSONDecodeError, OSError):
             continue
-        if isinstance(data, dict):
-            events += [e for e in data.get("traceEvents") or []
-                       if e.get("ph") == "X" and e.get("cat") == "gpu_op"]  # fmt: skip
-    events.sort(key=lambda e: float(e["ts"]))
-    return [[_SIMD.sub("", e["name"]).strip(), round(float(e["dur"]), 3)] for e in events]
+        if not isinstance(data, dict):
+            continue
+        ev = [e for e in data.get("traceEvents") or []
+              if e.get("ph") == "X" and e.get("cat") == "gpu_op"]  # fmt: skip
+        if not ev:
+            continue
+        if all(str((e.get("args") or {}).get("id", "")).isdigit() for e in ev):
+            ev.sort(key=lambda e: int(e["args"]["id"]))
+        else:
+            ev.sort(key=lambda e: float(e["ts"]))
+        procs.append(ev)
+    procs.sort(key=lambda ev: min(float(e["ts"]) for e in ev))
+    return [[_SIMD.sub("", e["name"]).strip(), round(float(e["dur"]), 3)]
+            for ev in procs for e in ev]  # fmt: skip
 
 
 def _tail(log: Path, n: int = 25) -> str:
@@ -342,6 +357,12 @@ def parse_capture(args) -> int:
           f"{r['total_device_us'] / 1e3:.1f} ms device time, {r['attributed_pct']}% attributed; "
           f"unitrace saw {truth / 1e3:.1f} ms; {known_pct:.1f}% of op time is in kernels unitrace "
           f"names -> {out}")  # fmt: skip
+    # The inputs the launcher says it ran on (runtime.inputs: name -> {"file", "sha256"}) are
+    # the ones it was given: each file still hashes to its recorded sha256.
+    for name, inp in ((r.get("runtime") or {}).get("inputs") or {}).items():
+        f = Path(inp.get("file") or "")
+        if not f.is_file() or _sha256(f) != inp.get("sha256"):
+            problems.append(f"input {name!r}: {f} is missing or not the file the run was given")
     if not capture.ops:
         problems.append("no ops")
     if known_pct < 90:

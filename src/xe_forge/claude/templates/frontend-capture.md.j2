@@ -7,7 +7,9 @@ The workload: a batch of {{ batch }} sequences of {{ input_len }} prompt tokens 
 generating {{ output_len }} tokens with no stop at EOS -- one prefill of the batch and the
 decode steps after it. Prompt token ids are fixed: the same for every framework and run,
 `from xe_forge.frontend import profile; profile.token_ids(profile.hf_vocab(tokenizer), {{ batch }},
-{{ input_len }})` (tokenizer: the model's Hugging Face tokenizer). Run eagerly: no graph
+{{ input_len }}{% if 'prompts' in inputs %}, prompt_file="{{ inputs.prompts.file }}"{% endif %})` (tokenizer: the model's Hugging Face tokenizer). A framework
+that takes text rather than ids is given text that encodes back to exactly those ids -- check
+it. Run eagerly: no graph
 capture or compilation, no prefix caching, nothing cached between requests; a warm-up run
 first, outside what is measured.
 
@@ -31,9 +33,14 @@ Write launcher/run.sh here: an executable that runs that workload once more with
 setting it needs, the framework under $FRAMEWORK_PYTHON when that is set (it is when another
 build of the stack is measured) and {{ python }} otherwise, and writes into $RAW_DIR:
  - meta.json: {"framework", "framework_version", "model": {"name", "config": <its config as
-   a dict>}, "runtime": {"batch", "input_len", "output_len", and every setting that changes
-   what runs}, "device": {"type", "name"}, "repeats": <how many times the process ran the
-   identical workload, warm-up included>};
+   a dict>}, "runtime": {"batch", "input_len", "output_len", "inputs": {{ inputs | tojson }}
+   (verbatim: the files the run's inputs come from, which the parse checks), and every
+   setting that changes what runs}, "device": {"type", "name"}, "repeats": <how many times
+   the process ran the identical workload, warm-up included>} -- what unitrace sees is
+   exactly those runs, work done once (model load, a first-use prepack or JIT) kept before
+   them. Runs that compare their tokens may part only at a near-tie: where one first picks
+   another token, the other's logprob of it is within 0.3 nat of its own pick (the patch
+   check's tolerance); past that a sequence runs on another prefix and is not compared;
  - for a framework that runs on PyTorch: its torch.profiler trace of exactly the generation
    (trace*.json.gz, record_shapes=True; `xe_forge.frontend.profile.profile_region(fn,
    raw_dir)` does this for a callable in this process -- a framework that runs the model in
@@ -46,7 +53,10 @@ build of the stack is measured) and {{ python }} otherwise, and writes into $RAW
    one kernel name serves several nodes (a library's GEMM for every matmul), give each node
    "launches": [[start, end], ...] as well -- index ranges into raw/unitrace_launches.json,
    the measured run's launches in device order, which `capture run` writes: run it once,
-   read that, and have the launcher write the ranges.
+   read that, and have the launcher write the ranges. The launcher is later run on rebuilt
+   stacks whose kernels differ in name and count: what it establishes about this build (a
+   kernel map) it keys to the build and establishes again on another, never failing on a
+   kernel it has not seen.
 
 Then run, under any interpreter that imports xe_forge (PYTHONPATH is set):
   xe-forge-skill capture run launcher/run.sh -o raw

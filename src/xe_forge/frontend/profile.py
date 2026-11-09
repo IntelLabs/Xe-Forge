@@ -1,5 +1,6 @@
-"""What a capture launcher imports: the model's fixed input token ids (the same work for every
-framework and run -- not an LLM prompt; those are claude/templates/*.j2), the device torch
+"""What a capture launcher imports: the model's input token ids (the same work for every
+framework and run: fixed synthetic ids, or slices of the run's prompt file -- not an LLM
+prompt for an agent; those are claude/templates/*.j2), the device torch
 sees, and one torch.profiler region written as ``trace.json.gz`` for ``capture parse``.
 """
 
@@ -78,12 +79,14 @@ def hf_vocab(tok) -> Vocab:
 def token_ids(
     vocab: Vocab, batch: int, length: int, prompt_file: Path | None = None
 ) -> list[list[int]]:
+    """``batch`` rows of ``length`` ids: with ``prompt_file``, consecutive slices of its text
+    (``xe-forge run --prompt-file``), each row its own; without, fixed synthetic ids."""
     if prompt_file:
         ids = vocab.encode(Path(prompt_file).read_text())
-        if not ids:
-            raise SystemExit(f"{prompt_file} tokenizes to nothing")
-        stride = max(1, len(ids) // batch)
-        return [[ids[(j * stride + i) % len(ids)] for i in range(length)] for j in range(batch)]
+        if len(ids) < batch * length:
+            raise SystemExit(f"{prompt_file} tokenizes to {len(ids)} ids; {batch} rows of "
+                             f"{length} need {batch * length}")  # fmt: skip
+        return [ids[j * length : (j + 1) * length] for j in range(batch)]
     pool = vocab.ordinary
     if not pool:
         raise SystemExit("the tokenizer has no ordinary tokens for a synthetic prompt")

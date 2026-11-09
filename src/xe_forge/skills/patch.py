@@ -12,8 +12,11 @@ first --min-match tokens of every sequence is within --tolerance nat of the best
 Hugging Face transformers reference fed the same prefix (teacher forcing: one forward per
 sequence, on the GPU in bf16) -- under patch.json's "reference_python" (the
 agent's, when the framework's transformers cannot load the model), else --reference-python,
-else the framework's interpreter. The agent owns that environment; the scoring is fixed here.
-Exit 0 passes.
+else the framework's interpreter. A sequence bf16 fails is judged again, all its positions,
+in float32 (on the GPU, or the CPU when it does not fit there): bf16 rounding over a long
+context can rank the reference's own tokens wrongly, and float32's verdict on that sequence is
+final; if that pass fails, bf16's stands. The agent owns that environment; the scoring and
+the precision are fixed here. Exit 0 passes.
 """
 
 from __future__ import annotations
@@ -31,21 +34,30 @@ import transformers
 from xe_forge.frontend import profile
 model_id, batch, input_len, n, trust = sys.argv[1], *map(int, sys.argv[2:5]), sys.argv[5] == "1"
 got = json.load(open(sys.argv[6]))
+prompt_file, dtype = sys.argv[7] or None, sys.argv[8]
+rows = [int(i) for i in sys.argv[9].split(",")] if sys.argv[9] else range(min(len(got), batch))
 dev = profile.device_type()
 if dev == "cpu":
     sys.exit("the reference interpreter sees no GPU")
 tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=trust)
-m = AutoModelForCausalLM.from_pretrained(model_id, dtype=torch.bfloat16, trust_remote_code=trust)
-m = m.to(dev).eval()
-gaps = []
-for p, g in zip(profile.token_ids(profile.hf_vocab(tok), batch, input_len), got):
-    g = g[:n]  # one row, the whole sequence's logits: no batch, no last-token slice
+m = AutoModelForCausalLM.from_pretrained(model_id, dtype=getattr(torch, dtype), trust_remote_code=trust)
+try:
+    m = m.to(dev).eval()
+except RuntimeError as e:  # float32 that does not fit the GPU runs on the CPU
+    if dtype != "float32" or "out of memory" not in str(e).lower():
+        raise
+    m, dev = m.to("cpu").eval(), "cpu"
+prompts = profile.token_ids(profile.hf_vocab(tok), batch, input_len, prompt_file)
+gaps = {}
+for i in rows:
+    p, g = prompts[i], got[i][:n]  # one row, the whole sequence's logits: no batch, no slice
     with torch.no_grad():
         x = torch.tensor([p + g], device=dev)
         lp = m(input_ids=x, use_cache=False).logits[0, len(p) - 1:-1].float().log_softmax(-1)
     best = lp.max(-1).values
-    gaps.append((best - lp[torch.arange(len(g), device=dev), torch.tensor(g, device=dev)]).tolist())
-print(json.dumps({"gaps": gaps, "transformers": [transformers.__version__, transformers.__file__]}))
+    gaps[i] = (best - lp[torch.arange(len(g), device=dev), torch.tensor(g, device=dev)]).tolist()
+print(json.dumps({"gaps": gaps, "device": dev,
+                  "transformers": [transformers.__version__, transformers.__file__]}))
 """
 
 
@@ -109,23 +121,47 @@ def check(args) -> tuple[list[str], dict]:
                 f"generate.sh failed (exit {run.returncode}): {run.stderr.strip()[-400:]}"
             ], record
         got = json.loads(got_path.read_text())
-        # Teacher forcing on the candidate's own tokens, on the GPU in bf16.
-        ref = subprocess.run([meta.get("reference_python") or args.reference_python
-                              or args.framework_python, "-c", _REFERENCE, args.model,
-                              str(args.batch), str(args.input_len), str(args.min_match),
-                              "1" if args.trust_remote_code or meta.get("trust_remote_code") else "0",
-                              str(got_path)], capture_output=True, text=True, env=_env())  # fmt: skip
-    if ref.returncode != 0:
-        return [
-            f"the transformers reference failed ({ref.stderr.strip()[-400:]}); patch.json's "
-            '"reference_python" (GPU torch and a transformers that loads the model) and '
-            '"trust_remote_code" set it up'
-        ], record
-    res = json.loads(ref.stdout.strip().splitlines()[-1])
-    gaps, n, tol = res["gaps"], args.min_match, args.tolerance
+        n, tol = args.min_match, args.tolerance
+
+        def score(dtype: str, rows: list[int] | None = None) -> subprocess.CompletedProcess:
+            """Teacher forcing on the candidate's own tokens, on the GPU."""
+            return subprocess.run([
+                meta.get("reference_python") or args.reference_python or args.framework_python,
+                "-c", _REFERENCE, args.model, str(args.batch), str(args.input_len), str(n),
+                "1" if args.trust_remote_code or meta.get("trust_remote_code") else "0",
+                str(got_path), args.prompt_file or "", dtype,
+                ",".join(map(str, rows)) if rows else ""],
+                capture_output=True, text=True, env=_env())  # fmt: skip
+
+        ref = score("bfloat16")
+        if ref.returncode != 0:
+            return [
+                f"the transformers reference failed ({ref.stderr.strip()[-400:]}); patch.json's "
+                '"reference_python" (GPU torch and a transformers that loads the model) and '
+                '"trust_remote_code" set it up'
+            ], record
+        res = json.loads(ref.stdout.strip().splitlines()[-1])
+        bf16 = [res["gaps"][k] for k in sorted(res["gaps"], key=int)]
+        gaps, judge = list(bf16), ["bf16"] * len(bf16)
+        # A sequence bf16 fails: float32 judges all its positions, and its verdict is final.
+        again = [i for i, g in enumerate(bf16)
+                 if i < len(got) and len(got[i]) >= n and max(g, default=0) > tol]  # fmt: skip
+        fp32 = None
+        if again:
+            ref32 = score("float32", again)
+            fp32 = {
+                "rows": again,
+                "error": ref32.stderr.strip()[-400:] if ref32.returncode else None,
+            }
+            if not ref32.returncode:
+                res32 = json.loads(ref32.stdout.strip().splitlines()[-1])
+                fp32.update(device=res32["device"], gaps=res32["gaps"])
+                for k, g in res32["gaps"].items():
+                    gaps[int(k)], judge[int(k)] = g, "fp32"
     worst = [round(max(r, default=float("inf")), 4) for r in gaps]
-    record.update(tokens=got, gaps=gaps, worst=worst, tolerance=tol, required=n,
-                  transformers=res.get("transformers"))  # fmt: skip
+    record.update(tokens=got, gaps=gaps, worst=worst, judge=judge, bf16_gaps=bf16, fp32=fp32,
+                  tolerance=tol, required=n, transformers=res.get("transformers"),
+                  prompt_file=args.prompt_file)  # fmt: skip
     if len(gaps) != len(got) or any(len(g) < n for g in got) or any(w > tol for w in worst):
         problems.append(f"tokens fall more than {tol} nat below transformers' best within the "
                         f"first {n}: worst per sequence {worst} ({len(got)} of {args.batch})")  # fmt: skip
@@ -143,4 +179,9 @@ def run(args) -> int:
         print(f"patch check: PASS {record['repo']} {record['base'][:12]}..{record['head'][:12]} "
               f"({len(record['files'])} files); tokens within {record['tolerance']} nat of transformers (worst {max(record['worst'])}) "
               f"-> {record['patch']}")  # fmt: skip
+        for k in (record.get("fp32") or {}).get("gaps") or {}:
+            print(
+                f"patch check: sequence {k} judged in float32 on {record['fp32']['device']} "
+                f"(bf16 {max(record['bf16_gaps'][int(k)]):.4f} -> {record['worst'][int(k)]})"
+            )
     return 0 if not problems else 1

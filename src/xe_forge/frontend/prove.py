@@ -9,11 +9,14 @@ from pathlib import Path
 
 from xe_forge.frontend import agent
 
+PARSE_REFUSED = 3  # recapture: the launcher ran, its capture did not parse
 
-def _build_arms(prove_dir: Path, patches: list[Path], python: str, max_turns: int) -> dict:
-    arms = agent.run(
-        "frontend-build-arms.md.j2", {"patches": patches}, prove_dir, "arms.json", python, max_turns
-    )
+
+def _build_arms(
+    prove_dir: Path, patches: list[Path], python: str, max_turns: int, launcher: Path | None
+) -> dict:
+    ctx = {"patches": patches, "launcher": launcher if launcher and launcher.is_file() else None}
+    arms = agent.run("frontend-build-arms.md.j2", ctx, prove_dir, "arms.json", python, max_turns)
     if set(arms) != {"A", "B"} or arms["A"] == arms["B"]:
         raise RuntimeError(f"build agent gave no two distinct arms: {arms} (see {prove_dir})")
     for arm, python_ in arms.items():
@@ -41,7 +44,7 @@ def prove(run_dir: Path, recapture, python: str, repeat: int, max_turns: int) ->
     prove_dir = run_dir / "prove"
     prove_dir.mkdir(parents=True, exist_ok=True)
     try:
-        arms = _build_arms(prove_dir, patches, python, max_turns)
+        arms = _build_arms(prove_dir, patches, python, max_turns, run_dir / "launcher" / "run.sh")
     except (RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
         return f"## In model\n\nnot run: {exc}\n"
     caps: dict[str, list[Path]] = {"A": [], "B": []}
@@ -49,7 +52,11 @@ def prove(run_dir: Path, recapture, python: str, repeat: int, max_turns: int) ->
         for arm in ("A", "B"):  # alternate, so drift falls on both arms
             path = prove_dir / f"{arm}-r{i}" / "capture.json"
             # The run's own cached launcher, under the arm's interpreter: identical work.
-            if recapture(run_dir, path.parent, arms[arm]) != 0 or not path.is_file():
+            code = recapture(run_dir, path.parent, arms[arm])
+            if code == PARSE_REFUSED and arm == "B" and caps["A"]:
+                return (f"## In model\n\nnot run: arm B ran but its capture does not parse -- "
+                        f"the launcher does not hold on the patched build ({path.parent})\n")  # fmt: skip
+            if code != 0 or not path.is_file():
                 if arm == "B" and caps["A"]:
                     return (f"## In model\n\nFAIL: with the patches the model does not run "
                             f"where the base does ({path.parent}); the patches are not mergeable\n")  # fmt: skip

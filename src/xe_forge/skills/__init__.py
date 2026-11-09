@@ -250,6 +250,7 @@ def main():
     pc.add_argument("--tolerance", type=float, default=0.3,
                     help="nat a token may fall below transformers' best")  # fmt: skip
     pc.add_argument("--trust-remote-code", action="store_true")
+    pc.add_argument("--prompt-file", help="the run's prompt text (xe-forge run --prompt-file)")
 
     # -- bound --
     p_bound = subparsers.add_parser("bound", help="Each workload's efficiency against its bound")

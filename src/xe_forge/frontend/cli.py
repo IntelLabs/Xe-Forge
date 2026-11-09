@@ -79,8 +79,10 @@ def capture(a, python: str, run_dir: Path, turns: int, repos: Path) -> tuple[int
     """
     from xe_forge.frontend import CACHE
 
+    inputs = getattr(a, "inputs", None) or {}
     context = {"model": a.model, "framework": a.framework, "batch": a.batch,
-               "input_len": a.input_len, "output_len": a.output_len, "cache": CACHE}  # fmt: skip
+               "input_len": a.input_len, "output_len": a.output_len, "cache": CACHE,
+               "inputs": inputs}  # fmt: skip
     for round_ in range(1, 4):
         got = _agent("capture", "frontend-capture.md.j2", context, run_dir, "captured.json",
                      python, turns)  # fmt: skip
@@ -107,6 +109,8 @@ def capture(a, python: str, run_dir: Path, turns: int, repos: Path) -> tuple[int
                  str(a.input_len)]  # fmt: skip
         if getattr(a, "reference_python", None):  # the framework's own has no GPU transformers
             check += ["--reference-python", a.reference_python]
+        if "prompts" in inputs:
+            check += ["--prompt-file", inputs["prompts"]["file"]]
         if _tool(python, *check) != 0:  # the gate is the tool's, not the agent's word
             print(f"capture: the patch in {work} does not pass its check", file=sys.stderr)
             return 1, python
@@ -122,10 +126,15 @@ def capture(a, python: str, run_dir: Path, turns: int, repos: Path) -> tuple[int
 def recapture(run_dir: Path, out_dir: Path, python: str) -> int:
     """Re-run the cached launcher under ``python``'s venv, then parse; no agent. The tools
     run here: the stack's interpreter need not import them (llama.cpp's has no torch)."""
+    from xe_forge.frontend.prove import PARSE_REFUSED
+
     launcher = str(run_dir / "launcher" / "run.sh")
-    return _tool(sys.executable, "capture", "run", launcher, "-o", str(out_dir / "raw"),
-                 FRAMEWORK_PYTHON=python) or _tool(
-        sys.executable, "capture", "parse", str(out_dir / "raw"), "-o", str(out_dir / "capture.json"))  # fmt: skip
+    code = _tool(sys.executable, "capture", "run", launcher, "-o", str(out_dir / "raw"),
+                 FRAMEWORK_PYTHON=python)  # fmt: skip
+    if code:
+        return code
+    parse = ["capture", "parse", str(out_dir / "raw"), "-o", str(out_dir / "capture.json")]
+    return PARSE_REFUSED if _tool(sys.executable, *parse) else 0
 
 
 def name(
@@ -466,6 +475,11 @@ def main(argv: list[str]) -> int:
     p.add_argument("--batch", type=int, default=1)
     p.add_argument("--input-len", type=int, default=512)
     p.add_argument("--output-len", type=int, default=32, help="tokens generated")
+    p.add_argument(
+        "--prompt-file",
+        help="text the prompts are sliced from, batch x input-len tokens at least (default: "
+        "fixed synthetic token ids)",
+    )
     _add_analyze_args(p)
     p.add_argument(
         "--name-coverage", type=float, default=0.99,
@@ -493,6 +507,17 @@ def main(argv: list[str]) -> int:
     repos = Path(a.kernel_repos).resolve() if a.kernel_repos else REPO_DIR.parent
     stack = run_dir / "stack.json"  # a patched framework, when one was needed
     python = json.loads(stack.read_text())["python"] if stack.is_file() else a.framework_python
+    # The run's inputs (runtime.inputs): a copy in the run dir, so every agent and gate reads
+    # one stable path, tied by its sha256. Room for other kinds (images, observations).
+    a.inputs = {}
+    if a.prompt_file:
+        from xe_forge.skills.capture import _sha256
+
+        prompts = run_dir / "inputs" / "prompts.txt"
+        prompts.parent.mkdir(parents=True, exist_ok=True)
+        if not prompts.is_file() or prompts.read_bytes() != Path(a.prompt_file).read_bytes():
+            shutil.copyfile(a.prompt_file, prompts)
+        a.inputs = {"prompts": {"file": str(prompts), "sha256": _sha256(prompts)}}
     capture_path = run_dir / "capture.json"
     if not capture_path.is_file():
         code, python = capture(a, python, run_dir, turns, repos)
@@ -505,9 +530,10 @@ def main(argv: list[str]) -> int:
     cap = ir.load(capture_path)  # once; the parse with names below rewrites it for analyze
     rt = cap.run.get("runtime") or {}
     want = {"framework": a.framework, "model": a.model, "batch": a.batch,
-            "input_len": a.input_len, "output_len": a.output_len}  # fmt: skip
+            "input_len": a.input_len, "output_len": a.output_len, "inputs": a.inputs}  # fmt: skip
     have = {"framework": cap.run.get("framework"), "model": (cap.run.get("model") or {}).get("name"),
-            **{k: rt.get(k) for k in ("batch", "input_len", "output_len")}}  # fmt: skip
+            **{k: rt.get(k) for k in ("batch", "input_len", "output_len")},
+            "inputs": rt.get("inputs") or {}}  # fmt: skip
     if have != want:
         print(f"run: {capture_path} is a capture of {have}, not {want}; remove it to capture "
               "again", file=sys.stderr)  # fmt: skip

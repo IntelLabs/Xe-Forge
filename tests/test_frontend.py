@@ -385,6 +385,22 @@ J
 """
 
 
+def test_timeline_follows_submission_not_skewed_start_times(tmp_path):
+    from xe_forge.skills.capture import _timeline
+
+    def ev(name, ts, i=None):
+        return {"ph": "X", "cat": "gpu_op", "name": name, "ts": ts, "dur": 1.0,
+                **({"args": {"id": str(i)}} if i is not None else {})}  # fmt: skip
+
+    # a oneDNN gemm reported as starting before the kernel submitted just ahead of it
+    (tmp_path / "python.1.json").write_text(json.dumps({"traceEvents": [
+        ev("norm", 0.0, 1), ev("convert", 20.5, 2), ev("gemm_kernel", 4.3, 3)]}))  # fmt: skip
+    (tmp_path / "python.2.json").write_text(json.dumps({"traceEvents": [
+        ev("later", 300.0), ev("first_of_2", 100.0)]}))  # fmt: skip
+    assert [n for n, _ in _timeline(tmp_path)] == [
+        "norm", "convert", "gemm_kernel", "first_of_2", "later"]  # fmt: skip
+
+
 @pytest.mark.parametrize(
     "fc_o, problem",
     [("[3, 4]", None), ("[0, 1]", "claimed by both"), ("[1, 2]", "matches none of its kernel")],
@@ -425,6 +441,26 @@ def test_counters_bound_only_a_kernel_of_one_workload_that_they_sampled():
 # ── a framework patch: the agent writes it, `patch check` and `run` gate it ─
 
 
+def _ref_stub(path, bf16, fp32=None, argv=None):
+    """The GPU reference: per-token gaps for the rows asked, bf16's or float32's (None: the
+    float32 pass fails); each call's argv appended to ``argv``."""
+    table = json.dumps({"bfloat16": [list(g) for g in bf16],
+                        "float32": [list(g) for g in fp32] if fp32 else None})  # fmt: skip
+    helper = path.with_suffix(".py")
+    helper.write_text(f"""import json, sys
+table = json.loads({table!r})
+dtype, rows = sys.argv[9], sys.argv[10]
+if {str(argv)!r} != "None":
+    open({str(argv)!r}, "a").write(json.dumps(sys.argv[1:]) + "\\n")
+if table[dtype] is None:
+    sys.exit("float32 does not load")
+rows = [int(i) for i in rows.split(",")] if rows else range(len(table[dtype]))
+print(json.dumps({{"gaps": {{str(i): table[dtype][i] for i in rows}}, "device": "cpu",
+                  "transformers": ["5", "t"]}}))
+""")
+    return _exe(path, f'#!/bin/bash\nshift\nexec {sys.executable} {helper} "$@"\n')
+
+
 def _patch_dir(tmp_path, tokens, base_from="parent", gaps=((0, 0, 0, 0), (0, 0.2, 0, 0))):
     """A clone with base + one patch commit, generate.sh emitting ``tokens``, and stubs for the
     framework interpreter (its sys.prefix) and the GPU reference (fixed per-token gaps)."""
@@ -449,9 +485,7 @@ def _patch_dir(tmp_path, tokens, base_from="parent", gaps=((0, 0, 0, 0), (0, 0.2
         "base": base if base_from == "parent" else "0" * 40}))  # fmt: skip
     (work / "generate.sh").write_text(f"echo '{json.dumps(tokens)}' > \"$OUT/tokens.json\"\n")
     fw = _exe(tmp_path / "fw-python", "#!/bin/bash\necho /no/such/prefix\n")
-    out = json.dumps({"gaps": [list(g) for g in gaps], "transformers": ["5", "t"]})
-    ref = _exe(tmp_path / "ref-python", f"#!/bin/bash\necho '{out}'\n")
-    return work, repos, fw, ref
+    return work, repos, fw, _ref_stub(tmp_path / "ref-python", gaps)
 
 
 def _check(work, repos, fw, ref):
@@ -489,6 +523,26 @@ def test_patch_check_fails_a_wrong_patch(tmp_path, tokens, base, gaps, problem):
     assert code == 1 and problem in out, out
 
 
+@pytest.mark.parametrize("fp32, code, worst, judge", [
+    ([[0] * 4, [0, 0, 0.0, 0]], 0, [0, 0.0], ["bf16", "fp32"]),  # bf16 wrong there: fp32 decides
+    ([[0] * 4, [0, 0, 1.2, 0]], 1, [0, 1.2], ["bf16", "fp32"]),  # fp32 agrees: still a FAIL
+    ([[0] * 4, [0.5, 0, 0, 0]], 1, [0, 0.5], ["bf16", "fp32"]),  # fp32 judges every position
+    (None, 1, [0, 1.4375], ["bf16", "bf16"]),  # the float32 pass fails: bf16's verdict stands
+])  # fmt: skip
+def test_patch_check_judges_a_sequence_bf16_fails_again_in_float32(tmp_path, fp32, code, worst,
+                                                                   judge):  # fmt: skip
+    work, repos, fw, _ = _patch_dir(tmp_path, [[1, 2, 3, 4], [5, 6, 7, 8]])
+    argv = tmp_path / "ref-argv"
+    ref = _ref_stub(tmp_path / "ref-python", [[0] * 4, [0, 0, 1.4375, 0]], fp32, argv)
+    got, out = _check(work, repos, fw, ref)
+    assert got == code, out
+    rec = json.loads((work / "check.json").read_text())
+    assert rec["worst"] == worst and rec["judge"] == judge
+    assert rec["bf16_gaps"][1] == [0, 0, 1.4375, 0]
+    calls = [json.loads(line) for line in argv.read_text().splitlines()]
+    assert [(c[8], c[9]) for c in calls] == [("bfloat16", ""), ("float32", "1")]  # only row 1
+
+
 def test_run_establishes_a_patch_then_captures_on_it(tmp_path, monkeypatch):
     from xe_forge.frontend import cli
 
@@ -515,6 +569,75 @@ def test_run_establishes_a_patch_then_captures_on_it(tmp_path, monkeypatch):
                     ("capture", "/patched/python"), ("capture", "/patched/python")]  # fmt: skip
     assert json.loads((tmp_path / "stack.json").read_text())["python"] == "/patched/python"
     assert checks[0][-2:] == ("--reference-python", "/ref/python")
+
+
+def test_prompt_file_gives_each_row_its_own_slice_and_refuses_too_little_text(tmp_path):
+    from xe_forge.frontend import profile
+
+    vocab = profile.Vocab(lambda text: [ord(c) for c in text], range(10))
+    f = tmp_path / "prompts.txt"
+    f.write_text("abcdefgh")
+    rows = profile.token_ids(vocab, 2, 4, f)
+    assert rows == [[97, 98, 99, 100], [101, 102, 103, 104]] == profile.token_ids(vocab, 2, 4, f)
+    with pytest.raises(SystemExit, match="need 9"):
+        profile.token_ids(vocab, 3, 3, f)  # 8 ids for 3 rows of 3
+
+
+def test_patch_check_scores_on_the_runs_prompt_file(tmp_path):
+    work, repos, fw, ref = _patch_dir(tmp_path, [[1, 2, 3, 4], [5, 6, 7, 8]])
+    argv = tmp_path / "ref-argv"
+    ref = _ref_stub(tmp_path / "ref-python", [[0] * 4] * 2, argv=argv)
+    code, msg = _tool("patch", "check", str(work), "--repos", str(repos), "--framework-python",
+                      str(fw), "--reference-python", str(ref), "--model", "toy", "--batch", "2",
+                      "--input-len", "4", "--min-match", "4", "--prompt-file", "/run/p.txt")  # fmt: skip
+    assert code == 0, msg
+    assert json.loads(argv.read_text())[7] == "/run/p.txt"  # the scoring's prompt file
+    assert json.loads((work / "check.json").read_text())["prompt_file"] == "/run/p.txt"
+
+
+def test_capture_parse_refuses_inputs_that_changed_since_the_run(tmp_path):
+    from xe_forge.skills.capture import _sha256
+
+    prompts = tmp_path / "prompts.txt"
+    prompts.write_text("some text")
+    inputs = json.dumps({"prompts": {"file": str(prompts), "sha256": _sha256(prompts)}})
+    unitrace = _exe(tmp_path / "unitrace", UNITRACE_STUB)
+    launcher = _exe(tmp_path / "run.sh", (LAUNCHER % "").replace(
+        '"runtime": {"batch": 1}', f'"runtime": {{"batch": 1, "inputs": {inputs}}}'))  # fmt: skip
+    raw, cap = tmp_path / "raw", tmp_path / "capture.json"
+    assert (
+        _tool("capture", "run", str(launcher), "-o", str(raw), "--unitrace", str(unitrace))[0] == 0
+    )
+    assert _tool("capture", "parse", str(raw), "-o", str(cap))[0] == 0
+    prompts.write_text("other text")
+    code, out = _tool("capture", "parse", str(raw), "-o", str(cap))
+    assert code == 1 and "input 'prompts'" in out, out
+
+
+def test_run_gives_the_prompt_file_to_the_patch_check(tmp_path, monkeypatch):
+    from xe_forge.frontend import cli
+
+    answers = iter([{"unsupported": "model", "what": "Toy", "reason": "r"}, {"notes": "patched"},
+                    {"launcher": "launcher/run.sh"}])  # fmt: skip
+    ctxs = []
+
+    def agent(step, template, ctx, cwd, answer, python, turns):
+        ctxs.append(ctx)
+        if step == "patch":
+            cwd.mkdir(parents=True, exist_ok=True)
+            (cwd / "patch.json").write_text('{"python": "/patched/python"}')
+        return next(answers)
+
+    monkeypatch.setattr(cli, "_agent", agent)
+    checks = []
+    monkeypatch.setattr(cli, "_tool", lambda py, *argv, **env:
+                        (argv[0] == "patch" and checks.append(argv)) or 0)  # fmt: skip
+    inputs = {"prompts": {"file": "/run/inputs/prompts.txt", "sha256": "ab"}}
+    a = SimpleNamespace(model="m", framework="fw", batch=1, input_len=4, output_len=2,
+                        inputs=inputs)  # fmt: skip
+    assert cli.capture(a, "/fw/python", tmp_path, 5, tmp_path / "repos")[0] == 0
+    assert all(c["inputs"] == inputs for c in ctxs)
+    assert checks[0][-2:] == ("--prompt-file", "/run/inputs/prompts.txt")
 
 
 def test_naming_listing_merges_identical_shapes_so_rare_ones_show():
@@ -577,3 +700,37 @@ def test_collect_offers_only_a_win_for_merge(tmp_path, speedup, mergeable):
     row = collect.collect_one(ws, "k", "v", tmp_path / "results")
     assert row["outcome"] == ("win" if speedup else "parity")
     assert row["mergeable"] is mergeable
+
+
+@pytest.mark.parametrize("code_b, says", [(3, "does not parse"), (1, "does not run")])
+def test_prove_tells_a_refused_parse_from_a_model_that_does_not_run(tmp_path, monkeypatch,
+                                                                   code_b, says):  # fmt: skip
+    """Arm B running with a capture the launcher cannot attribute is not a broken patch."""
+    from xe_forge.frontend import agent, prove
+
+    res = tmp_path / "results" / "k__v"
+    (res / "output").mkdir(parents=True)
+    (res / "output" / "upstream.patch").write_text("diff\n")
+    (tmp_path / "results" / "summary.json").write_text(json.dumps([
+        {"kernel": "k", "outcome": "win", "speedup": 1.5, "result": str(res),
+         "patches": ["output/upstream.patch"]}]))  # fmt: skip
+    (tmp_path / "launcher").mkdir()
+    (tmp_path / "launcher" / "run.sh").write_text("#!/bin/bash\n")
+    seen = {}
+
+    def build(template, ctx, cwd, answer, python, turns):
+        seen.update(ctx)
+        return {"A": sys.executable, "B": str(_exe(tmp_path / "b-python", "#!/bin/bash\n"))}
+
+    monkeypatch.setattr(agent, "run", build)
+
+    def recapture(run_dir, out, python):
+        if python != sys.executable:
+            return code_b
+        out.mkdir(parents=True)
+        (out / "capture.json").write_text("{}")
+        return 0
+
+    got = prove.prove(tmp_path, recapture, sys.executable, 1, 5)
+    assert says in got, got
+    assert seen["launcher"] == tmp_path / "launcher" / "run.sh"  # the build agent holds it

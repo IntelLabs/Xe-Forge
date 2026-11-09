@@ -23,7 +23,7 @@ code measures and checks it**, through `xe-forge-skill` tools the agents call th
 | analyze | code (`analyze.py`) | `kernels.yaml`, `specs/`, `analysis.json` | bound arithmetic: GEMM roofline, counter speed-of-light, agent-stated costs |
 | inputs | agent (`frontend-inputs.md.j2`): per kernel, one shape per configuration (each captured workload), merging only the token counts that take the same path, with weights | `inputs/inputs.json`, the specs' `weights:` | `inputs check`: every captured shape stands in one group, a group within one configuration, weights summing to 1 |
 | optimize | Xe-Forge, one workspace per kernel | `workspaces/`, `results/` | Xe-Forge's benchmark and trial gates; `benchmark` times every weighted shape: all correct, none slower, scored on the time-weighted total |
-| prove (`--prove`) | agent builds two stacks; code re-runs the cached launcher in each | `prove/` | median and spread over `--prove-repeat` alternating captures |
+| prove (`--prove`) | agent builds two stacks and makes the launcher hold on each; code re-runs it in each | `prove/` | median and spread over `--prove-repeat` alternating captures |
 
 `run` reuses `capture.json` and `names.json` when they exist (remove one to redo that step);
 `xe-forge optimize runs/qwen/kernels.yaml` re-runs only the optimize step.
@@ -43,17 +43,18 @@ code measures and checks it**, through `xe-forge-skill` tools the agents call th
 The launcher runs one batch of the workload into `$RAW_DIR`, under `$FRAMEWORK_PYTHON` when
 it is set (prove sets it per arm). It writes `meta.json` (framework, model, runtime settings,
 device, and `repeats`: how many times the process ran the identical workload, since unitrace
-times the whole process) and either a torch.profiler trace (`trace*.json.gz`, any PyTorch
+times the whole process; first-use work such as a weight prepack stays before those runs) and either a torch.profiler trace (`trace*.json.gz`, any PyTorch
 framework; `xe_forge.frontend.profile.profile_region` does it for a callable) or, for any
 other framework, `ops.json`: each node, the regexes of the kernel names it ran, its argument
 shapes, its calls. The model's input token ids come from `xe_forge.frontend.profile.token_ids`,
-the same for every framework and run. The full text is `frontend-capture.md.j2`.
+the same for every framework and run: fixed synthetic ids, or with `xe-forge run --prompt-file`
+slices of that text. Real text is closer to use and leaves fewer near-ties between the top two
+tokens. The run's inputs go into `meta.json` as `runtime.inputs` (`{name: {"file",
+"sha256"}}`); `capture parse` checks every file there still has its hash, whatever its kind,
+which leaves room for images or observations. Runs whose tokens are compared may differ only
+at a near-tie (0.3 nat, the patch check's tolerance). The full text is `frontend-capture.md.j2`.
 
-Adding a framework: nothing to add. The B70 experiments that replaced the per-framework
-adapters (Qwen2.5-0.5B, batch 4, 512 + 16 tokens): the agent's capture matched the old vLLM
-and SGLang adapters within 0.4% of device time at 99.9% attribution, and for OpenVINO gave
-concrete shapes for 100% of device time (the adapter: 0%) and counters for 97.6% (8.3%);
-code re-running each cached launcher twice spread by under 0.3%.
+Adding a framework: nothing to add.
 
 ## Counters
 
