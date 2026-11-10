@@ -8,7 +8,7 @@ kernels.yaml and analysis.json.
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 from xe_forge.frontend import formula
 from xe_forge.frontend.calibrate import peaks as calib_peaks
@@ -50,6 +50,7 @@ class Entry:
     priority: float = 0.0
     reason: str = ""
     target: str = "kernel"  # or "library"
+    extra: dict = field(default_factory=dict)  # further manifest fields (a fusion's reference)
 
 
 @dataclass

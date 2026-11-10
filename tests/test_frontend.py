@@ -734,3 +734,162 @@ def test_prove_tells_a_refused_parse_from_a_model_that_does_not_run(tmp_path, mo
     got = prove.prove(tmp_path, recapture, sys.executable, 1, 5)
     assert says in got, got
     assert seen["launcher"] == tmp_path / "launcher" / "run.sh"  # the build agent holds it
+
+
+# ── fuse ────────────────────────────────────────────────────────────────────
+
+
+def _fusion_capture():
+    """A norm (op-0, named rms) and a mul (op-1, aten) that follows it, at 4 and 512 tokens."""
+    from xe_forge.frontend.ir import CapturedOp, CaptureRun, Naming, Workload
+
+    def w(wid, op, name, us):
+        return Workload(workload_id=wid, family="norm", dims={"T": "var", "H": 64},
+                        dtypes=["bfloat16"], layout=[], attrs={}, calls=2, device_us=us,
+                        share=us / 400, ops=[op], naming=Naming("kernel", name, "r", "sycl"),
+                        var_axes={"T": {"512": {"calls": 1, "device_us": us - 10},
+                                        "4": {"calls": 1, "device_us": 10}}})  # fmt: skip
+
+    ops = [
+        CapturedOp("op-0", "rms", [], device_us=200.0),
+        CapturedOp("op-1", "mul", [], device_us=100.0),
+    ]
+    ws = [w("norm/a", "op-0", "rms", 200.0), w("mul/b", "op-1", "mul", 100.0)]
+    return CaptureRun(run={"model": {"name": "m"}, "total_device_us": 400.0}, ops=ops, workloads=ws)
+
+
+_CHAIN = '''"""rms (norm.cpp:10) then mul (model.py:20)."""
+import torch
+class Model(torch.nn.Module):
+    def forward(self, x, w):
+        return x * w
+def get_init_inputs(T, H):
+    return []
+def get_inputs(T, H, dtype):
+    return [torch.ones(T, H, dtype=dtype), torch.ones(H, dtype=dtype)]
+'''
+
+
+def _fusion(tmp_path, **over):
+    (tmp_path / "repo").mkdir(exist_ok=True)
+    (tmp_path / "refs").mkdir(exist_ok=True)
+    (tmp_path / "refs" / "rms_mul_pytorch.py").write_text(over.pop("ref", _CHAIN))
+    f = {"name": "rms_mul", "repo": "repo", "dsl": "sycl", "ops": ["op-0", "op-1"],
+         "anchor": "op-0", "reference": "refs/rms_mul_pytorch.py", "why": "w"}  # fmt: skip
+    return {"fusions": [{**f, **over}]}
+
+
+def test_fuse_check_ranks_a_chain_by_its_time_after_the_kernels_wins(tmp_path):
+    from xe_forge.skills import fuse
+
+    problems, passed = fuse.check(_fusion(tmp_path), _fusion_capture(), {"rms": 4.0}, tmp_path)
+    assert problems == []
+    assert passed[0]["chain_us"] == 150.0  # 200 / 4 for the optimized norm + 100
+    assert passed[0]["share"] == 0.375
+
+
+@pytest.mark.parametrize("over, says", [
+    ({"ops": ["op-0", "op-9"]}, "op-9 is not a captured op"),
+    ({"ops": ["op-0"]}, "two ops or more"),
+    ({"anchor": "op-7"}, "the anchor is one of its ops"),
+    ({"repo": "nowhere"}, "repository 'nowhere' not found"),
+    ({"ref": _CHAIN.replace("def get_inputs(T, H, dtype)", "def get_inputs(T, dtype)").replace(
+        "def get_init_inputs(T, H)", "def get_init_inputs(T)")}, "the anchor's dims"),
+    ({"ref": _CHAIN.replace("def get_inputs(T, H, dtype)", "def get_inputs(T, H)")}, "the dtype"),
+    ({"ref": "import torch\n"}, "defines no Model"),
+])  # fmt: skip
+def test_fuse_check_refuses_a_fusion_the_pipeline_cannot_build(tmp_path, over, says):
+    from xe_forge.skills import fuse
+
+    problems, passed = fuse.check(_fusion(tmp_path, **over), _fusion_capture(), {}, tmp_path)
+    assert passed == [] and any(says in p for p in problems), problems
+
+
+def _git_repo(path: Path) -> str:
+    def git(*a):
+        return subprocess.run(["git", "-C", str(path), *a], check=True, capture_output=True,
+                              text=True).stdout.strip()  # fmt: skip
+
+    path.mkdir()
+    git("init", "-q")
+    (path / "a.txt").write_text("a\n")
+    git("add", "a.txt")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base")
+    return git("rev-parse", "HEAD")
+
+
+def _winning_patch(results: Path, name: str, repo: Path, base: str, old: str, new: str) -> Path:
+    out = results / name / "output"
+    out.mkdir(parents=True)
+    patch = out / "upstream.patch"
+    patch.write_text(f"--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-{old}\n+{new}\n")
+    (out / "PORT.txt").write_text(f"kind: upstream\noutput/upstream.patch:\n  repository: {repo}\n"
+                                  f"  base commit: {base}\n")  # fmt: skip
+    return patch
+
+
+def test_fusions_build_on_the_kernels_winning_patches_applied_in_order(tmp_path):
+    from xe_forge.frontend import fuse
+
+    base = _git_repo(tmp_path / "origin")
+    p1 = _winning_patch(tmp_path / "results", "k1", tmp_path / "origin", base, "a", "b")
+    p2 = _winning_patch(tmp_path / "results", "k2", tmp_path / "origin", base, "b", "c")
+    stacked = fuse.stack([p1, p2], tmp_path / "stacked")
+    clone = Path(stacked[str(tmp_path / "origin")])
+    assert (clone / "a.txt").read_text() == "c\n"
+    made = json.loads((tmp_path / "stacked" / "STACK.json").read_text())
+    assert made[0]["base"] == base and made[0]["patches"] == [str(p1), str(p2)]
+    assert (tmp_path / "origin" / "a.txt").read_text() == "a\n"  # the origin is untouched
+
+
+def test_prove_applies_fusions_after_the_kernels_and_names_their_stack(tmp_path, monkeypatch):
+    from xe_forge.frontend import agent, prove
+
+    rows = {}
+    for where in ("results", "fuse/results"):
+        res = tmp_path / where / "k__v"
+        (res / "output").mkdir(parents=True)
+        (res / "output" / "upstream.patch").write_text("diff\n")
+        rows[where] = res
+        (tmp_path / where / "summary.json").write_text(json.dumps([
+            {"kernel": "k", "outcome": "win", "speedup": 1.5, "result": str(res),
+             "patches": ["output/upstream.patch"]}]))  # fmt: skip
+    (tmp_path / "fuse" / "stacked").mkdir()
+    (tmp_path / "fuse" / "stacked" / "STACK.json").write_text("[]")
+    seen = {}
+
+    def build(template, ctx, cwd, answer, python, turns):
+        seen.update(ctx)
+        return {"error": "stop here"}
+
+    monkeypatch.setattr(agent, "run", build)
+    prove.prove(tmp_path, None, sys.executable, 1, 5)
+    assert seen["patches"] == [rows["results"] / "output/upstream.patch",
+                               rows["fuse/results"] / "output/upstream.patch"]  # fmt: skip
+    assert seen["stack"] == tmp_path / "fuse" / "stacked" / "STACK.json"
+
+
+def test_a_fusion_workspace_gets_its_chain_reference_and_integration_repos(tmp_path):
+    from xe_forge.frontend.cli import xe_forge_command
+
+    entry = {"name": "f", "dsl": "sycl", "spec": "s.yaml", "reference": "/r/f_pytorch.py",
+             "integration_repos": ["/i/vllm"]}  # fmt: skip
+    opts = SimpleNamespace(engine="claude", device="xpu", max_turns=5, compiler_flags=None,
+                           passthrough=[])  # fmt: skip
+    cmd = xe_forge_command(entry, "bench", tmp_path, tmp_path / "ws", opts)
+    assert cmd[cmd.index("--reference") + 1] == "/r/f_pytorch.py"
+    assert cmd[cmd.index("--integration-repo") + 1] == "/i/vllm"
+
+
+def test_optimize_keeps_a_workspace_that_finished(tmp_path, monkeypatch):
+    from xe_forge.frontend import cli
+
+    ws = tmp_path / "workspaces" / "k__bench"
+    ws.mkdir(parents=True)
+    manifest.sidecar(ws, ".status.json").write_text(json.dumps({"exit_code": 0}))
+    (tmp_path / "kernels.yaml").write_text(json.dumps({"kernels": [
+        {"name": "k", "repo": "r", "dsl": "sycl", "enabled": True, "spec": "k.yaml",
+         "variants": ["bench"]}]}))  # fmt: skip
+    monkeypatch.setattr(cli.subprocess, "call", lambda *a, **k: pytest.fail("ran it again"))
+    opts = SimpleNamespace(kernel_repos=str(tmp_path), engine="dspy-agent", only=None)
+    assert cli.optimize(tmp_path / "kernels.yaml", tmp_path, opts) == [("k", "bench")]

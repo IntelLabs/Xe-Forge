@@ -114,6 +114,7 @@ def emit(
         }
         if e.target == "library":
             item["target"] = "library"
+        item.update(e.extra)
         if weights is not None and e.enabled and e.name not in weights:
             e.enabled, e.reason = False, f"{e.reason}; no checked trial shapes (inputs/)"
             item.update(enabled=False, reason=e.reason)

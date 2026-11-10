@@ -13,9 +13,15 @@ PARSE_REFUSED = 3  # recapture: the launcher ran, its capture did not parse
 
 
 def _build_arms(
-    prove_dir: Path, patches: list[Path], python: str, max_turns: int, launcher: Path | None
+    prove_dir: Path,
+    patches: list[Path],
+    python: str,
+    max_turns: int,
+    launcher: Path | None,
+    stack: Path | None = None,
 ) -> dict:
-    ctx = {"patches": patches, "launcher": launcher if launcher and launcher.is_file() else None}
+    ctx = {"patches": patches, "launcher": launcher if launcher and launcher.is_file() else None,
+           "stack": stack if stack and stack.is_file() else None}  # fmt: skip
     arms = agent.run("frontend-build-arms.md.j2", ctx, prove_dir, "arms.json", python, max_turns)
     if set(arms) != {"A", "B"} or arms["A"] == arms["B"]:
         raise RuntimeError(f"build agent gave no two distinct arms: {arms} (see {prove_dir})")
@@ -27,24 +33,33 @@ def _build_arms(
     return arms
 
 
-def prove(run_dir: Path, recapture, python: str, repeat: int, max_turns: int) -> str:
-    """Build, capture both arms, compare; returns the SUMMARY.md section."""
-    from xe_forge.frontend import compare
-
-    rows = json.loads((run_dir / "results" / "summary.json").read_text())
-    best: dict[str, dict] = {}  # one per kernel: variants' patches overlap
+def winners(results: Path) -> list[Path]:
+    """The winning patches in ``results/``, one kernel's best each: variants' overlap."""
+    summary = results / "summary.json"
+    rows = json.loads(summary.read_text()) if summary.is_file() else []
+    best: dict[str, dict] = {}
     for r in rows:
         kernel = r.get("kernel", r.get("result"))
         if str(r.get("outcome", "")).startswith("win") and r.get("patches"):
             if (r.get("speedup") or 0) >= (best.get(kernel, {}).get("speedup") or 0):
                 best[kernel] = r
-    patches = [Path(r["result"]) / p for r in best.values() for p in r["patches"]]
+    return [Path(r["result"]) / p for r in best.values() for p in r["patches"]]
+
+
+def prove(run_dir: Path, recapture, python: str, repeat: int, max_turns: int) -> str:
+    """Build, capture both arms, compare; returns the SUMMARY.md section. The fusions'
+    patches (fuse/), made on the kernels' patched repositories, apply after them."""
+    from xe_forge.frontend import compare
+
+    fused = winners(run_dir / "fuse" / "results")
+    patches = winners(run_dir / "results") + fused
     if not patches:
         return "## In model\n\nnot run: no winning patch to prove\n"
     prove_dir = run_dir / "prove"
     prove_dir.mkdir(parents=True, exist_ok=True)
     try:
-        arms = _build_arms(prove_dir, patches, python, max_turns, run_dir / "launcher" / "run.sh")
+        arms = _build_arms(prove_dir, patches, python, max_turns, run_dir / "launcher" / "run.sh",
+                           run_dir / "fuse" / "stacked" / "STACK.json" if fused else None)  # fmt: skip
     except (RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
         return f"## In model\n\nnot run: {exc}\n"
     caps: dict[str, list[Path]] = {"A": [], "B": []}

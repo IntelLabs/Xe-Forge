@@ -325,6 +325,10 @@ def xe_forge_command(entry: dict, variant: str, repo: Path, workspace: Path, opt
         cmd += ["--dataset-record", entry["record"]]
     if entry.get("target") == "library":
         cmd += ["--target", "library"]
+    if entry.get("reference"):  # a fusion: its chain of ops as PyTorch
+        cmd += ["--reference", entry["reference"]]
+    for r in entry.get("integration_repos") or []:
+        cmd += ["--integration-repo", r]
     if getattr(opts, "stack_python", None):
         cmd += ["--stack-python", opts.stack_python]
     if entry["dsl"] == "sycl" and opts.compiler_flags:
@@ -352,6 +356,11 @@ def optimize(manifest_path: Path, run_dir: Path, opts) -> list[tuple[str, str]]:
             pairs.append((key, variant))
             workspace = ws_root / f"{key}__{variant}"
             status_path = manifest.sidecar(workspace, ".status.json")
+            done = json.loads(status_path.read_text()) if status_path.is_file() else {}
+            if done.get("exit_code") == 0 and workspace.is_dir():
+                print(f"optimize: {entry['name']} ({variant}) ran before in {workspace}; "
+                      "kept (remove it to run again)")  # fmt: skip
+                continue
             repo = manifest.resolve_repo(entry["repo"], repos_dir)
             if not repo.is_dir():
                 status = {"skipped": f"kernel repo not found: {repo}"}
@@ -381,6 +390,51 @@ def optimize(manifest_path: Path, run_dir: Path, opts) -> list[tuple[str, str]]:
                 f"optimize: {entry['name']} ({variant}) exit {code} in {status['seconds']}s; log {log}"
             )
     return pairs
+
+
+# ── fuse ───────────────────────────────────────────────────────────────────
+
+
+def fuse(capture_path: Path, run_dir: Path, a, python, turns, repos) -> Path | None:
+    """The optional fusion step (frontend/fuse.py), under ``run_dir/fuse``: its own
+    manifest, inputs, workspaces and results; returns their SUMMARY.md, or None."""
+    from xe_forge.frontend import collect, ir, manifest, prove
+    from xe_forge.frontend import fuse as fusion
+    from xe_forge.models import DSL
+    from xe_forge.skills import fuse as tool
+
+    work = run_dir / "fuse"
+    work.mkdir(parents=True, exist_ok=True)
+    try:
+        stacked = fusion.stack(prove.winners(run_dir / "results"), work / "stacked")
+    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+        print(f"fuse: the winning patches do not stack: {exc}", file=sys.stderr)
+        return None
+    results = run_dir / "results" / "summary.json"
+    check = ["xe-forge-skill", "fuse", "check", str(work / "fusions.json"), "--capture",
+             str(capture_path), "--results", str(results)]  # fmt: skip
+    ctx = {"model": a.model, "framework": a.framework, "run_dir": run_dir,
+           "capture": capture_path, "stacked": stacked, "repos": repos,
+           "dsls": [d.value for d in DSL], "check_cmd": shlex.join(check)}  # fmt: skip
+    answer = _agent("fuse", "frontend-fuse.md.j2", ctx, work, "fusions.json", python, turns)
+    if not answer or not answer.get("fusions"):
+        print(f"fuse: none proposed: {(answer or {}).get('why', 'no answer')}")
+        return None
+    cap = ir.load(capture_path)
+    problems, passed = tool.check(answer, cap, tool.wins(results), work)  # the tool's verdict
+    for p in problems:
+        print(f"fuse: dropped: {p}", file=sys.stderr)
+    if not passed:
+        return None
+    found = fusion.analysis(passed, cap, work, a.fuse_top, a.min_gain)
+    path = manifest.emit(found, cap, capture_path, work)
+    path = manifest.emit(
+        found, cap, capture_path, work, inputs(path, work, a, python, turns, repos)
+    )
+    print(f"fuse: {len(passed)} passed, enabled: "
+          f"{', '.join(e.name for e in found.entries if e.enabled) or 'none'} -> {path}")  # fmt: skip
+    pairs = optimize(path, work, a)
+    return collect.collect(work, manifest.load(path), pairs)
 
 
 def _session_env() -> dict:
@@ -460,7 +514,7 @@ def main(argv: list[str]) -> int:
         print(summary.read_text())
         return 0
 
-    # run: capture (agent) -> name (agent) -> analyze -> optimize -> collect [-> prove]
+    # run: capture (agent) -> name (agent) -> analyze -> optimize -> collect [-> fuse] [-> prove]
     from xe_forge.frontend import collect, manifest
 
     p = argparse.ArgumentParser(prog="xe-forge run", allow_abbrev=False)
@@ -495,6 +549,11 @@ def main(argv: list[str]) -> int:
         "measure them in the model (prove.py)"
     )  # fmt: skip
     p.add_argument("--prove-repeat", type=int, default=3, help="captures per arm")
+    p.add_argument(
+        "--fuse", action="store_true", help="after optimizing, fuse chains of ops into one "
+        "kernel on the patched repositories (serving-only, as a rule; frontend/fuse.py)"
+    )  # fmt: skip
+    p.add_argument("--fuse-top", type=int, default=2, help="fusions to optimize")
     p.add_argument(
         "--stack-check", action="store_true", help="each port-back agent builds and tests "
         "its port in the framework's stack (Xe-Forge --stack-python)"
@@ -568,6 +627,11 @@ def main(argv: list[str]) -> int:
     a.stack_python = python if a.stack_check else None
     pairs = optimize(path, run_dir, a)
     summary = collect.collect(run_dir, manifest.load(path), pairs)
+    if a.fuse:
+        fused = fuse(capture_path, run_dir, a, python, turns, repos)
+        if fused is not None:
+            table = fused.read_text().split("\n", 2)[2]  # without its "# Results" title
+            summary.write_text(summary.read_text() + "\n## Fusions\n\n" + table)
     if a.prove:
         from xe_forge.frontend import prove
 

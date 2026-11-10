@@ -23,9 +23,11 @@ code measures and checks it**, through `xe-forge-skill` tools the agents call th
 | analyze | code (`analyze.py`) | `kernels.yaml`, `specs/`, `analysis.json` | bound arithmetic: GEMM roofline, counter speed-of-light, agent-stated costs |
 | inputs | agent (`frontend-inputs.md.j2`): per kernel, one shape per configuration (each captured workload), merging only the token counts that take the same path, with weights | `inputs/inputs.json`, the specs' `weights:` | `inputs check`: every captured shape stands in one group, a group within one configuration, weights summing to 1 |
 | optimize | Xe-Forge, one workspace per kernel | `workspaces/`, `results/` | Xe-Forge's benchmark and trial gates; `benchmark` times every weighted shape: all correct, none slower, scored on the time-weighted total |
+| fuse (`--fuse`) | agent (`frontend-fuse.md.j2`): after optimizing, proposes chains of ops one kernel could replace, each with its chain as a `_pytorch.py` reference; then each passing one goes through inputs and optimize as a kernel does, on clones carrying the kernels' winning patches (`fuse/stacked/`), against the optimized chain | `fuse/fusions.json`, `fuse/kernels.yaml`, `fuse/workspaces/`, `fuse/results/` | `fuse check`: the ops captured, the reference's inputs the anchor's dims, the repositories there; ranked by the chain's time after the kernels' wins. A fusion that changes call sites is serving-only |
 | prove (`--prove`) | agent builds two stacks and makes the launcher hold on each; code re-runs it in each | `prove/` | median and spread over `--prove-repeat` alternating captures |
 
-`run` reuses `capture.json` and `names.json` when they exist (remove one to redo that step);
+`run` reuses `capture.json`, `names.json` and each workspace that finished when they exist
+(remove one to redo that step);
 `xe-forge optimize runs/<name>/kernels.yaml` re-runs only the optimize step.
 
 ## Tools

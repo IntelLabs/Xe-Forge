@@ -313,6 +313,10 @@ call is what is optimized. The library itself is never edited and no new kernel 
   reduction it instantiates -- is copied into the file; from the repository only headers of
   the libraries it builds on (CUTLASS/CuTe, SYCL, oneDNN, torch) may be included by `-I`,
   never the op's own kernel headers.
+{%- if reference_workload and not baseline_oracle %} When the reference covers a chain of
+  ops (its docstring names each), the op is all of them: copy each one's kernels, in the
+  order the model calls them, and a trial may run the chain as fewer kernels.
+{%- endif %}
 {%- if baseline_oracle %} The file also defines `get_init_inputs()` and `get_inputs()`,
   taking exactly the spec variant's dims as keyword arguments, and builds every input the
   way the repository's own test or call site does -- cite its file:line for each

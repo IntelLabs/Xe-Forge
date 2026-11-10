@@ -1,0 +1,45 @@
+Find where {{ model }} under {{ framework }} would run faster if a chain of its ops became one
+kernel. Each kernel worth optimizing on its own already was; what is left is what only a
+fusion removes: the launches between the ops, and the intermediates one writes to device
+memory and the next reads back. An op at its bandwidth bound, or one inside PyTorch with no
+kernel repository to edit, has nothing else left to give.
+
+What the run established, all under {{ run_dir }}:
+ - {{ capture }}: every op the model ran, with its shapes, `call_site` (the module that
+   called it) and device time, grouped into workloads. Ops are aggregated per shape and call
+   site, not in order: `raw/unitrace_launches.json` is the measured run's kernel launches in
+   device order, and the model's source shows which op feeds which.
+ - names.json: each op's kernel and the repository it lives in; analysis.json and
+   kernels.yaml: which kernels were optimized and why the others were not.
+ - results/SUMMARY.md and results/summary.json: what optimizing each kernel won, and its patch.
+{%- if stacked %}
+ - The repositories with those winning patches applied and committed, which a fusion is
+   built on and its patch applies over:
+{%- for origin, clone in stacked.items() %}
+   {{ clone }} (from {{ origin }})
+{%- endfor %}
+{%- endif %}
+The kernel repositories are in {{ repos }}.
+
+Propose the chains that are worth it: ops that run back to back on the same data, every
+time, where one kernel can do what they do -- a residual add before a norm, an activation
+after a gated product, an elementwise op on a kernel's output. For each, write
+refs/<name>_pytorch.py: the chain as PyTorch -- a `Model` whose forward does what the ops do,
+in order, at the dtypes the capture shows (say in its docstring whether the model rounds
+between them), and `get_init_inputs()` / `get_inputs()` taking between them exactly the dims of
+the anchor's workload in {{ capture }} and `dtype` (the torch dtype it runs at) as keyword
+arguments, every other size a constant read from the capture. Its docstring names each op it covers and where the framework calls it
+(file:line): that is the scope the optimizing session locates and copies as its baseline.
+
+The fusion is built and optimized as a kernel is: in `repo` (the repository its kernel
+goes in -- a stacked one above when its ops' kernels were patched there), by an Xe-Forge
+session scored on the anchor's shapes, against the optimized chain. A fusion that changes
+an op's interface or its call sites needs the repositories wired to it as
+`integration_repos` and is delivered as serving-only.
+
+Run `{{ check_cmd }}` until it prints PASS; it ranks what passes by the time the chain's ops
+take after the kernels' wins. Then write {{ answer }}: {"fusions": [{"name": "<identifier>",
+"repo": "<path>", "dsl": "<one of {{ dsls | join(', ') }}>", "ops": ["<op id in the
+capture>", ...], "anchor": "<the op whose workload sets the shapes>", "reference":
+"refs/<name>_pytorch.py", "integration_repos": ["<path>", ...], "why": "<what is fused and
+what that removes, one line>"}, ...]}, or {"fusions": [], "why": "<why none is worth it>"}.

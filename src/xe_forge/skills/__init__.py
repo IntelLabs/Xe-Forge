@@ -267,6 +267,14 @@ def main():
     ic.add_argument("inputs", help="inputs.json: {kernel: {weights, why}}")
     ic.add_argument("--manifest", required=True, help="kernels.yaml")
 
+    # -- fuse --
+    p_fuse = subparsers.add_parser("fuse", help="Gate the fusions proposed after optimizing")
+    fuse_sub = p_fuse.add_subparsers(dest="fuse_command", required=True)
+    fc = fuse_sub.add_parser("check", help="ops captured, reference fits the anchor, ranked")
+    fc.add_argument("fusions", help="fusions.json: {fusions: [{name, repo, dsl, ops, ...}]}")
+    fc.add_argument("--capture", required=True, help="capture.json")
+    fc.add_argument("--results", help="results/summary.json of the kernels optimized before")
+
     args = parser.parse_args()
 
     if args.skill == "analyze":
@@ -289,6 +297,8 @@ def main():
         from xe_forge.skills.patch import run
     elif args.skill == "inputs":
         from xe_forge.skills.inputs import run
+    elif args.skill == "fuse":
+        from xe_forge.skills.fuse import run
 
     # A tool's verdict is its exit code: a failed check must not exit 0.
     return run(args)
