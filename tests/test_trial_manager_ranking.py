@@ -116,15 +116,19 @@ def test_required_profiles_gate_next_trial_and_finalization(tmp_path):
     )
     with pytest.raises(ValueError, match="EuStallSampling"):
         manager.finalize("k", tmp_path / "output.cpp")
-    manager.record_profile(
-        "k",
-        trial,
-        "EuStallSampling",
-        digest,
-        artifacts_dir="stalls",
-        error="no samples",
-        warnings=[],
-    )
+
+    def fail_stalls():
+        manager.record_profile(
+            "k", trial, "EuStallSampling", digest, artifacts_dir="stalls", error="no samples",
+            warnings=[],
+        )  # fmt: skip
+
+    fail_stalls()  # one failure is re-collected, not final
+    assert manager.recorded_profile("k", trial, "EuStallSampling", digest) is None
+    with pytest.raises(ValueError, match="EuStallSampling"):
+        manager.finalize("k", tmp_path / "output.cpp")
+    fail_stalls()
+    assert manager.recorded_profile("k", trial, "EuStallSampling", digest)["attempts"] == 2
     assert manager.finalize("k", tmp_path / "output.cpp") == trial
     assert (
         manager._load_state("k")["trials"][trial]["profiles"]["EuStallSampling"]["status"]

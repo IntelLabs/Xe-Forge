@@ -879,6 +879,21 @@ def test_a_fusion_workspace_gets_its_chain_reference_and_integration_repos(tmp_p
     cmd = xe_forge_command(entry, "bench", tmp_path, tmp_path / "ws", opts)
     assert cmd[cmd.index("--reference") + 1] == "/r/f_pytorch.py"
     assert cmd[cmd.index("--integration-repo") + 1] == "/i/vllm"
+    assert "--unitrace" in cmd  # every workspace profiles; a passed-through --no-unitrace wins
+
+
+def test_optimize_refuses_without_unitrace_unless_disabled(tmp_path, monkeypatch):
+    from xe_forge.frontend import cli
+
+    (tmp_path / "kernels.yaml").write_text(json.dumps({"kernels": []}))
+    monkeypatch.setenv("UNITRACE_BIN", str(tmp_path / "missing-unitrace"))
+    opts = SimpleNamespace(
+        kernel_repos=str(tmp_path), engine="dspy-agent", only=None, passthrough=[]
+    )
+    with pytest.raises(SystemExit, match="profiling needs unitrace"):
+        cli.optimize(tmp_path / "kernels.yaml", tmp_path, opts)
+    opts.passthrough = ["--no-unitrace"]
+    assert cli.optimize(tmp_path / "kernels.yaml", tmp_path, opts) == []
 
 
 def test_optimize_keeps_a_workspace_that_finished(tmp_path, monkeypatch):
@@ -891,5 +906,6 @@ def test_optimize_keeps_a_workspace_that_finished(tmp_path, monkeypatch):
         {"name": "k", "repo": "r", "dsl": "sycl", "enabled": True, "spec": "k.yaml",
          "variants": ["bench"]}]}))  # fmt: skip
     monkeypatch.setattr(cli.subprocess, "call", lambda *a, **k: pytest.fail("ran it again"))
-    opts = SimpleNamespace(kernel_repos=str(tmp_path), engine="dspy-agent", only=None)
+    opts = SimpleNamespace(kernel_repos=str(tmp_path), engine="dspy-agent", only=None,
+                           passthrough=["--no-unitrace"])  # fmt: skip
     assert cli.optimize(tmp_path / "kernels.yaml", tmp_path, opts) == [("k", "bench")]

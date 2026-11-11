@@ -320,6 +320,7 @@ def xe_forge_command(entry: dict, variant: str, repo: Path, workspace: Path, opt
         "--kernel-repo", str(repo),
         "--spec", entry["spec"],
         "--variant", variant,
+        "--unitrace",  # device timing, ComputeBasic and EU stall per trial; --no-unitrace wins
     ]  # fmt: skip
     if entry.get("record"):
         cmd += ["--dataset-record", entry["record"]]
@@ -346,6 +347,12 @@ def optimize(manifest_path: Path, run_dir: Path, opts) -> list[tuple[str, str]]:
     ws_root.mkdir(parents=True, exist_ok=True)
     if opts.engine == "claude" and shutil.which("claude") is None:
         raise SystemExit("optimize: --engine claude needs the Claude Code CLI ('claude') on PATH")
+    rest = list(opts.passthrough)
+    unitrace = rest[rest.index("--unitrace-bin") + 1] if "--unitrace-bin" in rest[:-1] else (
+        os.environ.get("UNITRACE_BIN", "unitrace"))  # fmt: skip
+    if "--no-unitrace" not in rest and shutil.which(unitrace) is None:
+        raise SystemExit(f"optimize: profiling needs unitrace ({unitrace!r} not found); "
+                         "set UNITRACE_BIN, or pass -- --no-unitrace")  # fmt: skip
 
     pairs = []
     for entry in data["kernels"]:

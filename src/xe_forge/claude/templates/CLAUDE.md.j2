@@ -10,7 +10,7 @@ At the start of every session, read `config.yaml` in the workspace root. It cont
 - **`dsl`** / **`device`** — what you are writing, and for what part
 - **`measurement`** — `host` when correctness and timing come from the project that
   generated this workspace, `builtin` when they come from Xe-Forge's own executor
-- **`unitrace_enabled`** / **`unitrace_bin`** — unitrace device timing and ComputeBasic profiling;
+- **`unitrace_enabled`** / **`unitrace_bin`** — unitrace device timing, ComputeBasic and EU stall profiling;
   prefer this over VTune when both are enabled
 - **`vtune_enabled`** / **`vtune_bin`** — VTune GPU profiling, if available this session
 - **`compiler_flags`** — extra flags to pass the target compiler when building this kernel,
@@ -24,9 +24,7 @@ All runtime behavior below is gated by these values; re-read `config.yaml` if an
 When profiling is enabled, read `knowledge_base/sycl/xpu/resource_feedback.yaml`
 before interpreting kernel properties or choosing a resource-related optimization.
 Read `knowledge_base/sycl/xpu/compute_basic.yaml` for metric availability and
-counter interpretation. ComputeBasic is the default utilization profile.
-When a stall hypothesis needs more evidence, request a separate unitrace profile
-with `--metric-group EuStallSampling`. EU event shares are not time utilization;
+counter interpretation. EU event shares are not time utilization;
 instruction-address records do not establish source or ISA attribution.
 Keep sample coverage visible. Missing samples are unknown, not zero activity.
 For unitrace, keep the reported artifact directory. On a child trial, pass
@@ -436,9 +434,9 @@ For each trial:
   and use the output to guide the next trial.{% if has_spec %} Use the same `--variant` as the benchmark.{% endif %}
 {%- if require_profiles %}
   Pass the saved trial file. Every correct trial that differs from the baseline, including
-  the last before finalize, needs both collections attempted; `trial save` and `finalize` refuse otherwise. A failed
-  collection is recorded and final: report it as failed, do not retry it, and do not
-  drop to a single `--metric-group`.
+  the last before finalize, needs both collections; `trial save` and `finalize` refuse otherwise. Re-run a
+  failed collection once with the same command; if it fails again it is final: report it as
+  failed with its artifacts, and do not drop to a single `--metric-group`.
   Each next trial's `--strategy` cites the profiled measurement it targets (kernel, metric,
   value, trial). After profiling, state the hottest kernel's stall-reason shares beside its
   parent's. If the dominant stall reason's share has not moved over the last two profiled

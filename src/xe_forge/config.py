@@ -203,7 +203,7 @@ class ProfilerConfig:
     vtune_bin: str = "vtune"
     unitrace_enabled: bool = False
     unitrace_bin: str = "unitrace"
-    unitrace_metric_group: str = "ComputeBasic"
+    unitrace_metric_group: str = "all"
     warmup_iters: int = 5
     profile_iters: int = 20
 
@@ -341,7 +341,7 @@ class ConfigManager:
             vtune_bin=self._get_env("VTUNE_BIN", "vtune"),
             unitrace_enabled=self._get_env("UNITRACE_ENABLED", False, bool),
             unitrace_bin=self._get_env("UNITRACE_BIN", "unitrace"),
-            unitrace_metric_group=self._get_env("UNITRACE_METRIC_GROUP", "ComputeBasic"),
+            unitrace_metric_group=self._get_env("UNITRACE_METRIC_GROUP", "all"),
             warmup_iters=self._get_env("VTUNE_WARMUP", 5, int),
             profile_iters=self._get_env("VTUNE_ITERS", 20, int),
         )

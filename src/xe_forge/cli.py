@@ -162,8 +162,8 @@ Examples:
     parser.add_argument("--trials-dir", type=str, help="Directory for trial state")
     parser.add_argument("--no-trials", action="store_true", help="Disable trial tracking")
 
-    # GPU profiling: unitrace (Level Zero EU stall sampling, no GPU OA counter
-    # permissions needed) and/or VTune (gpu-offload, needs /dev/dri/card0 access)
+    # GPU profiling: unitrace (device timing, ComputeBasic counters and EU stall
+    # sampling) and/or VTune (gpu-offload, needs /dev/dri/card0 access)
     parser.add_argument(
         "--unitrace", action="store_true", default=None, help="Enable unitrace profiling"
     )

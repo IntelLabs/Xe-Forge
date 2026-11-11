@@ -609,7 +609,7 @@ xe-forge --input KERNEL --spec SPEC [OPTIONS]
 | `--max-trials` | Max optimization trials (default: 10) |
 | `--trials-dir` | Trial state directory (default: `./trials`) |
 | `--no-trials` | Disable trial tracking |
-| `--unitrace` | Enable unitrace EU-stall profiling (no OA counter permissions needed) |
+| `--unitrace` | Enable unitrace profiling: device timing, ComputeBasic and EU stall |
 | `--unitrace-bin` | Path to unitrace binary |
 | `--vtune` | Enable VTune GPU profiling (see [docs/VTUNE.md](docs/VTUNE.md)) |
 | `--vtune-bin` | Path to VTune binary |
@@ -678,7 +678,7 @@ All settings can be controlled via environment variables or a `.env` file.
 | `ENGINE` | `dspy` | Optimization engine (`dspy`, `claude`) |
 | `MAX_TRIALS` | `10` | Trial tree max trials |
 | `TRIALS_DIR` | `./trials` | Trial state directory |
-| `UNITRACE_ENABLED` | `false` | Enable unitrace EU-stall profiling |
+| `UNITRACE_ENABLED` | `false` | Enable unitrace profiling (device timing, ComputeBasic, EU stall) |
 | `UNITRACE_BIN` | `unitrace` | unitrace binary path |
 | `VTUNE_ENABLED` | `false` | Enable VTune GPU profiling |
 | `VTUNE_BIN` | `vtune` | VTune binary path |

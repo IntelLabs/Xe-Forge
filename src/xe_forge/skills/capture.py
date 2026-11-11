@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from xe_forge.frontend import canonical, ir, naming
@@ -202,8 +203,11 @@ def run_capture(args) -> int:
         for path in sorted(scratch.glob("unitrace*.metrics.*")):
             with open(path, errors="replace") as f:
                 records += summarize_compute_metrics(f)["records"]
-        if records:
+        if any(v is not None for r in records for v in r["counters"].values()):
             (raw / "counters.json").write_text(json.dumps({"records": records}, indent=1) + "\n")
+        else:  # analyze then has no measured counters for any op: say so, don't guess
+            print("capture: no ComputeBasic counters measured (empty stream, missing Metrics "
+                  "Library or unrecognised CSV layout)", file=sys.stderr)  # fmt: skip
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 

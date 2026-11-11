@@ -10,9 +10,11 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -681,21 +683,22 @@ class UnitraceXPUProfiler:
                 timeout=30,
                 env=self._environment(),
             )
-            return self._collect_and_parse(
-                kernel_file,
-                spec_path,
-                variant,
-                warmup,
-                iters,
-                discovery={
-                    "command": [self.unitrace_bin, "--metric-list"],
-                    "returncode": capability.returncode,
-                    "stdout": capability.stdout,
-                    "stderr": capability.stderr,
-                    "device_hierarchy": "FLAT",
-                },
-                reference_path=reference_path,
-            )
+            discovery = {
+                "command": [self.unitrace_bin, "--metric-list"],
+                "returncode": capability.returncode,
+                "stdout": capability.stdout,
+                "stderr": capability.stderr,
+                "device_hierarchy": "FLAT",
+            }
+            # Sampling occasionally yields an empty stream; one retry, each in its own artifacts dir.
+            for _ in range(2):
+                result = self._collect_and_parse(
+                    kernel_file, spec_path, variant, warmup, iters,
+                    discovery=discovery, reference_path=reference_path,
+                )  # fmt: skip
+                if not result.raw_counters.get("no_samples"):
+                    break
+            return result
         except Exception as e:
             logger.exception("Unitrace profiling failed")
             return ProfileResult(error=str(e), source="Unitrace")
@@ -751,7 +754,8 @@ class UnitraceXPUProfiler:
             ):
                 result = ProfileResult(
                     error=f"{self.metric_group} unavailable on this device/driver or not accessible. "
-                    "Check unitrace --metric-list, Metrics Library loading and counter permissions.\n"
+                    "Check unitrace --metric-list, counter permissions, and that the Metrics Library "
+                    "(libigdml) is in a lib/ beside the unitrace binary or on LD_LIBRARY_PATH.\n"
                     + listing[-2000:],
                     source="Unitrace",
                 )
@@ -908,15 +912,13 @@ class UnitraceXPUProfiler:
             if self.sampling_interval_us is not None:
                 collect_cmd[1:1] = ["--sampling-interval", str(self.sampling_interval_us)]
             (tmpdir / "command.json").write_text(json.dumps(collect_cmd, indent=2))
-            proc = subprocess.run(
+            proc = _run_tree(
                 collect_cmd,
-                capture_output=True,
-                text=True,
-                timeout=300,
+                stdout=tmpdir / "unitrace.stdout.txt",
+                stderr=tmpdir / "unitrace.stderr.txt",
                 env=collection_env,
+                timeout=300,
             )
-            (tmpdir / "unitrace.stdout.txt").write_text(proc.stdout or "")
-            (tmpdir / "unitrace.stderr.txt").write_text(proc.stderr or "")
             if proc.returncode != 0:
                 return ProfileResult(
                     error=f"Unitrace collection failed: {proc.stderr[:500]}",
@@ -970,8 +972,10 @@ class UnitraceXPUProfiler:
                     "selection_basis": "total_device_time_ns",
                 }
                 if not timings or not stalls:
+                    raw["no_samples"] = not stalls
                     return ProfileResult(
-                        error="No EU stall samples or device timings. Inspect sampling coverage and retained logs.",
+                        error="No EU stall samples or device timings (no data or unrecognised CSV "
+                        "layout). Inspect sampling coverage and retained logs.",
                         source="Unitrace",
                         raw_counters=raw,
                     )
@@ -980,9 +984,11 @@ class UnitraceXPUProfiler:
                     raw["unassociated_stall_kernels"] = unmatched
                     raw["stall_temporal_isolation"] = "unverified"
                 primary = max(timings, key=lambda name: timings[name]["time_ns"])
-                if primary not in stalls:
+                if primary not in stalls or stalls[primary]["total_events"] <= 0:
+                    raw["no_samples"] = True
                     return ProfileResult(
-                        error="No EU stall samples for the hottest timed operation.",
+                        error="No EU stall samples for the hottest timed operation "
+                        "(no data or unrecognised CSV layout).",
                         source="Unitrace",
                         raw_counters=raw,
                     )
@@ -1018,9 +1024,14 @@ class UnitraceXPUProfiler:
                 "compute_metrics": compute,
                 "metric_group": "ComputeBasic",
             }
-            if not compute["records"]:
+            if not any(
+                value is not None
+                for record in compute["records"]
+                for value in record["counters"].values()
+            ):
+                raw["no_samples"] = True
                 return ProfileResult(
-                    error="No ComputeBasic samples. Check group availability, counter permissions, "
+                    error="No ComputeBasic counters (no data or unrecognised CSV layout). Check group availability, counter permissions, "
                     "sampling interval and retained process logs. Unsampled work is unknown, not zero utilization.",
                     source="Unitrace",
                     raw_counters=raw,
@@ -1084,13 +1095,11 @@ class UnitraceXPUProfiler:
             )
 
         except subprocess.TimeoutExpired as exc:
-            for label, output in (("stdout", exc.stdout), ("stderr", exc.stderr)):
-                if isinstance(output, bytes):
-                    output = output.decode(errors="replace")
-                (tmpdir / f"timeout.{label}.txt").write_text(output or "")
             (tmpdir / "timeout.command.json").write_text(json.dumps(exc.cmd))
             return ProfileResult(
-                error=f"Unitrace profiling timed out after {exc.timeout}s", source="Unitrace"
+                error=f"Unitrace profiling timed out after {exc.timeout}s; partial output is in "
+                "unitrace.stdout.txt / unitrace.stderr.txt",
+                source="Unitrace",
             )
 
     def _extract_banner_section(self, text: str, banner: str) -> str:
@@ -1158,35 +1167,15 @@ class UnitraceXPUProfiler:
     def _parse_stall_csv(self, text: str) -> dict[str, dict]:
         """Read per-IP sampled EU events, not elapsed-time percentages.
 
-        unitrace's ``-o`` report embeds this as a CSV table under a
-        ``=== Device #N Metrics ===`` banner, headed by a row starting with
-        ``Kernel,`` that includes one ``<Cause>Stall[Events]`` column per
-        stall cause plus ``Active[Events]``. Each row is one sampled IP; this
-        sums across every IP and instance for a kernel.
+        Rows carry ``Active[Events]`` and one ``<Cause>Stall[Events]`` column
+        per cause; this sums across every IP and instance of a kernel.
         """
-        lines = text.splitlines()
-        header_idx = next(
-            (
-                i
-                for i, ln in enumerate(lines)
-                if "OtherStall[Events]" in ln or ln.startswith("Kernel,")
-            ),
-            None,
-        )
-        if header_idx is None:
-            return {}
-        end_idx = next(
-            (i for i in range(header_idx + 1, len(lines)) if lines[i].strip().startswith("===")),
-            len(lines),
-        )
-
-        payload = "\n".join(ln.lstrip() for ln in lines[header_idx:end_idx] if ln.strip())
-        reader = csv.DictReader(io.StringIO(payload), skipinitialspace=True)
+        from xe_forge.core.compute_metrics import metric_rows
 
         per_kernel: dict[str, dict] = {}
-        for row in reader:
-            name = (row.get("Kernel") or "").strip()
-            if not name:
+        for _, row in metric_rows(text.splitlines()):
+            name = row.get("Kernel")
+            if not name or "Active[Events]" not in row:
                 continue
             agg = per_kernel.setdefault(
                 name,
@@ -1198,7 +1187,7 @@ class UnitraceXPUProfiler:
             )
             agg["ip_samples"].append(
                 {
-                    "ip": (row.get("IP[Address]") or "").strip(),
+                    "ip": row.get("IP[Address]") or row.get("Offset") or "",
                     "active_events": _safe_float(row.get("Active[Events]")),
                     "stall_events": {
                         cause: _safe_float(row.get(f"{cause}[Events]"))
@@ -1241,6 +1230,35 @@ class UnitraceXPUProfiler:
             Recommendation("stall_cause", f"{cause}: {pct:.1f}% of sampled EU events")
             for cause, pct in ranked
         ]
+
+
+def _run_tree(command, *, stdout: Path, stderr: Path, env: dict, timeout: float):
+    """Run *command* in its own session with output on disk; kill what it leaves behind.
+
+    The collector may fork (unitrace 2.4 writes its reports from a forked helper after
+    the launched process exits), so after a clean exit the session gets the rest of
+    *timeout* to finish. After a failure or the deadline, whatever is left is killed:
+    a stray collector would otherwise hold the sampling session and the next run fails.
+    """
+    deadline = time.monotonic() + timeout
+    with stdout.open("w") as out, stderr.open("w") as err:
+        proc = subprocess.Popen(command, stdout=out, stderr=err, env=env, start_new_session=True)
+        try:
+            returncode = proc.wait(timeout=timeout)
+            while returncode == 0 and time.monotonic() < deadline:
+                os.killpg(proc.pid, 0)  # raises ProcessLookupError once the session is empty
+                time.sleep(0.2)
+        except ProcessLookupError:
+            pass
+        finally:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait()
+    return subprocess.CompletedProcess(
+        command, returncode, stdout.read_text(errors="replace"), stderr.read_text(errors="replace")
+    )
 
 
 def _safe_float(v) -> float:
