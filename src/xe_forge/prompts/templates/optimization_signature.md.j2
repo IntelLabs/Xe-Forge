@@ -18,19 +18,18 @@ TENSOR_DESCRIPTORS: use tl.make_tensor_descriptor() created once outside the loo
   for a transposed operand, describe the memory as laid out and .T the loaded tile.
   tl.make_block_ptr() and tl.advance() are deprecated -- convert them.
 {% if device_type == "xpu" %}
-XPU_SPECIFIC: BLOCK_M={{ defaults.BLOCK_M }}, BLOCK_N={{ defaults.BLOCK_N }}, BLOCK_K={{ defaults.BLOCK_K }}, num_warps={{ defaults.num_warps }},
-  GROUP_SIZE_M swizzling.
+XPU_SPECIFIC: tile sizes and num_warps autotuned on this device, GROUP_SIZE_M swizzling.
   GRF MODE: grf_mode is a compiler option, NOT a triton.Config() kwarg.
   Declare it as tl.constexpr in the kernel signature:
     grf_mode: tl.constexpr  (values: "default", "128", "256", "auto")
   Use "auto" — it automatically selects 256-GRF when register spill > 1000 bytes.
   256-GRF requires num_warps <= 32 (halved thread occupancy).
 {% elif device_type == "cuda" %}
-DEVICE_SPECIFIC (CUDA): BLOCK_M={{ defaults.BLOCK_M }}, BLOCK_N={{ defaults.BLOCK_N }}, BLOCK_K={{ defaults.BLOCK_K }}, num_warps={{ defaults.num_warps }}.
+DEVICE_SPECIFIC (CUDA): tile sizes and num_warps autotuned on this device.
   Use shared memory for reductions. Consider warp-level primitives.
   Do NOT use tl.extra.intel.libdevice.
 {% else %}
-DEVICE_SPECIFIC: BLOCK_M={{ defaults.BLOCK_M }}, BLOCK_N={{ defaults.BLOCK_N }}, BLOCK_K={{ defaults.BLOCK_K }}, num_warps={{ defaults.num_warps }}.
+DEVICE_SPECIFIC: tile sizes and num_warps autotuned on this device.
 {% endif %}
 PERSISTENT_KERNEL: persistent kernel pattern, tune NUM_PROGS.
 DISCOVERY: apply the open-ended optimization described in the issues field.

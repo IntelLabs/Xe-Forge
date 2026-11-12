@@ -24,7 +24,7 @@ Grouped GEMM.
 
 - **icpx** — Intel DPC++ compiler (oneAPI 2025.x)
 - **sycl-tla** — CUTLASS SYCL port (set `SYCL_TLA_DIR`)
-- **Intel Xe2 GPU** — Arc B580, B570, or Battlemage (BMG) family
+- **An Intel Xe GPU** that sycl-tla's Xe kernels support
 - **Python deps** — `dspy`, `pyyaml`, `torch` (with XPU support via `uv sync --extra intel`)
 
 ## Step-by-Step Guide
@@ -38,9 +38,6 @@ source /opt/intel-gpu/latest/intel_gpu_vars.sh
 
 # Point to CUTLASS SYCL headers
 export SYCL_TLA_DIR=/path/to/sycl-tla
-
-# AOT target device (required for SPIRV extensions)
-export AIBENCH_SYCL_TARGET=bmg-g31
 
 # GPU performance flags (256-GRF mode for large tiles)
 export IGC_ExtraOCLOptions="-cl-intel-256-GRF-per-thread"
@@ -218,8 +215,8 @@ Output JSON contains best tile config per workload:
   "workloads": [{
     "problem_shape": {"M": 8192, "N": 8192, "K": 8192},
     "best_config": {"wg": [256, 128, 32]},
-    "best_tflops": 95.2,
-    "best_time_ms": 0.1234,
+    "best_tflops": <measured>,
+    "best_time_ms": <measured>,
     "configs_tested": [...]
   }],
   "tile_shapes": [{"wg": [256, 128, 32]}]
@@ -258,7 +255,7 @@ include paths from it automatically based on `KernelType`:
 | Variable | Default | Description |
 |---|---|---|
 | `AIBENCH_SYCL_COMPILER` | `icpx` | Path to the SYCL compiler binary |
-| `AIBENCH_SYCL_TARGET` | `""` | AOT target device (e.g. `bmg-g31`). **Required** — without this, SPIRV extensions are not enabled and compilation fails |
+| `AIBENCH_SYCL_TARGET` | the device's PCI id | AOT target device. Xe-Forge passes the PCI id torch reports (`0x...`, which ocloc accepts); set this to override |
 | `AIBENCH_SYCL_FLAGS` | `-O2 -std=c++17 -fno-sycl-instrument-device-code` | Compiler flags (replaces defaults if set) |
 
 ### GPU runtime flags
@@ -272,7 +269,7 @@ export ONEAPI_DEVICE_SELECTOR="level_zero:gpu"
 ### MKL headers (optional)
 
 ```bash
-export MKL_INCLUDE=/opt/intel/mkl/latest/include   # default
+export MKL_INCLUDE=/path/to/mkl/include   # default: $MKLROOT/include
 ```
 
 ## Supported Kernel Types

@@ -406,11 +406,77 @@ def _recording(target, args, produce) -> int:
     return code
 
 
+def _weights(args) -> dict[str, float]:
+    """The spec's weighted shapes, unless one ``--variant`` was asked for."""
+    if args.variant or not args.spec:
+        return {}
+    from xe_forge.core.spec_loader import load_spec
+
+    return load_spec(args.spec).weights
+
+
+def _weighted(args, single) -> int:
+    """Every weighted shape of the spec, one ``single`` run each, scored as one result.
+
+    The kernel replaces the baseline at all of them, so: every shape must be correct; a
+    shape measured slower is a regression at its own ratio (``VERDICT: SLOWER_ON``),
+    whatever the others gain; otherwise the speedup is the time-weighted total,
+    1 / sum(w / s) -- a shape whose comparison was gated (too close to call) counts as 1.
+    """
+    weights = _weights(args)
+    if not weights:
+        return single()
+    if args.baseline_us is not None:
+        print("Correctness: FAILED\nError: --baseline-us is one shape's; a weighted spec "
+              "times every shape's baseline afresh")  # fmt: skip
+        return 1
+    print(f"Variants: {', '.join(f'{n} (w={w:.3f})' for n, w in weights.items())}")
+    rows = []
+    try:
+        for name, w in weights.items():
+            args.variant = name
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = single()
+            text, out = buf.getvalue(), parse_outcome(buf.getvalue()) or {"correctness": "fail"}
+            if out["correctness"] != "pass":
+                print(f"Variant: {name}\n{text.rstrip()}")
+                return code or 1
+            timer = re.search(r"^TIMER: .*$", text, re.M)
+            if timer and not rows:
+                print(timer.group(0))
+            gated = "speedup" not in out or bool(out.get("verdict"))
+            rows.append((name, w, 1.0 if gated else out["speedup"], gated, out))
+            shown = f"none {out.get('verdict')}" if gated else f"{out['speedup']:.2f}x"
+            # Indented: these are not the lines the trial loop reads.
+            print(f"  {name} (w={w:.3f}): baseline_us={out.get('baseline_us')}, "
+                  f"kernel_us={out.get('triton_us')}, speedup={shown}")  # fmt: skip
+    finally:
+        args.variant = None  # what the tree is pinned to: the weighted set
+    total = 1.0 / sum(w / s for _, w, s, _, _ in rows)
+    times = [(w, r.get("baseline_us")) for _, w, _, _, r in rows]
+    base = sum(w * b for w, b in times) if all(b is not None for _, b in times) else None
+    slower = min((r for r in rows if not r[3] and r[2] < 1.0), key=lambda r: r[2], default=None)
+    noise = float(os.environ.get("BENCHMARK_MIN_EFFECT", "0.02"))
+    print("Correctness: PASSED")
+    print(f"Weighted: speedup={total:.3f}x over {len(rows)} shapes")
+    ratio = slower[2] if slower else (None if abs(total - 1) < noise else total)
+    times_ = f"baseline_us={base:.2f}, kernel_us={base / (ratio or 1.0):.2f}, " if base else ""
+    print(f"Performance: {times_}speedup={f'{ratio:.2f}x' if ratio else 'none'}")
+    if slower:
+        print(f"VERDICT: SLOWER_ON\nSlower on: {slower[0]} ({slower[2]:.2f}x)")
+    elif ratio is None:
+        print("VERDICT: INDISTINGUISHABLE")
+    return 0
+
+
 def run(args):
     target = _trial_target(args)
     template = _external_template(args)
     if template:
-        sys.exit(_recording(target, args, lambda: _run_external(args, template)))
+        sys.exit(
+            _recording(target, args, lambda: _weighted(args, lambda: _run_external(args, template)))
+        )
     if not _builtin_opted_in(args):
         print("Correctness: FAILED")
         print("VERDICT: NO_BENCHMARK_CONFIGURED")
@@ -423,15 +489,15 @@ def run(args):
         )
         sys.exit(1)
     if os.getenv(_CHILD_ENV):
-        sys.exit(_recording(target, args, lambda: _run_builtin(args)))
+        sys.exit(_recording(target, args, lambda: _weighted(args, lambda: _run_builtin(args))))
     # The child measures and records; this process only records a timeout.
-    sys.exit(_recording(target, args, _run_builtin_watched))
+    sys.exit(_recording(target, args, lambda: _run_builtin_watched(args)))
 
 
 _CHILD_ENV = "XE_FORGE_BENCHMARK_CHILD"
 
 
-def _run_builtin_watched() -> int:
+def _run_builtin_watched(args=None) -> int:
     """Run the built-in benchmark in a child that is killed after the benchmark timeout.
 
     A kernel that never completes leaves the process blocked inside the driver, where no
@@ -442,7 +508,7 @@ def _run_builtin_watched() -> int:
 
     from xe_forge.config import get_config
 
-    timeout = get_config().external.timeout
+    timeout = get_config().external.timeout * max(1, len(_weights(args)) if args else 1)
     child = subprocess.Popen(
         [sys.executable, "-c", "from xe_forge.skills import main; main()", *sys.argv[1:]],
         env={**os.environ, _CHILD_ENV: "1"},

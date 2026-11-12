@@ -6,7 +6,7 @@ from xe_forge.engines.base import BaseEngine
 def create_engine(config) -> BaseEngine:
     """Factory: create the engine specified by ``config.engine.engine``."""
     name = config.engine.engine.lower()
-    if name == "claude":
+    if name in ("claude", "codex"):  # the same workspace, driven by either agent CLI
         from xe_forge.engines.claude_engine import ClaudeEngine
 
         return ClaudeEngine(config)

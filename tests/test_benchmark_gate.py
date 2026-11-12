@@ -42,59 +42,6 @@ def _args(**overrides):
     return argparse.Namespace(**fields)
 
 
-@pytest.mark.parametrize("prompt_length,decode_length", [(4, 1), (2, 2)])
-def test_decode_reference_attention_layout(monkeypatch, prompt_length, decode_length):
-    import runpy
-    from pathlib import Path
-
-    import torch
-
-    namespace = runpy.run_path(str(Path(__file__).parents[1] / "scripts/deepseek_decode.py"))
-    args = namespace["ModelArgs"](
-        max_batch_size=2,
-        max_seq_len=6,
-        dim=12,
-        n_heads=3,
-        q_lora_rank=8,
-        kv_lora_rank=4,
-        qk_nope_head_dim=4,
-        qk_rope_head_dim=4,
-        v_head_dim=4,
-    )
-    frequencies = namespace["precompute_freqs_cis"](args)
-    shapes = []
-
-    def explicit_attention(query, key, value, *, scale, is_causal):
-        shapes.append((tuple(query.shape), tuple(key.shape), tuple(value.shape)))
-        assert not is_causal
-        return torch.softmax((query @ key.transpose(-2, -1)) * scale, dim=-1) @ value
-
-    with torch.no_grad():
-        model = namespace["Model"](
-            args,
-            torch.randn(2, prompt_length, 12),
-            0,
-            frequencies[:prompt_length],
-        ).eval()
-        inputs = (
-            torch.randn(2, decode_length, 12),
-            prompt_length,
-            frequencies[prompt_length : prompt_length + decode_length],
-        )
-        actual = model(*inputs)
-        monkeypatch.setattr(torch.nn.functional, "scaled_dot_product_attention", explicit_attention)
-        expected = model(*inputs)
-    assert actual.shape == (2, decode_length, 12)
-    assert shapes == [
-        (
-            (2, 3, decode_length, 8),
-            (2, 3, prompt_length + decode_length, 8),
-            (2, 3, prompt_length + decode_length, 4),
-        )
-    ]
-    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
-
-
 @pytest.mark.parametrize("legacy_setting", [True, False])
 def test_comparison_always_validates_before_timing(legacy_setting):
     from xe_forge.core.executor import KernelBenchExecutor

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -14,6 +13,29 @@ from xe_forge.models import OptimizationResult, OptimizationStage
 logger = logging.getLogger(__name__)
 
 LOG_NAME = "claude-session.log"
+
+
+def claude_env(config) -> dict[str, str]:
+    """Environment for the CLI, mapped from ``config.llm``.
+
+    The config names an endpoint the litellm way (``OPENAI_API_BASE`` and
+    friends, which is what the DSPy engine wants); the CLI reads the
+    ``ANTHROPIC_*`` spelling. Mapping here means one configured endpoint has
+    two consumers and the key exists in no second place -- not in a file
+    under the workspace, not in the rendered instructions, not in the log.
+    """
+    env = os.environ.copy()
+    llm = config.llm
+    if llm.api_base:
+        env.setdefault("ANTHROPIC_BASE_URL", llm.api_base)
+    if llm.api_key:
+        env.setdefault("ANTHROPIC_AUTH_TOKEN", llm.api_key)
+    if llm.model:
+        # litellm prefixes a provider ("openai/gpt-4o"); the CLI wants the
+        # bare model id.
+        env.setdefault("ANTHROPIC_MODEL", llm.model.split("/")[-1])
+    env.setdefault("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "1")
+    return env
 
 
 class ClaudeEngine(BaseEngine):
@@ -59,6 +81,7 @@ class ClaudeEngine(BaseEngine):
             variant_type=variant_type,
             target_dtype=target_dtype,
         )
+        self.backend.prepare(workspace)
 
         if not self.always_launch:
             print(f"\nClaude Code workspace ready at: {workspace}")
@@ -86,7 +109,7 @@ class ClaudeEngine(BaseEngine):
             # baseline. Exiting zero is what the CLI does when it runs out of
             # things to say; it is not evidence that anything was optimized.
             error = (
-                f"claude session completed but recorded no correct trial at or above "
+                f"{self.backend.name} session completed but recorded no correct trial at or above "
                 f"baseline for {kernel_name!r}; see {workspace / self.log_name}"
             )
             logger.error(error)
@@ -139,60 +162,43 @@ class ClaudeEngine(BaseEngine):
             best["code"] = Path(path).read_text()
         return best
 
-    def _child_env(self) -> dict[str, str]:
-        """Environment for the CLI, mapped from ``config.llm``.
+    @property
+    def backend(self):
+        """The agent CLI that drives the workspace: ``--engine codex`` is codex, else claude."""
+        from xe_forge import agent_cli as agents
 
-        The config names an endpoint the litellm way (``OPENAI_API_BASE`` and
-        friends, which is what the DSPy engine wants); the CLI reads the
-        ``ANTHROPIC_*`` spelling. Mapping here means one configured endpoint has
-        two consumers and the key exists in no second place -- not in a file
-        under the workspace, not in the rendered instructions, not in the log.
-        """
-        env = os.environ.copy()
-        llm = self.config.llm
-        if llm.api_base:
-            env.setdefault("ANTHROPIC_BASE_URL", llm.api_base)
-        if llm.api_key:
-            env.setdefault("ANTHROPIC_AUTH_TOKEN", llm.api_key)
-        if llm.model:
-            # litellm prefixes a provider ("openai/gpt-4o"); the CLI wants the
-            # bare model id.
-            env.setdefault("ANTHROPIC_MODEL", llm.model.split("/")[-1])
-        env.setdefault("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "1")
-        return env
+        name = self.config.engine.engine.lower()
+        return agents.get(name if name in agents.BACKENDS else "claude")
+
+    def _child_env(self) -> dict[str, str]:
+        return self.backend.env(self.config)
 
     def _launch_claude(self, workspace: Path, kernel_name: str) -> tuple[int, str | None]:
-        """Run one headless ``claude`` session to completion.
+        """Run one headless agent session to completion.
 
         Returns ``(returncode, error_message)``.
         """
-        claude_bin = shutil.which("claude")
-        if not claude_bin:
+        from xe_forge import agent_cli as agents
+
+        backend = self.backend
+        try:
+            backend.path()
+        except agents.AgentError:
             # An error, not a warning: auto_launch was asked for and did not
             # happen, and this is the failure a caller is least able to notice
             # on its own.
             msg = (
-                "'claude' CLI not found in PATH; auto-launch requested but the workspace "
-                f"at {workspace} was only generated, not optimized."
+                f"'{backend.binary}' CLI not found in PATH; auto-launch requested but the "
+                f"workspace at {workspace} was only generated, not optimized."
             )
             logger.error(msg)
             return 1, msg
 
         max_turns = self.config.engine.max_turns
         log_path = workspace / self.log_name
-        cmd = [
-            claude_bin,
-            "-p",
-            f"/optimize-kernel {kernel_name}",
-            "--dangerously-skip-permissions",
-            "--max-turns",
-            str(max_turns),
-            "--output-format",
-            "stream-json",
-            "--verbose",
-        ]
+        cmd = backend.start(backend.task(workspace, kernel_name), max_turns, self.config)
 
-        print(f"\nLaunching Claude Code in {workspace} (max {max_turns} turns)...")
+        print(f"\nLaunching {backend.name} in {workspace} (max {max_turns} turns)...")
         print(f"  session log: {log_path}")
 
         try:
@@ -214,7 +220,7 @@ class ClaudeEngine(BaseEngine):
                     log.write(line)
                 returncode = proc.wait()
         except OSError as exc:
-            msg = f"could not run 'claude': {exc}"
+            msg = f"could not run {backend.binary!r}: {exc}"
             logger.error(msg)
             return 1, msg
 
@@ -222,9 +228,9 @@ class ClaudeEngine(BaseEngine):
             # A turn limit reached mid-search shows up here too. That is a
             # stopping condition like any other, and the caller is told which
             # by the session's own finalize summary, not by a raised limit.
-            msg = f"claude session exited {returncode}; see {log_path}"
+            msg = f"{backend.name} session exited {returncode}; see {log_path}"
             logger.error(msg)
             return returncode, msg
 
-        print(f"\nClaude session finished. Log: {log_path}")
+        print(f"\n{backend.name} session finished. Log: {log_path}")
         return 0, None

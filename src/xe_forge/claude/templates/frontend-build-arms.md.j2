@@ -1,0 +1,28 @@
+Build two copies of a serving stack so a patch can be measured in the model.
+Patches, each with the PORT.txt beside it naming its repository and base commit:
+{% for p in patches %}  {{ p }}
+{% endfor %}
+- Arm A is every touched repository at its base commit; arm B is the same with the patches.
+  Clone fresh for each arm; never modify the repository PORT.txt names.
+{%- if stack %}
+- Some patches were made on a stack: a clone that is another repository at its base commit
+  with earlier patches of this list committed on top ({{ stack }} names each one's origin,
+  base and patches). For those, arm A is the origin at that base, and arm B applies every
+  patch to the origin in the order listed.
+{%- endif %}
+- Build both the same way, as the repository builds, into venv-A and venv-B here, each
+  layered over the framework's venv and holding only what you rebuilt.
+- Check that each arm imports its rebuilt package from its own venv and that the framework
+  still imports.
+{%- if launcher %}
+- The run's launcher {{ launcher }} then measures each arm, under FRAMEWORK_PYTHON=<the
+  arm's python>. Whatever it established on the build it was written on -- which kernels a
+  node runs, laid out per launch -- it must establish again per arm, and work an arm does
+  once on first use (a weight prepack, a JIT) stays before what it measures. Under each arm
+  run `xe-forge-skill capture run {{ launcher }} -o <arm>-check/raw` and `xe-forge-skill
+  capture parse <arm>-check/raw -o <arm>-check/capture.json` until both pass for both arms,
+  changing the launcher but never the workload (meta.json's runtime the same for both).
+{%- endif %}
+- Write arms.json {"A": "<venv-A python>", "B": "<venv-B python>"}, or {"error": "<why>"}
+  if an arm cannot be built or measured, and in report.md what you built, how, and what you
+  changed in the launcher.

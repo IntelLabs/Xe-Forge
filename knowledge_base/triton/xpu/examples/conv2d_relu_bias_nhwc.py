@@ -1,5 +1,5 @@
 """
-Conv2d(64->128, 3x3) + ReLU + bias on Intel Arc B580 (XPU)
+Conv2d(64->128, 3x3) + ReLU + bias on Intel XPU
 
 Optimization patterns applied (cumulative):
   1. CHANNELS-LAST (NHWC) layout for input, output, and model weights.
@@ -24,12 +24,12 @@ Optimization patterns applied (cumulative):
      forcing scatter/gather loads for x. By tiling over (n, oh) explicitly,
      all BLOCK_OW output pixels within a tile read CONSECUTIVE x rows
      in the NHWC flat (N*H*W, C) view. This enables a tensor descriptor
-     for x loads → hardware 2D block IO on the B580's Xe2 memory subsystem.
+     for x loads → hardware 2D block IO.
 
   5. ALL OPERANDS USE TENSOR DESCRIPTORS (x, w, y).
      Why: tl.make_tensor_descriptor generates Intel 2D block load/store instructions
      (SubgroupBlockReadINTEL / SubgroupBlockWriteINTEL) which use the
-     B580's dedicated 2D block IO hardware. This replaces ALL scatter/gather
+     device's 2D block IO hardware. This replaces ALL scatter/gather
      loads with structured, coalesced block transfers. Measured 2-3x
      bandwidth improvement vs pointer-arithmetic loads.
 
@@ -50,7 +50,7 @@ Optimization patterns applied (cumulative):
      the benchmark/inference loop. Zero per-call allocations or copies.
 
   9. AUTOTUNED tile sizes (BLOCK_OW, BLOCK_N, BLOCK_K) and
-     num_warps/num_stages for the B580's 160 EUs / 20 subslices.
+     num_warps/num_stages, tuned on the device.
 """
 
 import time
@@ -702,7 +702,7 @@ def main():
     ]
 
     print(f"\n{'='*80}")
-    print(f"  Roofline Analysis -- Intel Arc B580 (110 TF/s fp16 peak, 456 GB/s)")
+    print(f"  Roofline Analysis -- {torch.xpu.get_device_name()}")
     print(f"{'='*80}")
     print(f"  FLOPs:        {flops/1e9:.2f} GFLOP")
     print(f"  Data moved:   {data_bytes/1e6:.1f} MB")

@@ -153,12 +153,25 @@ def _patch(args) -> int:
     ]
     for _, (block, _) in ported:
         lines += block
+    stack_ok = True
+    names = "+".join(c.name for c, _ in ported)
+    verdict, _, evidence = getattr(args, "stack", "").strip().partition(" ")
+    if verdict:
+        stack_ok &= verdict.upper() == "PASS"
+        lines.append(f"stack check {names}: {verdict.upper()} {evidence}".rstrip())
+    built = all(ok for _, (_, ok) in ported)
+    from xe_forge.config import get_config
+
+    if built and not verdict and get_config().external.stack_python:
+        print("A stack check is configured: check the port in its stack, then pass "
+              '--stack "PASS|FAIL <evidence>".')  # fmt: skip
+        return 1
     if args.notes:
         lines += ["notes:", args.notes]
     (OUTPUT / "PORT.txt").write_text("\n".join(lines) + "\n")
     print(f"Wrote {', '.join(f'output/{c.name}.patch' for c, _ in ported)} and output/PORT.txt")
     print("\n".join(lines))
-    return 0 if all(ok for _, (_, ok) in ported) else 1
+    return 0 if stack_ok and all(ok for _, (_, ok) in ported) else 1
 
 
 def run(args):

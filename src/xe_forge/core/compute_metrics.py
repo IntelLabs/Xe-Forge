@@ -12,43 +12,57 @@ def _number(value):
         return None
 
 
-def summarize_compute_metrics(lines) -> dict:
-    """Aggregate within each device/kernel; keep missing counters unknown."""
-    header = None
-    time_column = None
-    device = "unknown"
-    groups = {}
+def _is_number(value) -> bool:
+    try:
+        float(value)
+        return True
+    except ValueError:
+        return False
+
+
+def metric_rows(lines):
+    """Yield ``(device, row)`` for each data row of a unitrace metrics table.
+
+    Reads both layouts unitrace writes: one header with the kernel on every
+    row, and per-launch blocks where a unit-less ``Kernel, ...`` header and
+    one identity row precede the block's own header and samples. A row with
+    no numeric field is a header. Unknown layouts yield nothing.
+    """
+    device, header, identity, pending = "unknown", None, {}, None
     for line in lines:
         stripped = line.strip()
         if stripped.startswith("==="):
-            device = stripped
-            header = None
+            device, header, identity, pending = stripped, None, {}, None
             continue
         if not stripped:
             continue
-        values = [
-            value.strip() for value in next(csv.reader([line.lstrip()], skipinitialspace=True))
-        ]
-        if "Kernel" in values and "GlobalInstanceId" in values:
-            header = values
-            time_column = next(
-                (
-                    column
-                    for column in (
-                        "GpuTime[ns]",
-                        "GPU_TIME[ns]",
-                        "Time[ns]",
-                        "GpuDuration[ns]",
-                    )
-                    if column in header
-                ),
-                None,
-            )
+        values = [v.strip() for v in next(csv.reader([stripped], skipinitialspace=True))]
+        if pending is not None:
+            identity, pending = dict(zip(pending, values, strict=False)), None
+        elif not any(_is_number(v) for v in values):
+            if "Kernel" in values and not any("[" in v for v in values):
+                pending = values
+            else:
+                header = values
+        elif header is not None and len(values) == len(header):
+            yield device, {**identity, **dict(zip(header, values, strict=True))}
+
+
+def summarize_compute_metrics(lines) -> dict:
+    """Aggregate within each device/kernel; keep missing counters unknown."""
+    groups = {}
+    for device, row in metric_rows(lines):
+        if "GlobalInstanceId" not in row:
             continue
-        if header is None or len(values) != len(header):
-            continue
-        row = dict(zip(header, values, strict=True))
-        name = row["Kernel"]
+        time_column = next(
+            (
+                column
+                for column in ("GpuTime[ns]", "GPU_TIME[ns]", "Time[ns]", "GpuDuration[ns]")
+                if column in row
+            ),
+            None,
+        )
+        name = row.get("Kernel")
         if not name:
             continue
         key = (device, name)

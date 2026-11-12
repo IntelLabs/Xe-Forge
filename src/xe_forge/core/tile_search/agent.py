@@ -37,6 +37,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _device() -> str:
+    """The XPU the configs will run on, as torch reports it."""
+    try:
+        import torch
+
+        p = torch.xpu.get_device_properties()
+        return (
+            f"{p.name}: SLM {p.local_mem_size // 1024} KB per work-group, at most "
+            f"{p.max_num_sub_groups} sub-groups per work-group, sub-group sizes "
+            f"{p.sub_group_sizes}. "
+        )
+    except Exception:
+        return "Intel Xe GPU. "
+
+
 # ---------------------------------------------------------------------------
 # DSPy Signatures
 # ---------------------------------------------------------------------------
@@ -50,14 +65,13 @@ class GEMMTileTuningSignature(dspy.Signature):
     previously tested configurations with their measured performance, propose
     new tile configurations that are likely to maximize TFLOPS.
 
-    HARDWARE CONSTRAINTS (Intel Xe / BMG):
+    HARDWARE CONSTRAINTS (Intel Xe; the device's limits are in the hardware info):
     - Workgroup tile shape: [wg_M, wg_N, wg_K]
     - DPAS atom shape: M=8, N=16, K depends on dtype (16 for bf16/f16)
     - wg_M must be divisible by 8
     - wg_N must be divisible by 16
     - wg_K must be divisible by atom_K (16 for bf16)
     - Subgroup layout is auto-derived: total subgroups <= 32
-    - SLM (shared local memory): 128 KB on BMG
     - Typical good wg_K values: 16, 32, 64
     - Typical good wg_M/wg_N values: 16, 32, 64, 128, 256, 512
 
@@ -173,23 +187,16 @@ class FATileTuningSignature(dspy.Signature):
     - sg_q: number of subgroups partitioning the Q dimension
     - VTiles = head_dim / pv_n must be integer
 
-    HARDWARE CONSTRAINTS (Intel Xe / BMG):
+    HARDWARE CONSTRAINTS (Intel Xe; the device's limits are in the hardware info):
     - DPAS atom: M=8, N=16
     - qk_m must be divisible by sg_q, and sg_tile_q = qk_m/sg_q must work with DPAS
     - qk_n must be divisible by 16
     - qk_n must be divisible by pv_k (maps to WgTileK % SgTileK == 0)
     - pv_k <= qk_n (SgTileK cannot exceed WgTileK)
     - sg_q <= 32 (max subgroups per workgroup)
-    - SLM = 128 KB
     - Typical qk_k values: 16, 32, 64
     - Typical pv_k values: 32, 64 (must divide qk_n)
     - pipeline_stages = 2 for prefill
-
-    KNOWN-GOOD CONFIGS (from sycl-tla):
-    - HD=64:  qk=(128,64,32), pv=(128,32,64), sg=8, stages=2
-    - HD=96:  qk=(128,64,32), pv=(128,32,64), sg=8, stages=2
-    - HD=128: qk=(256,32,32), pv=(256,32,32), sg=16, stages=2
-    - HD=192: qk=(256,64,32), pv=(256,32,64), sg=32, stages=2
 
     OUTPUT: JSON list of FA tile configs with keys:
     "qk_m", "qk_n", "qk_k", "pv_n", "pv_k", "sg_q", "pipeline_stages"
@@ -285,9 +292,7 @@ class GEMMStrategy:
     def build_hardware_info(self, dtype: str) -> str:
         atom_k = 256 // DTYPE_BITS.get(dtype, 16)
         return (
-            "Intel Xe (BMG/Battlemage). "
-            f"DPAS atom shape: M=8, N=16, K={atom_k} (for {dtype}). "
-            f"MaxSubgroups=32. SLM=128KB. "
+            _device() + f"DPAS atom shape: M=8, N=16, K={atom_k} (for {dtype}). "
             f"wg_M must be divisible by 8, wg_N by 16, wg_K by {atom_k}. "
             f"dtype={dtype}, layout_a={self.layout_a}, layout_b={self.layout_b}."
         )
@@ -410,8 +415,7 @@ class FAStrategy:
 
     def build_hardware_info(self, dtype: str) -> str:
         return (
-            "Intel Xe (BMG/Battlemage). "
-            "DPAS atom: M=8, N=16. MaxSubgroups=32. SLM=128KB. "
+            _device() + "DPAS atom: M=8, N=16. "
             "qk_n must be divisible by 16. "
             "qk_k typical values: 16, 32, 64. "
             "sg_q must divide qk_m, sg_q <= 32. "
@@ -617,9 +621,7 @@ class GroupedGEMMStrategy:
     def build_hardware_info(self, dtype: str) -> str:
         atom_k = 256 // DTYPE_BITS.get(dtype, 16)
         return (
-            "Intel Xe (BMG/Battlemage). "
-            f"DPAS atom shape: M=8, N=16, K={atom_k} (for {dtype}). "
-            f"MaxSubgroups=32. SLM=128KB. "
+            _device() + f"DPAS atom shape: M=8, N=16, K={atom_k} (for {dtype}). "
             f"wg_M must be divisible by 8, wg_N by 16, wg_K by {atom_k}. "
             f"Grouped GEMM uses persistent group tile scheduler. "
             f"dtype={dtype}, layout_a={self.layout_a}, layout_b={self.layout_b}."
@@ -745,9 +747,7 @@ class MoEGEMMStrategy:
     def build_hardware_info(self, dtype: str) -> str:
         atom_k = 256 // DTYPE_BITS.get(dtype, 16)
         return (
-            "Intel Xe (BMG/Battlemage). "
-            f"DPAS atom shape: M=8, N=16, K={atom_k} (for {dtype}). "
-            f"MaxSubgroups=32. SLM=128KB. "
+            _device() + f"DPAS atom shape: M=8, N=16, K={atom_k} (for {dtype}). "
             f"wg_M must be divisible by 8, wg_N by 16, wg_K by {atom_k}. "
             f"MoE GEMM: each expert has different M (token count). "
             f"Smaller wg_M improves M-occupancy for small experts. "

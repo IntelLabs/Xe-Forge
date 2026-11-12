@@ -103,7 +103,7 @@ Examples:
     parser.add_argument(
         "--dsl",
         type=str,
-        choices=["triton", "gluon", "sycl", "cuda"],
+        choices=["triton", "gluon", "sycl", "cuda", "opencl"],
         default=None,
         help="Kernel DSL (default: triton)",
     )
@@ -144,10 +144,17 @@ Examples:
     parser.add_argument(
         "--engine",
         type=str,
-        choices=["dspy", "claude", "dspy-agent"],
+        choices=["dspy", "claude", "codex", "dspy-agent"],
         default=None,
-        help="Optimization engine (default: dspy). dspy-agent runs a DSPy tool-calling "
-        "agent in the Claude workspace",
+        help="Optimization engine (default: dspy). claude and codex drive the agent "
+        "workspace with that CLI; dspy-agent runs a DSPy tool-calling agent in it",
+    )
+    parser.add_argument(
+        "--target",
+        choices=["kernel", "library"],
+        default=None,
+        help="Workspace engines: optimize a kernel (default) or tune how the repository "
+        "calls a library such as oneDNN",
     )
 
     # Trial management
@@ -155,8 +162,8 @@ Examples:
     parser.add_argument("--trials-dir", type=str, help="Directory for trial state")
     parser.add_argument("--no-trials", action="store_true", help="Disable trial tracking")
 
-    # GPU profiling: unitrace (Level Zero EU stall sampling, no GPU OA counter
-    # permissions needed) and/or VTune (gpu-offload, needs /dev/dri/card0 access)
+    # GPU profiling: unitrace (device timing, ComputeBasic counters and EU stall
+    # sampling) and/or VTune (gpu-offload, needs /dev/dri/card0 access)
     parser.add_argument(
         "--unitrace", action="store_true", default=None, help="Enable unitrace profiling"
     )
@@ -202,6 +209,12 @@ Examples:
         type=str,
         help="Command template run instead of the built-in validator; placeholders: "
         "{kernel} {trial} {dsl} {stage} {workspace}",
+    )
+    host_group.add_argument(
+        "--stack-python",
+        type=str,
+        help="Interpreter of the stack the kernel serves; the port-back agent then builds its "
+        "port into that stack (beside it, never into it), tests it there and records the verdict",
     )
     host_group.add_argument(
         "--dataset-record",
@@ -304,6 +317,8 @@ def _load_config(args) -> Config:
     # Engine/trial/profiler env var overrides
     if args.engine:
         os.environ["ENGINE"] = args.engine
+    if getattr(args, "target", None):
+        os.environ["TARGET"] = args.target
     if args.max_trials is not None:
         os.environ["MAX_TRIALS"] = str(args.max_trials)
     if args.trials_dir:
@@ -337,6 +352,8 @@ def _load_config(args) -> Config:
         os.environ["EXTERNAL_BENCHMARK"] = args.external_benchmark
     if getattr(args, "external_validate", None):
         os.environ["EXTERNAL_VALIDATE"] = args.external_validate
+    if getattr(args, "stack_python", None):
+        os.environ["STACK_PYTHON"] = args.stack_python
     if getattr(args, "dataset_record", None):
         os.environ["DATASET_RECORD"] = args.dataset_record
     if getattr(args, "lessons", None):
@@ -357,6 +374,13 @@ def _load_config(args) -> Config:
 
 def main():
     sys.stdout.reconfigure(line_buffering=True)
+
+    from xe_forge.frontend.cli import COMMANDS
+
+    if len(sys.argv) > 1 and sys.argv[1] in COMMANDS:
+        from xe_forge.frontend.cli import main as frontend_main
+
+        return frontend_main(sys.argv[1:])
 
     parser, args = _parse_args()
 
@@ -526,10 +550,10 @@ def _run_optimize(parser, args, config: Config) -> int:
     """Run the optimization pipeline (original path)."""
     # Validate input. Only the workspace engines can locate a kernel in --kernel-repo
     # at runtime; the pipeline would be handed an empty kernel.
-    workspace_engine = config.engine.engine in ("claude", "dspy-agent")
+    workspace_engine = config.engine.engine in ("claude", "codex", "dspy-agent")
     if not args.input and not (args.kernel_repo and workspace_engine):
         parser.error(
-            "--input is required (or use --kernel-repo with --engine claude|dspy-agent, "
+            "--input is required (or use --kernel-repo with --engine claude|codex|dspy-agent, "
             "--tile-tune / --tune-config)"
         )
     if args.input and not Path(args.input).exists():

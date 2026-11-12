@@ -31,24 +31,9 @@ logger = logging.getLogger(__name__)
 
 SYCL_TLA_DIR = os.environ.get("SYCL_TLA_DIR", "")
 
-MKL_INCLUDE = os.environ.get("MKL_INCLUDE", "/swtools/intel/mkl/latest/include")
-
-_DEVICE_NAME_TO_TARGET: dict[str, str] = {
-    "b580": "bmg-g31",
-    "b570": "bmg-g31",
-    "battlemage": "bmg-g31",
-    "bmg": "bmg-g31",
-    "a770": "acm-g10",
-    "a750": "acm-g10",
-    "a580": "acm-g11",
-    "a380": "acm-g11",
-    "a310": "acm-g12",
-    "max 1550": "pvc",
-    "max 1100": "pvc",
-    "ponte vecchio": "pvc",
-    "data center gpu max": "pvc",
-    "lunar lake": "lnl-m",
-}
+MKL_INCLUDE = os.environ.get("MKL_INCLUDE") or (
+    f"{os.environ['MKLROOT']}/include" if os.environ.get("MKLROOT") else ""
+)
 
 
 class KernelType(Enum):
@@ -60,21 +45,18 @@ class KernelType(Enum):
 
 
 def _detect_device_target() -> str:
-    """Auto-detect the icpx AOT device target from torch.xpu."""
+    """The icpx AOT device target for the XPU torch sees: its PCI device id, which ocloc
+    takes as ``-device 0x...``."""
     try:
         import torch
 
         if not hasattr(torch, "xpu") or not torch.xpu.is_available():
             return ""
-        name = torch.xpu.get_device_name(torch.xpu.current_device()).lower()
-        for key, target in _DEVICE_NAME_TO_TARGET.items():
-            if key in name:
-                logger.info("Auto-detected SYCL device target: %s (from '%s')", target, name)
-                return target
-        logger.warning("Unknown XPU device '%s', skipping AOT target", name)
-        return ""
+        target = hex(torch.xpu.get_device_properties().device_id)
+        logger.info("SYCL device target: %s", target)
+        return target
     except Exception as e:
-        logger.debug("Could not auto-detect SYCL device target: %s", e)
+        logger.debug("Could not detect the SYCL device target: %s", e)
         return ""
 
 
@@ -91,7 +73,7 @@ def _include_dirs(sycl_tla_dir: str, kernel_type: KernelType = KernelType.GEMM) 
         dirs.append(f"{sycl_tla_dir}/benchmarks/flash_attention")
     if kernel_type == KernelType.MOE_GEMM:
         dirs.append(f"{sycl_tla_dir}/examples/12_xe20_moe_gemm_cute_interface")
-    if Path(MKL_INCLUDE).exists():
+    if MKL_INCLUDE and Path(MKL_INCLUDE).exists():
         dirs.append(MKL_INCLUDE)
     return dirs
 

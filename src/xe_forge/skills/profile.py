@@ -24,7 +24,7 @@ def run(args):
         profilers.append(XPUProfiler(vtune_bin=args.vtune_bin))
 
     # With a trial named, every attempt -- collected, failed or unavailable -- is recorded
-    # against the saved trial's source, and an attempt already recorded is not repeated.
+    # against the saved trial's source; a final attempt (collected, or failed twice) is not repeated.
     kernel_name, trial_id = getattr(args, "kernel_name", None), getattr(args, "trial_id", None)
     manager = digest = None
     if kernel_name or trial_id:
@@ -46,7 +46,7 @@ def run(args):
         )
         if previous is not None:
             print(
-                f"== Collection: {group} == already attempted on this source "
+                f"== Collection: {group} == final on this source "
                 f"({previous['status']}); not re-collected. Artifacts: {previous['artifacts_dir']}"
             )
             result = ProfileResult(error=previous["error"], artifacts_dir=previous["artifacts_dir"])
@@ -91,8 +91,8 @@ def run(args):
         if first_result is not None:
             if manager is not None:
                 print(
-                    "Failed attempts are recorded for this trial and satisfy its profiling gate; "
-                    "do not retry them on this source."
+                    "A failed collection is re-run once on the same source; after that it is "
+                    "final. Report it with its artifacts; do not fabricate results."
                 )
             raise SystemExit(1)
         return

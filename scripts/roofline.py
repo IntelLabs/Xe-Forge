@@ -49,17 +49,14 @@ Examples
 matplotlib/numpy are declared in the PEP 723 header above, so `uv run` pulls
 them ephemerally — no need to install anything into the project venv.
 
-  # plot with the Arc Pro B70 preset roof
+  # plot under the roof measured on this device
   uv run scripts/roofline.py scripts/sample_roofline.csv \
-      --hardware arc-pro-b70 --connect --annotate \
+      --calibration calibration.json --connect --annotate \
       --title "Roofline — FlashAttention Fwd" -o plots/fa.png
 
-  # list the built-in hardware presets
-  uv run scripts/roofline.py --list-hardware
-
-  # override the roof explicitly (skips the preset table)
+  # give the roof explicitly
   uv run scripts/roofline.py results.csv \
-      --peak-tflops 160 --peak-bandwidth 608 -o plots/gemm.png
+      --peak-tflops <TFLOPS> --peak-bandwidth <GB/s> -o plots/gemm.png
 """
 
 from __future__ import annotations
@@ -71,33 +68,15 @@ from dataclasses import dataclass, field
 
 
 # ---------------------------------------------------------------------------
-# Hardware presets: peak FP16/BF16 dense throughput and peak DRAM bandwidth.
-#
-# These are the *roof* values drawn on the plot. They are best-effort published
-# / measured numbers and can always be overridden with --peak-tflops /
-# --peak-bandwidth. The Arc Pro B70 figures match the ceilings used in the
-# repo's existing roofline plots (160 TFLOPS, 608 GB/s).
+# The roof: peak half-precision throughput and DRAM bandwidth, as `xe-forge
+# calibrate` measured them on the device, or given with --peak-tflops /
+# --peak-bandwidth.
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class Hardware:
     name: str
     peak_tflops: float  # peak compute, half precision (FP16/BF16)
     peak_bandwidth_gbps: float  # peak DRAM bandwidth, GB/s
-
-
-HARDWARE_PRESETS: dict[str, Hardware] = {
-    "arc-pro-b70": Hardware("Intel Arc Pro B70", peak_tflops=160.0, peak_bandwidth_gbps=608.0),
-    "arc-b580": Hardware("Intel Arc B580", peak_tflops=117.0, peak_bandwidth_gbps=456.0),
-    "max-1550": Hardware(
-        "Intel Data Center GPU Max 1550 (PVC)", peak_tflops=839.0, peak_bandwidth_gbps=3276.0
-    ),
-    "max-1100": Hardware(
-        "Intel Data Center GPU Max 1100 (PVC)", peak_tflops=362.0, peak_bandwidth_gbps=1228.0
-    ),
-    "flex-170": Hardware(
-        "Intel Data Center GPU Flex 170", peak_tflops=137.0, peak_bandwidth_gbps=576.0
-    ),
-}
 
 
 # ---------------------------------------------------------------------------
@@ -232,26 +211,22 @@ class PlotConfig:
 
 
 def _resolve_hardware(args) -> Hardware:
-    if args.peak_tflops is not None and args.peak_bandwidth is not None:
-        return Hardware("custom", args.peak_tflops, args.peak_bandwidth)
-    if args.hardware is None:
+    name, tflops, bandwidth = "custom", None, None
+    if args.calibration:
+        import json
+
+        cal = json.loads(open(args.calibration).read())
+        name = cal.get("device", {}).get("name", "calibrated")
+        tflops = max(cal["matmul_tflops"].get(d, 0.0) for d in ("bfloat16", "float16"))
+        bandwidth = cal["bandwidth_gbs"]
+    tflops = args.peak_tflops if args.peak_tflops is not None else tflops
+    bandwidth = args.peak_bandwidth if args.peak_bandwidth is not None else bandwidth
+    if not tflops or not bandwidth:
         raise SystemExit(
-            "error: specify --hardware <preset> (see --list-hardware), "
+            "error: give --calibration <calibration.json> (from `xe-forge calibrate`), "
             "or both --peak-tflops and --peak-bandwidth"
         )
-    key = args.hardware.lower()
-    if key not in HARDWARE_PRESETS:
-        raise SystemExit(
-            f"error: unknown hardware preset '{args.hardware}'. "
-            f"Choices: {', '.join(HARDWARE_PRESETS)}"
-        )
-    hw = HARDWARE_PRESETS[key]
-    # Allow partial override of a preset.
-    if args.peak_tflops is not None:
-        hw = Hardware(hw.name, args.peak_tflops, hw.peak_bandwidth_gbps)
-    if args.peak_bandwidth is not None:
-        hw = Hardware(hw.name, hw.peak_tflops, args.peak_bandwidth)
-    return hw
+    return Hardware(name, tflops, bandwidth)
 
 
 def plot_roofline(points: list[Point], hw: Hardware, cfg: PlotConfig) -> None:
@@ -613,8 +588,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("-t", "--title", default="Roofline", help="Plot title")
     p.add_argument(
-        "--hardware",
-        help="Hardware preset for the roof (see --list-hardware)",
+        "--calibration",
+        help="calibration.json from `xe-forge calibrate`: the roof measured on the device",
     )
     p.add_argument("--peak-tflops", type=float, help="Override peak compute (TFLOPS)")
     p.add_argument("--peak-bandwidth", type=float, help="Override peak DRAM bandwidth (GB/s)")
@@ -638,28 +613,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--series-order",
         help="Comma-separated series names to fix legend/color order",
     )
-    p.add_argument(
-        "--list-hardware",
-        action="store_true",
-        help="List built-in hardware presets and exit",
-    )
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
-    if args.list_hardware:
-        print("Built-in hardware presets:")
-        for key, hw in HARDWARE_PRESETS.items():
-            print(
-                f"  {key:<14} {hw.name:<42} "
-                f"{hw.peak_tflops:>7g} TFLOPS  {hw.peak_bandwidth_gbps:>7g} GB/s"
-            )
-        return 0
-
     if not args.csv:
-        build_parser().error("the CSV argument is required (or use --list-hardware)")
+        build_parser().error("the CSV argument is required")
 
     hw = _resolve_hardware(args)
     points = load_points(args.csv)

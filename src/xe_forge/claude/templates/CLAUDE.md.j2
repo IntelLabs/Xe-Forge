@@ -10,7 +10,7 @@ At the start of every session, read `config.yaml` in the workspace root. It cont
 - **`dsl`** / **`device`** — what you are writing, and for what part
 - **`measurement`** — `host` when correctness and timing come from the project that
   generated this workspace, `builtin` when they come from Xe-Forge's own executor
-- **`unitrace_enabled`** / **`unitrace_bin`** — unitrace device timing and ComputeBasic profiling;
+- **`unitrace_enabled`** / **`unitrace_bin`** — unitrace device timing, ComputeBasic and EU stall profiling;
   prefer this over VTune when both are enabled
 - **`vtune_enabled`** / **`vtune_bin`** — VTune GPU profiling, if available this session
 - **`compiler_flags`** — extra flags to pass the target compiler when building this kernel,
@@ -24,9 +24,7 @@ All runtime behavior below is gated by these values; re-read `config.yaml` if an
 When profiling is enabled, read `knowledge_base/sycl/xpu/resource_feedback.yaml`
 before interpreting kernel properties or choosing a resource-related optimization.
 Read `knowledge_base/sycl/xpu/compute_basic.yaml` for metric availability and
-counter interpretation. ComputeBasic is the default utilization profile.
-When a stall hypothesis needs more evidence, request a separate unitrace profile
-with `--metric-group EuStallSampling`. EU event shares are not time utilization;
+counter interpretation. EU event shares are not time utilization;
 instruction-address records do not establish source or ISA attribution.
 Keep sample coverage visible. Missing samples are unknown, not zero activity.
 For unitrace, keep the reported artifact directory. On a child trial, pass
@@ -94,7 +92,8 @@ reset-plus-forward benchmark. Never infer end-to-end speedup from trace timings.
    constant — and taking a different path for it is not optimization; it is defeating the
    measurement, and every number it produces is void. The test is whether the kernel would
    still be right, and still be fast, on a workload from the same distribution that is not
-   in this dataset.
+   in this dataset. A threshold on a real argument of the op (N, K, a head dim, the rows
+   the caller passes) is specialization; recognizing a benchmark shape is not.
 {%- endif %}
 {%- if lessons %}
 {{ 8 if dataset else 7 }}. **A lesson is a record of a past measurement, never a substitute for one.** The ledger
@@ -133,7 +132,18 @@ the correctness oracle: every trial's outputs and buffers must match it. Once th
 gate passes, never modify it; a trial that disagrees with it is wrong. Its
 `get_init_inputs()` and `get_inputs()` define the workload.
 {% endif %}
-{% if has_spec %}
+{% if has_spec and weights %}
+`benchmark` (without `--variant`) times every shape this kernel is scored on and records one
+result: {% for n, w in weights.items() %}`{{ n }}` (weight {{ w }}){{ ", " if not loop.last }}{% endfor %} --
+the shares of its time in the model they stand for. Every shape must pass; a shape slower
+than the baseline makes the trial a regression at that shape's ratio (`VERDICT: SLOWER_ON`,
+the next line names it), whatever the others gain; otherwise the speedup is the
+time-weighted total over them. A change that helps one shape and hurts another must take
+its path on a real argument of the op (N, K, a head dim, the rows the caller passes), not
+be given up. The first passing `benchmark --trial-id` pins the tree to these shapes;
+`--variant <name>` times one of them alone, as a probe, without `--trial-id`. `profile`
+defaults to `{{ variant }}`, the heaviest; give it `--variant` for another.
+{% elif has_spec %}
 The commands above default to variant `{{ variant }}`, the one this run was started with.
 Append `--variant <name>` to measure another variant the spec lists; the last `--variant`
 wins. A trial tree is measured on one variant: the first passing `benchmark --trial-id`
@@ -255,6 +265,30 @@ came from `xe-forge-skill benchmark` here.
 - **Do not copy the ledger into the kernel.** A tile size, a sub-group width or a
   work-group shape that won on another kernel is a hypothesis here, not a setting.
 {% endif %}
+{%- if target == "library" %}
+## THIS WORKSPACE TUNES A LIBRARY CALL, NOT A KERNEL
+
+`{{ kernel_name }}` is where the repository calls a library (a GEMM, a convolution) and that
+call is what is optimized. The library itself is never edited and no new kernel is written.
+
+- **The baseline is the call exactly as the repository makes it.** Read, at the call site
+  the profile names, what it computes, its descriptors (shapes, data types, memory
+  formats), its attributes, and when it is created and executed. The baseline `Model`
+  reproduces that call through the library's own API, built with `load_inline` against the
+  copy of the library the stack itself loads (find which; another version picks other
+  implementations), on torch's queue. Find how the library reports the implementation it
+  picked, and record it for the baseline and for every trial.
+- **A trial changes only how the call is made**: the weight layout (prepacked once,
+  outside the timed call), attributes, reusing the call's setup instead of re-creating it,
+  splitting or batching the call, or a different data type where the repository's
+  accuracy allows it. Name the change in the trial strategy.
+- **The ceiling is the card, not the library's default.** The spec names the shapes; a
+  call already at its bandwidth or compute bound has nothing left, and a trial that cannot
+  move the implementation the library picks is a finding, not a failure. Say so in the lessons.
+  A hand-written GEMM is a different route (Xe-Forge's `--tile-tune`), not this one.
+- **Port back to the call site** the profile names (the framework's Python, or the
+  plugin's implementation of the op over the library), never to the library itself.
+{% endif %}
 ## WORKFLOW — Follow these steps in order
 
 ### Step 1: Analyze
@@ -264,7 +298,9 @@ came from `xe-forge-skill benchmark` here.
 {%- endif %}
 - Read `test_kernels/{{ kernel_name }}{{ ext }}` if it exists — that is the baseline to
   optimize.
-{%- if kernel_repo %} If it does not exist, write it before Step 2 as a self-contained copy
+{%- if kernel_repo and target == "library" %} If it does not exist, write it before Step 2:
+  the library call as the section above describes, wrapped as a `Model`.
+{%- elif kernel_repo %} If it does not exist, write it before Step 2 as a self-contained copy
   of the kernel the `kernel-locator` profile names, in its own language, wrapped as a
   `Model` and built with the flags the profile lists -- the baseline is that kernel, not a
   new implementation. Copy every kernel the op launches, in the order it launches them --
@@ -275,6 +311,10 @@ came from `xe-forge-skill benchmark` here.
   reduction it instantiates -- is copied into the file; from the repository only headers of
   the libraries it builds on (CUTLASS/CuTe, SYCL, oneDNN, torch) may be included by `-I`,
   never the op's own kernel headers.
+{%- if reference_workload and not baseline_oracle %} When the reference covers a chain of
+  ops (its docstring names each), the op is all of them: copy each one's kernels, in the
+  order the model calls them, and a trial may run the chain as fewer kernels.
+{%- endif %}
 {%- if baseline_oracle %} The file also defines `get_init_inputs()` and `get_inputs()`,
   taking exactly the spec variant's dims as keyword arguments, and builds every input the
   way the repository's own test or call site does -- cite its file:line for each
@@ -289,6 +329,17 @@ came from `xe-forge-skill benchmark` here.
   `torch.utils.cpp_extension._SYCL_DLINK_FLAGS` before `load_inline`, once per target (`-Xspirv-translator=spir64_gen -spirv-ext=...` and
   `-Xspirv-translator=spir64 -spirv-ext=...`), and put ocloc options (e.g. the GRF mode)
   after the device name in `TORCH_XPU_ARCH_LIST`.
+{%- elif dsl == "opencl" %} The OpenCL C source is a string in the file, built and launched
+  with `from xe_forge.opencl import load, long_`: `k = load(src, "<kernel name>",
+  defines={...})`, then `k(global_size, local_size, *args)` inside `Model.forward` (tensors
+  pass their device pointers, `int` is `int`, `float` is `float`, `long_(v)` is a 64-bit
+  integer). It runs on torch's current XPU queue, so no queue, context or synchronization
+  of your own. A kernel that the repository generates JIT constants for gets every one of
+  them as an entry in `defines`, with the values the profile records for this workload,
+  and the kernel's own includes are inlined into the string. The source declares the
+  extensions it uses (e.g. `#pragma OPENCL EXTENSION cl_khr_fp16 : enable` for `half`);
+  `load(..., options=..., spirv_options=...)` takes clang and llvm-spirv flags when a trial
+  needs others than the run's defaults.
 {%- endif %}
 {%- else %}
 {%- if dsl == "sycl" %} If it contains `TODO` markers, this is a from-scratch task: it is
@@ -383,9 +434,9 @@ For each trial:
   and use the output to guide the next trial.{% if has_spec %} Use the same `--variant` as the benchmark.{% endif %}
 {%- if require_profiles %}
   Pass the saved trial file. Every correct trial that differs from the baseline, including
-  the last before finalize, needs both collections attempted; `trial save` and `finalize` refuse otherwise. A failed
-  collection is recorded and final: report it as failed, do not retry it, and do not
-  drop to a single `--metric-group`.
+  the last before finalize, needs both collections; `trial save` and `finalize` refuse otherwise. Re-run a
+  failed collection once with the same command; if it fails again it is final: report it as
+  failed with its artifacts, and do not drop to a single `--metric-group`.
   Each next trial's `--strategy` cites the profiled measurement it targets (kernel, metric,
   value, trial). After profiling, state the hottest kernel's stall-reason shares beside its
   parent's. If the dominant stall reason's share has not moved over the last two profiled
@@ -412,8 +463,9 @@ For each trial:
      not a regression and not an improvement**. The two arms were closer together than the
      part's measured timing floor, so there is no result. It is recorded with its verdict
      and no speedup; do not branch away from the kernel on it. If no trial separates from
-     the baseline, stop and say the shape is unmeasurable here: the tree is pinned to its
-     variant, so a larger shape is a new run started on it{% if dataset %}
+     the baseline, stop and say the shape is unmeasurable here{% if weights %} (a
+     weighted shape too close to call counts as parity in the total){% else %}: the tree is
+     pinned to its variant, so a larger shape is a new run started on it{% endif %}{% if dataset %}
      (`{{ dataset.profile_path }}` says which variants carry the real work){% endif %}.
    - `VERDICT: NO_CALIBRATION` or `VERDICT: EXTERNAL_ERROR` → STOP and report. The gate could
      not be evaluated, so no trial after this one means anything.
@@ -444,9 +496,15 @@ either nothing was correct or nothing reached parity — `trial status` says whi
 result to report, not a thing to work around.
 
 {% if kernel_repo %}
-If finalize wrote `output/`, dispatch the **port-back** agent once. It turns the winner into
+If finalize wrote `output/` and the best trial is a measured win -- a speedup above 1, not a
+gate's parity -- dispatch the **port-back** agent once; a kernel at parity changes nothing
+worth porting, so say so in the summary instead. Port-back turns the winner into
 `output/upstream.patch` against `{{ kernel_repo }}` without touching the repository. Name
 the patch, or the reason there is none, in the summary.
+{%- if stack_check %} A stack check is on: port-back builds the port into its stack and runs
+its tests and the model there, on the GPU -- do not tell it not to; `PORT.txt` must carry
+the verdict.
+{%- endif %}
 {% endif %}
 Then write a short summary: the best trial, its measured speedup — or the gate that withheld
 one, said as parity rather than as a win — which stopping condition fired, and what you tried
@@ -493,8 +551,7 @@ worth more to the next one than a run that finished and said nothing.
   Change that identity when the implementation changes. A distinct `load_inline` module
   name alone does not isolate device kernel names; collisions can corrupt either arm.
 - **Use the caller's queue.** Do not create a `sycl::queue`. Obtain the one the framework
-  already runs on — for a TVM-FFI entry point that is
-  `static_cast<sycl::queue*>(TVMFFIEnvGetStream(dev.device_type, dev.device_id))`. A kernel
+  already runs on; its entry point's API says how. A kernel
   that submits to its own queue runs correctly, out of order with everything around it, and
   its measured time is not the time it would take in the model.
 - **Do not synchronize inside the kernel function.** No `queue.wait()`, no host-side barrier
@@ -533,6 +590,22 @@ worth more to the next one than a run that finished and said nothing.
 - **The kernel must be self-contained.** All helpers inline in the one file, because that
   file is what is compiled.
 {%- endif %}
+{% elif dsl == "opencl" %}
+- **Launch only through `xe_forge.opencl`.** It builds OpenCL C to SPIR-V and runs it on
+  torch's queue; a kernel launched through another OpenCL context runs out of order with
+  everything around it, and its measured time is not the time it would take in the model.
+- **Expand the generator's macros exactly.** A kernel copied from a repository that
+  generates its JIT constants builds only with the same `defines` the generator would emit
+  for this workload; a missing or different one silently selects another code path.
+- **Sub-group size is declared, not assumed** (`__attribute__((intel_reqd_sub_group_size(N)))`),
+  and a block read (`intel_sub_group_block_read*`) requires the alignment and extent it
+  reads; guard the tail.
+- **Accumulate in a wider type**: reductions over `half` accumulate in `float`.
+- **Tile parameters are measured, not chosen**: a trial built on a work-group size,
+  sub-group width or elements-per-work-item tries at least two values as siblings.
+- **Port back to the `.cl` the profile names.** The trial's kernel string maps onto that
+  file; the generator's host code changes only if a launch parameter it chooses changes.
+- The kernel must be self-contained — all helpers inline in the one source string.
 {% elif dsl == "cuda" %}
 - Use the caller's stream; do not create one, and do not synchronize inside the kernel call.
 - Declare launch bounds rather than relying on the compiler's occupancy guess.
