@@ -13,7 +13,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from jinja2 import Environment, FileSystemLoader, select_autoescape
+from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 
 from xe_forge.config import Config
 from xe_forge.core.dataset_record import load_dataset_record
@@ -32,6 +32,8 @@ _env = Environment(
     keep_trailing_newline=True,
     trim_blocks=False,
     lstrip_blocks=False,
+    # A variable a template uses but the caller did not pass is an error, not a blank.
+    undefined=StrictUndefined,
 )
 
 

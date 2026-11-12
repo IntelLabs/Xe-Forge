@@ -180,6 +180,38 @@ out({{"type": "result", "subtype": "success", "session_id": "s-1"}})
 """
 
 
+CODEX_STUB = """\
+#!{python}
+# `codex exec --json`: first call stops with no answer; `exec ... resume <id>` finishes.
+import json, subprocess, sys
+def out(o): print(json.dumps(o, separators=(',', ':')))
+argv = sys.argv[1:]
+assert argv[0] == "exec" and "--json" in argv, argv
+out({{"type": "thread.started", "thread_id": "t-1"}})
+if "resume" not in argv:
+    out({{"type": "item.completed", "item": {{"type": "agent_message", "text": "caf\\u00e9 " * 200}}}})
+    out({{"type": "turn.completed", "usage": {{}}}})
+    sys.exit(0)
+assert argv[argv.index("resume") + 1] == "t-1", argv
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+open("{pidfile}", "w").write(str(child.pid))
+open("answer.json", "w").write(json.dumps({{"ok": True}}))
+out({{"type": "turn.completed", "usage": {{}}}})
+"""
+
+STUBS = {"claude": STUB, "codex": CODEX_STUB}
+
+
+def _stub_cli(tmp_path, monkeypatch, backend: str, text: str) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / backend
+    stub.write_text(text)
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("XE_FORGE_AGENT", backend)
+
+
 def _alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -190,15 +222,13 @@ def _alive(pid: int) -> bool:
     return not (status.is_file() and "\nState:\tZ" in status.read_text())
 
 
-def test_agent_resumes_after_non_ascii_and_kills_detached_work(tmp_path, monkeypatch):
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+def test_agent_resumes_after_non_ascii_and_kills_detached_work(tmp_path, monkeypatch, backend):
     from xe_forge.frontend import agent
 
-    bin_dir, pidfile = tmp_path / "bin", tmp_path / "child.pid"
-    bin_dir.mkdir()
-    stub = bin_dir / "claude"
-    stub.write_text(STUB.format(python=sys.executable, pidfile=pidfile))
-    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    pidfile = tmp_path / "child.pid"
+    _stub_cli(tmp_path, monkeypatch, backend,
+              STUBS[backend].format(python=sys.executable, pidfile=pidfile))  # fmt: skip
     monkeypatch.setattr(agent, "RESUMES", 1)
 
     got = agent.run("frontend-resume.md.j2", {}, tmp_path / "work", "answer.json", "python", 5)
@@ -209,6 +239,96 @@ def test_agent_resumes_after_non_ascii_and_kills_detached_work(tmp_path, monkeyp
     while _alive(pid) and time.monotonic() < deadline:
         time.sleep(0.2)
     assert not _alive(pid), "the session's detached work outlived the step"
+
+
+ONESHOT_STUB = """\
+#!{python}
+# Records its argv and cwd, checks the staged input, answers the way its CLI does.
+import json, os, sys
+argv = sys.argv[1:]
+json.dump({{"argv": argv, "cwd": os.getcwd()}}, open("{record}", "w"))
+assert open("inputs/config.json").read() == '{{"x": 1}}'
+if {reject}:
+    print('{reject_line}'); sys.exit(1)
+answer = {{"rows": [{{"batch": 1}}]}}
+if "{backend}" == "codex":
+    open(argv[argv.index("-o") + 1], "w").write(json.dumps(answer))
+    print(json.dumps({{"type": "turn.completed"}}))
+else:
+    print(json.dumps({{"type": "result", "structured_output": answer}}))
+"""
+
+REJECT = {"claude": '{"type":"system","subtype":"api_retry","error_status":401}',
+          "codex": '{"type":"turn.failed","error":{"message":"401 Unauthorized"}}'}  # fmt: skip
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+@pytest.mark.parametrize("reject", [False, True])
+def test_oneshot_stages_inputs_and_reads_the_answer(tmp_path, monkeypatch, backend, reject):
+    from xe_forge import agent_cli as agents
+    from xe_forge.frontend import agent
+
+    record = tmp_path / "argv.json"
+    _stub_cli(tmp_path, monkeypatch, backend, ONESHOT_STUB.format(
+        python=sys.executable, record=record, backend=backend, reject=reject,
+        reject_line=REJECT[backend]))  # fmt: skip
+    schema = {"type": "object", "properties": {"rows": {"type": "array"}}}
+    if reject:
+        with pytest.raises(agents.AgentError, match="rejected"):
+            agent.oneshot("suggest rows", {"config.json": '{"x": 1}'}, schema)
+        return
+    assert agent.oneshot("suggest rows", {"config.json": '{"x": 1}'}, schema) == {
+        "rows": [{"batch": 1}]}  # fmt: skip
+    argv = json.loads(record.read_text())["argv"]
+    assert argv[-1] == "suggest rows" if backend == "codex" else argv[1] == "suggest rows"
+
+
+def test_tool_profiles_map_to_each_cli(tmp_path, monkeypatch):
+    """Read-only is confined and shell-free on claude; on codex reads go through a
+    read-only sandboxed shell with no network. Nothing beyond the profile is granted."""
+    from xe_forge import agent_cli as agents
+
+    for name in ("claude", "codex"):
+        _stub_cli(tmp_path, monkeypatch, name, "#!/bin/sh\n")
+    schema, answer = tmp_path / "s.json", tmp_path / "a.json"
+    schema.write_text("{}")
+    claude = agents.get("claude").oneshot("p", schema, answer, agents.READ_ONLY)
+    assert "--restricted" in claude and "dontAsk" in claude
+    assert claude[claude.index("--tools") + 1] == "Read,Glob,Grep"
+    codex = agents.get("codex").oneshot("p", schema, answer, agents.READ_ONLY)
+    assert codex[codex.index("--sandbox") + 1] == "read-only"
+    assert "sandbox_workspace_write.network_access=false" in codex
+    assert "web_search=disabled" in codex
+    assert "--dangerously-bypass-approvals-and-sandbox" not in codex
+    none = agents.get("claude").oneshot("p", schema, answer, {"read": False})
+    assert none[none.index("--tools") + 1] == "" and "--allowedTools" not in none
+    assert "features.shell_tool=false" in agents.get("codex").oneshot(
+        "p", schema, answer, {"read": False})  # fmt: skip
+    with pytest.raises(agents.AgentError, match="unknown agent CLI"):
+        agents.get("gemini")
+
+
+def test_codex_reads_the_generated_workspace(tmp_path):
+    from xe_forge import agent_cli as agents
+
+    (tmp_path / ".claude" / "agents").mkdir(parents=True)
+    (tmp_path / ".claude" / "commands").mkdir()
+    (tmp_path / "CLAUDE.md").write_text("# Workflow\n")
+    (tmp_path / ".claude" / "commands" / "optimize-kernel.md").write_text("Optimize `$ARGUMENTS`.")
+    (tmp_path / ".claude" / "agents" / "tool-runner.md").write_text(
+        '---\nname: tool-runner\ndescription: "Run tools"\ntools: Bash\n---\nRun "it".\n'
+    )
+    codex = agents.get("codex")
+    codex.prepare(tmp_path)
+    text = (tmp_path / "AGENTS.md").read_text()
+    assert text.endswith("# Workflow\n") and ".claude/agents/<name>.md` (tool-runner)" in text
+    toml = (tmp_path / ".codex" / "agents" / "tool-runner.toml").read_text()
+    assert 'name = "tool-runner"' in toml and 'developer_instructions = "Run \\"it\\"."' in toml
+    assert codex.task(tmp_path, "rmsnorm") == "Optimize `rmsnorm`."
+    assert agents.get("claude").task(tmp_path, "rmsnorm") == "/optimize-kernel rmsnorm"
+    assert agents.get("codex").auth_failed(REJECT["codex"])
+    assert agents.get("claude").auth_failed(REJECT["claude"])
+    assert not agents.get("claude").auth_failed('{"type":"assistant","text":"401"}')
 
 
 def test_optimize_records_the_repo_revision(tmp_path):
@@ -662,6 +782,73 @@ def test_capture_parse_refuses_a_dtype_name_the_bounds_cannot_size(tmp_path):
     )
     code, out = _tool("capture", "parse", str(raw), "-o", str(tmp_path / "capture.json"))
     assert code == 1 and "dtype 'f16'" in out, out
+
+
+def test_precision_and_weights_parse_to_torch_dtypes():
+    from xe_forge.frontend.dtypes import canonical, compute_dtype, parse_weights
+
+    assert canonical("bf16") == "bfloat16" and canonical("float8_e4m3fn") == "float8_e4m3fn"
+    with pytest.raises(ValueError):
+        canonical("f16")
+    assert parse_weights("auto") == (None, None)
+    assert parse_weights("int8") == (None, "int8")
+    assert parse_weights("awq:int4") == ("awq", "int4")
+    assert parse_weights("Q4_K_M") == ("Q4_K_M", None)  # a scheme alone is recorded, not checked
+    with pytest.raises(ValueError):
+        parse_weights("awq:i4")
+    assert compute_dtype(["int8", "int32"], "float32") == "float32"
+
+
+def test_a_template_variable_the_caller_did_not_pass_is_an_error():
+    """A missing variable once rendered blank: every step prompt said `Write : {...}`."""
+    from jinja2 import UndefinedError
+
+    from xe_forge.claude.generator import render
+
+    assert "captured.json" in render("frontend-resume.md.j2", answer="captured.json")
+    with pytest.raises(UndefinedError):
+        render("frontend-resume.md.j2")
+
+
+def test_an_fp8_model_computes_in_bf16_and_its_gemms_in_fp8():
+    """Block-scaled fp8 GEMMs (fp8 operands, fp32 scales) count as fp8, not as their scales;
+    the model's compute dtype is still the bf16 the rest runs in (B70, Qwen3-1.7B-FP8)."""
+    from xe_forge.frontend.dtypes import compute_dtype, observed
+
+    def op(us, *dtypes):
+        return SimpleNamespace(device_us=us, args=[None if d is None else
+                                                   SimpleNamespace(dtype=d) for d in dtypes])  # fmt: skip
+
+    shares = observed([op(76.0, "float8_e4m3fn", "float8_e4m3fn", None, "float32", "float32"),
+                       op(24.0, "bfloat16", "float32")])  # fmt: skip
+    assert shares == {"float8_e4m3fn": 0.76, "bfloat16": 0.24}
+    assert compute_dtype(list(shares)) == "bfloat16"
+
+
+@pytest.mark.parametrize("declared, code", [("auto", 0), ("fp16", 0), ("bf16", 1)])
+def test_capture_parse_checks_the_declared_precision(tmp_path, declared, code):
+    unitrace = _exe(tmp_path / "unitrace", UNITRACE_STUB)
+    launcher = _exe(tmp_path / "run.sh", (LAUNCHER % "").replace(
+        '"runtime": {"batch": 1}', f'"runtime": {{"batch": 1, "precision": "{declared}"}}'))  # fmt: skip
+    raw, cap = tmp_path / "raw", tmp_path / "capture.json"
+    assert (
+        _tool("capture", "run", str(launcher), "-o", str(raw), "--unitrace", str(unitrace))[0] == 0
+    )
+    got, out = _tool("capture", "parse", str(raw), "-o", str(cap))
+    assert got == code, out
+    assert json.loads(cap.read_text())["run"]["precision"]["compute"] == "float16"
+    if code:
+        assert "declared compute bfloat16, the trace ran 100% in float16" in out
+
+
+@pytest.mark.parametrize("weights, ok", [("int8", True), ("gptq:int4", False), ("Q4_K_M", True),
+                                         ("auto", True)])  # fmt: skip
+def test_declared_weights_are_checked_against_bytes_per_weight_element(weights, ok):
+    from xe_forge.skills.capture import _precision_problems
+
+    run = {"runtime": {"weights": weights},
+           "precision": {"compute": "bfloat16", "dtypes": {"bfloat16": 1.0}, "w_bytes": 1.06}}  # fmt: skip
+    assert (not _precision_problems(run)) is ok
 
 
 def test_naming_checks_a_cost_on_shapes_beyond_the_ones_listed():

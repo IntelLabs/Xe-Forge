@@ -345,8 +345,11 @@ def optimize(manifest_path: Path, run_dir: Path, opts) -> list[tuple[str, str]]:
     repos_dir = Path(opts.kernel_repos).resolve() if opts.kernel_repos else REPO_DIR.parent
     ws_root = run_dir / "workspaces"
     ws_root.mkdir(parents=True, exist_ok=True)
-    if opts.engine == "claude" and shutil.which("claude") is None:
-        raise SystemExit("optimize: --engine claude needs the Claude Code CLI ('claude') on PATH")
+    from xe_forge import agent_cli as agents
+
+    cli = agents.BACKENDS.get(opts.engine)
+    if cli and shutil.which(cli.binary) is None:
+        raise SystemExit(f"optimize: --engine {opts.engine} needs the {cli.binary!r} CLI on PATH")
     rest = list(opts.passthrough)
     unitrace = rest[rest.index("--unitrace-bin") + 1] if "--unitrace-bin" in rest[:-1] else (
         os.environ.get("UNITRACE_BIN", "unitrace"))  # fmt: skip
@@ -468,7 +471,12 @@ def _git_revision(repo: Path) -> dict:
 
 
 def _add_optimize_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--engine", default="claude", choices=("claude", "dspy-agent"))
+    p.add_argument(
+        "--engine", default=os.environ.get("XE_FORGE_AGENT") or "claude",
+        choices=("claude", "codex", "dspy-agent"),
+        help="the agent CLI (claude, codex) for every agent of the run, or dspy-agent for the "
+        "kernels (default: $XE_FORGE_AGENT, else claude)",
+    )  # fmt: skip
     p.add_argument("--device", default="xpu")
     p.add_argument("--max-turns", type=int, default=80)
     p.add_argument("--only", nargs="*", help="kernel names to run (default: every enabled)")
@@ -484,6 +492,14 @@ def _add_optimize_args(p: argparse.ArgumentParser) -> None:
 
 
 # ── entry ──────────────────────────────────────────────────────────────────
+
+
+def _use_agent(a) -> None:
+    """``--engine claude|codex`` drives the frontend agents too (they read XE_FORGE_AGENT)."""
+    from xe_forge import agent_cli as agents
+
+    if getattr(a, "engine", None) in agents.BACKENDS:
+        os.environ["XE_FORGE_AGENT"] = a.engine
 
 
 def main(argv: list[str]) -> int:
@@ -505,6 +521,7 @@ def main(argv: list[str]) -> int:
         p.add_argument("--iters", type=int, default=20)
         p.add_argument("--dtypes", nargs="*", help="matmul dtypes to measure (default: all)")
         a = p.parse_args(rest)
+        _use_agent(a)
         return calibrate.main(a.output, a.read_bytes, a.matmul_n, a.iters, a.dtypes)
 
     if command == "optimize":
@@ -514,6 +531,7 @@ def main(argv: list[str]) -> int:
         p.add_argument("manifest", type=Path)
         _add_optimize_args(p)
         a = p.parse_args(rest)
+        _use_agent(a)
         a.passthrough = passthrough
         run_dir = a.manifest.resolve().parent
         pairs = optimize(a.manifest.resolve(), run_dir, a)
@@ -567,6 +585,7 @@ def main(argv: list[str]) -> int:
     )  # fmt: skip
     _add_optimize_args(p)
     a = p.parse_args(rest)
+    _use_agent(a)
     a.passthrough = passthrough
     turns = a.agent_max_turns or a.max_turns
     run_dir = a.output.resolve()
@@ -596,10 +615,13 @@ def main(argv: list[str]) -> int:
     cap = ir.load(capture_path)  # once; the parse with names below rewrites it for analyze
     rt = cap.run.get("runtime") or {}
     want = {"framework": a.framework, "model": a.model, "batch": a.batch,
-            "input_len": a.input_len, "output_len": a.output_len, "inputs": a.inputs}  # fmt: skip
+            "input_len": a.input_len, "output_len": a.output_len,
+            "prompts": a.inputs.get("prompts")}  # fmt: skip
+    # The run's one input is its prompt file; other files the launcher records (a tokenizer)
+    # are its own, checked by the parse, not part of which run this is.
     have = {"framework": cap.run.get("framework"), "model": (cap.run.get("model") or {}).get("name"),
             **{k: rt.get(k) for k in ("batch", "input_len", "output_len")},
-            "inputs": rt.get("inputs") or {}}  # fmt: skip
+            "prompts": (rt.get("inputs") or {}).get("prompts")}  # fmt: skip
     if have != want:
         print(f"run: {capture_path} is a capture of {have}, not {want}; remove it to capture "
               "again", file=sys.stderr)  # fmt: skip

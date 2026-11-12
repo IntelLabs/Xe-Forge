@@ -34,7 +34,8 @@ setting it needs, the framework under $FRAMEWORK_PYTHON when that is set (it is 
 build of the stack is measured) and {{ python }} otherwise, and writes into $RAW_DIR:
  - meta.json: {"framework", "framework_version", "model": {"name", "config": <its config as
    a dict>}, "runtime": {"batch", "input_len", "output_len", "inputs": {{ inputs | tojson }}
-   (verbatim: the files the run's inputs come from, which the parse checks), and every
+   (copied exactly, the run's own input files that the parse checks; files you add, such as a
+   tokenizer, go under another runtime key), and every
    setting that changes what runs}, "device": {"type", "name"}, "repeats": <how many times
    the process ran the identical workload, warm-up included>} -- what unitrace sees is
    exactly those runs, work done once (model load, a first-use prepack or JIT) kept before

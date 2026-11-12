@@ -28,7 +28,8 @@ import sys
 from pathlib import Path
 
 from xe_forge.frontend import canonical, ir, naming
-from xe_forge.frontend.dtypes import STORAGE_BYTES
+from xe_forge.frontend.dtypes import STORAGE_BYTES, compute_dtype, observed, parse_weights
+from xe_forge.frontend.dtypes import canonical as canonical_dtype
 from xe_forge.frontend.torch_trace import parse_traces
 
 _SIMD = re.compile(r"\[SIMD\d+ \{[^}]*\} \{[^}]*\}\]$")
@@ -367,6 +368,7 @@ def parse_capture(args) -> int:
         f = Path(inp.get("file") or "")
         if not f.is_file() or _sha256(f) != inp.get("sha256"):
             problems.append(f"input {name!r}: {f} is missing or not the file the run was given")
+    problems += _precision_problems(r)
     if not capture.ops:
         problems.append("no ops")
     if known_pct < 90:
@@ -374,6 +376,33 @@ def parse_capture(args) -> int:
     for p in problems:
         print(f"capture parse: PROBLEM {p}")
     return 1 if problems else 0
+
+
+def _precision_problems(run: dict) -> list[str]:
+    """The declared ``runtime.precision`` / ``runtime.weights`` against what the trace ran;
+    ``auto`` (or nothing declared) only records."""
+    rt, seen = run.get("runtime") or {}, run["precision"]
+    problems = []
+    try:
+        want = (
+            None if rt.get("precision") in (None, "", "auto") else canonical_dtype(rt["precision"])
+        )
+        _, w_dtype = parse_weights(rt.get("weights"))
+    except ValueError as exc:
+        return [f"runtime precision/weights: {exc}"]
+    got = seen["compute"]
+    if want and got != want:
+        share = f"{100 * seen['dtypes'][got]:.0f}% in {got}" if got else "no float tensor"
+        problems.append(f"declared compute {want}, the trace ran {share}")
+    w_bytes = seen["w_bytes"]
+    if (
+        w_dtype
+        and w_bytes is not None
+        and not 1.0 <= round(w_bytes / STORAGE_BYTES[w_dtype], 3) <= 1.25
+    ):
+        problems.append(f"declared weights {w_dtype} ({STORAGE_BYTES[w_dtype]} B/element), the "
+                        f"GEMMs read {w_bytes} B per weight element")  # fmt: skip
+    return problems
 
 
 def run(args) -> int:
@@ -412,6 +441,13 @@ def build(raw_dir: Path, out: Path, names: dict | None = None, summary=None) -> 
         run["counters"] = _counters(json.loads((raw_dir / "counters.json").read_text()))
     capture = ir.CaptureRun(run=run, ops=summary.ops)
     capture.workloads = canonical.workloads(capture.ops, summary.total_us, naming.name_op)
+    # What the run computed in, and the time-weighted bytes per weight element of its GEMMs.
+    gemms = [(w.attrs["w_bytes"], w.device_us) for w in capture.workloads if "w_bytes" in w.attrs]
+    gemm_us = sum(us for _, us in gemms)
+    shares = observed(capture.ops)
+    run["precision"] = {"compute": compute_dtype(list(shares)), "dtypes": shares,
+                        "w_bytes": round(sum(b * us for b, us in gemms) / gemm_us, 4)
+                        if gemm_us else None}  # fmt: skip
     ir.dump(capture, out)
     return capture
 

@@ -131,7 +131,7 @@ class LoggingConfig:
 class EngineConfig:
     """Engine selection configuration"""
 
-    engine: str = "dspy"  # "dspy", "claude" or "dspy-agent"
+    engine: str = "dspy"  # "dspy", "claude", "codex" or "dspy-agent"
     auto_launch: bool = False  # Claude engine: auto-launch claude CLI
     workspace: str = "./"  # Claude engine: workspace directory
     git_init: bool = False  # Claude engine: initialize workspace as git repo

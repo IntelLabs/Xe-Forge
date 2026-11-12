@@ -144,10 +144,10 @@ Examples:
     parser.add_argument(
         "--engine",
         type=str,
-        choices=["dspy", "claude", "dspy-agent"],
+        choices=["dspy", "claude", "codex", "dspy-agent"],
         default=None,
-        help="Optimization engine (default: dspy). dspy-agent runs a DSPy tool-calling "
-        "agent in the Claude workspace",
+        help="Optimization engine (default: dspy). claude and codex drive the agent "
+        "workspace with that CLI; dspy-agent runs a DSPy tool-calling agent in it",
     )
     parser.add_argument(
         "--target",
@@ -550,10 +550,10 @@ def _run_optimize(parser, args, config: Config) -> int:
     """Run the optimization pipeline (original path)."""
     # Validate input. Only the workspace engines can locate a kernel in --kernel-repo
     # at runtime; the pipeline would be handed an empty kernel.
-    workspace_engine = config.engine.engine in ("claude", "dspy-agent")
+    workspace_engine = config.engine.engine in ("claude", "codex", "dspy-agent")
     if not args.input and not (args.kernel_repo and workspace_engine):
         parser.error(
-            "--input is required (or use --kernel-repo with --engine claude|dspy-agent, "
+            "--input is required (or use --kernel-repo with --engine claude|codex|dspy-agent, "
             "--tile-tune / --tune-config)"
         )
     if args.input and not Path(args.input).exists():
