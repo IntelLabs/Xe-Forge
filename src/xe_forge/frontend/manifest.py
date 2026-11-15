@@ -37,8 +37,9 @@ def _dtype(w: Workload) -> str:
     return floats[0] if floats else (w.dtypes[0] if w.dtypes else "float32")
 
 
-def _variants(e: Entry) -> list[tuple[str, Workload, str | None, int | None, float]]:
-    """(variant, workload, var axis, value, device us) for every captured shape, costliest
+def _variants(e: Entry) -> list[tuple]:
+    """(variant, workload, var axis, value, device us, its shape's sizes or None, record
+    ref) for every captured shape -- each token count's every runtime size too, costliest
     first: which of them a trial is scored on, and how much each counts, is the inputs
     agent's choice (``weights``)."""
     rows = []
@@ -47,11 +48,19 @@ def _variants(e: Entry) -> list[tuple[str, Workload, str | None, int | None, flo
             continue
         suffix = f"-w{i}" if len(e.workloads) > 1 else ""
         if not w.var_axes:
-            rows.append((f"bench{suffix}", w, None, None, w.device_us))
+            rows.append((f"bench{suffix}", w, None, None, w.device_us, None, w.workload_id))
             continue
         axis, hist = next(iter(w.var_axes.items()))
         for value, h in hist.items():
-            rows.append((f"bench-t{value}{suffix}", w, axis, int(value), h["device_us"]))
+            ref = f"{w.workload_id}@{axis}={value}"
+            pts = h.get("points") or []
+            if len(pts) <= 1:
+                rows.append((f"bench-t{value}{suffix}", w, axis, int(value), h["device_us"], None,
+                             ref))  # fmt: skip
+                continue
+            for j, p in enumerate(pts):
+                rows.append((f"bench-t{value}-s{j}{suffix}", w, axis, int(value), p["device_us"],
+                             p["with"], f"{ref}#{j}"))  # fmt: skip
     rows.sort(key=lambda r: -r[4])
     return rows
 
@@ -71,13 +80,12 @@ def build_spec(
                   "weights": {k: round(v, 4) for k, v in chosen.items()}}  # fmt: skip
     record: dict[str, str] = {}
     smallest = min(rows, key=lambda r: r[3] if r[3] is not None else 0)
-    for name, w, axis, value, _ in [("ci", *smallest[1:]), *rows]:
+    for name, w, _axis, value, _, with_, ref in [("ci", *smallest[1:]), *rows]:
         rtol, atol = _TOLERANCE.get(_dtype(w), (0.05, 0.05))
-        spec[name] = [
-            {"dtype": _dtype(w), "rtol": rtol, "atol": atol, "dims": resolve_dims(w, value)}
-        ]
+        spec[name] = [{"dtype": _dtype(w), "rtol": rtol, "atol": atol,
+                       "dims": resolve_dims(w, value, with_)}]  # fmt: skip
         if name != "ci":
-            record[name] = w.workload_id + (f"@{axis}={value}" if axis else "")
+            record[name] = ref
     return spec, record
 
 

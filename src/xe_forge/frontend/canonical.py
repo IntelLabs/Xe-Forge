@@ -227,9 +227,19 @@ def _workload(members, var: set[str], moving: set[str], total_us: float, naming_
             h = hist.setdefault(value, {"calls": 0, "device_us": 0.0})
             h["calls"] += op.calls
             h["device_us"] = round(h["device_us"] + op.device_us, 3)
-            if moving and op.device_us > heaviest.get(value, -1.0):
-                heaviest[value] = op.device_us
-                h["with"] = {k: op_dims[k] for k in sorted(moving)}
+            if moving:
+                with_ = {k: op_dims[k] for k in sorted(moving)}
+                if op.device_us > heaviest.get(value, -1.0):
+                    heaviest[value] = op.device_us
+                    h["with"] = with_
+                # every distinct shape at this token count, for the spec: none is dropped
+                pts = h.setdefault("points", [])
+                p = next((p for p in pts if p["with"] == with_), None)
+                if p is None:
+                    p = {"with": with_, "calls": 0, "device_us": 0.0}
+                    pts.append(p)
+                p["calls"] += op.calls
+                p["device_us"] = round(p["device_us"] + op.device_us, 3)
     ident = {k: v for k, v in base.items() if k != "dim_names"} | {"dims": dims}
     naming: Naming = naming_fn(top)
     kernels: dict[str, float] = {}
@@ -253,9 +263,10 @@ def _workload(members, var: set[str], moving: set[str], total_us: float, naming_
     )
 
 
-def resolve_dims(w: Workload, value: int | None) -> dict:
-    """Concrete dims at one captured token count."""
-    with_ = {}
-    if value is not None and w.var_axes:
-        with_ = next(iter(w.var_axes.values())).get(str(value), {}).get("with", {})
+def resolve_dims(w: Workload, value: int | None, with_: dict | None = None) -> dict:
+    """Concrete dims at one captured token count: its heaviest shape, or ``with_``'s."""
+    if with_ is None:
+        with_ = {}
+        if value is not None and w.var_axes:
+            with_ = next(iter(w.var_axes.values())).get(str(value), {}).get("with", {})
     return {k: (with_.get(k, value) if v == "var" else v) for k, v in w.dims.items()}

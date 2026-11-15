@@ -2,14 +2,17 @@ Find where {{ model }} under {{ framework }} would run faster if a chain of its 
 kernel. Each kernel worth optimizing on its own already was; what is left is what only a
 fusion removes: the launches between the ops, and the intermediates one writes to device
 memory and the next reads back. An op at its bandwidth bound, or one inside PyTorch with no
-kernel repository to edit, has nothing else left to give.
+kernel repository to edit, has nothing else left to give on its own; in a chain, what a
+fusion removes is its call, which is made where the framework calls it.
 
 What the run established, all under {{ run_dir }}:
  - {{ capture }}: every op the model ran, with its shapes, `call_site` (the module that
    called it) and device time, grouped into workloads. Ops are aggregated per shape and call
    site, not in order: `raw/unitrace_launches.json` is the measured run's kernel launches in
    device order, and the model's source shows which op feeds which.
- - names.json: each op's kernel and the repository it lives in; analysis.json and
+ - names.json: each op's kernel and the repository it lives in (its model.weights_widened_by,
+   when set, is an op that widens the stored weights on every forward for the GEMMs that
+   read them: a chain whose GEMM could widen them as it reads); analysis.json and
    kernels.yaml: which kernels were optimized and why the others were not.
  - results/SUMMARY.md and results/summary.json: what optimizing each kernel won, and its patch.
 {%- if stacked %}
@@ -40,6 +43,8 @@ an op's interface or its call sites needs the repositories wired to it as
 Run `{{ check_cmd }}` until it prints PASS; it ranks what passes by the time the chain's ops
 take after the kernels' wins. Then write {{ answer }}: {"fusions": [{"name": "<identifier>",
 "repo": "<path>", "dsl": "<one of {{ dsls | join(', ') }}>", "ops": ["<op id in the
-capture>", ...], "anchor": "<the op whose workload sets the shapes>", "reference":
+capture>", ...] (every op the chain is made of, at every shape it runs at -- prefill and
+decode{% if rows %}, and in each of the run's {{ rows }} rows, whose op ids start rNN:{% endif %}:
+the check ranks a fusion by their time), "anchor": "<the op whose workload sets the shapes>", "reference":
 "refs/<name>_pytorch.py", "integration_repos": ["<path>", ...], "why": "<what is fused and
 what that removes, one line>"}, ...]}, or {"fusions": [], "why": "<why none is worth it>"}.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from xe_forge.frontend import formula
+from xe_forge.frontend.calibrate import peak_of
 from xe_forge.frontend.calibrate import peaks as calib_peaks
 from xe_forge.frontend.ir import CapturedOp, Naming
 
@@ -146,7 +147,16 @@ def keep_valid(names, listing: dict, repos) -> tuple[dict | None, list[str]]:
     problems = []
     for key in list(ops):
         wrong = validate({"ops": {key: ops[key]}}, listing, repos)
-        if wrong:
+        costs = [p for p in wrong if re.search(r"\.cost[.:]", p)]
+        if wrong and len(costs) == len(wrong):  # a bad cost loses the cost, not the naming
+            e = ops[key]
+            groups = (e.get("kernels") or {}) if isinstance(e.get("kernels"), dict) else {}
+            for where, part in [(repr(key), e)] + [(f"{key!r}.kernels[{s!r}]", k)
+                                                     for s, k in groups.items()]:  # fmt: skip
+                if isinstance(part, dict) and any(p.startswith(f"{where}.cost") for p in costs):
+                    part.pop("cost", None)
+            problems += [f"{p}; that cost dropped" for p in costs]
+        elif wrong:
             problems += wrong
             del ops[key]
     return names, problems
@@ -166,7 +176,7 @@ def refuted(names: dict, listing: dict, calib: dict | None, noise: float) -> lis
                 us = sum(t for s, t in shape.get("kernels_per_call", {}).items() if sub in s)
             moved = formula.evaluate(cost.get("bytes", 0), shape["dims"])
             flops = formula.evaluate(cost.get("flops", 0), shape["dims"])
-            peak = peaks.get(shape.get("dtype")) or max(peaks.values(), default=0)
+            peak = peak_of(peaks, shape.get("dtype"))
             if moved is None or flops is None:
                 continue
             bound = max(moved / (bw * 1e3), flops / (peak * 1e6) if peak else 0.0)

@@ -11,6 +11,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 
 from xe_forge.frontend import formula
+from xe_forge.frontend.calibrate import peak_of
 from xe_forge.frontend.calibrate import peaks as calib_peaks
 from xe_forge.frontend.canonical import resolve_dims
 from xe_forge.frontend.dtypes import storage_bytes
@@ -123,7 +124,7 @@ def gemm_bound(
     w: Workload, calib: dict | None, ctx: dict | None = None
 ) -> tuple[float, float] | None:
     """(recoverable us, efficiency) against the GEMM roofline; None if unbounded."""
-    ctx = ctx or {}
+    ctx = {} if ctx is None else ctx  # the caller's: it collects ctx["unpeaked"]
     if not calib or not {"M", "N", "K"} <= set(w.dims) or "var" in (w.dims["N"], w.dims["K"]):
         return None
     dtype = w.dtypes[0] if w.dtypes else None
@@ -140,7 +141,7 @@ def gemm_bound(
         if "w_bytes" not in p:
             return None
         a_b, w_b, o_b = p.get("a_bytes", size), p["w_bytes"], p.get("o_bytes", size)
-        peak = peaks.get(p.get("compute", dtype)) or max(peaks.values())
+        peak = peak_of(peaks, p.get("compute", dtype), ctx)
         rows, e_eff = m, 1
         if p.get("grouped"):
             e = p.get("E")
@@ -180,7 +181,7 @@ def cost_bound(
     if not bw or "bytes" not in cost:
         return None
     dtype = next((d for d in w.dtypes if d.startswith(("bfloat", "float"))), None)
-    peak = peaks.get(dtype) or max(peaks.values(), default=None)
+    peak = peak_of(peaks, dtype, ctx) if cost.get("flops") else None
 
     def per_call(value):
         dims = resolve_dims(w, value)
@@ -210,7 +211,11 @@ def _measured(measured: dict, name: str) -> dict | None:
     """A kernel's counters; the trace may cut long names the counters keep whole."""
     if name in measured:
         return measured[name]
-    hits = [v for k, v in measured.items() if k.startswith(name)]
+    return combine([v for k, v in measured.items() if k.startswith(name)])
+
+
+def combine(hits: list[dict]) -> dict | None:
+    """Counters of several launches of one kernel as one, rates weighted by time."""
     if not sum(v["us"] for v in hits):
         return None
     out = {"us": sum(v["us"] for v in hits)}
@@ -377,7 +382,7 @@ def analyze(
         calls = sum(d.calls for d in ds)
         effs = [d.eff for d in ds if d.eff is not None]
         bound = f"eff {min(effs):.2f} of its bound" if effs else "bound unknown"
-        e.reason = f"{share:.2%} of device time; {calls} calls; " + (
+        e.reason = f"{share:.2%} of device time; {round(calls, 3)} calls;" + (
             bound if e.enabled else ds[0].reason
         )
         entries.append(e)
@@ -404,5 +409,6 @@ def analyze(
             "min_gain": min_gain,
             "bound": "calibrated" if calibration else "unknown (no calibration)",
             "counters_pct": _counted(capture.workloads, ctx["counters"], ctx["shared"]),
+            "unpeaked": sorted(ctx.get("unpeaked", ())),
         },
     )

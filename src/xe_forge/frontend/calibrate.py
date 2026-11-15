@@ -12,7 +12,7 @@ from pathlib import Path
 from xe_forge import frontend
 
 CACHE = frontend.CACHE / "calibration"
-DTYPES = ("bfloat16", "float16")
+DTYPES = ("bfloat16", "float16", "float32")
 # Float formats whose every value is exactly a value of these: a matmul in them is never bound
 # to be slower than one in those (convert, then multiply), whatever the card's own kernel does.
 # Not int8: its int32 result is not one a 16-bit float matmul computes.
@@ -29,6 +29,24 @@ def peaks(calib: dict | None) -> tuple[float | None, dict[str, float]]:
         if best:
             tflops[d] = best
     return calib.get("bandwidth_gbs") or None, tflops
+
+
+def peak_of(tflops: dict[str, float], dtype, ctx: dict | None = None) -> float | None:
+    """``dtype``'s matmul peak. One the calibration lacks is bounded at the fastest measured
+    -- still a lower bound, but its efficiency then reads low -- and noted in
+    ``ctx["unpeaked"]``, for the agent reading the bounds to weigh."""
+    if dtype in tflops:
+        return tflops[dtype]
+    if ctx is not None and dtype and tflops:
+        ctx.setdefault("unpeaked", set()).add(dtype)
+    return max(tflops.values(), default=None)
+
+
+def unpeaked_note(tflops: dict[str, float], ctx: dict) -> list[str]:
+    best = max(tflops, key=tflops.get, default=None)
+    return [f"{d} has no matmul peak in the calibration: its GEMMs are bounded at the fastest "
+            f"measured ({best}, {tflops.get(best)} TFLOP/s), so their efficiency reads low"
+            for d in sorted(ctx.get("unpeaked", ()))]  # fmt: skip
 
 
 def _time_us(fn, dev, iters: int) -> float:

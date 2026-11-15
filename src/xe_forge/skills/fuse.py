@@ -3,7 +3,8 @@
 <fusions.json>: {"fusions": [{"name", "repo", "dsl", "ops": ["<capture op id>", ...],
 "anchor": "<one of them>", "reference": "<the chain as a _pytorch.py>",
 "integration_repos": [...], "why"}]}. Each op a captured one, two or more; the anchor's
-workload has the shapes the fusion is specified at, and the reference's ``get_inputs`` and
+workload has the shapes the fusion is specified at; a capture of several rows has the
+chain's ops in every row, and the reference's ``get_inputs`` and
 ``get_init_inputs`` between them take exactly its dims and ``dtype``, as a spec passes them
 (``core/reference_workload``); the repositories exist (relative paths are read
 from fusions.json's directory). Ranks the fusions by the time their ops took, each divided
@@ -63,6 +64,7 @@ def check(answer: dict, capture, won: dict[str, float], base: Path) -> tuple[lis
 
     ops = {o.id: o for o in capture.ops}
     owner = {i: w for w in capture.workloads for i in w.ops}
+    rows = {o.framework_meta.get("row") for o in ops.values()} - {None}
     total = capture.run.get("total_device_us") or sum(o.device_us for o in ops.values()) or 1.0
     items = answer.get("fusions")
     if not isinstance(items, list) or not items:
@@ -78,6 +80,11 @@ def check(answer: dict, capture, won: dict[str, float], base: Path) -> tuple[lis
         if len(chain) < 2:
             bad.append("a fusion has two ops or more")
         bad += [f"{i} is not a captured op" for i in chain if i not in ops]
+        # several rows (rows.merge): the same code runs at every row's size
+        listed = {ops[i].framework_meta.get("row") for i in chain if i in ops}
+        if rows - listed:
+            bad.append(f"its ops are of rows {sorted(listed)} only: list the chain's ops in "
+                       f"every row ({len(rows)} rows, op ids rNN:...)")  # fmt: skip
         anchor = owner.get(f.get("anchor"))
         if f.get("anchor") not in chain or anchor is None or not anchor.dims:
             bad.append("the anchor is one of its ops, in a workload with dims")

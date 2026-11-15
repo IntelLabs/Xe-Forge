@@ -112,6 +112,13 @@ def collect(run_dir: Path, manifest: dict, runs: list[tuple[str, str]]) -> Path:
         "| kernel | repo | variant | decision | outcome | speedup | trial | kind | stack | mergeable | patches |",
         "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
+    cap = run_dir / "capture.json"
+    run = json.loads(cap.read_text()).get("run") or {} if cap.is_file() else {}
+    if run.get("precision"):  # what was declared and what ran
+        rt, seen = run.get("runtime") or {}, run["precision"]
+        lines[1:1] = ["", f"Precision: compute {rt.get('precision')} ({seen.get('compute')} ran); "
+                      f"weights {rt.get('weights')} ({seen.get('w_bytes')} B per GEMM weight "
+                      f"element read)."]  # fmt: skip
     for entry in manifest["kernels"]:
         name = entry["name"]
         mine = [(v, r) for (k, v), r in attempted.items() if k == key_of(entry)]

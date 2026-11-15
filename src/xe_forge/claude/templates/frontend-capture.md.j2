@@ -9,7 +9,10 @@ decode steps after it. Prompt token ids are fixed: the same for every framework 
 `from xe_forge.frontend import profile; profile.token_ids(profile.hf_vocab(tokenizer), {{ batch }},
 {{ input_len }}{% if 'prompts' in inputs %}, prompt_file="{{ inputs.prompts.file }}"{% endif %})` (tokenizer: the model's Hugging Face tokenizer). A framework
 that takes text rather than ids is given text that encodes back to exactly those ids -- check
-it. Precision: compute in {{ precision }}, weights stored as {{ weights }} -- auto leaves the
+it. The launcher you write is rerun at other sizes with no agent: it takes the batch, input
+length and output length from $XF_BATCH, $XF_INPUT_LEN and $XF_OUTPUT_LEN when they are set,
+the numbers above otherwise -- in the token ids, the framework's settings and what it records.
+Precision: compute in {{ precision }}, weights stored as {{ weights }} -- auto leaves the
 framework's default for this checkpoint alone; anything else is set with the framework's own
 option for it (a checkpoint that must be quantized or converted for it is made once, with
 the framework's own tool, under {{ cache }}/models/). Run eagerly: no graph
@@ -40,7 +43,7 @@ Write launcher/run.sh here: an executable that runs that workload once more with
 setting it needs, the framework under $FRAMEWORK_PYTHON when that is set (it is when another
 build of the stack is measured) and {{ python }} otherwise, and writes into $RAW_DIR:
  - meta.json: {"framework", "framework_version", "model": {"name": {{ model | tojson }} (copied
-   exactly, even when it is a path), "config": <its config as a dict>}, "runtime": {"batch", "input_len", "output_len", "inputs": {{ inputs | tojson }}
+   exactly, even when it is a path), "config": <its config as a dict>}, "runtime": {"batch", "input_len", "output_len" (the integers that ran), "inputs": {{ inputs | tojson }}
    (copied exactly, the run's own input files that the parse checks; files you add, such as a
    tokenizer, go under another runtime key), "precision": the compute dtype that ran, by
    torch's name ({{ precision | tojson }} verbatim when it is not auto), "weights":
@@ -81,7 +84,16 @@ kernel the device ran (raw/unitrace_kernels.json) with its counters. `capture pa
 capture.json and checks it: exit 0 passes; exit 1 prints each PROBLEM. Fix the launcher and
 run both again until parse passes. Report the numbers it prints; do not edit raw/ or
 capture.json yourself.
-
+{% if refused %}
+launcher/run.sh here already captured this run: fix it, do not start over. Its capture was
+refused once its ops were named (`capture parse raw -o capture.json --names names.json`):
+{% for p in refused %}  - {{ p }}
+{% endfor %}The naming agent saw these and cannot change what was captured. Find in the launcher
+and raw/ why, fix it and run both commands again (the named parse too, to see what is left:
+names.json is the old naming, rewritten once you answer, so a problem in its answer may
+remain); then the tool decides. If the launcher already records exactly what ran and the
+problem is the naming's, change nothing and write {"error": ...} saying why.
+{% endif %}
 Write {{ answer }}: {"launcher": "launcher/run.sh", "capture": "capture.json", "notes":
 "<what the launcher does and why, one paragraph>"}, or {"error": "<why it cannot be
 captured>", "next_step": "<what a person would do>"}.

@@ -391,8 +391,8 @@ def _precision_problems(run: dict, named: bool = False, ops: list = ()) -> list[
     """The declared ``runtime.precision`` / ``runtime.weights`` against what the trace ran;
     both must name a dtype. Once ``named``, the GEMMs' weights are known: declared weights
     none of them read is a problem too, and GEMMs reading more bytes than stored are one
-    unless the namer names the op that widens them (``model.weights_widened_by``), which must
-    be an op of ``ops`` reading the stored dtype. The namer decides; this checks its claim."""
+    unless the namer names the op that widens them (``model.weights_widened_by``); a named op
+    must be one of ``ops`` reading the stored dtype. The namer decides; this checks its claim."""
     rt, seen = run.get("runtime") or {}, run["precision"]
     problems = []
     try:
@@ -410,7 +410,7 @@ def _precision_problems(run: dict, named: bool = False, ops: list = ()) -> list[
     w_bytes = seen["w_bytes"]
     if named and w_dtype and w_bytes is None:
         problems.append(f"declared weights {w_dtype}, but no GEMM's weight was captured: "
-                        f"the launcher records each node's weights as arguments")  # fmt: skip
+                        f"the launcher must record each node's weights among its args")  # fmt: skip
     ratio = round(w_bytes / STORAGE_BYTES[w_dtype], 3) if w_bytes is not None else 1
     # uint8 is also the byte container of packed sub-byte formats: no lower bound for it.
     if ratio < 1.0 and w_dtype != "uint8":
@@ -422,7 +422,7 @@ def _precision_problems(run: dict, named: bool = False, ops: list = ()) -> list[
                         f"GEMMs read {w_bytes} B per weight element: loaded wide, or widened on "
                         f"the fly by an op -- then names.json's model.weights_widened_by names "
                         f"it")  # fmt: skip
-    if ratio > 1.25 and claim:
+    if named and claim:  # every claim is checked, needed or not
         reads = any(o.framework_meta.get("name_key", o.framework_op) == claim
                     and any(a is not None and a.dtype == w_dtype for a in o.args) for o in ops)  # fmt: skip
         if not reads:

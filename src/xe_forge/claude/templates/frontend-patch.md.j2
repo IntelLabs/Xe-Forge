@@ -28,10 +28,11 @@ interpreter is {{ python }}.
    its own code. Then run
      xe-forge-skill patch check . --repos {{ repos }} --framework-python {{ python }} \
        --model {{ model }} --batch {{ batch }} --input-len {{ input_len }}{% if 'prompts' in inputs %} \
-       --prompt-file {{ inputs.prompts.file }}{% endif %}
+       --prompt-file {{ inputs.prompts.file }}{% endif %}{% if precision is defined and precision.startswith(("float", "bfloat")) %} \
+       --precision {{ precision }}{% endif %}
    It diffs base..HEAD itself, applies that to a fresh clone, checks the import, runs
    generate.sh, then has transformers score its tokens on the GPU: fed each sequence's prompt
-   and generated prefix, every generated token must be within 0.3 nat of transformers' best. It scores in bf16; a sequence that fails there is judged again in
+   and generated prefix, every generated token must be within 0.3 nat of transformers' best. It scores in {{ precision if precision is defined and precision.startswith(("float", "bfloat")) else "bf16" }}; a sequence that fails there is judged again in
    float32 over several slightly perturbed forwards, a token failing only by more than the
    reference's own spread there. The reference runs the checkpoint as it is specified,
    activation quantization included: a dequantized one is stable and wrong. A FAIL there is

@@ -25,13 +25,21 @@ REPO_DIR = SRC_DIR.parent
 # ── capture ────────────────────────────────────────────────────────────────
 
 
-def _tool(python: str, *argv: str, **env: str) -> int:
-    """An ``xe-forge-skill`` tool under ``python``, with this package on its path."""
+def _tool(python: str, *argv: str, problems: list | None = None, **env: str) -> int:
+    """An ``xe-forge-skill`` tool under ``python``, with this package on its path; the PROBLEM
+    lines it prints are added to ``problems`` when given."""
     full = dict(os.environ, **env)
     full["PYTHONPATH"] = os.pathsep.join(p for p in (str(SRC_DIR), full.get("PYTHONPATH")) if p)
     cmd = [python, "-m", "xe_forge.skills", *argv]
     print(f"run: {shlex.join(cmd)}", flush=True)
-    return subprocess.call(cmd, env=full)
+    if problems is None:
+        return subprocess.call(cmd, env=full)
+    proc = subprocess.run(cmd, env=full, stdout=subprocess.PIPE, text=True)
+    print(proc.stdout, end="", flush=True)
+    problems += [
+        ln.split(": PROBLEM ", 1)[1] for ln in proc.stdout.splitlines() if ": PROBLEM " in ln
+    ]
+    return proc.returncode
 
 
 def _shapes(ops, top: int | None = 12) -> list[dict]:
@@ -70,12 +78,15 @@ def _agent(step: str, template: str, context: dict, cwd: Path, answer: str, pyth
         return None
 
 
-def capture(a, python: str, run_dir: Path, turns: int, repos: Path) -> tuple[int, str]:
+def capture(
+    a, python: str, run_dir: Path, turns: int, repos: Path, refused: list | None = None
+) -> tuple[int, str]:
     """(exit code, the interpreter the run continues under).
 
     The capture agent writes and runs a launcher; the tool's own verdict decides. When the
     framework lacks the model's architecture or an op, a patch agent establishes the patch
     first and capture runs again on the patched stack (``stack.json``), a few rounds at most.
+    ``refused``: the problems the named read found in this launcher's last capture.
     """
     from xe_forge.frontend import CACHE
 
@@ -83,7 +94,7 @@ def capture(a, python: str, run_dir: Path, turns: int, repos: Path) -> tuple[int
     context = {"model": a.model, "framework": a.framework, "batch": a.batch,
                "input_len": a.input_len, "output_len": a.output_len, "cache": CACHE,
                "inputs": inputs, "precision": getattr(a, "precision", "auto"),
-               "weights": getattr(a, "weights", "auto")}  # fmt: skip
+               "weights": getattr(a, "weights", "auto"), "refused": refused or []}  # fmt: skip
     for round_ in range(1, 4):
         got = _agent("capture", "frontend-capture.md.j2", context, run_dir, "captured.json",
                      python, turns)  # fmt: skip
@@ -116,6 +127,8 @@ def capture(a, python: str, run_dir: Path, turns: int, repos: Path) -> tuple[int
             check += ["--reference-python", a.reference_python]
         if "prompts" in inputs:
             check += ["--prompt-file", inputs["prompts"]["file"]]
+        if str(context["precision"]).startswith(("float", "bfloat")):  # declared, not auto
+            check += ["--precision", context["precision"]]
         if _tool(python, *check) != 0:  # the gate is the tool's, not the agent's word
             print(f"capture: the patch in {work} does not pass its check", file=sys.stderr)
             return 1, python
@@ -126,6 +139,86 @@ def capture(a, python: str, run_dir: Path, turns: int, repos: Path) -> tuple[int
                                     indent=1) + "\n")  # fmt: skip
     print("capture: still unsupported after 3 patches", file=sys.stderr)
     return 1, python
+
+
+def name_and_read(a, cap, run_dir: Path, python: str, turns: int, repos: Path) -> tuple[int, str]:
+    """Name the capture's ops, then re-read it with the names: the tool's verdict decides. A
+    capture the named read refuses goes back once to the capture agent -- the namer saw those
+    problems (bound) and cannot change what was captured -- and its new capture is named again.
+    """
+    from xe_forge.frontend import ir
+
+    capture_path, names = run_dir / "capture.json", run_dir / "names.json"
+    for attempt in (1, 2):
+        if names.is_file() and json.loads(names.read_text()).get("capture") != _stamp(cap):
+            print(f"run: {names} was written for another capture; naming again", file=sys.stderr)
+            names.unlink()
+        if not names.is_file():
+            # A capture.json a previous names.json annotated would show the namer its own old
+            # answers (an op's "gemm" as given) and it would leave them out: name a clean one.
+            if any("named" in o.framework_meta for o in cap.ops):
+                if _tool(python, "capture", "parse", str(run_dir / "raw"), "-o", str(capture_path)):
+                    return 1, python
+                cap = ir.load(capture_path)
+            name(capture_path, run_dir, python, turns, repos, a.name_coverage, a.calibration,
+                 cap=cap)  # fmt: skip
+            if not names.is_file():
+                print("run: no names.json; the ops stay unnamed", file=sys.stderr)
+                return 0, python
+        problems: list = []
+        parse = ["capture", "parse", str(run_dir / "raw"), "-o", str(capture_path)]
+        if _tool(python, *parse, "--names", str(names), problems=problems) == 0:
+            return 0, python
+        if attempt == 2 or not problems:
+            break
+        print("run: the named capture is refused; back to the capture agent", file=sys.stderr)
+        if (run_dir / "session.log").is_file():  # the refused capture's, kept
+            (run_dir / "session.log").replace(run_dir / "session-refused.log")
+        code, python = capture(a, python, run_dir, turns, repos, refused=problems)
+        names.unlink()  # its stamp does not see a changed launcher: name the new capture
+        if code != 0:
+            return (code if code > 0 else 1), python
+        cap = ir.load(capture_path)
+    print("run: re-reading the capture with names.json failed", file=sys.stderr)
+    return 1, python
+
+
+def capture_rows(a, run_dir: Path, python: str) -> tuple[Path | None, str | None]:
+    """The run's other rows: the launcher rerun at each, no agent, every capture read with
+    the anchor's names.json, then merged (``rows.merge``). (The merged capture, else None;
+    the launcher's problem for the capture agent when it did not run at a row's size.)"""
+    from xe_forge.frontend import ir, rows
+    from xe_forge.skills.capture import _sha256
+
+    launcher, names = run_dir / "launcher" / "run.sh", run_dir / "names.json"
+    caps = [ir.load(run_dir / "capture.json")]
+    for i, row in enumerate(a.rows[1:], 2):
+        out = run_dir / "rows" / f"{i:02d}"
+        raw, path = out / "raw", out / "capture.json"
+        parse = ["capture", "parse", str(raw), "-o", str(path)]
+        parse += ["--names", str(names)] if names.is_file() else []
+        # a row this launcher captured at this size is kept; read again, names.json may be new
+        run = json.loads((raw / "run.json").read_text()) if (raw / "run.json").is_file() else {}
+        rt = run.get("runtime") or {}
+        if run.get("launcher_sha256") != _sha256(launcher) or any(
+            rt.get(k) != row[k] for k in rows.KEYS
+        ):
+            env = {f"XF_{k.upper()}": str(row[k]) for k in rows.KEYS}
+            if _tool(sys.executable, "capture", "run", str(launcher), "-o", str(raw),
+                     FRAMEWORK_PYTHON=python, **env):  # fmt: skip
+                print(f"run: row {i} {row} did not capture", file=sys.stderr)
+                return None, None
+        if _tool(python, *parse):  # the interpreter the anchor was read under: its schemas
+            print(f"run: row {i} {row}: its capture is refused", file=sys.stderr)
+            return None, None
+        caps.append(ir.load(path))
+        if not rows.ran(caps[-1], row):
+            got = {k: (caps[-1].run.get("runtime") or {}).get(k) for k in rows.KEYS}
+            env = " ".join(f"XF_{k.upper()}={row[k]}" for k in rows.KEYS)
+            return None, (f"run with {env} set, the launcher recorded runtime {got}: it must "
+                          "run at those sizes and record them")  # fmt: skip
+    merged = rows.merge(caps, a.rows)
+    return ir.dump(merged, run_dir / "rows" / "capture.json"), None
 
 
 def recapture(run_dir: Path, out_dir: Path, python: str) -> int:
@@ -224,7 +317,7 @@ def name(
         return None
     answer, problems = naming.keep_valid(answer, listing, repos)
     if problems:
-        what = "the answer is not usable" if answer is None else "entries dropped, left unnamed"
+        what = "not usable" if answer is None else "entries left unnamed or costs dropped"
         print(f"name: {what} ({len(problems)} problems):", file=sys.stderr)
         for line in problems[:20]:
             print(f"  {line}", file=sys.stderr)
@@ -279,6 +372,8 @@ def analyze(capture_path: Path, out_dir: Path, a: argparse.Namespace, weights=No
     enabled = [e for e in result.entries if e.enabled]
     if cap.run.get("counters"):
         print(f"analyze: counters cover {result.options['counters_pct']}% of device time")
+    for d in result.options["unpeaked"]:
+        print(f"analyze: {d} has no matmul peak in the calibration; bounded at the fastest")
     print(
         f"analyze: {len(cap.workloads)} workloads -> {len(result.entries)} kernels, "
         f"{len(enabled)} enabled ({', '.join(e.name for e in enabled) or 'none'}) -> {path}"
@@ -431,7 +526,8 @@ def fuse(capture_path: Path, run_dir: Path, a, python, turns, repos) -> Path | N
              str(capture_path), "--results", str(results)]  # fmt: skip
     ctx = {"model": a.model, "framework": a.framework, "run_dir": run_dir,
            "capture": capture_path, "stacked": stacked, "repos": repos,
-           "dsls": [d.value for d in DSL], "check_cmd": shlex.join(check)}  # fmt: skip
+           "dsls": [d.value for d in DSL], "check_cmd": shlex.join(check),
+           "rows": len(a.rows) if len(a.rows) > 1 else 0}  # fmt: skip
     answer = _agent("fuse", "frontend-fuse.md.j2", ctx, work, "fusions.json", python, turns)
     if not answer or not answer.get("fusions"):
         print(f"fuse: none proposed: {(answer or {}).get('why', 'no answer')}")
@@ -557,9 +653,12 @@ def main(argv: list[str]) -> int:
         "--reference-python",
         help="GPU torch + transformers, for a patch's reference tokens (default: the framework's)",
     )
-    p.add_argument("--batch", type=int, default=1)
-    p.add_argument("--input-len", type=int, default=512)
-    p.add_argument("--output-len", type=int, default=32, help="tokens generated")
+    p.add_argument("--batch", type=int, help="default 1")
+    p.add_argument("--input-len", type=int, help="default 512")
+    p.add_argument("--output-len", type=int, help="tokens generated (default 32)")
+    p.add_argument("--rows", type=Path, help="rows.yaml: several (batch, input_len, output_len, "
+                   "weight) served by one run, in place of --batch/--input-len/--output-len "
+                   "(frontend/rows.py)")  # fmt: skip
     p.add_argument(
         "--prompt-file",
         help="text the prompts are sliced from, batch x input-len tokens at least (default: "
@@ -604,7 +703,17 @@ def main(argv: list[str]) -> int:
     try:
         a.precision = a.precision if a.precision == "auto" else canonical(a.precision)
         parse_weights(a.weights)
-    except ValueError as exc:
+        from xe_forge.frontend import rows
+
+        given = {k: getattr(a, k) for k in rows.KEYS}
+        if a.rows and any(v is not None for v in given.values()):
+            raise ValueError("--rows replaces --batch, --input-len and --output-len")
+        # the anchor row (the largest) is the one the capture agent captures
+        a.rows = rows.load(a.rows) if a.rows else []
+        first = a.rows[0] if a.rows else {"batch": 1, "input_len": 512, "output_len": 32}
+        for k, v in given.items():
+            setattr(a, k, first[k] if v is None else v)
+    except (OSError, ValueError) as exc:
         p.error(str(exc))
     _use_agent(a)
     a.passthrough = passthrough
@@ -652,29 +761,29 @@ def main(argv: list[str]) -> int:
         print(f"run: {capture_path} is a capture of {have}, not {want}; remove it to capture "
               "again", file=sys.stderr)  # fmt: skip
         return 1
-    names = run_dir / "names.json"
-    if names.is_file():
-        stamp = json.loads(names.read_text()).get("capture")
-        if stamp != _stamp(cap):
-            print(f"run: {names} was written for another capture; naming again", file=sys.stderr)
-            names.unlink()
-    if not names.is_file():
-        # A capture.json a previous names.json annotated would show the namer its own old
-        # answers (an op's "gemm" as given) and it would leave them out: name a clean one.
-        if any("named" in o.framework_meta for o in cap.ops):
-            if _tool(python, "capture", "parse", str(run_dir / "raw"), "-o", str(capture_path)):
-                return 1
-            cap = ir.load(capture_path)
-        named = name(
-            capture_path, run_dir, python, turns, repos, a.name_coverage, a.calibration, cap=cap
-        )
-        if named is None:
-            print("run: no names.json; the ops stay unnamed", file=sys.stderr)
-    if names.is_file():
-        parse = ["capture", "parse", str(run_dir / "raw"), "-o", str(capture_path)]
-        if _tool(python, *parse, "--names", str(names)) != 0:
-            print("run: re-reading the capture with names.json failed", file=sys.stderr)
+    code, python = name_and_read(a, cap, run_dir, python, turns, repos)
+    if code != 0:
+        return code
+    if len(a.rows) > 1:  # analyze and every step after it read the merged capture
+        merged, problem = capture_rows(a, run_dir, python)
+        if problem:  # a launcher that ignores the rows' sizes goes back once to its agent
+            print(f"run: {problem}; back to the capture agent", file=sys.stderr)
+            if (run_dir / "session.log").is_file():
+                (run_dir / "session.log").replace(run_dir / "session-rows.log")
+            code, python = capture(a, python, run_dir, turns, repos, refused=[problem])
+            if code == 0:
+                code, python = name_and_read(a, ir.load(capture_path), run_dir, python, turns,
+                                             repos)  # fmt: skip
+            if code != 0:
+                return code if code > 0 else 1
+            merged, problem = capture_rows(a, run_dir, python)
+        if merged is None:
+            print(f"run: the rows were not captured{f' ({problem})' if problem else ''}",
+                  file=sys.stderr)  # fmt: skip
             return 1
+        capture_path = merged
+        if a.prove:
+            print("run: --prove measures the anchor row only", file=sys.stderr)
     path = analyze(capture_path, run_dir, a)
     path = analyze(capture_path, run_dir, a, inputs(path, run_dir, a, python, turns, repos))
     if a.analyze_only:

@@ -54,6 +54,11 @@ def run(args) -> int:
             gain = "-" if r["gain"] is None else f"{r['gain']:.2%}"
             print(f"  {r['share']:6.2%}  eff {eff:>7}  gain {gain:>7}  {r['kernel']} "
                   f"({r['route']}, {r['repo'] or '-'})  {r['workload_id']}")  # fmt: skip
+    if calib:
+        from xe_forge.frontend.calibrate import peaks, unpeaked_note
+
+        for n in unpeaked_note(peaks(calib)[1], ctx):
+            print(f"bound: NOTE {n}", file=sys.stderr)
     for p in problems:  # stderr: --json stays parseable
         print(f"bound: PROBLEM {p}", file=sys.stderr)
     return 0 if cap.workloads else 1

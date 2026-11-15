@@ -251,6 +251,8 @@ def main():
                     help="nat a token may fall below transformers' best")  # fmt: skip
     pc.add_argument("--trust-remote-code", action="store_true")
     pc.add_argument("--prompt-file", help="the run's prompt text (xe-forge run --prompt-file)")
+    pc.add_argument("--precision", default="bfloat16",
+                    help="the float dtype scored first: the run's declared compute")  # fmt: skip
 
     # -- bound --
     p_bound = subparsers.add_parser("bound", help="Each workload's efficiency against its bound")

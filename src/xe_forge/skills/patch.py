@@ -14,16 +14,16 @@ Checks, in order: the patch is git's own diff of base..HEAD and applies to a fre
 base; the patched package imports from outside the framework's venv; then each of generate.sh's
 first --min-match tokens of every sequence is within --tolerance nat of the best token of a
 Hugging Face transformers reference fed the same prefix (teacher forcing: one forward per
-sequence, on the GPU in bf16) -- under patch.json's "reference_python" (the
+sequence, on the GPU in --precision, bf16 unless the run declares another) -- under patch.json's "reference_python" (the
 agent's, when the framework's transformers cannot load the model), else --reference-python,
-else the framework's interpreter. A sequence bf16 fails is judged again, all its positions,
+else the framework's interpreter. A sequence that fails there is judged again, all its positions,
 in float32 (on the GPU, or the CPU when it does not fit there), over DRAWS forwards: one
 clean, the others with the embeddings perturbed by a seeded 1e-6 relative noise. A model
 that quantizes activations on the fly is ill-conditioned (rounding steps turn that noise into
 nats at some positions), so any two correct implementations disagree there: a token fails
 when its smallest gap over the draws exceeds the tolerance plus their spread, and a sequence
 where more than one token in eight passes only within that spread is too unstable to judge,
-a FAIL. A stable model has no spread: the tolerance alone. If the float32 pass fails, bf16's
+a FAIL. A stable model has no spread: the tolerance alone. If the float32 pass fails, the first
 verdict stands. The agent owns that environment; the scoring and precision are fixed here.
 Exit 0 passes.
 """
@@ -37,7 +37,7 @@ import tempfile
 from pathlib import Path
 
 PROMPT = Path(__file__).with_name("patch_prompt.txt")  # plain English prose, any tokenizer
-DRAWS = 8  # float32 forwards of a sequence bf16 fails: one clean, the rest perturbed
+DRAWS = 8  # float32 forwards of a sequence the first pass fails: one clean, the rest perturbed
 
 _REFERENCE = """
 import json, sys, torch
@@ -158,7 +158,7 @@ def check(args) -> tuple[list[str], dict]:
                 ",".join(map(str, rows)) if rows else "", str(draws)],
                 capture_output=True, text=True, env=_env())  # fmt: skip
 
-        ref = score("bfloat16")
+        ref = score(args.precision)
         if ref.returncode != 0:
             return [
                 f"the transformers reference failed ({ref.stderr.strip()[-400:]}); patch.json's "
@@ -166,10 +166,10 @@ def check(args) -> tuple[list[str], dict]:
                 '"trust_remote_code" set it up'
             ], record
         res = json.loads(ref.stdout.strip().splitlines()[-1])
-        bf16 = [res["gaps"][k][0] for k in sorted(res["gaps"], key=int)]
-        gaps, judge = list(bf16), ["bf16"] * len(bf16)
-        # A sequence bf16 fails: float32 judges all its positions, over DRAWS forwards.
-        again = [i for i, g in enumerate(bf16)
+        first = [res["gaps"][k][0] for k in sorted(res["gaps"], key=int)]
+        gaps, judge = list(first), [args.precision] * len(first)
+        # A sequence the first pass fails: float32 judges all its positions, over DRAWS forwards.
+        again = [i for i, g in enumerate(first)
                  if i < len(got) and len(got[i]) >= n and max(g, default=0) > tol]  # fmt: skip
         fp32 = None
         if again:
@@ -185,7 +185,7 @@ def check(args) -> tuple[list[str], dict]:
                     # per token: its smallest gap over the draws, and their spread
                     ls = [(min(c), max(c) - min(c)) for c in zip(*runs, strict=True)]
                     gaps[int(k)] = [max(0.0, lo - s) for lo, s in ls]
-                    judge[int(k)] = "fp32"
+                    judge[int(k)] = "float32"
                     fp32["excused"][k] = sum(lo > tol >= lo - s for lo, s in ls)
                     if fp32["excused"][k] * 8 > len(ls):
                         problems.append(
@@ -193,7 +193,7 @@ def check(args) -> tuple[list[str], dict]:
                             f"{fp32['excused'][k]} of {len(ls)} tokens pass only within its own "
                             f"spread over {DRAWS} perturbed float32 forwards")  # fmt: skip
     worst = [round(max(r, default=float("inf")), 4) for r in gaps]
-    record.update(tokens=got, gaps=gaps, worst=worst, judge=judge, bf16_gaps=bf16, fp32=fp32,
+    record.update(tokens=got, gaps=gaps, worst=worst, judge=judge, judge_first=args.precision, first_gaps=first, fp32=fp32,
                   tolerance=tol, required=n, transformers=res.get("transformers"),
                   prompt_file=prompt)  # fmt: skip
     if len(gaps) != len(got) or any(len(g) < n for g in got) or any(w > tol for w in worst):
@@ -216,7 +216,7 @@ def run(args) -> int:
         for k in (record.get("fp32") or {}).get("gaps") or {}:
             print(
                 f"patch check: sequence {k} judged in float32 on {record['fp32']['device']} "
-                f"(bf16 {max(record['bf16_gaps'][int(k)]):.4f} -> {record['worst'][int(k)]}; "
+                f"({record['judge_first']} {max(record['first_gaps'][int(k)]):.4f} -> {record['worst'][int(k)]}; "
                 f"{record['fp32']['excused'][k]} tokens within the reference's own spread)"
             )
     return 0 if not problems else 1

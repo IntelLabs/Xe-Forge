@@ -27,8 +27,11 @@ def shares(record: dict) -> dict[str, dict]:
         wid, _, point = ref.partition("@")
         w = by_id.get(wid) or {}
         if point:
+            point, _, j = point.partition("#")  # #j: that token count's j-th runtime size
             axis, _, value = point.partition("=")
             h = ((w.get("var_axes") or {}).get(axis) or {}).get(value) or {}
+            if j:
+                h = (h.get("points") or [{}] * (int(j) + 1))[int(j)]
             calls, us = h.get("calls", 0), h.get("device_us", 0.0)
         else:
             calls, us = w.get("calls", 0), w.get("device_us", 0.0)
