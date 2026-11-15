@@ -12,7 +12,8 @@ that takes text rather than ids is given text that encodes back to exactly those
 it. The launcher you write is rerun at other sizes with no agent: it takes the batch, input
 length and output length from $XF_BATCH, $XF_INPUT_LEN and $XF_OUTPUT_LEN when they are set,
 the numbers above otherwise -- in the token ids, the framework's settings and what it records.
-Precision: compute in {{ precision }}, weights stored as {{ weights }} -- auto leaves the
+Precision: compute in {{ precision }}, weights stored as {{ weights }}, the KV cache stored
+as {{ kv_cache }} -- auto leaves the
 framework's default for this checkpoint alone; anything else is set with the framework's own
 option for it (a checkpoint that must be quantized or converted for it is made once, with
 the framework's own tool, under {{ cache }}/models/). Run eagerly: no graph
@@ -32,7 +33,8 @@ the CPU, or is emulated in plain torch in place of a kernel (a portable Triton k
 kernel), do not work around it: write {"unsupported": "model" or "op", "what": "<the
 architecture or op>", "reason": "<file:line where the framework shows it>"} as {{ answer }}
 and stop. A patch that adds it is established first, and you are run again on it. When
-what is missing is the checkpoint's number format itself -- no kernel for it on this device
+what is missing is a number format -- the checkpoint's own or a declared one (compute,
+weights, KV cache): no kernel for it on this device
 in the framework or its upstream, only an emulation (a format made for another vendor's
 hardware) -- write {"unsupported": "precision", "what": "<the format>", "reason": "<where the
 framework and its upstream show it>"} instead: it is not patched, and the run stops. If
@@ -49,7 +51,9 @@ build of the stack is measured) and {{ python }} otherwise, and writes into $RAW
    torch's name ({{ precision | tojson }} verbatim when it is not auto), "weights":
    "<scheme>:<dtype>", how the weights are stored -- the scheme in words, the dtype by torch's
    name of the element stored (uint8 for packed sub-byte formats); when {{ weights | tojson }}
-   is not auto, it verbatim, with ":<dtype>" added if it names none -- and every setting that
+   is not auto, it verbatim, with ":<dtype>" added if it names none -- "kv_cache": the element
+   dtype the KV cache is stored in, by torch's name ({{ kv_cache | tojson }} verbatim when it
+   is not auto) -- and every setting that
    changes what runs}, "device": {"type", "name"}, "repeats": <how many times
    the process ran the identical workload, warm-up included>} -- what unitrace sees is
    exactly those runs, work done once (model load, a first-use prepack or JIT) kept before

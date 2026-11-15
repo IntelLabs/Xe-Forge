@@ -1519,3 +1519,66 @@ def test_rows_replace_batch_and_lengths(tmp_path):
     with pytest.raises(SystemExit):
         cli.main(["run", "-o", str(tmp_path), "--framework", "x", "--model", "m",
                   "--framework-python", "py", "--rows", str(f), "--batch", "2"])  # fmt: skip
+
+
+def _kv_op(dtype, kv_args=("cache",)):
+    from xe_forge.frontend.ir import CapturedOp, TensorArg
+
+    return CapturedOp("op-0", "attn", [TensorArg([4, 64], "bfloat16"), TensorArg([9, 64], dtype)],
+                      framework_meta={"arg_names": ["q", "cache"],
+                                      "named": {"kv_args": list(kv_args)}})  # fmt: skip
+
+
+@pytest.mark.parametrize("declared, held, kv_args, bad", [
+    ("float8_e4m3fn", "uint8", ("cache",), False),         # a byte container of its size
+    ("float8_e4m3fn", "float8_e4m3fn", ("cache",), False),
+    ("float8_e4m3fn", "bfloat16", ("cache",), True),       # declared fp8, ran bf16
+    ("bfloat16", "float16", ("cache",), True),             # same size, another dtype
+    ("float8_e5m2", "float8_e4m3fn", ("cache",), True),
+    ("float8_e4m3fn", "bfloat16", (), False),              # none named: nothing to check
+    ("auto", "bfloat16", ("cache",), False),
+    ("float8_e4m3fn", None, ("cache",), False),            # no dtype: skipped
+])  # fmt: skip
+def test_declared_kv_cache_against_the_named_cache_arguments(declared, held, kv_args, bad):
+    from xe_forge.skills.capture import _kv_problems
+
+    got = _kv_problems({"runtime": {"kv_cache": declared}}, [_kv_op(held, kv_args)])
+    assert bool(got) == bad, got
+
+
+def test_kv_args_must_name_the_ops_arguments(tmp_path):
+    from xe_forge.frontend import naming
+
+    (tmp_path / "repo").mkdir()
+    listing = {"op": {"args": [{"name": "q"}, {"name": "cache"}], "dims": {}}}
+    entry = {"route": "kernel", "name": "k", "repo": "repo", "dsl": "sycl"}
+    good = {"ops": {"op": {**entry, "kv_args": ["cache"]}}}
+    assert naming.validate(good, listing, tmp_path) == []
+    for bad in (["key_cache"], "cache", []):
+        problems = naming.validate({"ops": {"op": {**entry, "kv_args": bad}}}, listing, tmp_path)
+        assert any("kv_args" in p for p in problems)
+
+
+@pytest.mark.parametrize("kv_dtypes, says", [(["uint8"], "KV cache float8_e4m3fn (uint8)."),
+                                             ([], "(not checked: no op names it)")])  # fmt: skip
+def test_summary_states_the_declared_kv_cache_and_whether_it_was_checked(tmp_path, kv_dtypes,
+                                                                          says):  # fmt: skip
+    from xe_forge.frontend import collect
+
+    run = {"runtime": {"precision": "bfloat16", "weights": "auto", "kv_cache": "float8_e4m3fn"},
+           "precision": {"compute": "bfloat16", "w_bytes": 2.0, "kv_dtypes": kv_dtypes}}  # fmt: skip
+    (tmp_path / "capture.json").write_text(json.dumps({"run": run}))
+    assert says in collect.collect(tmp_path, {"kernels": []}, []).read_text().splitlines()[2]
+
+
+def test_capture_prompt_carries_the_kv_cache_and_run_refuses_a_bad_one(tmp_path):
+    from xe_forge.claude.generator import render
+    from xe_forge.frontend import cli
+
+    text = render("frontend-capture.md.j2", model="m", framework="fw", python="py", batch=1,
+                  input_len=4, output_len=2, cache="/c", inputs={}, precision="auto",
+                  weights="auto", kv_cache="float8_e4m3fn", refused=[], answer="a.json")  # fmt: skip
+    assert "the KV cache stored\nas float8_e4m3fn" in text and '"float8_e4m3fn" verbatim' in text
+    with pytest.raises(SystemExit):
+        cli.main(["run", "-o", str(tmp_path), "--framework", "x", "--model", "m",
+                  "--framework-python", "py", "--kv-cache", "fp7"])  # fmt: skip

@@ -95,6 +95,9 @@ def validate(names, listing: dict, repos) -> list[str]:
         if config is not None and not (isinstance(config, list) and set(config) <= scalars):
             out.append(f"{where}: config_args {config!r} must be integer scalar dims of the op "
                        f"({sorted(scalars)})")  # fmt: skip
+        kv = e.get("kv_args")
+        if kv is not None and not (isinstance(kv, list) and kv and set(kv) <= set(args)):
+            out.append(f"{where}: kv_args {kv!r} must be a list of the op's arguments")
         if e.get("token_arg") is not None and e["token_arg"] not in args:
             out.append(f"{where}: token_arg {e['token_arg']!r} is not an argument")
         specs = e.get("gemm")

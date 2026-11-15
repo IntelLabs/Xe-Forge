@@ -28,6 +28,10 @@ def run(args) -> int:
         # The weights check the run applies to this answer, so the namer sees it first.
         run = {**cap.run, "precision": precision_record(cap), "model_facts": names.get("model")}
         problems = _precision_problems(run, named=True, ops=cap.ops)
+        kv = (cap.run.get("runtime") or {}).get("kv_cache")
+        if kv not in (None, "auto") and not run["precision"]["kv_dtypes"]:
+            print(f"bound: NOTE the run declares KV cache {kv}, and no op names its kv_args: "
+                  "it goes unchecked", file=sys.stderr)  # fmt: skip
     calib = json.loads(Path(args.calibration).read_text()) if args.calibration else None
     ctx = analyze.context(cap)
     rows = []

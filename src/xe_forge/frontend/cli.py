@@ -94,7 +94,8 @@ def capture(
     context = {"model": a.model, "framework": a.framework, "batch": a.batch,
                "input_len": a.input_len, "output_len": a.output_len, "cache": CACHE,
                "inputs": inputs, "precision": getattr(a, "precision", "auto"),
-               "weights": getattr(a, "weights", "auto"), "refused": refused or []}  # fmt: skip
+               "weights": getattr(a, "weights", "auto"), "kv_cache": getattr(a, "kv_cache", "auto"),
+               "refused": refused or []}  # fmt: skip
     for round_ in range(1, 4):
         got = _agent("capture", "frontend-capture.md.j2", context, run_dir, "captured.json",
                      python, turns)  # fmt: skip
@@ -672,6 +673,8 @@ def main(argv: list[str]) -> int:
     p.add_argument("--weights", default="auto",
                    help="weight storage: auto (the checkpoint's own), <dtype>, <scheme> or "
                    "<scheme>:<dtype>, e.g. int8, awq:int4")  # fmt: skip
+    p.add_argument("--kv-cache", default="auto",
+                   help="KV cache dtype: auto (the framework's default) or a torch name, e.g. float8_e4m3fn")  # fmt: skip
     _add_analyze_args(p)
     p.add_argument(
         "--name-coverage", type=float, default=0.99,
@@ -702,6 +705,7 @@ def main(argv: list[str]) -> int:
 
     try:
         a.precision = a.precision if a.precision == "auto" else canonical(a.precision)
+        a.kv_cache = a.kv_cache if a.kv_cache == "auto" else canonical(a.kv_cache)
         parse_weights(a.weights)
         from xe_forge.frontend import rows
 
@@ -752,7 +756,7 @@ def main(argv: list[str]) -> int:
     have = {"framework": cap.run.get("framework"), "model": (cap.run.get("model") or {}).get("name"),
             **{k: rt.get(k) for k in ("batch", "input_len", "output_len")},
             "prompts": (rt.get("inputs") or {}).get("prompts")}  # fmt: skip
-    for k in ("precision", "weights"):  # declared ones the launcher writes verbatim
+    for k in ("precision", "weights", "kv_cache"):  # declared ones the launcher writes verbatim
         if getattr(a, k) != "auto":
             want[k], have[k] = getattr(a, k), str(rt.get(k))
     if "weights" in want and have["weights"].rpartition(":")[0] == want["weights"]:

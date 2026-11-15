@@ -56,6 +56,10 @@ detached or modified checkout was put there on purpose: leave it. Then write nam
             several kernels): {"<kernel symbol substring>": {route, name, repo, dsl, via,
             family, cost}} -- each group of kernels is then measured, bounded and optimized
             on its own;
+   "kv_args": on every op that reads or writes the stored KV cache, the arguments that are
+           the cache tensors themselves -- not the query, nor the new keys and values being
+           written into it -- as the source shows them; a KV PROBLEM `{{ bound_cmd }}`
+           prints is the launcher's, so they stay as the source shows them;
    "gemm": only for a matrix multiply whose weight is one of its arguments, and not where
            ops.json already gives the op's "gemm" -- which argument is what, from the
            kernel's source; a list when the op multiplies by more than one weight:
