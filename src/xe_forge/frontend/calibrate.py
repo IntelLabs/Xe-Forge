@@ -13,12 +13,21 @@ from xe_forge import frontend
 
 CACHE = frontend.CACHE / "calibration"
 DTYPES = ("bfloat16", "float16")
+# Float formats whose every value is exactly a value of these: a matmul in them is never bound
+# to be slower than one in those (convert, then multiply), whatever the card's own kernel does.
+# Not int8: its int32 result is not one a 16-bit float matmul computes.
+EXACT_IN = dict.fromkeys(("float8_e4m3fn", "float8_e5m2"), ("bfloat16", "float16"))
 
 
 def peaks(calib: dict | None) -> tuple[float | None, dict[str, float]]:
-    """(read bandwidth GB/s, {dtype: matmul TFLOP/s}) of a calibration, unmeasured left out."""
+    """(read bandwidth GB/s, {dtype: matmul TFLOP/s}) of a calibration, unmeasured left out;
+    a dtype held exactly in a faster one takes that one's peak."""
     calib = calib or {}
     tflops = {k: v for k, v in (calib.get("matmul_tflops") or {}).items() if v}
+    for d, wider in EXACT_IN.items():
+        best = max([tflops.get(d) or 0, *(tflops.get(w) or 0 for w in wider)])
+        if best:
+            tflops[d] = best
     return calib.get("bandwidth_gbs") or None, tflops
 
 

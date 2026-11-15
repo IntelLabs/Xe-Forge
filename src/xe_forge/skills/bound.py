@@ -10,6 +10,7 @@ Exit 1 when the capture has no workloads.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 
@@ -17,11 +18,16 @@ def run(args) -> int:
     from xe_forge.frontend import analyze, canonical, ir, naming
 
     cap = ir.load(args.capture)
+    problems = []
     if args.names and Path(args.names).is_file():  # none yet: the capture as it is
-        from xe_forge.skills.capture import apply_names
+        from xe_forge.skills.capture import _precision_problems, apply_names, precision_record
 
-        cap.ops = apply_names(cap.ops, json.loads(Path(args.names).read_text()))
+        names = json.loads(Path(args.names).read_text())
+        cap.ops = apply_names(cap.ops, names)
         cap.workloads = canonical.workloads(cap.ops, cap.run["total_device_us"], naming.name_op)
+        # The weights check the run applies to this answer, so the namer sees it first.
+        run = {**cap.run, "precision": precision_record(cap), "model_facts": names.get("model")}
+        problems = _precision_problems(run, named=True, ops=cap.ops)
     calib = json.loads(Path(args.calibration).read_text()) if args.calibration else None
     ctx = analyze.context(cap)
     rows = []
@@ -48,4 +54,6 @@ def run(args) -> int:
             gain = "-" if r["gain"] is None else f"{r['gain']:.2%}"
             print(f"  {r['share']:6.2%}  eff {eff:>7}  gain {gain:>7}  {r['kernel']} "
                   f"({r['route']}, {r['repo'] or '-'})  {r['workload_id']}")  # fmt: skip
+    for p in problems:  # stderr: --json stays parseable
+        print(f"bound: PROBLEM {p}", file=sys.stderr)
     return 0 if cap.workloads else 1

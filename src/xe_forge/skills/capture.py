@@ -235,7 +235,7 @@ def _ops_summary(ops_map: dict, window: list, by_launch: bool):
     from xe_forge.frontend.ir import CapturedOp, TensorArg
     from xe_forge.frontend.torch_trace import TraceSummary
 
-    problems, owner, ops, unknown = [], {}, [], {}
+    problems, owner, ops, unknown, first = [], {}, [], {}, {}
     for key, e in ops_map.items():
         regs = []
         for pat in e.get("kernels") or []:
@@ -287,6 +287,15 @@ def _ops_summary(ops_map: dict, window: list, by_launch: bool):
         arg_list = e.get("args") or []
         args = [TensorArg(list(a.get("shape") or []), a.get("dtype")) for a in arg_list]
         meta = dict(e.get("meta") or {}, arg_names=[a.get("name") for a in arg_list])
+        # names.json describes an op type once (its "gemm" names arguments): its nodes must
+        # name their arguments alike, by role, not by the tensor each node happens to read.
+        fop = e.get("framework_op") or key
+        k0, n0 = first.setdefault((fop, len(arg_list)), (key, meta["arg_names"]))
+        if meta["arg_names"] != n0 and k0 is not None:
+            problems.append(f"{fop}: nodes name their arguments differently ({n0} at {k0!r}, "
+                            f"{meta['arg_names']} at {key!r}); name each by its role on the "
+                            f"op, the same on every node")  # fmt: skip
+            first[(fop, len(arg_list))] = (None, n0)  # once per type
         op = CapturedOp(id="", framework_op=e.get("framework_op") or key, args=args,
                         call_site=e.get("call_site") or "", framework_meta=meta)  # fmt: skip
         op.calls = int(e.get("calls") or max(counts.values(), default=0))
@@ -368,7 +377,7 @@ def parse_capture(args) -> int:
         f = Path(inp.get("file") or "")
         if not f.is_file() or _sha256(f) != inp.get("sha256"):
             problems.append(f"input {name!r}: {f} is missing or not the file the run was given")
-    problems += _precision_problems(r)
+    problems += _precision_problems(r, named=names is not None, ops=capture.ops)
     if not capture.ops:
         problems.append("no ops")
     if known_pct < 90:
@@ -378,30 +387,46 @@ def parse_capture(args) -> int:
     return 1 if problems else 0
 
 
-def _precision_problems(run: dict) -> list[str]:
+def _precision_problems(run: dict, named: bool = False, ops: list = ()) -> list[str]:
     """The declared ``runtime.precision`` / ``runtime.weights`` against what the trace ran;
-    ``auto`` (or nothing declared) only records."""
+    both must name a dtype. Once ``named``, the GEMMs' weights are known: declared weights
+    none of them read is a problem too, and GEMMs reading more bytes than stored are one
+    unless the namer names the op that widens them (``model.weights_widened_by``), which must
+    be an op of ``ops`` reading the stored dtype. The namer decides; this checks its claim."""
     rt, seen = run.get("runtime") or {}, run["precision"]
     problems = []
     try:
-        want = (
-            None if rt.get("precision") in (None, "", "auto") else canonical_dtype(rt["precision"])
-        )
+        want = canonical_dtype(str(rt.get("precision")))
         _, w_dtype = parse_weights(rt.get("weights"))
     except ValueError as exc:
-        return [f"runtime precision/weights: {exc}"]
+        return [f"runtime.precision: {exc}"]
+    if w_dtype is None:
+        return [f"runtime.weights {rt.get('weights')!r} names no stored dtype: write "
+                f"'<scheme>:<dtype>' (uint8 for packed sub-byte formats)"]  # fmt: skip
     got = seen["compute"]
     if want and got != want:
         share = f"{100 * seen['dtypes'][got]:.0f}% in {got}" if got else "no float tensor"
         problems.append(f"declared compute {want}, the trace ran {share}")
     w_bytes = seen["w_bytes"]
-    if (
-        w_dtype
-        and w_bytes is not None
-        and not 1.0 <= round(w_bytes / STORAGE_BYTES[w_dtype], 3) <= 1.25
-    ):
+    if named and w_dtype and w_bytes is None:
+        problems.append(f"declared weights {w_dtype}, but no GEMM's weight was captured: "
+                        f"the launcher records each node's weights as arguments")  # fmt: skip
+    ratio = round(w_bytes / STORAGE_BYTES[w_dtype], 3) if w_bytes is not None else 1
+    # uint8 is also the byte container of packed sub-byte formats: no lower bound for it.
+    if ratio < 1.0 and w_dtype != "uint8":
         problems.append(f"declared weights {w_dtype} ({STORAGE_BYTES[w_dtype]} B/element), the "
                         f"GEMMs read {w_bytes} B per weight element")  # fmt: skip
+    claim = (run.get("model_facts") or {}).get("weights_widened_by")
+    if ratio > 1.25 and not claim:
+        problems.append(f"declared weights {w_dtype} ({STORAGE_BYTES[w_dtype]} B/element), the "
+                        f"GEMMs read {w_bytes} B per weight element: loaded wide, or widened on "
+                        f"the fly by an op -- then names.json's model.weights_widened_by names "
+                        f"it")  # fmt: skip
+    if ratio > 1.25 and claim:
+        reads = any(o.framework_meta.get("name_key", o.framework_op) == claim
+                    and any(a is not None and a.dtype == w_dtype for a in o.args) for o in ops)  # fmt: skip
+        if not reads:
+            problems.append(f"model.weights_widened_by {claim!r}: no such op reads {w_dtype}")
     return problems
 
 
@@ -441,15 +466,18 @@ def build(raw_dir: Path, out: Path, names: dict | None = None, summary=None) -> 
         run["counters"] = _counters(json.loads((raw_dir / "counters.json").read_text()))
     capture = ir.CaptureRun(run=run, ops=summary.ops)
     capture.workloads = canonical.workloads(capture.ops, summary.total_us, naming.name_op)
-    # What the run computed in, and the time-weighted bytes per weight element of its GEMMs.
+    run["precision"] = precision_record(capture)
+    ir.dump(capture, out)
+    return capture
+
+
+def precision_record(capture: ir.CaptureRun) -> dict:
+    """What the run computed in, and the time-weighted bytes per weight element of its GEMMs."""
     gemms = [(w.attrs["w_bytes"], w.device_us) for w in capture.workloads if "w_bytes" in w.attrs]
     gemm_us = sum(us for _, us in gemms)
     shares = observed(capture.ops)
-    run["precision"] = {"compute": compute_dtype(list(shares)), "dtypes": shares,
-                        "w_bytes": round(sum(b * us for b, us in gemms) / gemm_us, 4)
-                        if gemm_us else None}  # fmt: skip
-    ir.dump(capture, out)
-    return capture
+    return {"compute": compute_dtype(list(shares)), "dtypes": shares,
+            "w_bytes": round(sum(b * us for b, us in gemms) / gemm_us, 4) if gemm_us else None}  # fmt: skip
 
 
 def apply_names(ops: list, names: dict | None) -> list:

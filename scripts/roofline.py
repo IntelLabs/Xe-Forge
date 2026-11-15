@@ -217,7 +217,7 @@ def _resolve_hardware(args) -> Hardware:
 
         cal = json.loads(open(args.calibration).read())
         name = cal.get("device", {}).get("name", "calibrated")
-        tflops = max(cal["matmul_tflops"].get(d, 0.0) for d in ("bfloat16", "float16"))
+        tflops = max((cal["matmul_tflops"].get(d) or 0.0) for d in ("bfloat16", "float16"))
         bandwidth = cal["bandwidth_gbs"]
     tflops = args.peak_tflops if args.peak_tflops is not None else tflops
     bandwidth = args.peak_bandwidth if args.peak_bandwidth is not None else bandwidth

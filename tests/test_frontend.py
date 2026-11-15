@@ -387,7 +387,7 @@ ev() { printf '{"ph": "X", "cat": "gpu_op", "name": "%s", "ts": %s, "dur": %s},'
 LAUNCHER = """#!/bin/bash
 cat > "$RAW_DIR/meta.json" <<'J'
 {"framework": "toyfw", "framework_version": "1", "model": {"name": "toy"},
- "runtime": {"batch": 1}, "device": {"type": "xpu"}}
+ "runtime": {"batch": 1, "precision": "float16", "weights": "float16"}, "device": {"type": "xpu"}}
 J
 cat > "$RAW_DIR/ops.json" <<'J'
 {"rms": {"framework_op": "toy::RMS", "kernels": ["^rms_opt"], "calls": 4,
@@ -468,7 +468,9 @@ def test_bound_tool_lists_workloads_by_share(tmp_path):
     names = tmp_path / "names.json"
     names.write_text(json.dumps({"ops": {"toy::RMS": {"route": "kernel", "name": "rms_v2"}}}))
     code, out = _tool("bound", str(cap), "--json", "--min-share", "0", "--names", str(names))
-    assert code == 0 and "rms_v2" in [r["kernel"] for r in json.loads(out)], out
+    rows, _, problem = out.partition("bound: PROBLEM")  # the run's weights check on the draft
+    assert code == 0 and "rms_v2" in [r["kernel"] for r in json.loads(rows)], out
+    assert "no GEMM's weight was captured" in problem  # its FC has no weight argument
 
 
 def test_naming_family_is_free_text_and_a_bad_gemm_spec_degrades(tmp_path):
@@ -493,7 +495,7 @@ def test_naming_family_is_free_text_and_a_bad_gemm_spec_degrades(tmp_path):
 
 SPLIT_LAUNCHER = """#!/bin/bash
 cat > "$RAW_DIR/meta.json" <<'J'
-{"framework": "toyfw", "model": {"name": "toy"}, "runtime": {"batch": 1}, "device": {}}
+{"framework": "toyfw", "model": {"name": "toy"}, "runtime": {"batch": 1, "precision": "float16", "weights": "float16"}, "device": {}}
 J
 cat > "$RAW_DIR/ops.json" <<'J'
 {"rms": {"framework_op": "toy::RMS", "kernels": ["^rms_opt"]},
@@ -519,6 +521,27 @@ def test_timeline_follows_submission_not_skewed_start_times(tmp_path):
         ev("later", 300.0), ev("first_of_2", 100.0)]}))  # fmt: skip
     assert [n for n, _ in _timeline(tmp_path)] == [
         "norm", "convert", "gemm_kernel", "first_of_2", "later"]  # fmt: skip
+
+
+@pytest.mark.parametrize("w0, w1, bad", [
+    (["in0", "weight"], ["in0", "weight"], False),
+    (["in0", "const:layers.0.w"], ["in0", "const:layers.1.w"], True),
+    (["in0", "weight"], ["in0", "weight", "bias"], False),  # another arity: another signature
+])  # fmt: skip
+def test_ops_json_nodes_of_one_type_name_their_arguments_by_role(w0, w1, bad):
+    from xe_forge.skills.capture import _ops_summary
+
+    def fc(names):
+        return {
+            "framework_op": "FC",
+            "kernels": ["^gemm$"],
+            "args": [{"name": n, "shape": [16, 8], "dtype": "float16"} for n in names],
+        }
+
+    ops = {"fc0": fc(w0), "fc1": fc(w1), "fc2": fc(w1)}
+    _, problems = _ops_summary(ops, [["gemm", 1.0, 1]], False)
+    hits = [p for p in problems if "name their arguments differently" in p]
+    assert len(hits) == bad, problems  # one per type, not one per node
 
 
 @pytest.mark.parametrize(
@@ -563,7 +586,8 @@ def test_counters_bound_only_a_kernel_of_one_workload_that_they_sampled():
 
 def _ref_stub(path, bf16, fp32=None, argv=None):
     """The GPU reference: per-token gaps for the rows asked, bf16's or float32's (None: the
-    float32 pass fails); each call's argv appended to ``argv``."""
+    float32 pass fails; a row of lists: its gaps per draw); each call's argv appended to
+    ``argv``."""
     table = json.dumps({"bfloat16": [list(g) for g in bf16],
                         "float32": [list(g) for g in fp32] if fp32 else None})  # fmt: skip
     helper = path.with_suffix(".py")
@@ -575,7 +599,8 @@ if {str(argv)!r} != "None":
 if table[dtype] is None:
     sys.exit("float32 does not load")
 rows = [int(i) for i in rows.split(",")] if rows else range(len(table[dtype]))
-print(json.dumps({{"gaps": {{str(i): table[dtype][i] for i in rows}}, "device": "cpu",
+runs = lambda g: g if g and isinstance(g[0], list) else [g]
+print(json.dumps({{"gaps": {{str(i): runs(table[dtype][i]) for i in rows}}, "device": "cpu",
                   "transformers": ["5", "t"]}}))
 """)
     return _exe(path, f'#!/bin/bash\nshift\nexec {sys.executable} {helper} "$@"\n')
@@ -660,7 +685,26 @@ def test_patch_check_judges_a_sequence_bf16_fails_again_in_float32(tmp_path, fp3
     assert rec["worst"] == worst and rec["judge"] == judge
     assert rec["bf16_gaps"][1] == [0, 0, 1.4375, 0]
     calls = [json.loads(line) for line in argv.read_text().splitlines()]
-    assert [(c[8], c[9]) for c in calls] == [("bfloat16", ""), ("float32", "1")]  # only row 1
+    assert [(c[8], c[9], c[10]) for c in calls] == [("bfloat16", "", "1"), ("float32", "1", "8")]
+
+
+@pytest.mark.parametrize("draws, code, problem", [
+    # token 2 is 0.5 off on one draw, 1.4 on another: within the reference's own spread
+    ([[0] * 7 + [1.4], [0] * 7 + [0.5]], 0, ""),
+    # consistent across draws: a wrong token, however noisy the rest
+    ([[0] * 7 + [1.2], [0] * 7 + [1.3]], 1, "nat below"),
+    # two of eight tokens pass only within the spread: too unstable to judge
+    ([[0] * 6 + [1.4, 1.4], [0] * 6 + [0.5, 0.5]], 1, "too unstable"),
+])  # fmt: skip
+def test_patch_check_excuses_only_what_the_reference_disagrees_with_itself_on(
+    tmp_path, draws, code, problem
+):
+    work, repos, fw, _ = _patch_dir(tmp_path, [list(range(8)), list(range(8))])
+    ref = _ref_stub(tmp_path / "ref-python", [[0] * 8, [0] * 7 + [2.0]], [[0] * 8, draws])
+    got, out = _tool("patch", "check", str(work), "--repos", str(repos), "--framework-python",
+                     str(fw), "--reference-python", str(ref), "--model", "toy", "--batch", "2",
+                     "--input-len", "4", "--min-match", "8")  # fmt: skip
+    assert got == code and problem in out, out
 
 
 def test_run_establishes_a_patch_then_captures_on_it(tmp_path, monkeypatch):
@@ -691,7 +735,20 @@ def test_run_establishes_a_patch_then_captures_on_it(tmp_path, monkeypatch):
     assert checks[0][-2:] == ("--reference-python", "/ref/python")
 
 
-def test_prompt_file_gives_each_row_its_own_slice_and_refuses_too_little_text(tmp_path):
+def test_run_stops_on_a_precision_the_device_has_no_kernel_for(tmp_path, monkeypatch):
+    """A checkpoint format only emulated here is reported, never patched."""
+    from xe_forge.frontend import cli
+
+    steps = []
+    monkeypatch.setattr(cli, "_agent", lambda step, *rest: steps.append(step) or
+                        {"unsupported": "precision", "what": "fp4", "reason": "platform.py:1"})  # fmt: skip
+    monkeypatch.setattr(cli, "_tool", lambda *a, **k: pytest.fail("nothing runs"))
+    a = SimpleNamespace(model="m", framework="fw", batch=1, input_len=4, output_len=2)
+    assert cli.capture(a, "/fw/python", tmp_path, 5, tmp_path / "repos") == (3, "/fw/python")
+    assert steps == ["capture"]
+
+
+def test_prompt_file_gives_each_row_its_own_slice_and_repeats_too_little_text(tmp_path):
     from xe_forge.frontend import profile
 
     vocab = profile.Vocab(lambda text: [ord(c) for c in text], range(10))
@@ -699,8 +756,7 @@ def test_prompt_file_gives_each_row_its_own_slice_and_refuses_too_little_text(tm
     f.write_text("abcdefgh")
     rows = profile.token_ids(vocab, 2, 4, f)
     assert rows == [[97, 98, 99, 100], [101, 102, 103, 104]] == profile.token_ids(vocab, 2, 4, f)
-    with pytest.raises(SystemExit, match="need 9"):
-        profile.token_ids(vocab, 3, 3, f)  # 8 ids for 3 rows of 3
+    assert profile.token_ids(vocab, 3, 3, f)[2] == [103, 104, 97]  # 8 ids for 3 rows of 3
 
 
 def test_patch_check_scores_on_the_runs_prompt_file(tmp_path):
@@ -715,6 +771,25 @@ def test_patch_check_scores_on_the_runs_prompt_file(tmp_path):
     assert json.loads((work / "check.json").read_text())["prompt_file"] == "/run/p.txt"
 
 
+def test_patch_check_gives_generate_its_natural_text_prompt_and_shape(tmp_path):
+    """Without a run prompt file the check scores on its own prose, never synthetic ids, and
+    tells generate.sh the prompt, shape and the tokens it will score."""
+    from xe_forge.skills.patch import PROMPT
+
+    work, repos, fw, _ = _patch_dir(tmp_path, [])
+    argv = tmp_path / "ref-argv"
+    ref = _ref_stub(tmp_path / "ref-python", [[0] * 4] * 2, argv=argv)
+    (work / "generate.sh").write_text(  # echoes back what it was given, as its tokens
+        'echo "[[$BATCH, $INPUT_LEN, $OUTPUT_LEN, 0], [0, 0, 0, 0]]" > "$OUT/tokens.json"\n'
+        'echo "$PROMPT_FILE" > seen-prompt\n')  # fmt: skip
+    code, msg = _check(work, repos, fw, ref)
+    assert code == 0, msg
+    assert json.loads((work / "check.json").read_text())["tokens"][0] == [2, 4, 4, 0]
+    seen = (work / "seen-prompt").read_text().strip()
+    assert seen == str(PROMPT) == json.loads(argv.read_text())[7]
+    assert len(PROMPT.read_text().split()) > 800  # a 512-token row is prose, not a repeat
+
+
 def test_capture_parse_refuses_inputs_that_changed_since_the_run(tmp_path):
     from xe_forge.skills.capture import _sha256
 
@@ -723,7 +798,7 @@ def test_capture_parse_refuses_inputs_that_changed_since_the_run(tmp_path):
     inputs = json.dumps({"prompts": {"file": str(prompts), "sha256": _sha256(prompts)}})
     unitrace = _exe(tmp_path / "unitrace", UNITRACE_STUB)
     launcher = _exe(tmp_path / "run.sh", (LAUNCHER % "").replace(
-        '"runtime": {"batch": 1}', f'"runtime": {{"batch": 1, "inputs": {inputs}}}'))  # fmt: skip
+        '"runtime": {"batch": 1', f'"runtime": {{"batch": 1, "inputs": {inputs}'))  # fmt: skip
     raw, cap = tmp_path / "raw", tmp_path / "capture.json"
     assert (
         _tool("capture", "run", str(launcher), "-o", str(raw), "--unitrace", str(unitrace))[0] == 0
@@ -775,7 +850,9 @@ def test_naming_listing_merges_identical_shapes_so_rare_ones_show():
 
 def test_capture_parse_refuses_a_dtype_name_the_bounds_cannot_size(tmp_path):
     unitrace = _exe(tmp_path / "unitrace", UNITRACE_STUB)
-    launcher = _exe(tmp_path / "run.sh", (LAUNCHER % "").replace('"float16"', '"f16"', 1))
+    launcher = _exe(
+        tmp_path / "run.sh", (LAUNCHER % "").replace('"dtype": "float16"', '"dtype": "f16"', 1)
+    )
     raw = tmp_path / "raw"
     assert (
         _tool("capture", "run", str(launcher), "-o", str(raw), "--unitrace", str(unitrace))[0] == 0
@@ -823,13 +900,18 @@ def test_an_fp8_model_computes_in_bf16_and_its_gemms_in_fp8():
                        op(24.0, "bfloat16", "float32")])  # fmt: skip
     assert shares == {"float8_e4m3fn": 0.76, "bfloat16": 0.24}
     assert compute_dtype(list(shares)) == "bfloat16"
+    # int8 W8A8 GEMMs (int8 operands, fp32 scales) count as int8; an index does not count
+    shares = observed([op(90.0, "int8", "int8", "float32", "float32"),
+                       op(10.0, "int64", "bfloat16")])  # fmt: skip
+    assert shares == {"int8": 0.9, "bfloat16": 0.1}
+    assert compute_dtype(list(shares)) == "bfloat16"
 
 
-@pytest.mark.parametrize("declared, code", [("auto", 0), ("fp16", 0), ("bf16", 1)])
+@pytest.mark.parametrize("declared, code", [("auto", 1), ("fp16", 0), ("bf16", 1)])
 def test_capture_parse_checks_the_declared_precision(tmp_path, declared, code):
     unitrace = _exe(tmp_path / "unitrace", UNITRACE_STUB)
     launcher = _exe(tmp_path / "run.sh", (LAUNCHER % "").replace(
-        '"runtime": {"batch": 1}', f'"runtime": {{"batch": 1, "precision": "{declared}"}}'))  # fmt: skip
+        '"precision": "float16"', f'"precision": "{declared}"'))  # fmt: skip
     raw, cap = tmp_path / "raw", tmp_path / "capture.json"
     assert (
         _tool("capture", "run", str(launcher), "-o", str(raw), "--unitrace", str(unitrace))[0] == 0
@@ -837,18 +919,57 @@ def test_capture_parse_checks_the_declared_precision(tmp_path, declared, code):
     got, out = _tool("capture", "parse", str(raw), "-o", str(cap))
     assert got == code, out
     assert json.loads(cap.read_text())["run"]["precision"]["compute"] == "float16"
-    if code:
+    if declared == "bf16":
         assert "declared compute bfloat16, the trace ran 100% in float16" in out
+    if declared == "auto":  # the launcher writes the dtype that ran, not the request
+        assert "runtime.precision" in out
 
 
-@pytest.mark.parametrize("weights, ok", [("int8", True), ("gptq:int4", False), ("Q4_K_M", True),
-                                         ("auto", True)])  # fmt: skip
-def test_declared_weights_are_checked_against_bytes_per_weight_element(weights, ok):
+@pytest.mark.parametrize("weights, w_bytes, ok", [
+    ("int8", 1.06, True), ("gptq:int4", 1.06, False),
+    ("Q4_K_M", 1.06, False), ("auto", 1.06, False),  # no stored dtype named: nothing to check
+    ("fp8:float8_e4m3fn", 2.0, False),  # more bytes than stored, and no op named as widening
+    ("int8", 0.7, False),  # fewer bytes than the dtype stores
+    ("k-quant rows packed as bytes:uint8", 0.7, True),  # uint8 also holds packed sub-byte values
+    ("k-quant rows packed as bytes:uint8", 1.5, False),
+    ("int8", None, True),  # before naming no GEMM's weight is known yet
+])  # fmt: skip
+def test_declared_weights_are_checked_against_bytes_per_weight_element(weights, w_bytes, ok):
     from xe_forge.skills.capture import _precision_problems
 
-    run = {"runtime": {"weights": weights},
-           "precision": {"compute": "bfloat16", "dtypes": {"bfloat16": 1.0}, "w_bytes": 1.06}}  # fmt: skip
+    run = {"runtime": {"precision": "bf16", "weights": weights},
+           "precision": {"compute": "bfloat16", "dtypes": {"bfloat16": 1.0}, "w_bytes": w_bytes}}  # fmt: skip
     assert (not _precision_problems(run)) is ok
+
+
+@pytest.mark.parametrize("claim, ok", [
+    (None, False),  # GEMMs read bf16 and nobody says why: loaded wide
+    ("aten::to", True),  # the namer names the cast, which does read the stored fp8
+    ("aten::linear", False),  # an op that reads no fp8 is not what widened them
+    ("aten::nope", False),
+])  # fmt: skip
+def test_weights_widened_on_the_fly_are_the_namers_claim_the_tool_verifies(claim, ok):
+    from xe_forge.frontend.ir import CapturedOp, TensorArg
+    from xe_forge.skills.capture import _precision_problems
+
+    def op(name, dtype):
+        return CapturedOp(id=name, framework_op=name, args=[TensorArg([16, 8], dtype)],
+                          framework_meta={"name_key": name})  # fmt: skip
+
+    run = {"runtime": {"precision": "bf16", "weights": "fp8:float8_e4m3fn"},
+           "model_facts": {"weights_widened_by": claim},
+           "precision": {"compute": "bfloat16", "dtypes": {"bfloat16": 1.0}, "w_bytes": 2.0}}  # fmt: skip
+    ops = [op("aten::to", "float8_e4m3fn"), op("aten::linear", "bfloat16")]
+    assert (not _precision_problems(run, named=True, ops=ops)) is ok
+
+
+@pytest.mark.parametrize("weights, ok", [("int8", False), ("Q4_K_M", False), (None, False)])
+def test_named_capture_with_declared_weights_no_gemm_read_is_a_problem(weights, ok):
+    from xe_forge.skills.capture import _precision_problems
+
+    run = {"runtime": {"precision": "bfloat16", "weights": weights},
+           "precision": {"compute": "bfloat16", "dtypes": {"bfloat16": 1.0}, "w_bytes": None}}  # fmt: skip
+    assert (not _precision_problems(run, named=True)) is ok
 
 
 def test_naming_checks_a_cost_on_shapes_beyond_the_ones_listed():
@@ -1096,3 +1217,14 @@ def test_optimize_keeps_a_workspace_that_finished(tmp_path, monkeypatch):
     opts = SimpleNamespace(kernel_repos=str(tmp_path), engine="dspy-agent", only=None,
                            passthrough=["--no-unitrace"])  # fmt: skip
     assert cli.optimize(tmp_path / "kernels.yaml", tmp_path, opts) == [("k", "bench")]
+
+
+def test_a_matmul_dtype_held_exactly_in_a_faster_one_takes_its_peak():
+    from xe_forge.frontend.calibrate import peaks
+
+    calib = {"bandwidth_gbs": 500, "matmul_tflops": {"bfloat16": 156.2, "float16": 145.5,
+                                                     "int8": 285.6, "float8_e4m3fn": 68.1}}  # fmt: skip
+    bw, tflops = peaks(calib)
+    assert bw == 500 and tflops["float8_e4m3fn"] == 156.2 and tflops["int8"] == 285.6
+    assert tflops["float8_e5m2"] == 156.2  # unmeasured, still never slower than bf16
+    assert peaks({"matmul_tflops": {"float8_e4m3fn": 68.1}})[1] == {"float8_e4m3fn": 68.1}

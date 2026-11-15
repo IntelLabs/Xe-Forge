@@ -131,6 +131,9 @@ def validate(names, listing: dict, repos) -> list[str]:
         for fact in ("topk", "experts"):
             if model.get(fact) is not None and not _pos_int(model[fact]):
                 out.append(f"model.{fact}: {model[fact]!r} is not a positive integer")
+        widen = model.get("weights_widened_by")
+        if widen is not None and widen not in listing:
+            out.append(f"model.weights_widened_by: {widen!r} is not a key of ops.json")
     return out
 
 

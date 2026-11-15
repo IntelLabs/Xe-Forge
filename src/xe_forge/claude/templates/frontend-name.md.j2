@@ -71,7 +71,9 @@ detached or modified checkout was put there on purpose: leave it. Then write nam
               token x expert rows}
  }},
  "model": {"topk": <experts each token is routed to, or null>,
-           "experts": <routed experts in the model, or null>}}
+           "experts": <routed experts in the model, or null>,
+           "weights_widened_by": <the key of the op that converts the stored weights to a
+             wider dtype for the GEMMs on every forward, from its source, or null>}}
 
 `{{ bound_cmd }}` applies your names.json as you draft it -- its costs and config_args --
 and prints each workload's efficiency against its bound: run it once the draft is written,
@@ -79,7 +81,10 @@ and again after each change. Each value of a config_arg is a row of its own ther
 splits an op into a row per call size named a size, not a path. An efficiency far below what such a kernel reaches usually
 means the cost misses a read: read the kernel, and fix the cost or say in "via" why it is that
 far from it. "shapes" lists an op's 12 costliest;
-capture.json has every call, and a cost must hold at all of them.
+capture.json has every call, and a cost must hold at all of them. A PROBLEM it prints stops
+the run once you answer: one about the weights' bytes means the GEMMs read more per weight
+than the run stores -- find in the framework's source whether an op widens them on the fly
+(name it) or the weights were loaded wide (then say so in that op's "via"; do not name one).
 
 Use the keys exactly as ops.json gives them, and argument names exactly as it lists them.
 Before writing, check each name greps in its repository and each argument you name is one

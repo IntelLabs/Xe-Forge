@@ -52,11 +52,12 @@ def compute_dtype(dtypes: list, default: str | None = None) -> str | None:
 
 
 def observed(ops: list) -> dict[str, float]:
-    """Share of op device time by the dtype of each op's first float argument, its activation
-    operand (not an fp32 scale or norm weight further on)."""
+    """Share of op device time by the dtype of each op's first float or 8-bit integer argument,
+    its activation operand (not an fp32 scale or norm weight further on, nor an index)."""
     us: dict[str, float] = {}
     for op in ops:
-        d = next(iter(_floats(a.dtype for a in op.args if a is not None)), None)
+        d = next((a.dtype for a in op.args if a is not None and a.dtype
+                  and (a.dtype in ("int8", "uint8") or _floats([a.dtype]))), None)  # fmt: skip
         if d:
             us[d] = us.get(d, 0.0) + op.device_us
     total = sum(us.values())

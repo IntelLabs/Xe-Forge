@@ -9,15 +9,17 @@ interpreter is {{ python }}.
  - Add it the way the framework adds one: read its docs for new models or ops and copy the
    structure of the closest one it already has. A plain, correct implementation first --
    torch, or the framework's own portable kernels; making it fast is Xe-Forge's job later.
-   Nothing that only hides the gap: no generic fallback backend, no CPU path.
+   Nothing that only hides the gap: no generic fallback backend, no CPU path, no emulation of
+   a number format this device has no kernel for (that is {"error": ...}, not a patch).
  - Build it into a venv layered over {{ python }}, holding only what you rebuilt, and check
    that the patched package imports from there and the framework still imports.
  - Write generate.sh here: under $FRAMEWORK_PYTHON, run {{ model }} with the framework, on
    the GPU, eagerly, on `xe_forge.frontend.profile.token_ids(profile.hf_vocab(tok),
-   {{ batch }}, {{ input_len }}{% if 'prompts' in inputs %}, prompt_file="{{ inputs.prompts.file }}"{% endif %})`, generating {{ output_len }} tokens with no stop at EOS, plain
-   greedy -- the argmax of the raw logits, no repetition, frequency or presence penalty, the
-   checkpoint's generation_config ignored -- and write the generated ids to $OUT/tokens.json
-   as [[ids of sequence 0], ...].
+   int($BATCH), int($INPUT_LEN), $PROMPT_FILE)`, generating $OUTPUT_LEN tokens with no stop at
+   EOS, plain greedy -- the argmax of the raw logits, no repetition, frequency or presence
+   penalty, the checkpoint's generation_config ignored -- and write the generated ids to
+   $OUT/tokens.json as [[ids of sequence 0], ...]. The check sets those four variables (a
+   natural-text prompt, the tokens it scores); read them from the environment, no defaults.
  - Write patch.json here: {"python": "<the layered venv's python>", "repo": "<the clone's
    directory name under {{ repos }}>", "base": "<base commit>", "package": "<the module the
    patch changes, importable>"}, plus "reference_python": "<an interpreter with the GPU torch
@@ -29,9 +31,11 @@ interpreter is {{ python }}.
        --prompt-file {{ inputs.prompts.file }}{% endif %}
    It diffs base..HEAD itself, applies that to a fresh clone, checks the import, runs
    generate.sh, then has transformers score its tokens on the GPU: fed each sequence's prompt
-   and generated prefix, every one of the first 32 generated tokens must be within 0.3 nat of
-   transformers' best. It scores in bf16; a sequence that fails there is judged again in
-   float32, and that verdict is final. A FAIL there is the patch's: fix it, never the check.
+   and generated prefix, every generated token must be within 0.3 nat of transformers' best. It scores in bf16; a sequence that fails there is judged again in
+   float32 over several slightly perturbed forwards, a token failing only by more than the
+   reference's own spread there. The reference runs the checkpoint as it is specified,
+   activation quantization included: a dequantized one is stable and wrong. A FAIL there is
+   the patch's: fix it, never the check.
 
 Write {{ answer }}: patch.json's content with "notes": "<what the patch adds and how it was
 verified>", once the check passes; or {"error": "<why>", "next_step": "<what a person would

@@ -82,7 +82,8 @@ def capture(a, python: str, run_dir: Path, turns: int, repos: Path) -> tuple[int
     inputs = getattr(a, "inputs", None) or {}
     context = {"model": a.model, "framework": a.framework, "batch": a.batch,
                "input_len": a.input_len, "output_len": a.output_len, "cache": CACHE,
-               "inputs": inputs}  # fmt: skip
+               "inputs": inputs, "precision": getattr(a, "precision", "auto"),
+               "weights": getattr(a, "weights", "auto")}  # fmt: skip
     for round_ in range(1, 4):
         got = _agent("capture", "frontend-capture.md.j2", context, run_dir, "captured.json",
                      python, turns)  # fmt: skip
@@ -90,6 +91,10 @@ def capture(a, python: str, run_dir: Path, turns: int, repos: Path) -> tuple[int
             return 1, python
         if got.get("fits") is False:
             print(f"capture: does not fit -- {got.get('reason', '')}", file=sys.stderr)
+            return 3, python
+        if got.get("unsupported") == "precision":  # a format this device has no kernel for
+            print(f"capture: {a.framework} cannot run {got.get('what')} on this device -- "
+                  f"{got.get('reason', '')}", file=sys.stderr)  # fmt: skip
             return 3, python
         if "unsupported" not in got:
             # What the agent reports is not the verdict: the tool checks raw/ again here.
@@ -196,6 +201,7 @@ def name(
     (work / "ops.json").write_text(json.dumps(listing, indent=1) + "\n")
     model = cap.run.get("model") or {}
     (work / "config.json").write_text(json.dumps(model.get("config") or {}, indent=1) + "\n")
+    from xe_forge.frontend import calibrate
     from xe_forge.models import DSL
 
     calib = json.loads(calibration.read_text()) if calibration else None
@@ -207,7 +213,7 @@ def name(
         "routes": naming.ROUTES,
         "rows": naming.ROWS,
         "dsls": [d.value for d in DSL],
-        "calibration": calib,
+        "calibration": calib and {**calib, "matmul_tflops": calibrate.peaks(calib)[1]},
         "bound_cmd": shlex.join(
             ["xe-forge-skill", "bound", str(capture_path), "--names", str(work / "names.json")]
             + (["--calibration", str(calibration)] if calibration else [])
@@ -559,6 +565,14 @@ def main(argv: list[str]) -> int:
         help="text the prompts are sliced from, batch x input-len tokens at least (default: "
         "fixed synthetic token ids)",
     )
+    p.add_argument(
+        "--precision",
+        default="auto",
+        help="compute dtype: auto (the framework's default) or a torch name / bf16 ...",
+    )
+    p.add_argument("--weights", default="auto",
+                   help="weight storage: auto (the checkpoint's own), <dtype>, <scheme> or "
+                   "<scheme>:<dtype>, e.g. int8, awq:int4")  # fmt: skip
     _add_analyze_args(p)
     p.add_argument(
         "--name-coverage", type=float, default=0.99,
@@ -585,6 +599,13 @@ def main(argv: list[str]) -> int:
     )  # fmt: skip
     _add_optimize_args(p)
     a = p.parse_args(rest)
+    from xe_forge.frontend.dtypes import canonical, parse_weights
+
+    try:
+        a.precision = a.precision if a.precision == "auto" else canonical(a.precision)
+        parse_weights(a.weights)
+    except ValueError as exc:
+        p.error(str(exc))
     _use_agent(a)
     a.passthrough = passthrough
     turns = a.agent_max_turns or a.max_turns
@@ -622,6 +643,11 @@ def main(argv: list[str]) -> int:
     have = {"framework": cap.run.get("framework"), "model": (cap.run.get("model") or {}).get("name"),
             **{k: rt.get(k) for k in ("batch", "input_len", "output_len")},
             "prompts": (rt.get("inputs") or {}).get("prompts")}  # fmt: skip
+    for k in ("precision", "weights"):  # declared ones the launcher writes verbatim
+        if getattr(a, k) != "auto":
+            want[k], have[k] = getattr(a, k), str(rt.get(k))
+    if "weights" in want and have["weights"].rpartition(":")[0] == want["weights"]:
+        have["weights"] = want["weights"]  # a declared scheme, the stored dtype added to it
     if have != want:
         print(f"run: {capture_path} is a capture of {have}, not {want}; remove it to capture "
               "again", file=sys.stderr)  # fmt: skip

@@ -9,7 +9,10 @@ decode steps after it. Prompt token ids are fixed: the same for every framework 
 `from xe_forge.frontend import profile; profile.token_ids(profile.hf_vocab(tokenizer), {{ batch }},
 {{ input_len }}{% if 'prompts' in inputs %}, prompt_file="{{ inputs.prompts.file }}"{% endif %})` (tokenizer: the model's Hugging Face tokenizer). A framework
 that takes text rather than ids is given text that encodes back to exactly those ids -- check
-it. Run eagerly: no graph
+it. Precision: compute in {{ precision }}, weights stored as {{ weights }} -- auto leaves the
+framework's default for this checkpoint alone; anything else is set with the framework's own
+option for it (a checkpoint that must be quantized or converted for it is made once, with
+the framework's own tool, under {{ cache }}/models/). Run eagerly: no graph
 capture or compilation, no prefix caching, nothing cached between requests; a warm-up run
 first, outside what is measured.
 
@@ -25,18 +28,26 @@ fallback, such as a transformers backend, is none), or an op the model needs fai
 the CPU, or is emulated in plain torch in place of a kernel (a portable Triton kernel is a
 kernel), do not work around it: write {"unsupported": "model" or "op", "what": "<the
 architecture or op>", "reason": "<file:line where the framework shows it>"} as {{ answer }}
-and stop. A patch that adds it is established first, and you are run again on it. If
+and stop. A patch that adds it is established first, and you are run again on it. When
+what is missing is the checkpoint's number format itself -- no kernel for it on this device
+in the framework or its upstream, only an emulation (a format made for another vendor's
+hardware) -- write {"unsupported": "precision", "what": "<the format>", "reason": "<where the
+framework and its upstream show it>"} instead: it is not patched, and the run stops. If
 {{ python }}'s build of the framework departs from what its own docs say to use on this
 device (a build option, a backend), measure it as it is and name the departure in "notes".
 
 Write launcher/run.sh here: an executable that runs that workload once more with every
 setting it needs, the framework under $FRAMEWORK_PYTHON when that is set (it is when another
 build of the stack is measured) and {{ python }} otherwise, and writes into $RAW_DIR:
- - meta.json: {"framework", "framework_version", "model": {"name", "config": <its config as
-   a dict>}, "runtime": {"batch", "input_len", "output_len", "inputs": {{ inputs | tojson }}
+ - meta.json: {"framework", "framework_version", "model": {"name": {{ model | tojson }} (copied
+   exactly, even when it is a path), "config": <its config as a dict>}, "runtime": {"batch", "input_len", "output_len", "inputs": {{ inputs | tojson }}
    (copied exactly, the run's own input files that the parse checks; files you add, such as a
-   tokenizer, go under another runtime key), and every
-   setting that changes what runs}, "device": {"type", "name"}, "repeats": <how many times
+   tokenizer, go under another runtime key), "precision": the compute dtype that ran, by
+   torch's name ({{ precision | tojson }} verbatim when it is not auto), "weights":
+   "<scheme>:<dtype>", how the weights are stored -- the scheme in words, the dtype by torch's
+   name of the element stored (uint8 for packed sub-byte formats); when {{ weights | tojson }}
+   is not auto, it verbatim, with ":<dtype>" added if it names none -- and every setting that
+   changes what runs}, "device": {"type", "name"}, "repeats": <how many times
    the process ran the identical workload, warm-up included>} -- what unitrace sees is
    exactly those runs, work done once (model load, a first-use prepack or JIT) kept before
    them. Runs that compare their tokens may part only at a near-tie: where one first picks
@@ -50,7 +61,10 @@ build of the stack is measured) and {{ python }} otherwise, and writes into $RAW
    {"<node>": {"framework_op": "<its type>", "kernels": ["<regex over the kernel names
    unitrace reports>"], "args": [{"name", "shape", "dtype": <torch's name: float16, int8, ...>}], "call_site": "<node name>",
    "calls": <runs in one workload>}} with concrete shapes, read from the framework's own
-   runtime API; which kernels a node ran is what you establish, not guess from names. When
+   runtime API. args are every tensor the node reads or writes, constants (weights, scales,
+   zero points) included, each once (an output once, however many nodes read it), named by
+   its role on the op (a port, a parameter) -- the same on every node of that type, never the
+   tensor or node that feeds it. Which kernels a node ran is what you establish, not guess from names. When
    one kernel name serves several nodes (a library's GEMM for every matmul), give each node
    "launches": [[start, end], ...] as well -- index ranges into raw/unitrace_launches.json,
    the measured run's launches in device order, which `capture run` writes: run it once,

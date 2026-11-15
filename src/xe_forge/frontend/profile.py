@@ -80,12 +80,13 @@ def token_ids(
     vocab: Vocab, batch: int, length: int, prompt_file: Path | None = None
 ) -> list[list[int]]:
     """``batch`` rows of ``length`` ids: with ``prompt_file``, consecutive slices of its text
-    (``xe-forge run --prompt-file``), each row its own; without, fixed synthetic ids."""
+    (``xe-forge run --prompt-file``), each row its own, the text repeated when it is shorter;
+    without, fixed synthetic ids."""
     if prompt_file:
         ids = vocab.encode(Path(prompt_file).read_text())
-        if len(ids) < batch * length:
-            raise SystemExit(f"{prompt_file} tokenizes to {len(ids)} ids; {batch} rows of "
-                             f"{length} need {batch * length}")  # fmt: skip
+        if not ids:
+            raise SystemExit(f"{prompt_file} tokenizes to no ids")
+        ids = ids * -(-batch * length // len(ids))
         return [ids[j * length : (j + 1) * length] for j in range(batch)]
     pool = vocab.ordinary
     if not pool:
