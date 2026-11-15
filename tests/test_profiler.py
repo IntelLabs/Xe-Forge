@@ -1,6 +1,7 @@
 """Tests for profiler workload preparation and unitrace report parsing."""
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -349,7 +350,12 @@ def test_profile_cli_forwards_parent_profile(monkeypatch, interval, metric_group
             "unitrace_bin": "unitrace",
             "parent_profile": "parent-artifacts",
             "capture_assembly": False,
-            "sampling_interval_us": interval,
+            # Omitting the flag no longer means "unset": the default is the interval that
+            # was measured to work (25 us, or XE_FORGE_SAMPLING_INTERVAL_US). unitrace's own
+            # default of 50 samples almost nothing here.
+            "sampling_interval_us": interval
+            if interval is not None
+            else int(os.environ.get("XE_FORGE_SAMPLING_INTERVAL_US", 25)),
             "metric_group": metric_group,
         }
     ]

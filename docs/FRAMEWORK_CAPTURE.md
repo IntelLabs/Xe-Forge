@@ -23,7 +23,7 @@ code measures and checks it**, through `xe-forge-skill` tools the agents call th
 | analyze | code (`analyze.py`) | `kernels.yaml`, `specs/`, `analysis.json` | bound arithmetic: GEMM roofline, counter speed-of-light, agent-stated costs |
 | inputs | agent (`frontend-inputs.md.j2`): per kernel, one shape per configuration (each captured workload), merging only the token counts that take the same path, with weights | `inputs/inputs.json`, the specs' `weights:` | `inputs check`: every captured shape stands in one group, a group within one configuration, weights summing to 1 |
 | optimize | Xe-Forge, one workspace per kernel | `workspaces/`, `results/` | Xe-Forge's benchmark and trial gates; `benchmark` times every weighted shape: all correct, none slower, scored on the time-weighted total |
-| prove (`--prove`) | agent builds two stacks; code re-runs the cached launcher in each | `prove/` | median and spread over `--prove-repeat` alternating captures |
+| prove (`--prove`) | agent builds two stacks; code re-runs the cached launcher in each | `prove/` | median and spread over `--prove-repeat` alternating captures, and `quality.json`: is the output still right |
 
 `run` reuses `capture.json` and `names.json` when they exist (remove one to redo that step);
 `xe-forge optimize runs/qwen/kernels.yaml` re-runs only the optimize step.
@@ -32,7 +32,7 @@ code measures and checks it**, through `xe-forge-skill` tools the agents call th
 
 | Tool | Does |
 |---|---|
-| `xe-forge-skill capture run <launcher> -o raw` | runs the launcher once as is (its own trace), once under `unitrace --device-timing --metric-sampling --group ComputeBasic` (every kernel by its real name, its time and counters); records the launcher's sha256 and a `MANIFEST.json` of raw/ |
+| `xe-forge-skill capture run <launcher> -o raw` | runs the launcher once as is (its own trace), once under `unitrace --device-timing --chrome-kernel-logging` (every kernel by its real name, its time, and the launch timeline), adding `--metric-sampling --group ComputeBasic --sampling-interval 10` only when the device lists that group); records the launcher's sha256 and a `MANIFEST.json` of raw/ |
 | `xe-forge-skill capture parse raw -o capture.json [--names names.json]` | builds the op list and checks it: raw/ unchanged since `run`; >= 90% of op time in kernels unitrace saw; for an op map, every kernel pattern matches a kernel unitrace saw and none is claimed twice. Exit 1 prints each problem |
 | `xe-forge-skill bound capture.json [--calibration c.json]` | each workload's efficiency against the stricter known bound, recoverable us and gain |
 | `xe-forge-skill inputs check inputs.json --manifest kernels.yaml` | each chosen shape's captured share beside its weight, and the captured time they cover; exit 1 on a shape the capture did not run or weights that do not sum to 1 |
@@ -61,3 +61,72 @@ code re-running each cached launcher twice spread by under 0.3%.
 bandwidth) and its ALU0/1/2 utilization (ALU2 is the XMX pipe); its efficiency is the larger
 of the two. A counter that was not measured is unknown, never 0, and such a kernel takes no
 counter bound. Stall sampling is the optimize agent's `xe-forge-skill profile`.
+
+Metric sampling is time-based, so the interval decides whether the counters are usable at
+all -- and it fails in **both** directions. Too coarse and a kernel shorter than one tick is
+never sampled, so its counters cover under half its measured time and it is dropped as
+unmeasured. Too fine and unitrace stops partway, writing a truncated metrics file that
+parses to zero records, with exit 0 and no error. Share of device time keeping a counter
+bound, measured on two real launchers (a 0.5B and a 9B text model on an Arc Pro B70):
+
+| interval | 0.5B, 44 ms | 9B, 1013 ms | |
+|---|---|---|---|
+| 50 us (unitrace's default) | 0.2% | 0.1% | works, useless |
+| **25 us** | **86.5%** | **94.6%** | works |
+| 10 us | 0.0% | 0.0% | no records |
+
+So `capture run` samples at 25 us (`--sampling-interval`, env
+`XE_FORGE_SAMPLING_INTERVAL_US`). 10 us is not reliably broken, which is what makes it the
+wrong default: it returned 96% on the 0.5B once and nothing on the same launcher and node
+afterwards. Device time moved under 2% across intervals, so sampling shares the pass with
+`--device-timing`. When sampling is asked for and no records come back, `capture run` says
+so and keeps the metrics files in `metrics-no-records/` beside raw/ -- otherwise the
+capture succeeds, every bound quietly falls back to arithmetic, and the evidence goes with
+the scratch directory. `--metric-query`, which queries every kernel instance instead of
+sampling, wrote nothing these parsers could read and is not used.
+
+## Installing what unitrace needs for counters
+
+Reading the counters needs **two** libraries, and a GPU stack may ship only one:
+
+| | |
+|---|---|
+| metrics **discovery** (`libigdmd`) | lists the metric groups -- every stack here ships it |
+| metrics **library** (`libigdml`) | collects them -- **no stack here ships it** |
+
+Without the library a card lists `EuStallSampling` and nothing else, because EU stall
+sampling comes through a different path in the driver. That looks exactly like a card with
+no counters, and it is not: on an Arc Pro B70 the library turns 1 group into 13,
+ComputeBasic among them, on both the b70 and bmtxb70 nodes. It is plain user-space code and
+needs no root -- the kernel side is already open (`/proc/sys/dev/xe/observation_paranoid`
+is 0):
+
+```sh
+git clone --depth 1 --branch metrics-library-1.0.200 \
+    https://github.com/intel/metrics-library.git ~/opt/metrics-library-src
+cmake -S ~/opt/metrics-library-src -B ~/opt/metrics-library-build \
+      -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$HOME/opt/metrics-library
+cmake --build ~/opt/metrics-library-build -j && \
+cmake --install ~/opt/metrics-library-build          # -> ~/opt/metrics-library/lib64
+```
+
+Put that directory on `LD_LIBRARY_PATH` before the capture runs -- nothing in the package
+does it for you, since the launcher inherits its environment from whoever starts it. Check it
+took effect with `unitrace --metric-list`, which should name ComputeBasic; without the library
+a card lists `EuStallSampling` alone, and `capture run` says so rather than reporting a device
+with no counters.
+
+A version note: the installed discovery here is 1.16.194, newer than any public release
+(1.14.182), so this stack is an internal build and the officially paired library may be
+internal too. 1.0.200 is the newest public one and works. If a future stack stops listing
+ComputeBasic, ask for the `intel-metrics-library` matching that discovery version.
+
+Asking for a group a device really lacks is not a missing counter -- unitrace exits 255
+before it runs the launcher, so the device-timing pass is lost with it. So `capture run`
+asks the device first (`unitrace --metric-list`) and simply goes without counters when the
+group is absent. If that ever happens here, the metrics library is the first thing to check.
+
+Without counters `analyze` falls back to the GEMM roofline and the costs the naming agent
+states and proves. That is weaker than a counter bound, not absent: a kernel with neither
+gets no bound at all, so it is ranked by its share of device time and can never be skipped
+as already at roofline.

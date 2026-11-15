@@ -1,8 +1,10 @@
 __pycache__/
 *.pyc
 *.egg-info/
-.env
-.env*.local
+# Credentials: the agents' API keys live in .env files beside the repo. The two patterns
+# below used to miss .env_claude_azure and .env.claude.aide, which `git add -A` would commit.
+.env*
+!.env.example
 uv.lock
 
 # Build artifacts
@@ -20,3 +22,32 @@ sycl_build/
 # Output
 /trials
 /output
+
+# Framework-capture runs: one run holds the captures, the per-kernel workspaces and, with
+# --prove, two built stacks (cutlass-sycl + oneDNN sources and build trees). runs/ reached
+# 142 GB over 15 runs, so none of it belongs in git. The patch, SUMMARY.md and compare.md
+# that carry a run's result are a few MB and can be copied out by hand when they matter.
+/runs/
+/outputs/
+
+# SLURM scratch beside the launchers. The launchers themselves (*.sh, bench_card.py) are
+# kept; these are the per-job dumps slurm and the tools leave behind.
+/slurms/*.json
+/slurms/*.log
+/slurms/outputs/
+
+# vLLM-Omni vs diffusers comparison: the scripts are kept, the measured artifacts are not
+# (the first repeat's images and videos, about 1 GB).
+/bench_vs_diffusers/results/
+/bench_vs_diffusers/results_warm/
+
+# Generated slide decks and their figures; docs/make_qwen9b_*.py rebuilds them from
+# docs/qwen9b_numbers.py. The scripts are kept, the binaries are not. Scoped to docs/ so
+# that tracked images elsewhere (assets/, plots/) are untouched.
+/docs/*.pptx
+/docs/qwen35-9b-*.png
+
+# Stray tool output, each a few hundred bytes left in the repo root
+/.123.txt
+/python.123.json
+/build_provenance.json

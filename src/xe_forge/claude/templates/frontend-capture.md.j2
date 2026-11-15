@@ -3,19 +3,94 @@ kernels it spends its time in can be named and optimized. The framework's interp
 {{ python }}; {{ framework }} is installed there. Read its own code and docs for how to do
 this; nothing here knows that framework.
 
+{% if framework_notes %}Constraints on this machine, from someone who has run this before. These are not
+guesses and not optional; a run that ignores one usually fails late, after the
+expensive part:
+{% for note in framework_notes %}
+ - {{ note }}
+{% endfor %}
+{% endif %}
+Find how the framework is *meant* to be driven offline before writing anything, and go
+looking rather than waiting to be told. Where to look, in order:
+
+ - the installed package under {{ python }}'s site-packages -- its examples, its tests, and
+   its `*.dist-info/METADATA`, which records the project's own repository URL;
+ - a source checkout of the framework on this machine. A project often keeps its per-model
+   recipes and examples in its git repo and not in its wheel, so the installed package can
+   be missing exactly the page you need;
+ - the repository itself, if you can reach it.
+
+What you are looking for first is a recipe or example for **{{ model }} on this card**. One
+often exists, and it states the entry point, the precision and the settings the model needs
+to run at all -- which is most of what a launcher is.
+
+Failing that, take the nearest, in this order, and note that the same model on another card
+beats a different model on this one -- getting the call wrong stops the run, while a wrong
+memory setting is something you can measure and change:
+
+ 1. {{ model }} on another device. The entry point and the pipeline class are exactly
+    right. The precision and offloading are not: they were sized to that card's memory.
+ 2. another size of {{ model }}, on any device -- same family, so the call holds.
+ 3. another model of the same family, then any model of the same kind under this framework.
+    Here only the convention carries: how a pipeline class is named, which settings exist.
+
+What transfers is the shape of the call. What does not is anything sized to a model or a
+card: the precision, the offloading, the resolution, the step count -- and the workload
+above is what this run measures, so it is not a recipe's to set. Follow a neighbour's form
+and establish the numbers here. Say in "notes" which recipe you worked from and what you
+changed, so a reader knows which parts were borrowed.
+
+
+A framework's entry point usually takes one shape and refuses every near miss: an argument
+that looks obvious from a signature is often the wrong one, and a type annotation does not
+tell you how the pieces are built. Copy a working call and change the parts you need. If
+you find nothing, say so in "notes" -- the launcher then rests on your reading of the
+source and is worth more doubt.
+
+{% if workload == "vision" -%}
+The workload: {{ batch }} x {% if frames > 1 %}{{ frames }} frames{% else %}one image{% endif %} of
+{{ width }}x{{ height }} over {{ steps }} denoising steps.
+{% if input_images %}The model is given {{ input_images | length }} input image(s), the ones to edit or to
+condition on, and this is the model's input, not a reference to compare against:
+{% for img in input_images %}
+ - {{ img }}
+{% endfor %}
+Use them as the framework's own entry point takes them. A model that derives the output
+size from its input may ignore the width and height above -- if it does, record the size it
+actually produced in meta.json's runtime, not the size asked for, and say so in "notes".
+{% endif %} Fix everything that makes a run
+differ from the next one: one fixed prompt, one fixed seed, the scheduler and guidance the
+framework uses by default. Do not vary the prompt between the warm-up and the measured run.
+{% if frames > 1 %}A video model may round the frame count to what its latent layout allows -- LTX wants 8k+1 --
+so record what actually ran in meta.json's runtime, not what was asked for.{% endif %}
+{%- else -%}
 The workload: a batch of {{ batch }} sequences of {{ input_len }} prompt tokens each, greedy,
 generating {{ output_len }} tokens with no stop at EOS -- one prefill of the batch and the
 decode steps after it. Prompt token ids are fixed: the same for every framework and run,
 `from xe_forge.frontend import profile; profile.token_ids(profile.hf_vocab(tokenizer), {{ batch }},
-{{ input_len }})` (tokenizer: the model's Hugging Face tokenizer). Run eagerly: no graph
+{{ input_len }})` (tokenizer: the model's Hugging Face tokenizer).
+{%- endif %} Run eagerly: no graph
 capture or compilation, no prefix caching, nothing cached between requests; a warm-up run
 first, outside what is measured.
 
 Before downloading or running anything large, decide whether this fits the device: the
 model's config (hub metadata, no weights), the device's memory, and how the framework runs
-it at this workload. If it cannot run here -- it does not fit, or it is not a text decoder
-that runs on token ids -- write {"fits": false, "reason": "<one line>"} as {{ answer }} and
-stop. A framework that runs a converted model (an exported IR, an engine) needs it converted
+it at this workload. If it cannot run here -- it does not fit, or it is not a
+{% if workload == "vision" %}model that generates an image from a text prompt{% else %}text decoder that runs on token ids{% endif %} --
+write {"fits": false, "reason": "<one line>"} as {{ answer }} and stop.
+
+Memory is the usual reason it does not fit, and there are two different answers to it.
+Weight offloading you may turn on yourself: it moves weights between host and device and
+changes neither the numbers the model computes nor the kernels it runs, only the copies
+around them. Say in "notes" that you did.
+
+{% if quantization %}Run at {{ quantization }} precision, which is what was asked for.
+{% else %}Run at the model's own precision.{% endif %} **Do not choose a precision to make a
+model fit.** A reduced precision changes what the model produces, and whether that is
+acceptable is a judgement about output quality that you cannot make here; it also changes
+which kernels run, so optimizing it would tune kernels that a differently-served model never
+executes. If the model only fits at a lower precision, that is a {"fits": false} with the
+reason saying so -- name the precision that would fit, so a person can decide and pass it. A framework that runs a converted model (an exported IR, an engine) needs it converted
 once: into {{ cache }}/models/<framework>/<model id with / as -->, reused when it is there.
 
 If the framework has no implementation of this architecture on this device (a generic
@@ -30,8 +105,10 @@ device (a build option, a backend), measure it as it is and name the departure i
 Write launcher/run.sh here: an executable that runs that workload once more with every
 setting it needs, the framework under $FRAMEWORK_PYTHON when that is set (it is when another
 build of the stack is measured) and {{ python }} otherwise, and writes into $RAW_DIR:
- - meta.json: {"framework", "framework_version", "model": {"name", "config": <its config as
-   a dict>}, "runtime": {"batch", "input_len", "output_len", and every setting that changes
+ - meta.json: {"framework", "framework_version", "model": {"name": "{{ model }}" exactly as
+   given here, verbatim -- not the id you resolved it to, not the directory you found it in;
+   put that in "resolved" if you want it recorded, "config": <its config as
+   a dict>}, "runtime": {{ '{' }}{% for k in runtime_keys %}"{{ k }}", {% endfor %}and every setting that changes
    what runs}, "device": {"type", "name"}, "repeats": <how many times the process ran the
    identical workload, warm-up included>};
  - for a framework that runs on PyTorch: its torch.profiler trace of exactly the generation
@@ -40,13 +117,67 @@ build of the stack is measured) and {{ python }} otherwise, and writes into $RAW
    another process profiles it there, with its own profiler, into $RAW_DIR);
  - for any other framework: ops.json, every node that ran on the device:
    {"<node>": {"framework_op": "<its type>", "kernels": ["<regex over the kernel names
-   unitrace reports>"], "args": [{"name", "shape", "dtype": <torch's name: float16, int8, ...>}], "call_site": "<node name>",
+   unitrace reports>"], "args": [{"name", "shape", "dtype": <torch's name: float16, int8,
+   ...>}], "call_site": "<node name>",
    "calls": <runs in one workload>}} with concrete shapes, read from the framework's own
    runtime API; which kernels a node ran is what you establish, not guess from names. When
    one kernel name serves several nodes (a library's GEMM for every matmul), give each node
    "launches": [[start, end], ...] as well -- index ranges into raw/unitrace_launches.json,
    the measured run's launches in device order, which `capture run` writes: run it once,
-   read that, and have the launcher write the ranges.
+   read that, and have the launcher write the ranges. That file comes from the instrumented
+   pass below, which XE_FORGE_TRACE_STEPS can make shorter than the workload asked for, so
+   count the ranges in that pass and not in the full run.
+
+`capture run` runs your launcher twice: once plain, which is the measurement, and once under
+unitrace, which only names the kernels and reads the counters. For the second it sets
+**XE_FORGE_TRACE_STEPS**, and your launcher has to read it.
+
+This workload repeats one thing many times -- {% if workload == "vision" %}{{ steps }} denoising steps over the same
+transformer{% else %}{{ output_len }} decode steps over the same layers{% endif %}. When XE_FORGE_TRACE_STEPS is in the environment, do that many
+repetitions instead, and change nothing else: same prompt, same seed, {% if workload == "vision" %}same size{% else %}same prompt length{% endif %},
+same number of repeats of the whole workload. Record what you actually ran in meta.json's
+runtime -- `capture run` compares the two passes' runtime to tell whether you read the
+variable at all, and says so when you did not. Write the output and the trace in both passes
+as usual; the instrumented pass's copies are discarded.
+
+Honour it even though it looks like it spoils the measurement, because it does not. The
+timed pass keeps the whole workload, and that pass is the measurement. A few repetitions
+still run every kernel the full workload runs, because the shortened run is complete end to
+end -- it still {% if workload == "vision" %}encodes the prompt and decodes the image{% else %}prefills and samples{% endif %} -- so nothing goes
+unnamed; only the call counts fall. What falls with them is the thing that breaks this pass:
+unitrace puts a timing event on every launch and the driver's supply of them is finite, so a
+long workload can exhaust it part way through and lose the whole pass -- after the model has
+been loaded and run.
+
+Do not shorten anything that runs once -- the prompt encode, the decode of the image, the
+prefill. Those are a share of the time too, and cutting them would hide kernels.
+
+{% if workload == "vision" %}Save what the model produced into $RAW_DIR, beside the trace: an image as
+`output.png`, a video as `output.mp4`, its audio as `output.wav` if it has any. Write the
+frames at the frame rate the model used, not as separate files.
+
+This is not optional and it is not for the measurement. Nothing downstream can tell whether
+a replaced kernel still makes an acceptable picture -- a kernel is kept on a numeric
+tolerance and a timing comparison, neither of which looks at the output. A person has to,
+and they cannot if the run decoded a video and threw it away. A capture that writes no
+output leaves every patch from this run unjudgeable.
+
+{% endif %}Your launcher is run again later, and not only here. The optimize step re-runs it to
+compare a patched build against an unpatched one, in a freshly built environment with
+nothing in the page cache. So it has to work cold, not just now: give every start-up or
+stage-initialisation timeout the framework offers enough room to load this model's weights
+off a network filesystem from cold, and prefer a generous value to the default. A timeout
+that was ample during this capture -- when the weights were already warm from your own
+earlier attempts -- is the commonest way that later comparison fails, and it fails after
+the whole build has been paid for.
+
+And it has to **exit cleanly**, because its exit code is the whole verdict: a launcher that
+generated its output and wrote its whole trace, and then died on the way out, is recorded as
+a failed launcher and its work is thrown away. Shut the framework down explicitly and wait
+for it. A framework that hands its own shutdown to a background thread and returns will
+abort the process if you exit while that thread runs, and whether it does is a race -- so it
+can pass here and fail in the comparison, or pass for one build and fail for the other.
+Check what its shutdown actually does rather than assuming the call is synchronous.
 
 Then run, under any interpreter that imports xe_forge (PYTHONPATH is set):
   xe-forge-skill capture run launcher/run.sh -o raw

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
@@ -42,14 +43,25 @@ def _args(**overrides):
     return argparse.Namespace(**fields)
 
 
+# The reference this reads is not in the repository. The test arrived with the SYCL runner
+# (#50) and `git log --all --diff-filter=A` finds no commit that ever added the script, so it
+# has failed since it was merged. Skipped rather than deleted: it says what the decode
+# reference is meant to hand SDPA, which is worth keeping until the script lands. Writing a
+# stand-in here would make the test check the stand-in.
+DEEPSEEK_DECODE = Path(__file__).parents[1] / "scripts/deepseek_decode.py"
+
+
+@pytest.mark.skipif(
+    not DEEPSEEK_DECODE.is_file(),
+    reason=f"{DEEPSEEK_DECODE} is missing: the test was merged without the script it loads",
+)
 @pytest.mark.parametrize("prompt_length,decode_length", [(4, 1), (2, 2)])
 def test_decode_reference_attention_layout(monkeypatch, prompt_length, decode_length):
     import runpy
-    from pathlib import Path
 
     import torch
 
-    namespace = runpy.run_path(str(Path(__file__).parents[1] / "scripts/deepseek_decode.py"))
+    namespace = runpy.run_path(str(DEEPSEEK_DECODE))
     args = namespace["ModelArgs"](
         max_batch_size=2,
         max_seq_len=6,

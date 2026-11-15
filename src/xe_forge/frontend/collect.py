@@ -25,8 +25,14 @@ def _port_status(port_txt: Path) -> dict:
     kind = next(
         (ln.split(":", 1)[1].split()[0] for ln in text.splitlines() if ln.startswith("kind:")), None
     )
+    # PORT.txt is written by an agent, so the verdict token may carry punctuation:
+    # "stack check upstream: PASS: built _C ..." parsed as "PASS:" and turned a passing
+    # stack check into FAIL, discarding a verified patch. `upstream patch` now normalises
+    # it at the source; this stays tolerant for the PORT.txt files already on disk.
     verdicts = [
-        ln.split(":", 1)[1].split()[0] for ln in text.splitlines() if ln.startswith("stack check ")
+        ln.split(":", 1)[1].split()[0].strip(":;,.-").upper()
+        for ln in text.splitlines()
+        if ln.startswith("stack check ")
     ]
     stack = None if not verdicts else ("PASS" if all(v == "PASS" for v in verdicts) else "FAIL")
     return {"kind": kind, "stack": stack, "mergeable": kind == "upstream" and stack == "PASS"}

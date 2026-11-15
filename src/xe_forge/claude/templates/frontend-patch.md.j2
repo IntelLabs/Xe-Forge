@@ -12,12 +12,31 @@ interpreter is {{ python }}.
    Nothing that only hides the gap: no generic fallback backend, no CPU path.
  - Build it into a venv layered over {{ python }}, holding only what you rebuilt, and check
    that the patched package imports from there and the framework still imports.
- - Write generate.sh here: under $FRAMEWORK_PYTHON, run {{ model }} with the framework, on
+{% if workload == "text" %} - Write generate.sh here: under $FRAMEWORK_PYTHON, run {{ model }} with the framework, on
    the GPU, eagerly, on `xe_forge.frontend.profile.token_ids(profile.hf_vocab(tok),
    {{ batch }}, {{ input_len }})`, generating {{ output_len }} tokens with no stop at EOS, plain
    greedy -- the argmax of the raw logits, no repetition, frequency or presence penalty, the
    checkpoint's generation_config ignored -- and write the generated ids to $OUT/tokens.json
    as [[ids of sequence 0], ...].
+{% else %} - Write generate.sh here: under $FRAMEWORK_PYTHON, run {{ model }} with the framework, on
+   the GPU, eagerly, with a fixed prompt and `seed=42`, one output, and write into $OUT:
+     - `prompt_embeds.npy` -- what the text encoder produced. One small tensor, and an op the
+       transformer shares with the encoder changes it too, so it cannot be assumed unchanged;
+     - `latent_step1.npy` -- the latent after the **first** denoise step, and
+       `latent_final.npy` -- the latent after the last, before the VAE. Both float32 `.npy`
+       of the array as the model holds it;
+     - `output.png`{% if frames > 1 %}, plus one float32 `frames/f0000.npy` per frame, in order. The encoded video
+       cannot be compared: the encoder is lossy, so it hides this difference and adds its own{% endif %}.
+   Keep it short: `XE_FORGE_CHECK_STEPS` steps, default 1. The sampling loop feeds each step
+   into the next, so a rounding difference grows with every step; at step 1 it has not grown
+   yet, and a real defect still stands out by orders of magnitude. Switch off anything that
+   makes one run differ from the next: CPU or layerwise offload, autotuning.
+ - generate.sh must also honour `XE_FORGE_NATIVE=1`: the same run, with the framework's own
+   plain-torch path instead of your new op -- vLLM's `custom_ops: ["none"]` (or `-<op name>`
+   for one op) and the torch/SDPA attention backend. Nothing else changes: same weights, same
+   seed, same precision. That is the reference the check compares you against, and the two
+   wall times are the op gain your patch is worth.
+{% endif %}
  - Write patch.json here: {"python": "<the layered venv's python>", "repo": "<the clone's
    directory name under {{ repos }}>", "base": "<base commit>", "package": "<the module the
    patch changes, importable>"}, plus "reference_python": "<an interpreter with the GPU torch
@@ -27,9 +46,14 @@ interpreter is {{ python }}.
      xe-forge-skill patch check . --repos {{ repos }} --framework-python {{ python }} \
        --model {{ model }} --batch {{ batch }} --input-len {{ input_len }}
    It diffs base..HEAD itself, applies that to a fresh clone, checks the import, runs
-   generate.sh, then has transformers score its tokens on the GPU: fed each sequence's prompt
+   generate.sh, then compares its output against a reference.
+{% if workload == "text" %}   The reference is transformers, scoring your tokens on the GPU: fed each sequence's prompt
    and generated prefix, every one of the first 32 generated tokens must be within 0.3 nat of
-   transformers' best. A FAIL there is the patch's: fix it, never the check.
+   transformers' best.
+{% else %}   The reference is generate.sh again with `XE_FORGE_NATIVE=1`, and the two outputs are
+   compared stage by stage (`quality.json`): the earliest stage present is the gate, because
+   the later ones have amplified the difference. The op gain is reported with the verdict.
+{% endif %}   A FAIL there is the patch's: fix it, never the check.
 
 Write {{ answer }}: patch.json's content with "notes": "<what the patch adds and how it was
 verified>", once the check passes; or {"error": "<why>", "next_step": "<what a person would

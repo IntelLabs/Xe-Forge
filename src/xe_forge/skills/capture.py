@@ -49,8 +49,13 @@ def _manifest(raw: Path) -> dict:
 
 
 def _env() -> dict:
-    """The launcher's environment: this one without the API credentials."""
-    return {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "OPENAI_"))}
+    """The launcher's environment: this one without the API credentials.
+
+    XE_FORGE_TRACE_STEPS goes with them. It is set for the unitrace pass only, and an
+    exported one reaching the timed pass would shorten the measurement itself.
+    """
+    drop = ("ANTHROPIC_", "OPENAI_", "XE_FORGE_TRACE_STEPS")
+    return {k: v for k, v in os.environ.items() if not k.startswith(drop)}
 
 
 def _launch(
@@ -66,6 +71,30 @@ def _launch(
         return subprocess.call(
             [*prefix, str(launcher)], env=env, stdout=f, stderr=subprocess.STDOUT, cwd=cwd
         )
+
+
+def _same_work(a: list, b: list) -> float:
+    """Share of ``a``'s kernel time that ``b`` ran too: 1.0 when both did the same work.
+
+    The launcher says it ran the workload N times and one run is the last 1/N of the
+    timeline, so that claim has to be checked. Counting launches checks it badly: a single
+    stray launch -- a lazy allocation, a one-off init -- leaves the total indivisible while
+    both runs did the same work, and at a few hundred thousand launches that decides the
+    verdict by chance. So compare the work itself: time per kernel name in one window against
+    the other.
+    """
+
+    def by_name(xs: list) -> dict:
+        out: dict = {}
+        for name, us in xs:
+            out[name] = out.get(name, 0.0) + us
+        return out
+
+    x, y = by_name(a), by_name(b)
+    total = sum(x.values())
+    if not total:
+        return 0.0
+    return min(1.0, sum(min(us, y.get(k, 0.0)) for k, us in x.items()) / total)
 
 
 def _timeline(scratch: Path) -> list[list]:
@@ -104,6 +133,35 @@ def _unitrace_kernels(reports: list[Path]) -> dict:
 _SAMPLING_SHM = Path("/dev/shm/uctrlunitrace_metric_sampling_control")  # unitrace prefixes /uctrl
 
 
+# torch and unitrace name the same device copy differently, and a workload that streams
+# weights is mostly copies. An LTX capture with layerwise offload (mandatory: the model
+# does not fit 31.89 GiB otherwise) had 20.2% of device time in copies -- 3.4 s of H2D
+# weight streaming and 2.5 s moving a 97x544x960x3 video to host -- and failed the 90%
+# check at 78.8%, because torch calls them "Memcpy H2D (...)" while unitrace calls the very
+# same transfers "zeCommandListAppendMemoryCopy(H2D)[bytes]".
+#
+# Mapped rather than excluded. A copy is real device time: dropping it from the check would
+# pass the capture and then hide a fifth of the run from the ranking, which is the opposite
+# of what this file is for.
+_MEMCPY = re.compile(r"^Mem(cpy|set)\s*([A-Z0-9]+)?", re.I)
+
+
+def _is_seen(name: str, kernels: dict) -> bool:
+    """Whether unitrace saw the thing the trace calls ``name``."""
+    if name in kernels or any(u.startswith(name) for u in kernels):
+        return True
+    m = _MEMCPY.match(name)
+    if not m:
+        return False
+    # "Memcpy H2D (Host -> Device)" -> unitrace's "...AppendMemoryCopy(H2D)[bytes]";
+    # a direction-less "Memset" matches any of unitrace's fill entries.
+    kind = "Copy" if m.group(1).lower() == "cpy" else "Fill"
+    direction = (m.group(2) or "").upper()
+    return any(
+        f"Memory{kind}" in u and (not direction or f"({direction})" in u.upper()) for u in kernels
+    )
+
+
 def _sampling_free() -> bool:
     """Whether unitrace can open its metric-sampling session here.
 
@@ -126,6 +184,37 @@ def _sampling_free() -> bool:
         f"capture run: {_SAMPLING_SHM} is held by another unitrace session on this node: "
         "no counters this time (bounds take them as unknown)"
     )
+    return False
+
+
+def _has_group(unitrace: str, group: str, env: dict) -> bool:
+    """Whether this device exposes a metric group.
+
+    Asking for one it does not have is not a missing counter: unitrace exits 255 before it
+    runs the launcher, so nothing is captured at all and the device-timing pass -- which the
+    whole capture rests on -- is lost with it. So ask the device first.
+
+    A device that lists EuStallSampling and nothing else is usually not a device without
+    counters: reading them needs metrics discovery (libigdmd, which the GPU stacks ship) and
+    the metrics library (libigdml, which none of them ships). Build intel/metrics-library and
+    put its lib64 on LD_LIBRARY_PATH -- it is user-space code and needs no root; the steps are
+    in docs/FRAMEWORK_CAPTURE.md -- and the same Arc Pro B70 lists 13 groups, ComputeBasic
+    among them, where it listed one before.
+    """
+    try:
+        out = subprocess.run([unitrace, "--metric-list"], capture_output=True, text=True,
+                             env=env, timeout=180)  # fmt: skip
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"capture run: cannot list this device's metric groups ({exc}): no counters "
+              "this time (bounds take them as unknown)")  # fmt: skip
+        return False
+    if group in out.stdout or group in out.stderr:
+        return True
+    print(f"capture run: this device lists no {group} metric group: no counters this time "
+          "(bounds take them as unknown). If it lists EuStallSampling only, the metrics "
+          "library (libigdml) is probably not on LD_LIBRARY_PATH: build "
+          "intel/metrics-library (no root needed) and add its lib64, as "
+          "docs/FRAMEWORK_CAPTURE.md describes")  # fmt: skip
     return False
 
 
@@ -154,18 +243,69 @@ def run_capture(args) -> int:
         if not (raw / "meta.json").is_file():
             print("capture run: the launcher wrote no $RAW_DIR/meta.json")
             return 1
-        # Pass 2, under unitrace: every kernel the device ran, by its real name, with counters.
+        # Pass 2, under unitrace: every kernel the device ran, by its real name, with
+        # counters. This pass may do less work than the one above -- see --trace-steps.
         report = scratch / "unitrace.txt"
         cmd = [args.unitrace, "--device-timing", "--chrome-kernel-logging", "--opencl",
                "-o", str(report)]  # fmt: skip
-        if _sampling_free():
-            cmd[-2:-2] = ["--metric-sampling", "--group", "ComputeBasic"]
         from xe_forge.core.profiler import UnitraceXPUProfiler
 
         # The profiler's own setup: its Metrics Library on LD_LIBRARY_PATH, a flat hierarchy.
         env = UnitraceXPUProfiler(unitrace_bin=args.unitrace)._environment()
         env = {k: v for k, v in env.items() if not k.startswith(("ANTHROPIC_", "OPENAI_"))}
+        sampling = _sampling_free() and _has_group(args.unitrace, "ComputeBasic", env)
+        if sampling:
+            # The interval decides whether the counters are usable at all, in both
+            # directions. Metric sampling is time-based: a kernel shorter than one tick is
+            # never sampled, and analyze drops a kernel whose counters cover under half its
+            # measured time -- so too coarse gives nothing usable. Too fine gives nothing at
+            # all: unitrace stops partway and writes a truncated metrics file that parses to
+            # zero records, with no error and exit 0.
+            #
+            # The 25 us default is a measurement, not a property of metric sampling: it was
+            # taken on an Arc Pro B70 with two real launchers (a 0.5B and a 9B text model,
+            # 44 ms and 1013 ms of device time). Another device, or a much shorter or longer
+            # run, may need a different interval -- `--sampling-interval-us`, env
+            # XE_FORGE_SAMPLING_INTERVAL_US. Share of device time keeping a counter bound:
+            #
+            #            0.5B, 44 ms      9B, 1013 ms
+            #   50 us       0.2%             0.1%      works, useless
+            #   25 us      86.5%            94.6%     works
+            #   10 us       0.0%             0.0%      no records
+            #
+            # 10 us is not reliably broken, which is what makes it dangerous: it returned
+            # 96% on the 0.5B once and nothing on the same launcher and node later. 25 us
+            # has produced records on every run of both lengths. Device time moved under 2%
+            # across intervals, so this shares the pass with --device-timing.
+            cmd[-2:-2] = ["--metric-sampling", "--group", "ComputeBasic",
+                          "--sampling-interval", str(args.sampling_interval)]  # fmt: skip
+        if args.trace_steps:
+            # The launcher's contract: run this many steps in place of the workload's own
+            # count, changing nothing else. Only this pass is cut; the timed pass above keeps
+            # the whole workload, its trace and its output.
+            env["XE_FORGE_TRACE_STEPS"] = str(args.trace_steps)
+        else:
+            # 0 is "measure the whole workload under unitrace too", and it has to hold
+            # against an exported variable: this env is built from os.environ, and the flag
+            # is the decision while the variable is only where its default came from.
+            env.pop("XE_FORGE_TRACE_STEPS", None)
         code = _launch(launcher, scratch / "raw", cmd, raw.parent / "unitrace.log", env, scratch)
+        # Whether the launcher read it. A launcher written before the variable existed runs
+        # the full workload under unitrace, which is what it did before and still correct --
+        # but then nothing downstream may say the pass was short, and the launch count that
+        # loses the pass is still there. Its own meta.json is the evidence, while it exists.
+        short = False
+        if args.trace_steps:
+            ran = scratch / "raw" / "meta.json"
+            if ran.is_file():
+                before = json.loads((raw / "meta.json").read_text()).get("runtime")
+                short = json.loads(ran.read_text()).get("runtime") != before
+            if not short:
+                print(f"capture run: the launcher ran the full workload under unitrace; it "
+                      f"does not read XE_FORGE_TRACE_STEPS (asked for {args.trace_steps}). "
+                      f"That is the behaviour it had before the variable existed, and the "
+                      f"capture is sound; a launcher that reads it makes this pass far "
+                      f"cheaper and cannot run the device out of timing events.")  # fmt: skip
         reports = [p for p in scratch.glob("unitrace*") if ".metrics." not in p.name]
         kernels = _unitrace_kernels(reports)
         if not kernels:
@@ -177,30 +317,64 @@ def run_capture(args) -> int:
         launches = _timeline(scratch)
         repeats = int(json.loads((raw / "meta.json").read_text()).get("repeats") or 1)
         if launches:
+            # Whether the launcher's "repeats" holds is decided here, where the whole
+            # timeline is in memory: the window against the run before it. Only the window
+            # is written -- the full timeline runs to tens of megabytes.
+            n = len(launches) // repeats
+            window = launches[len(launches) - n :]
+            prev = launches[len(launches) - 2 * n : len(launches) - n] if repeats > 1 else []
             (raw / "unitrace_launches.json").write_text(json.dumps({
                 "repeats": repeats, "total": len(launches),
-                "launches": launches[len(launches) - len(launches) // repeats:],
+                "stray": len(launches) - n * repeats,
+                "match": round(_same_work(window, prev), 4) if prev else None,
+                "trace_steps": args.trace_steps if short else None,
+                "launches": window,
             }) + "\n")  # fmt: skip
         from xe_forge.core.compute_metrics import summarize_compute_metrics
 
         records = []
-        for path in sorted(scratch.glob("unitrace*.metrics.*")):
+        metrics = sorted(scratch.glob("unitrace*.metrics.*"))
+        for path in metrics:
             with open(path, errors="replace") as f:
                 records += summarize_compute_metrics(f)["records"]
-        if records:
+        usable = _usable(records)
+        if usable:
             (raw / "counters.json").write_text(json.dumps({"records": records}, indent=1) + "\n")
+        elif sampling:
+            # Sampling was asked for and nothing usable came back. This is the failure that
+            # hides: unitrace exits 0, the capture succeeds, every bound silently falls back
+            # to arithmetic, and the metrics files go with the scratch directory below -- so
+            # say it here, with the interval, while the evidence still exists. Keep the
+            # files for a look: they are the only way to tell a truncated collection from
+            # one that never started, or one that sampled without reading a counter.
+            kept = raw.parent / "metrics-no-records"
+            shutil.rmtree(kept, ignore_errors=True)
+            kept.mkdir(parents=True, exist_ok=True)
+            for path in metrics:
+                shutil.copy2(path, kept / path.name)
+            print(f"capture run: PROBLEM metric sampling at {args.sampling_interval} us "
+                  f"produced no usable counter records from {len(metrics)} metrics file(s) "
+                  f"({len(records)} record(s) parsed, none with a time to weight it by). "
+                  f"Every bound will fall back to arithmetic. Too fine an interval does "
+                  f"this -- unitrace stops partway and writes a truncated file with exit 0. "
+                  f"Try a coarser --sampling-interval-us (25 works on every launcher measured "
+                  f"here). The files are kept in {kept}")  # fmt: skip
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
+    # Pass 1's meta.json: the timed pass is the one the capture describes.
     run = json.loads((raw / "meta.json").read_text())
     # Settings that change the run are the launcher's, in its meta.json runtime.
-    run.update(launcher=str(launcher), launcher_sha256=_sha256(launcher))
+    # trace_steps: what the instrumented pass actually ran, not what was asked for.
+    run.update(launcher=str(launcher), launcher_sha256=_sha256(launcher),
+               trace_steps=args.trace_steps if short else None)  # fmt: skip
 
     (raw / "run.json").write_text(json.dumps(run, indent=1) + "\n")
     (raw / "MANIFEST.json").write_text(json.dumps(_manifest(raw), indent=1) + "\n")
     total = sum(k["us"] for k in kernels.values())
+    # Usable records, not records: the count is read as "the capture has counters".
     print(f"capture run: {len(kernels)} kernels, {total / 1e3:.1f} ms device time (unitrace), "
-          f"counters for {len(records)} records -> {raw}")  # fmt: skip
+          f"counters for {len(usable)} of {len(records)} records -> {raw}")  # fmt: skip
     return 0
 
 
@@ -305,7 +479,18 @@ def parse_capture(args) -> int:
     timeline = raw / "unitrace_launches.json"
     if timeline.is_file():
         t = json.loads(timeline.read_text())
-        if t["total"] % t["repeats"]:
+        match = t.get("match")
+        if match is not None:
+            if match < 0.9:
+                problems.append(
+                    f"the last 1/{t['repeats']} of the timeline's {t['total']} launches is "
+                    f"not the work the run before it did ({match:.0%} of its kernel time "
+                    f"matches); meta.json's repeats says the launcher ran the identical "
+                    f"workload {t['repeats']} times"
+                )
+        elif t["total"] % t["repeats"]:
+            # raw/ from before "match" was recorded: the old divisibility test, which is a
+            # parity test at repeats=2 and fails on one stray launch.
             problems.append(f"the timeline's {t['total']} launches are not {t['repeats']} "
                             "identical runs (repeats in meta.json)")  # fmt: skip
         window, by_launch = [[n, us, 1] for n, us in t["launches"]], True
@@ -334,13 +519,16 @@ def parse_capture(args) -> int:
     for op in capture.ops:
         for k, us in op.kernel_symbols.items():
             traced[k] = traced.get(k, 0.0) + us
-    seen = sum(
-        us for k, us in traced.items() if k in kernels or any(u.startswith(k) for u in kernels)
-    )
+    seen = sum(us for k, us in traced.items() if _is_seen(k, kernels))
     known_pct = 100 * seen / sum(traced.values()) if traced else 0.0
+    # unitrace's total is this run's only when both passes did the same work; with
+    # --trace-steps it is a shorter run of the same model, so say so rather than invite the
+    # two numbers to be compared.
+    saw = (f"unitrace saw {truth / 1e3:.1f} ms over {r['trace_steps']} step(s)"
+           if r.get("trace_steps") else f"unitrace saw {truth / 1e3:.1f} ms")  # fmt: skip
     print(f"capture parse: {len(capture.ops)} ops, {len(capture.workloads)} workloads, "
           f"{r['total_device_us'] / 1e3:.1f} ms device time, {r['attributed_pct']}% attributed; "
-          f"unitrace saw {truth / 1e3:.1f} ms; {known_pct:.1f}% of op time is in kernels unitrace "
+          f"{saw}; {known_pct:.1f}% of op time is in kernels unitrace "
           f"names -> {out}")  # fmt: skip
     if not capture.ops:
         problems.append("no ops")
@@ -385,6 +573,11 @@ def build(raw_dir: Path, out: Path, names: dict | None = None, summary=None) -> 
         run["model_facts"] = names.get("model") or {}
     if (raw_dir / "counters.json").is_file():
         run["counters"] = _counters(json.loads((raw_dir / "counters.json").read_text()))
+    # The same pass the counters came from, per kernel name: what their coverage is judged
+    # against. The trace's time for a kernel is the timed pass's, which --trace-steps makes
+    # a longer run, so the two are not comparable.
+    if (raw_dir / "unitrace_kernels.json").is_file():
+        run["unitrace_kernels"] = json.loads((raw_dir / "unitrace_kernels.json").read_text())
     capture = ir.CaptureRun(run=run, ops=summary.ops)
     capture.workloads = canonical.workloads(capture.ops, summary.total_us, naming.name_op)
     ir.dump(capture, out)
@@ -401,6 +594,19 @@ def apply_names(ops: list, names: dict | None) -> list:
             op.framework_meta["named"] = entries[naming.key(op)]
         out.extend(_split(op))
     return out
+
+
+def _usable(records: list) -> list:
+    """The records that carry a counter at all.
+
+    ``_counters`` weights every rate by ``time_ns`` and skips a record without one, so such
+    a record is no counter, however many of them come back. Counting records instead of
+    these let the PixArt capture print "counters for 134 records" and keep none: every
+    record arrived with ``time_ns`` None and ``counters`` {}, the no-records branch never
+    ran, the metrics files went with the scratch directory, and every bound fell back to
+    arithmetic unannounced -- the exact failure that branch exists to report.
+    """
+    return [r for r in records if r.get("time_ns")]
 
 
 def _counters(summary: dict) -> dict:

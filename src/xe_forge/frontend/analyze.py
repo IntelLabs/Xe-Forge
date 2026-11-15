@@ -223,6 +223,7 @@ def _measured(measured: dict, name: str) -> dict | None:
 def _sol_parts(w: Workload, calib: dict | None, ctx: dict | None) -> tuple | None:
     """(SOL, memory SOL, compute SOL); None when most of the time is unmeasured."""
     measured = (ctx or {}).get("counters") or {}
+    ran = (ctx or {}).get("unitrace_kernels") or {}
     shared = (ctx or {}).get("shared") or set()
     bw = calib_peaks(calib)[0]
     kernels = w.framework_meta.get("kernels") or {}
@@ -233,8 +234,11 @@ def _sol_parts(w: Workload, calib: dict | None, ctx: dict | None) -> tuple | Non
         # averages their shapes, so it bounds none of them.
         k = None if name in shared else _measured(measured, name)
         # Metric sampling misses short launches: counters that sampled under half of the
-        # kernel's measured time describe a few launches, not the kernel.
-        if not k or not us or (k.get("us") or 0.0) < 0.5 * us:
+        # kernel's measured time describe a few launches, not the kernel. Judge that against
+        # unitrace's own total for the kernel in the pass the counters came from -- `us` is
+        # the trace's, from the timed pass, which --trace-steps makes the longer of the two.
+        ceiling = ((_measured(ran, name) or {}).get("us") if ran else None) or us
+        if not k or not us or (k.get("us") or 0.0) < 0.5 * ceiling:
             continue
         # SOL is the max of both sides; an unknown side (or no bandwidth peak) is not 0% of
         # peak, so such a kernel counts as unmeasured.
@@ -328,6 +332,7 @@ def context(capture: CaptureRun) -> dict:
             runs[name].add(w.workload_id)
     return {
         "counters": capture.run.get("counters") or {},
+        "unitrace_kernels": capture.run.get("unitrace_kernels") or {},
         "shared": {name for name, ws in runs.items() if len(ws) > 1},
         "topk": facts.get("topk"),
         "experts": facts.get("experts"),
