@@ -12,6 +12,33 @@ from xe_forge.frontend import agent
 PARSE_REFUSED = 3  # recapture: the launcher ran, its capture did not parse
 
 
+def _why(arm_dir: Path, lines: int = 6) -> str:
+    """The reason an arm's capture failed, from whichever log holds it."""
+    for name in ("launcher.log", "unitrace.log", "capture_run.log"):
+        log = arm_dir / name
+        if not log.is_file():
+            continue
+        hits = [
+            ln.strip()
+            for ln in log.read_text(errors="replace").splitlines()
+            if any(
+                w in ln
+                for w in (
+                    "Error",
+                    "error:",
+                    "Timeout",
+                    "FAIL",
+                    "Traceback",
+                    "out of memory",
+                    "not become ready",
+                )
+            )
+        ]
+        if hits:
+            return f"{name}: " + " | ".join(hits[-lines:])[:600]
+    return "no error line in the arm's logs"
+
+
 def _build_arms(
     prove_dir: Path,
     patches: list[Path],
@@ -68,14 +95,27 @@ def prove(run_dir: Path, recapture, python: str, repeat: int, max_turns: int) ->
             path = prove_dir / f"{arm}-r{i}" / "capture.json"
             # The run's own cached launcher, under the arm's interpreter: identical work.
             code = recapture(run_dir, path.parent, arms[arm])
+            if code not in (0, PARSE_REFUSED) or (code == 0 and not path.is_file()):
+                # One retry, and not a blind one: the commonest failure here is a startup
+                # timeout loading a large model off NFS from cold, and the attempt that
+                # just failed is what warms the page cache. An LTX arm died with
+                # "Orchestrator did not become ready within 600s" on an 89 GB model whose
+                # own capture had succeeded warm.
+                print(f"prove: arm {arm} run {i} failed, retrying once ({_why(path.parent)})",
+                      flush=True)  # fmt: skip
+                code = recapture(run_dir, path.parent, arms[arm])
             if code == PARSE_REFUSED and arm == "B" and caps["A"]:
                 return (f"## In model\n\nnot run: arm B ran but its capture does not parse -- "
                         f"the launcher does not hold on the patched build ({path.parent})\n")  # fmt: skip
             if code != 0 or not path.is_file():
                 if arm == "B" and caps["A"]:
-                    return (f"## In model\n\nFAIL: with the patches the model does not run "
-                            f"where the base does ({path.parent}); the patches are not mergeable\n")  # fmt: skip
-                return f"## In model\n\nnot run: capture of arm {arm} failed ({path.parent})\n"
+                    return (f"## In model\n\nFAIL: with the patches the model does not "
+                            f"run where the base does ({path.parent}); the patches are "
+                            f"not mergeable\n\n```\n{_why(path.parent)}\n```\n")  # fmt: skip
+                # The reason belongs in the report. A path alone sends the reader
+                # hunting through logs for a line the run already had.
+                return (f"## In model\n\nnot run: capture of arm {arm} failed "
+                        f"({path.parent})\n\n```\n{_why(path.parent)}\n```\n")  # fmt: skip
             caps[arm].append(path)
     table = compare.compare(caps["A"], caps["B"])
     out = compare.write(table, prove_dir)

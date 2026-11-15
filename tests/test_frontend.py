@@ -16,7 +16,7 @@ import pytest
 from xe_forge.dsl_registry import get_stages_for_dsl
 from xe_forge.frontend import analyze, formula, manifest
 from xe_forge.models import DSL, OptimizationStage
-from xe_forge.skills.capture import _counters
+from xe_forge.skills.capture import _counters, _usable
 
 # ── OpenCL ──────────────────────────────────────────────────────────────────
 
@@ -63,6 +63,22 @@ def test_counters_average_only_measured_records():
     assert out["k"]["gb_per_s"] == 1.0
     assert out["k"]["util_pct"] == 80.0
     assert out["k"]["us"] == 2.0
+
+
+def test_records_without_a_time_are_no_counters():
+    """What the PixArt-Sigma capture got back: records, samples, launches -- no values.
+
+    ``capture run`` chose its success branch on ``if records:``, so it reported "counters
+    for 134 records", wrote counters.json, deleted the metrics files with the scratch
+    directory and left every bound on arithmetic without saying so.
+    """
+    empty = [
+        {"kernel": "k", "time_ns": None, "samples": 196, "launches": 196, "counters": {},
+         "memory": {"read": {"bytes": None}, "write": {"bytes": None}}}
+    ]  # fmt: skip
+    assert _usable(empty) == []  # so the no-records branch runs and says so
+    assert _counters({"records": empty}) == {}  # and nothing would have survived anyway
+    assert len(_usable([*empty, _record("k", 1000, 600, 400, 80.0)])) == 1
 
 
 def _workload(kernels):
@@ -555,6 +571,124 @@ def test_capture_tools_on_an_agent_op_map(tmp_path):
                                                                        "toy::RMS": 8.0}  # fmt: skip
 
 
+# Two identical runs of the workload, and a stray launch before them -- the lazy allocation
+# or one-off init every real launcher makes. The timeline is then an odd length, which is all
+# the old check tested for.
+UNITRACE_STUB_STRAY = UNITRACE_STUB.replace(
+    "{ printf '{\"traceEvents\": ['; ev gemm_kernel 1 6.0;",
+    "{ printf '{\"traceEvents\": ['; ev one_off_init 0 1.0; ev gemm_kernel 1 6.0;",
+)
+
+# A launcher that ran the workload twice, honours XE_FORGE_TRACE_STEPS, and reports which
+# pass it is in: $RAW_DIR differs between the two, so each pass leaves its own note.
+LAUNCHER_TWICE = """#!/bin/bash
+echo "${XE_FORGE_TRACE_STEPS:-unset}" > "$RAW_DIR/steps_seen"
+# Beside the launcher, so it survives the instrumented pass's scratch being removed: one
+# line per pass, in order, which is the only way to see what the second pass was given.
+echo "${XE_FORGE_TRACE_STEPS:-unset}" >> "$(dirname "$0")/steps_log"
+cat > "$RAW_DIR/meta.json" <<J
+{"framework": "toyfw", "framework_version": "1", "model": {"name": "toy"},
+ "runtime": {"batch": 1, "precision": "float16", "weights": "float16", "steps": ${XE_FORGE_TRACE_STEPS:-50}},
+ "device": {"type": "xpu"}, "repeats": 2}
+J
+cat > "$RAW_DIR/ops.json" <<'J'
+{"rms": {"framework_op": "toy::RMS", "kernels": ["^rms_opt"], "calls": 2,
+         "args": [{"name": "x", "shape": [4, 896], "dtype": "float16"}]},
+ "fc": {"framework_op": "toy::FC", "kernels": ["^gemm_kernel$"],
+        "args": [{"name": "x", "shape": [4, 896], "dtype": "float16"}]}}
+J
+"""
+
+
+def test_capture_parse_takes_two_identical_runs_with_a_stray_launch(tmp_path):
+    """The window is checked by the work in it, not by the timeline's length being even."""
+    unitrace = _exe(tmp_path / "unitrace", UNITRACE_STUB_STRAY)
+    launcher = _exe(tmp_path / "run.sh", LAUNCHER_TWICE)
+    raw = tmp_path / "raw"
+    code, out = _tool("capture", "run", str(launcher), "-o", str(raw), "--unitrace", str(unitrace))
+    assert code == 0, out
+    t = json.loads((raw / "unitrace_launches.json").read_text())
+    assert t["total"] % t["repeats"], "the point of this test is an odd timeline"
+    assert t["match"] == 1.0 and t["stray"] == 1
+    code, out = _tool("capture", "parse", str(raw), "-o", str(tmp_path / "capture.json"))
+    assert code == 0, out
+
+
+def test_capture_parse_refuses_a_window_that_is_not_the_run_before_it(tmp_path):
+    """A launcher whose two runs differ is still caught: only the second one was warm."""
+    half = UNITRACE_STUB.replace('ev gemm_kernel 30 6.0; ev "$r" 40 2.0; ev "$r" 50 2.0',
+                                 "ev other_kernel 30 6.0; ev other_kernel 40 2.0")  # fmt: skip
+    unitrace = _exe(tmp_path / "unitrace", half)
+    launcher = _exe(tmp_path / "run.sh", LAUNCHER_TWICE)
+    raw = tmp_path / "raw"
+    assert (
+        _tool("capture", "run", str(launcher), "-o", str(raw), "--unitrace", str(unitrace))[0] == 0
+    )
+    code, out = _tool("capture", "parse", str(raw), "-o", str(tmp_path / "capture.json"))
+    assert code == 1
+    assert "not the work the run before it did" in out
+
+
+def test_capture_run_shortens_only_the_instrumented_pass(tmp_path):
+    """--trace-steps reaches the unitrace pass and never the timed one."""
+    unitrace = _exe(tmp_path / "unitrace", UNITRACE_STUB_STRAY)
+    launcher = _exe(tmp_path / "run.sh", LAUNCHER_TWICE)
+    raw = tmp_path / "raw"
+    code, out = _tool("capture", "run", str(launcher), "-o", str(raw), "--unitrace",
+                      str(unitrace), "--trace-steps", "2")  # fmt: skip
+    assert code == 0, out
+    # The timed pass writes $RAW_DIR itself; the instrumented one writes the scratch copy,
+    # which `capture run` removes -- so the note that survives is the timed pass's.
+    assert (raw / "steps_seen").read_text().strip() == "unset"
+    assert (tmp_path / "steps_log").read_text().split() == ["unset", "2"]
+    # And the capture describes the timed pass: 50 steps, whatever the other one ran.
+    assert json.loads((raw / "run.json").read_text())["runtime"]["steps"] == 50
+    assert json.loads((raw / "run.json").read_text())["trace_steps"] == 2
+    _, out = _tool("capture", "parse", str(raw), "-o", str(tmp_path / "capture.json"))
+    assert "over 2 step(s)" in out, out
+
+
+@pytest.mark.parametrize("exported", [None, "2"])
+def test_capture_run_trace_steps_zero_measures_the_whole_workload_twice(tmp_path, monkeypatch,
+                                                                        exported):  # fmt: skip
+    """0 is the whole workload under unitrace too, and it holds against an exported value."""
+    if exported:
+        monkeypatch.setenv("XE_FORGE_TRACE_STEPS", exported)
+    unitrace = _exe(tmp_path / "unitrace", UNITRACE_STUB_STRAY)
+    launcher = _exe(tmp_path / "run.sh", LAUNCHER_TWICE)
+    raw = tmp_path / "raw"
+    code, out = _tool("capture", "run", str(launcher), "-o", str(raw), "--unitrace",
+                      str(unitrace), "--trace-steps", "0")  # fmt: skip
+    assert code == 0, out
+    assert (tmp_path / "steps_log").read_text().split() == ["unset", "unset"]
+    assert json.loads((raw / "run.json").read_text())["trace_steps"] is None
+
+
+def test_capture_run_says_when_the_launcher_ignores_trace_steps(tmp_path):
+    """A launcher written before the variable keeps working, and is not claimed to be short."""
+    unitrace = _exe(tmp_path / "unitrace", UNITRACE_STUB)
+    launcher = _exe(tmp_path / "run.sh", LAUNCHER % "")  # never reads the variable
+    raw = tmp_path / "raw"
+    code, out = _tool("capture", "run", str(launcher), "-o", str(raw), "--unitrace",
+                      str(unitrace), "--trace-steps", "2")  # fmt: skip
+    assert code == 0, out
+    assert "does not read XE_FORGE_TRACE_STEPS" in out
+    assert json.loads((raw / "run.json").read_text())["trace_steps"] is None
+    _, out = _tool("capture", "parse", str(raw), "-o", str(tmp_path / "capture.json"))
+    assert "step(s)" not in out, out
+
+
+def test_capture_run_keeps_an_exported_trace_steps_out_of_the_timed_pass(tmp_path, monkeypatch):
+    monkeypatch.setenv("XE_FORGE_TRACE_STEPS", "2")
+    unitrace = _exe(tmp_path / "unitrace", UNITRACE_STUB_STRAY)
+    launcher = _exe(tmp_path / "run.sh", LAUNCHER_TWICE)
+    raw = tmp_path / "raw"
+    assert (
+        _tool("capture", "run", str(launcher), "-o", str(raw), "--unitrace", str(unitrace))[0] == 0
+    )
+    assert (raw / "steps_seen").read_text().strip() == "unset"
+
+
 def test_capture_parse_refuses_invented_or_double_claimed_kernels(tmp_path):
     unitrace = _exe(tmp_path / "unitrace", UNITRACE_STUB)
     launcher = _exe(tmp_path / "run.sh", LAUNCHER % ', "^rms_opt", "^no_such_kernel"')
@@ -876,8 +1010,8 @@ def test_run_establishes_a_patch_then_captures_on_it(tmp_path, monkeypatch):
     checks = []
     monkeypatch.setattr(cli, "_tool", lambda py, *argv, **env: seen.append((argv[0], py))
                         or (argv[0] == "patch" and checks.append(argv)) or 0)  # fmt: skip
-    a = SimpleNamespace(model="m", framework="fw", batch=1, input_len=4, output_len=2,
-                        reference_python="/ref/python")  # fmt: skip
+    a = SimpleNamespace(model="m", framework="fw", workload="text", batch=1, input_len=4,
+                        output_len=2, reference_python="/ref/python")  # fmt: skip
     code, python = cli.capture(a, "/fw/python", tmp_path, 5, tmp_path / "repos")
     assert (code, python) == (0, "/patched/python")
     assert seen == [("capture", "/fw/python"), ("patch", "/fw/python"), ("patch", "/fw/python"),
@@ -894,7 +1028,9 @@ def test_run_stops_on_a_precision_the_device_has_no_kernel_for(tmp_path, monkeyp
     monkeypatch.setattr(cli, "_agent", lambda step, *rest: steps.append(step) or
                         {"unsupported": "precision", "what": "fp4", "reason": "platform.py:1"})  # fmt: skip
     monkeypatch.setattr(cli, "_tool", lambda *a, **k: pytest.fail("nothing runs"))
-    a = SimpleNamespace(model="m", framework="fw", batch=1, input_len=4, output_len=2)
+    a = SimpleNamespace(
+        model="m", framework="fw", workload="text", batch=1, input_len=4, output_len=2
+    )
     assert cli.capture(a, "/fw/python", tmp_path, 5, tmp_path / "repos") == (3, "/fw/python")
     assert steps == ["capture"]
 
@@ -998,7 +1134,7 @@ def test_run_gives_a_declared_float_precision_to_the_patch_check(
     checks = []
     monkeypatch.setattr(cli, "_tool", lambda py, *argv, **env:
                         (argv[0] == "patch" and checks.append(argv)) or 0)  # fmt: skip
-    a = SimpleNamespace(model="m", framework="fw", batch=1, input_len=4, output_len=2,
+    a = SimpleNamespace(model="m", framework="fw", workload="text", batch=1, input_len=4, output_len=2,
                         precision=precision)  # fmt: skip
     assert cli.capture(a, "/fw/python", tmp_path, 5, tmp_path / "repos")[0] == 0
     got = checks[0][checks[0].index("--precision") + 1] if "--precision" in checks[0] else None
@@ -1062,7 +1198,7 @@ def test_run_gives_the_prompt_file_to_the_patch_check(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_tool", lambda py, *argv, **env:
                         (argv[0] == "patch" and checks.append(argv)) or 0)  # fmt: skip
     inputs = {"prompts": {"file": "/run/inputs/prompts.txt", "sha256": "ab"}}
-    a = SimpleNamespace(model="m", framework="fw", batch=1, input_len=4, output_len=2,
+    a = SimpleNamespace(model="m", framework="fw", workload="text", batch=1, input_len=4, output_len=2,
                         inputs=inputs)  # fmt: skip
     assert cli.capture(a, "/fw/python", tmp_path, 5, tmp_path / "repos")[0] == 0
     assert all(c["inputs"] == inputs for c in ctxs)
@@ -1576,9 +1712,129 @@ def test_capture_prompt_carries_the_kv_cache_and_run_refuses_a_bad_one(tmp_path)
     from xe_forge.frontend import cli
 
     text = render("frontend-capture.md.j2", model="m", framework="fw", python="py", batch=1,
+                  workload="text", runtime_keys=cli.WORKLOADS["text"], framework_notes=[], quantization=None,
                   input_len=4, output_len=2, cache="/c", inputs={}, precision="auto",
                   weights="auto", kv_cache="float8_e4m3fn", refused=[], answer="a.json")  # fmt: skip
-    assert "the KV cache stored\nas float8_e4m3fn" in text and '"float8_e4m3fn" verbatim' in text
+    assert "the KV cache\nstored as float8_e4m3fn" in text and '"float8_e4m3fn" verbatim' in text
     with pytest.raises(SystemExit):
         cli.main(["run", "-o", str(tmp_path), "--framework", "x", "--model", "m",
                   "--framework-python", "py", "--kv-cache", "fp7"])  # fmt: skip
+
+
+def _stage_named(rec: dict, name: str) -> dict:
+    return next(s for s in rec["stages"] if s["stage"] == name)
+
+
+def _latent(d: Path, arr) -> Path:
+    import numpy as np
+
+    d.mkdir(parents=True, exist_ok=True)
+    np.save(d / "latent_step1.npy", arr)
+    return d
+
+
+def test_quality_passes_byte_identical_arms(tmp_path):
+    import numpy as np
+
+    from xe_forge.frontend import quality
+
+    x = np.arange(16, dtype=np.float32)
+    rec = quality.quality(
+        tmp_path, {"A": [], "B": []}, {"A": [_latent(tmp_path / "a", x)], "B": [_latent(tmp_path / "b", x)]}
+    )  # fmt: skip
+    assert rec["verdict"] == "identical"
+    assert json.loads((tmp_path / "quality.json").read_text())["verdict"] == "identical"
+
+
+@pytest.mark.parametrize(
+    "scale, verdict",
+    [(1.0, "pass"), (100.0, "fail")],  # B as close to the reference as A, and far worse
+)
+def test_quality_judges_the_gate_against_a_float32_reference(tmp_path, scale, verdict):
+    import numpy as np
+
+    from xe_forge.frontend import quality
+
+    rng = np.random.default_rng(0)
+    ref = rng.standard_normal((4, 16)).astype(np.float32)
+    (tmp_path / "reference").mkdir()
+    np.save(tmp_path / "reference" / "step1.npy", ref)
+    a = _latent(tmp_path / "a", ref + rng.standard_normal(ref.shape) * 1e-3)
+    b = _latent(tmp_path / "b", ref + rng.standard_normal(ref.shape) * 1e-3 * scale)
+    rec = quality.quality(tmp_path, {"A": [], "B": []}, {"A": [a], "B": [b]})
+    assert rec["verdict"] == verdict
+    assert "float32 reference" in _stage_named(rec, "step1")["why"]
+
+
+def test_quality_without_a_reference_uses_the_absolute_convention(tmp_path):
+    """No reference: A against B, judged by the stage's documented limits, and said to be so."""
+    import numpy as np
+
+    from xe_forge.frontend import quality
+
+    base = np.ones((8, 8), dtype=np.float32)
+    a = _latent(tmp_path / "a", base)
+    near = _latent(tmp_path / "b", base * (1 + 1e-5))
+    far = _latent(tmp_path / "c", base * 2)
+    assert quality.quality(tmp_path, {"A": []}, {"A": [a], "B": [near]})["verdict"] == "pass"
+    rec = quality.quality(tmp_path, {"A": []}, {"A": [a], "B": [far]})
+    assert rec["verdict"] == "fail"
+    assert "convention" in _stage_named(rec, "step1")["why"]
+
+
+def test_quality_lets_the_worst_gate_stage_decide(tmp_path):
+    """A byte-identical prompt embedding must not cover a bad step-1 latent."""
+    import numpy as np
+
+    from xe_forge.frontend import quality
+
+    a, b = tmp_path / "a", tmp_path / "b"
+    for d in (a, b):
+        d.mkdir()
+        np.save(d / "prompt_embeds.npy", np.ones((2, 8), dtype=np.float32))
+    np.save(a / "latent_step1.npy", np.ones((4, 4), dtype=np.float32))
+    np.save(b / "latent_step1.npy", np.ones((4, 4), dtype=np.float32) * 3)
+    rec = quality.quality(tmp_path, {"A": []}, {"A": [a], "B": [b]})
+    assert _stage_named(rec, "prompt")["verdict"] == "identical"
+    assert _stage_named(rec, "step1")["verdict"] == "fail"
+    assert rec["verdict"] == "fail"
+
+
+def test_patch_check_judges_vision_against_the_native_path(tmp_path):
+    """No tokens: the reference is generate.sh under XE_FORGE_NATIVE, and the op gain is timed."""
+    from xe_forge.skills import patch
+
+    work = tmp_path / "patch-1"
+    work.mkdir()
+    (work / "generate.sh").write_text(
+        "set -e\n"
+        'python3 -I -c "\n'
+        "import os, numpy as np\n"
+        "out = os.environ['OUT']\n"
+        "native = os.environ.get('XE_FORGE_NATIVE') == '1'\n"
+        "bad = native and os.environ.get('BREAK') == '1'\n"
+        "np.save(out + '/prompt_embeds.npy', np.ones((2, 4), dtype=np.float32))\n"
+        "np.save(out + '/latent_step1.npy', np.full((4, 4), 3.0 if bad else 1.0, np.float32))\n"
+        '"\n'
+    )
+
+    def patched_out(d: Path) -> Path:
+        d.mkdir()
+        assert subprocess.run(["bash", str(work / "generate.sh")], cwd=work,
+                              env={**os.environ, "OUT": str(d)}).returncode == 0  # fmt: skip
+        return d
+
+    rec: dict = {"patched_s": 1.0}
+    assert patch._by_native(work, sys.executable, patched_out(tmp_path / "got"), rec) == []
+    assert rec["quality"]["verdict"] == "identical"
+    assert "op_gain" in rec and json.loads((work / "quality.json").read_text())
+
+    # Now the native path disagrees: the patch must fail its own gate.
+    os.environ["BREAK"] = "1"
+    try:
+        rec2: dict = {"patched_s": 1.0}
+        problems = patch._by_native(work, sys.executable, patched_out(tmp_path / "got2"), rec2)
+    finally:
+        del os.environ["BREAK"]
+    assert problems and "does not match" in problems[0]
+    assert _stage_named(rec2["quality"], "step1")["verdict"] == "fail"

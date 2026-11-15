@@ -156,9 +156,16 @@ def _patch(args) -> int:
     stack_ok = True
     names = "+".join(c.name for c, _ in ported)
     verdict, _, evidence = getattr(args, "stack", "").strip().partition(" ")
+    # Strip the punctuation an agent naturally writes after the verdict. A real
+    # `--stack "PASS: 3264 tests passed unpatched and patched"` was read as the verdict
+    # "PASS:", which is not "PASS", so a port that passed its stack check was rejected and
+    # its patch renamed .rejected -- and "PASS:" went into PORT.txt, where collect read it
+    # as FAIL too. The verdict is one word from an agent, so normalise it rather than
+    # demanding exact spelling.
+    verdict = verdict.strip(":;,.-").upper()
     if verdict:
-        stack_ok &= verdict.upper() == "PASS"
-        lines.append(f"stack check {names}: {verdict.upper()} {evidence}".rstrip())
+        stack_ok &= verdict == "PASS"
+        lines.append(f"stack check {names}: {verdict} {evidence}".rstrip())
     built = all(ok for _, (_, ok) in ported)
     from xe_forge.config import get_config
 

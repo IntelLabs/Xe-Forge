@@ -179,8 +179,12 @@ def main():
     p_profile.add_argument(
         "--sampling-interval-us",
         type=int,
-        default=None,
-        help="Unitrace sampling interval in microseconds (default: installed tool's default)",
+        default=int(os.environ.get("XE_FORGE_SAMPLING_INTERVAL_US", 25)),
+        help="Unitrace sampling interval in microseconds. The tool's own default of 50 is "
+        "longer than most kernels here, so most launches are never sampled and the "
+        "utilization reads near zero with a [partial_samples] warning; below about 25 "
+        "unitrace stops partway and returns no records at all, with exit 0. 25 is what "
+        "`capture run` uses (env XE_FORGE_SAMPLING_INTERVAL_US)",
     )
     p_profile.add_argument(
         "--assembly",
@@ -224,6 +228,29 @@ def main():
     c_run.add_argument("launcher", help="executable that runs one profiled batch into $RAW_DIR")
     c_run.add_argument("-o", "--raw", required=True, help="raw/ directory to write")
     c_run.add_argument("--unitrace", default=os.environ.get("UNITRACE_BIN", "unitrace"))
+    c_run.add_argument("--sampling-interval", type=int,
+                       default=int(os.environ.get("XE_FORGE_SAMPLING_INTERVAL_US", 25)),
+                       help="unitrace metric sampling interval in us. Too coarse and every "
+                       "kernel shorter than a tick goes unsampled (unitrace's own default "
+                       "of 50 keeps a counter bound on 0.1-0.2%% of device time); too fine "
+                       "and unitrace stops partway and returns no records at all with exit "
+                       "0 (10 does this). 25 kept 86-95%% on both a 0.5B and a 9B capture "
+                       "(env XE_FORGE_SAMPLING_INTERVAL_US)")  # fmt: skip
+    c_run.add_argument("--trace-steps", type=int,
+                       default=int(os.environ.get("XE_FORGE_TRACE_STEPS", 2)),
+                       help="how many of whatever the workload repeats -- denoising steps, "
+                       "decode steps -- the unitrace pass runs in place of the full count; 0 "
+                       "runs the same work as the timed pass. The timed pass is never "
+                       "shortened: it keeps the whole workload, its trace and its output, and "
+                       "it is the measurement. The shortened pass only names kernels and "
+                       "reads counters, and two repetitions name every kernel the full run "
+                       "has, because the run is still complete end to end -- a 2-step "
+                       "generation still encodes the prompt and decodes the image. unitrace "
+                       "puts a timing event on every launch and the driver's supply of them "
+                       "is finite, so a long workload can exhaust it mid-run and lose the "
+                       "whole pass. A launcher that does not read "
+                       "the variable keeps running the full workload, and `capture run` says "
+                       "so (env XE_FORGE_TRACE_STEPS)")  # fmt: skip
     c_parse = cap_sub.add_parser("parse", help="raw/ -> capture.json, checked against unitrace")
     c_parse.add_argument("raw", help="raw/ directory capture run wrote")
     c_parse.add_argument("-o", "--output", required=True, help="capture.json to write")
@@ -253,6 +280,12 @@ def main():
     pc.add_argument("--prompt-file", help="the run's prompt text (xe-forge run --prompt-file)")
     pc.add_argument("--precision", default="bfloat16",
                     help="the float dtype scored first: the run's declared compute")  # fmt: skip
+    pc.add_argument("--no-reference", action="store_true",
+                    help="skip only the transformers comparison, keeping every other check: "
+                    "the patch is a real diff that applies to a fresh clone, the patched "
+                    "package imports from the patch, and the model runs to completion under "
+                    "it. For a workload with no tokens to score -- an image or a video -- "
+                    "where whether the output is right is a human judgement")  # fmt: skip
 
     # -- bound --
     p_bound = subparsers.add_parser("bound", help="Each workload's efficiency against its bound")

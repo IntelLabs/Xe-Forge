@@ -78,6 +78,179 @@ def _agent(step: str, template: str, context: dict, cwd: Path, answer: str, pyth
         return None
 
 
+# ── the workload ───────────────────────────────────────────────────────────
+# What one measured run is. A text decoder is a batch of sequences, a prefill and some
+# decode steps; a vision model is some frames at a resolution over some denoising steps --
+# one frame being a still image, so Flux and LTX are the same kind.
+# Neither set of numbers means anything to the other, so each kind names its own and the
+# capture template is told which it is.
+#
+# Adding a kind: add its fields here and say what they mean in frontend-capture.md.j2.
+# Nothing downstream of the capture needs to change -- analyze, inputs, optimize and
+# port-back work on ops, shapes and kernels, and the axis a shape varies along is whatever
+# the naming agent declares (``token_arg``), not something this file decides.
+WORKLOADS = {
+    "text": ("batch", "input_len", "output_len", "quantization"),
+    "vision": ("batch", "steps", "height", "width", "frames", "quantization", "input_images"),
+}
+
+
+def _add_workload_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--workload", default="text", choices=sorted(WORKLOADS),
+                   help="what one measured run is: a text decoder's prefill and decode "
+                   "steps, or a vision model's denoising steps at a resolution")  # fmt: skip
+    p.add_argument("--batch", type=int, default=1)
+    p.add_argument("--quantization", default=None,
+                   help="the framework's name for a reduced precision (fp8, awq, ...), or "
+                   "unset for the model's own. The capture agent never picks this: it "
+                   "changes the model's output quality, which only you can judge, and it "
+                   "changes which kernels run -- so optimizing a quantized run and serving "
+                   "an unquantized one tunes kernels you never execute")  # fmt: skip
+    # text
+    p.add_argument("--input-len", type=int, default=512, help="prompt tokens [text]")
+    p.add_argument("--output-len", type=int, default=32, help="tokens generated [text]")
+    # vision
+    p.add_argument("--steps", type=int, default=28, help="denoising steps [vision]")
+    p.add_argument("--height", type=int, default=1024, help="image height [vision]")
+    p.add_argument("--width", type=int, default=1024, help="image width [vision]")
+    p.add_argument("--input-image", action="append", default=[], metavar="PATH",
+                   help="an image the model takes as input [vision]: the one being edited, "
+                   "or the first frame of a video. Repeatable -- some editing models take "
+                   "several references. Its size decides the shapes the model runs at, so "
+                   "it is part of what a capture is: a capture made with one image is not "
+                   "a capture made with another")  # fmt: skip
+    p.add_argument("--frames", type=int, default=1,
+                   help="frames to generate [vision]; 1 is a still image. A video model "
+                   "may round this up -- LTX wants 8k+1 -- so record what actually ran")  # fmt: skip
+
+
+def workload(a) -> dict:
+    """The fields of ``a.workload``'s kind, and nothing else.
+
+    Passing every field of every kind would be worse than useless: the capture agent would
+    be told a text model generates 28 denoising steps, and the reuse check below would
+    compare an output_len that no vision capture ever recorded.
+    """
+    out = {}
+    for k in WORKLOADS[a.workload]:
+        v = getattr(a, k, None)
+        if k == "input_images":
+            # Resolved and sorted: the same images given in another order, or by a relative
+            # path, are the same work. Empty becomes None so a capture that never recorded
+            # the field still matches -- the trap quantization already taught us.
+            paths = getattr(a, "input_image", []) or []
+            v = sorted(str(Path(x).resolve()) for x in paths) or None
+        out[k] = v
+    return out
+
+
+def _model_id(name: str) -> str:
+    """A model name reduced to what identifies the model, for comparison only.
+
+    A Hugging Face cache path carries the repo id in a ``models--Org--Name`` component and
+    ends in a commit hash, so neither the whole string nor its last component is the name:
+    ``.../hub/models--Qwen--Qwen3.5-9B/snapshots/c202236...`` is ``Qwen/Qwen3.5-9B``. A
+    plain directory (a Flux snapshot) has only its own name, which is the best available.
+    """
+    name = name.rstrip("/")
+    parts = Path(name).parts
+    for part in reversed(parts):
+        if part.startswith("models--"):
+            return part[len("models--") :].replace("--", "/").lower()
+    # Only a filesystem path gets reduced to its last component. "Qwen/Qwen3.5-9B" is a
+    # repo id, not a path, and cutting it to "Qwen3.5-9B" would lose the organisation.
+    if name.startswith(("/", "./", "~")):
+        return (parts[-1] if parts else name).lower()
+    return name.lower()
+
+
+def _image_paths(value) -> list[str] | None:
+    """The image paths in a recorded or requested ``input_images``, resolved and sorted.
+
+    A launcher is right to record more than a path -- a FLUX editing capture recorded
+    ``{"path", "size": [4544, 2805], "mode": "RGB", "note": "the pipeline resizes to
+    <=1024*1024 area"}``, which is exactly the kind of thing a reader wants. Comparing the
+    whole structure refused that capture after it had already succeeded. The path is what
+    identifies the input; the rest is description.
+    """
+    if not value:
+        return None
+    out = []
+    for item in value if isinstance(value, list) else [value]:
+        path = item.get("path") if isinstance(item, dict) else item
+        if path:
+            out.append(str(Path(str(path)).resolve()))
+    return sorted(out) or None
+
+
+def _same_workload(want: dict, have: dict) -> bool:
+    """Whether a capture is of the workload asked for, comparing each field as it means."""
+    for key in want:
+        if key == "input_images":
+            if _image_paths(want[key]) != _image_paths(have.get(key)):
+                return False
+        elif want[key] != have.get(key):
+            return False
+    return True
+
+
+def _same_model(want: str, have: str | None) -> bool:
+    """Whether two model names mean the same model.
+
+    They often differ without disagreeing: pass a local snapshot directory and the capture
+    agent records the canonical id it resolved to. A 9B run was refused for exactly that,
+    after a good capture -- "capture of {'model': 'Qwen/Qwen3.5-9B'}, not
+    {'model': '/data/.../models--Qwen--Qwen3.5-9B/snapshots/c202236...'}". A local Flux
+    directory has the same shape.
+    """
+    if not have:
+        return False
+    # Deliberately strict about the organisation: comparing only the last segment would
+    # make "Qwen/Qwen3.5-9B" and "meta-llama/Qwen3.5-9B" the same model. A wrong refusal
+    # costs one re-capture; a wrong match optimizes against someone else's capture and says
+    # nothing about it.
+    return want == have or _model_id(want) == _model_id(have)
+
+
+def _collect_outputs(run_dir: Path) -> None:
+    """Gather what the model produced into ``outputs/``, for a person to look at.
+
+    A vision patch and a vision kernel are both kept on measurements that say nothing about
+    the picture, so the picture has to be easy to find. The launcher and each prove arm
+    write theirs wherever suits them, which is no use for comparing before against after.
+
+    Only the places a model writes are searched. Walking the run directory instead pulled in
+    135 files, nearly all of them documentation images out of cloned kernel repositories --
+    CUTLASS logos and oneDNN diagrams -- which is worse than collecting nothing.
+    """
+    out = run_dir / "outputs"
+    places = [run_dir, run_dir / "raw"]
+    places += sorted(run_dir.glob("prove/*"))
+    places += sorted(run_dir.glob("prove/*/raw"))
+    places += sorted(run_dir.glob("results/*/output"))
+    seen: set[str] = set()
+    for place in places:
+        if not place.is_dir():
+            continue
+        for src in sorted(place.iterdir()):
+            if src.suffix.lower() not in {".png", ".jpg", ".jpeg", ".mp4", ".wav"}:
+                continue
+            if not src.is_file() or src.stat().st_size < 1024:
+                continue
+            prefix = "" if place == run_dir else f"{place.parent.name}-{place.name}-"
+            name = (prefix + src.name).replace(f"{run_dir.name}-", "")
+            if name in seen:
+                continue
+            out.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, out / name)
+            seen.add(name)
+    if seen:
+        print(
+            f"run: {len(seen)} generated output(s) in {out} -- look at these before using "
+            "any patch from this run"
+        )
+
+
 def capture(
     a, python: str, run_dir: Path, turns: int, repos: Path, refused: list | None = None
 ) -> tuple[int, str]:
@@ -90,12 +263,15 @@ def capture(
     """
     from xe_forge.frontend import CACHE
 
-    inputs = getattr(a, "inputs", None) or {}
-    context = {"model": a.model, "framework": a.framework, "batch": a.batch,
-               "input_len": a.input_len, "output_len": a.output_len, "cache": CACHE,
-               "inputs": inputs, "precision": getattr(a, "precision", "auto"),
-               "weights": getattr(a, "weights", "auto"), "kv_cache": getattr(a, "kv_cache", "auto"),
-               "refused": refused or []}  # fmt: skip
+    # runtime_keys: the launcher must record exactly the fields the reuse check reads back,
+    # or a good capture is refused for a field it never wrote.
+    context = {"model": a.model, "framework": a.framework, "cache": CACHE,
+               "workload": a.workload, "runtime_keys": WORKLOADS[a.workload],
+               "framework_notes": getattr(a, "framework_note", []) or [],
+               **workload(a), "inputs": getattr(a, "inputs", None) or {},
+               "precision": getattr(a, "precision", "auto"),
+               "weights": getattr(a, "weights", "auto"),
+               "kv_cache": getattr(a, "kv_cache", "auto"), "refused": refused or []}  # fmt: skip
     for round_ in range(1, 4):
         got = _agent("capture", "frontend-capture.md.j2", context, run_dir, "captured.json",
                      python, turns)  # fmt: skip
@@ -123,11 +299,15 @@ def capture(
             return 1, python
         check = ["patch", "check", str(work), "--repos", str(repos), "--framework-python",
                  python, "--model", a.model, "--batch", str(a.batch), "--input-len",
-                 str(a.input_len)]  # fmt: skip
+                 str(getattr(a, "input_len", 0))]  # fmt: skip
+        # An image or a video has no token to teacher-force, but it still has a reference:
+        # `patch check` runs generate.sh a second time with XE_FORGE_NATIVE=1 -- the
+        # framework's own plain-torch path for the same op -- and compares the two, stage by
+        # stage, as well as timing both for the op gain. Pass --no-reference to skip it.
         if getattr(a, "reference_python", None):  # the framework's own has no GPU transformers
             check += ["--reference-python", a.reference_python]
-        if "prompts" in inputs:
-            check += ["--prompt-file", inputs["prompts"]["file"]]
+        if "prompts" in context["inputs"]:
+            check += ["--prompt-file", context["inputs"]["prompts"]["file"]]
         if str(context["precision"]).startswith(("float", "bfloat")):  # declared, not auto
             check += ["--precision", context["precision"]]
         if _tool(python, *check) != 0:  # the gate is the tool's, not the agent's word
@@ -651,12 +831,21 @@ def main(argv: list[str]) -> int:
     p.add_argument("--model", required=True, help="HF id or local path")
     p.add_argument("--framework-python", required=True, help="the framework's interpreter")
     p.add_argument(
+        "--framework-note", action="append", default=[], metavar="TEXT",
+        help="a constraint the capture agent cannot discover: a setting this framework "
+        "needs on this machine, and why. Repeatable. The code never reads it -- it is "
+        "handed to the agent verbatim. Example: LTX on XPU needs "
+        "--stage-overrides '{\"0\":{\"extras\":{\"ltx2_use_conv_vae\":true}}}' because the "
+        "default VAE decoder loads a NATTEN kernel that has no XPU build, and the failure "
+        "lands after the whole denoise is paid for",
+    )  # fmt: skip
+    p.add_argument(
         "--reference-python",
         help="GPU torch + transformers, for a patch's reference tokens (default: the framework's)",
     )
-    p.add_argument("--batch", type=int, help="default 1")
-    p.add_argument("--input-len", type=int, help="default 512")
-    p.add_argument("--output-len", type=int, help="tokens generated (default 32)")
+    _add_workload_args(p)
+    # unset, so --rows can refuse them; the defaults are set once parsed
+    p.set_defaults(batch=None, input_len=None, output_len=None)
     p.add_argument("--rows", type=Path, help="rows.yaml: several (batch, input_len, output_len, "
                    "weight) served by one run, in place of --batch/--input-len/--output-len "
                    "(frontend/rows.py)")  # fmt: skip
@@ -710,6 +899,8 @@ def main(argv: list[str]) -> int:
         from xe_forge.frontend import rows
 
         given = {k: getattr(a, k) for k in rows.KEYS}
+        if a.rows and a.workload != "text":
+            raise ValueError("--rows is for --workload text: its rows are token counts")
         if a.rows and any(v is not None for v in given.values()):
             raise ValueError("--rows replaces --batch, --input-len and --output-len")
         # the anchor row (the largest) is the one the capture agent captures
@@ -724,6 +915,12 @@ def main(argv: list[str]) -> int:
     turns = a.agent_max_turns or a.max_turns
     run_dir = a.output.resolve()
     repos = Path(a.kernel_repos).resolve() if a.kernel_repos else REPO_DIR.parent
+    # Before an agent is started and a model is loaded: a missing input image would
+    # otherwise surface as a launcher failure minutes in, blamed on the framework.
+    missing = [x for x in (getattr(a, "input_image", []) or []) if not Path(x).is_file()]
+    if missing:
+        print(f"run: no such input image: {', '.join(missing)}", file=sys.stderr)
+        return 1
     stack = run_dir / "stack.json"  # a patched framework, when one was needed
     python = json.loads(stack.read_text())["python"] if stack.is_file() else a.framework_python
     # The run's inputs (runtime.inputs): a copy in the run dir, so every agent and gate reads
@@ -748,22 +945,20 @@ def main(argv: list[str]) -> int:
 
     cap = ir.load(capture_path)  # once; the parse with names below rewrites it for analyze
     rt = cap.run.get("runtime") or {}
-    want = {"framework": a.framework, "model": a.model, "batch": a.batch,
-            "input_len": a.input_len, "output_len": a.output_len,
-            "prompts": a.inputs.get("prompts")}  # fmt: skip
+    want = {"framework": a.framework, **workload(a), "prompts": a.inputs.get("prompts")}
     # The run's one input is its prompt file; other files the launcher records (a tokenizer)
     # are its own, checked by the parse, not part of which run this is.
-    have = {"framework": cap.run.get("framework"), "model": (cap.run.get("model") or {}).get("name"),
-            **{k: rt.get(k) for k in ("batch", "input_len", "output_len")},
+    have = {"framework": cap.run.get("framework"), **{k: rt.get(k) for k in workload(a)},
             "prompts": (rt.get("inputs") or {}).get("prompts")}  # fmt: skip
     for k in ("precision", "weights", "kv_cache"):  # declared ones the launcher writes verbatim
         if getattr(a, k) != "auto":
             want[k], have[k] = getattr(a, k), str(rt.get(k))
     if "weights" in want and have["weights"].rpartition(":")[0] == want["weights"]:
         have["weights"] = want["weights"]  # a declared scheme, the stored dtype added to it
-    if have != want:
-        print(f"run: {capture_path} is a capture of {have}, not {want}; remove it to capture "
-              "again", file=sys.stderr)  # fmt: skip
+    model_was = (cap.run.get("model") or {}).get("name")
+    if not _same_workload(want, have) or not _same_model(a.model, model_was):
+        print(f"run: {capture_path} is a capture of {have} of {model_was!r}, not {want} of "
+              f"{a.model!r}; remove it to capture again", file=sys.stderr)  # fmt: skip
         return 1
     code, python = name_and_read(a, cap, run_dir, python, turns, repos)
     if code != 0:
@@ -788,8 +983,24 @@ def main(argv: list[str]) -> int:
         capture_path = merged
         if a.prove:
             print("run: --prove measures the anchor row only", file=sys.stderr)
+    _collect_outputs(run_dir)
     path = analyze(capture_path, run_dir, a)
     path = analyze(capture_path, run_dir, a, inputs(path, run_dir, a, python, turns, repos))
+    if a.workload != "text" and not a.analyze_only:
+        # Optimizing is allowed here, and nothing is merged by it. A trial is kept only if
+        # it is faster AND torch.allclose against the baseline kernel at the spec's
+        # tolerance -- a comparison of two tensors, which knows nothing about images. What
+        # a vision workload has no answer for is the step after: proving the whole model
+        # still produces an acceptable image. A kernel can pass its tolerance and still
+        # shift the picture, because the difference compounds over the denoising steps.
+        # So a patch is written and left for a person to judge; `mergeable` stays no
+        # without a stack check, which is what collect already does.
+        print(f"run: {a.workload} workload -- a missing-op patch is checked against the "
+              "framework's own torch path (patch-*/quality.json, with the op gain), but an "
+              "optimized kernel is not: it is kept on a per-kernel tolerance, and --prove "
+              "compares time only. A kernel can pass its tolerance and still shift the "
+              "picture over the denoising steps, so look at the images before using any "
+              "patch from this run.")  # fmt: skip
     if a.analyze_only:
         return 0
     a.stack_python = python if a.stack_check else None
