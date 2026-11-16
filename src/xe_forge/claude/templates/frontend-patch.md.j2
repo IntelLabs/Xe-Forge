@@ -6,6 +6,13 @@ interpreter is {{ python }}.
    installed, at its latest default branch) into {{ repos }}/<its name>, unless a clone is
    there; record its HEAD as the base. Work on a branch `xe-forge/<what>` and commit the patch
    there, so HEAD is the base plus the patch.
+ - Deliver it as the framework's maintainers would accept it: read its contribution guide,
+   recent `git log` and lint, format and pre-commit configuration, and follow them -- commit
+   split, subject and body, formatting, tests, and the docs or supported-models entry a change
+   of this kind needs there. Run the linters and formatters it configures on the files you
+   touched, and leave nothing uncommitted. Nothing in the commits names Xe-Forge or this
+   workspace. Add no `Signed-off-by` or other trailer in anyone's name; if the repository
+   requires one, say so in PR.md as its owner's step.
  - Add it the way the framework adds one: read its docs for new models or ops and copy the
    structure of the closest one it already has. A plain, correct implementation first --
    torch, or the framework's own portable kernels; making it fast is Xe-Forge's job later.
@@ -40,6 +47,9 @@ interpreter is {{ python }}.
    seed, same precision. That is the reference the check compares you against, and the two
    wall times are the op gain your patch is worth.
 {% endif %}
+ - Write PR.md here: the pull-request description, in the repository's own template if it has
+   one -- what changes, why, how it was tested, what is left to its owner. Write no timing or
+   accuracy number yourself: the check appends the measured ones, and fails without the file.
  - Write patch.json here: {"python": "<the layered venv's python>", "repo": "<the clone's
    directory name under {{ repos }}>", "base": "<base commit>", "package": "<the module the
    patch changes, importable>"}, plus "reference_python": "<an interpreter with the GPU torch
@@ -50,7 +60,8 @@ interpreter is {{ python }}.
        --model {{ model }} --batch {{ batch }}{% if workload == "text" %} --input-len {{ input_len }}{% if 'prompts' in inputs %} \
        --prompt-file {{ inputs.prompts.file }}{% endif %}{% if precision is defined and precision.startswith(("float", "bfloat")) %} \
        --precision {{ precision }}{% endif %}{% endif %}
-   It diffs base..HEAD itself, applies that to a fresh clone, checks the import, runs
+   It diffs base..HEAD itself (and writes the commits as an `.mbox`), applies that to a
+   fresh clone, checks the import, runs
    generate.sh, then compares its output against a reference.
 {% if workload == "text" %}   The reference is transformers, scoring your tokens on the GPU: fed each sequence's prompt
    and generated prefix, every generated token must be within 0.3 nat of transformers' best. It scores in {{ precision if precision is defined and precision.startswith(("float", "bfloat")) else "bf16" }}; a sequence that fails there is judged again in

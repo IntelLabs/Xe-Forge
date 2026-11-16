@@ -78,12 +78,16 @@ def collect_one(
     if output.is_dir():
         shutil.copytree(output, dest / "output")
         row["patches"] = sorted(str(p.relative_to(dest)) for p in dest.rglob("*.patch"))
+        row["pr"] = (
+            str(dest / "output" / "PR.md") if (dest / "output" / "PR.md").is_file() else None
+        )
         row.update(_port_status(dest / "output" / "PORT.txt"))
         row["mergeable"] = row["mergeable"] and row["outcome"] == "win"  # parity is no change
         if row["stack"] == "FAIL":
-            for p in dest.rglob("*.patch"):
-                p.rename(p.with_suffix(".patch.rejected"))
-            row["patches"] = []
+            # The series and its PR text go too: nothing submit-ready is left of a rejected port.
+            for p in [*dest.rglob("*.patch"), *dest.rglob("*.mbox"), *dest.rglob("PR.md")]:
+                p.rename(p.with_name(p.name + ".rejected"))
+            row["patches"], row["pr"] = [], None
             row["outcome"] += " (stack check FAIL; patch rejected)"
     else:
         row["outcome"] += " (measured trial, not finalized; no patch)"

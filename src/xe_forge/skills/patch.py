@@ -173,7 +173,10 @@ def check(args) -> tuple[list[str], dict]:
     patch.write_text(diff)  # git's diff, not the agent's
     record.update(head=head, patch=str(patch), url=_git(repo, "remote", "get-url", "origin").stdout.strip(),
                   files=_git(repo, "diff", "--name-only", f"{base}..{head}").stdout.split())  # fmt: skip
-    problems = []
+    from xe_forge.skills.upstream import commit_problems, write_mbox
+
+    problems = commit_problems(repo, base)
+    write_mbox(repo, base, patch.with_suffix(".mbox"))
     with tempfile.TemporaryDirectory() as tmp:
         fresh = Path(tmp) / "fresh"
         subprocess.run(["git", "clone", "-q", "--shared", "--no-checkout", str(repo), str(fresh)],
@@ -282,9 +285,24 @@ def check(args) -> tuple[list[str], dict]:
 
 
 def run(args) -> int:
+    from xe_forge.skills.upstream import measured_pr
+
     problems, record = check(args)
-    record["pass"] = not problems
     work = Path(args.dir).resolve()
+    quality = record.get("quality") or {}
+    facts = {
+        "repository": record.get("url"), "base": record.get("base"), "head": record.get("head"),
+        "files": ", ".join(record.get("files") or []), "reference": record.get("reference"),
+        "tolerance (nat)": record.get("tolerance"), "tokens checked per sequence": record.get("required"),
+        "worst gap per sequence (nat)": record.get("worst"), "judged in": record.get("judge"),
+        "transformers": record.get("transformers"), "quality": quality.get("verdict"),
+        "patched run (s)": record.get("patched_s"), "native run (s)": record.get("native_s"),
+        "op gain (native / patched)": record.get("op_gain"),
+        "check": "FAIL" if problems else "PASS",
+    }  # fmt: skip
+    if record.get("head") and not measured_pr(work / "PR.md", facts):
+        problems.append("no PR.md: write the pull-request description beside patch.json")
+    record["pass"] = not problems
     (work / "check.json").write_text(json.dumps(record, indent=1) + "\n")
     for p in problems:
         print(f"patch check: FAIL {p}")

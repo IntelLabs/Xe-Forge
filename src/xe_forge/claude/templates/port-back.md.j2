@@ -30,9 +30,16 @@ If `output/` holds no winner, stop: there is nothing to port.
 2. **Change what the winner changed, nowhere else.** Map each hunk of the baseline-to-winner
    diff onto the original file and region the profile names. Add a file only when the kernel
    cannot be expressed without one. Add no fallback, flag or environment switch.
-3. **Keep the repository's conventions**: its formatting, its launch-configuration style,
-   its build files. If the winner needs a compile flag the build does not pass, change the
-   build target the profile names, and only that.
+3. **Deliver it as its maintainers would accept it.** Read the repository's contribution
+   guide, its recent `git log` and its lint, format and pre-commit configuration, and follow
+   them: formatting, launch-configuration style, build files, commit split, subject and body,
+   tests, and the docs or changelog entry a change of this kind needs there. Run the linters
+   and formatters it configures on the files you touched. If the winner needs a compile flag
+   the build does not pass, change the build target the profile names, and only that.
+   Commit in the clone and leave nothing uncommitted: the patch is the commits over the base.
+   Nothing in the commits names Xe-Forge, trials, this workspace or its paths. Add no
+   `Signed-off-by` or other trailer in anyone's name; if the repository requires one, say so
+   in PR.md as its owner's step.
 4. **Every win ports. Try, in this order, and stop at the first that applies:**
    1. **upstream** -- the winner keeps the op's schema, signature, bindings and every call
       site, and needs no dispatch by shape. A different algorithm, or fused or eliminated
@@ -92,9 +99,14 @@ If `output/` holds no winner, stop: there is nothing to port.
 
 ## Output
 
+- `output/PR.md`, written before `upstream patch` -- the pull-request description, in the
+  repository's own template if it has one: what changes, why, how it was tested, what is
+  left to its owner. Write no timing or speedup yourself: `upstream patch` appends the
+  measured ones, and refuses without the file.
 - `output/upstream.patch` (and `output/upstream-<name>.patch` for each further clone) --
-  `git -C <clone> diff`, paths relative to that repository's root, applicable with
-  `git apply` / `patch -p1` at its recorded commit. `upstream patch` writes them.
+  the diff of the clone's commits over its base, paths relative to that repository's root,
+  applicable with `git apply` / `patch -p1` at its recorded commit -- and beside each its
+  `.mbox`, the commits as `git format-patch` writes them. `upstream patch` writes them.
 - `output/PORT.txt` -- `kind: upstream|serving-only`, then per repository: base commit, touched
   files; the best trial and its measured speedup; and what was verified:
   - a Python or Triton file: `python -m py_compile` of every touched file, and, when an

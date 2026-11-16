@@ -10,11 +10,13 @@ engine does it the same way and none needs a shell:
         for a further repository such as the stack the kernel is wired into) at REV
         (default: the repository's HEAD). The repository itself is never written.
     upstream patch <kernel_name> [--kind upstream|serving-only] [--notes TEXT]
-        ``output/<clone>.patch`` from the edits in every clone, with its base commit,
+        ``output/<clone>.patch`` (the diff) and ``output/<clone>.mbox`` (the commits, as
+        ``git format-patch``) of what each clone committed over its base commit,
         every touched Python file compiled, and ``output/PORT.txt`` saying which kind of port it is and
-        what was and was not verified. C++/SYCL changes are reported unbuilt: rebuilding a
-        provider is its owner's action. ``serving-only`` wires a winner into a stack
-        without being fit for upstream (a dispatch by shape, a changed call site).
+        what was and was not verified, and the measured numbers appended to the session's
+        ``output/PR.md``. C++/SYCL changes are reported unbuilt: rebuilding a provider is its
+        owner's action. ``serving-only`` wires a winner into a stack without being fit for
+        upstream (a dispatch by shape, a changed call site).
 """
 
 from __future__ import annotations
@@ -26,6 +28,44 @@ from pathlib import Path
 
 UPSTREAM = Path("upstream")
 OUTPUT = Path("output")
+BASE_REF = "refs/xe-forge/base"  # the commit a clone was made at; the agent commits on top
+MEASURED = "<!-- Measured by xe-forge; everything below this line is generated. -->"
+
+
+def commit_problems(repo: Path, base: str) -> list[str]:
+    """What keeps the commits base..HEAD in ``repo`` from being the whole, owner's change."""
+    out = []
+    git = ["git", "-C", str(repo)]
+    dirty = subprocess.run([*git, "status", "--porcelain", "--untracked-files=no"],
+                           capture_output=True, text=True).stdout.strip()  # fmt: skip
+    if dirty:
+        out.append(f"{repo.name} has uncommitted changes, which no patch carries: commit them")
+    log = subprocess.run([*git, "log", "--format=%B", f"{base}..HEAD"],
+                         capture_output=True, text=True).stdout  # fmt: skip
+    if "Signed-off-by:" in log:
+        out.append(f"a commit in {repo.name} carries a Signed-off-by: that is its owner's to add")
+    return out
+
+
+def write_mbox(repo: Path, base: str, path: Path) -> None:
+    """The commits as ``git format-patch`` writes them: messages and authorship kept."""
+    path.write_text(subprocess.run(["git", "-C", str(repo), "format-patch", "--stdout",
+                                    f"{base}..HEAD"], capture_output=True, text=True).stdout)  # fmt: skip
+
+
+def measured_pr(path: Path, facts: dict) -> bool:
+    """Append ``facts`` to the session's PR description at ``path``; False when it wrote none.
+
+    The prose is the session's; every number in it comes from here, so none is typed by hand.
+    Re-running replaces the block rather than adding another.
+    """
+    text = path.read_text().split(MEASURED)[0].strip() if path.is_file() else ""
+    if not text:
+        return False
+    rows = [f"| {k} | {v} |" for k, v in facts.items() if v not in (None, "", [])]
+    path.write_text(f"{text}\n\n{MEASURED}\n\n## Measurements\n\n| | |\n|---|---|\n"
+                    + "\n".join(rows) + "\n")  # fmt: skip
+    return True
 
 
 def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -44,7 +84,7 @@ def _clone(args) -> None:
     if (target / ".git").exists():
         # Reused, never re-cloned: it holds the session's edits. A clone of another
         # repository or revision is refused rather than edited in its place.
-        base = _git("-C", str(target), "rev-parse", "HEAD").stdout.strip()
+        base = _base(target)
         origin = _git("-C", str(target), "remote", "get-url", "origin", check=False)
         if Path(origin.stdout.strip()).resolve() != repo:
             raise SystemExit(
@@ -63,10 +103,17 @@ def _clone(args) -> None:
     rev = args.rev or _git("-C", str(repo), "rev-parse", "HEAD").stdout.strip()
     _git("clone", "--quiet", "--shared", "--no-checkout", str(repo), str(target))
     _git("-C", str(target), "checkout", "--quiet", "--detach", rev)
+    _git("-C", str(target), "update-ref", BASE_REF, "HEAD")
     print(f"Cloned {repo} at {rev} into {target}/. Edit files there, then run `upstream patch`.")
 
 
-def _best_trial(kernel_name: str, trials_dir: str) -> str | None:
+def _base(clone: Path) -> str:
+    """The commit ``clone`` was made at (its HEAD, for a clone made before the ref existed)."""
+    ref = _git("-C", str(clone), "rev-parse", "--verify", "-q", BASE_REF, check=False)
+    return ref.stdout.strip() or _git("-C", str(clone), "rev-parse", "HEAD").stdout.strip()
+
+
+def _best_trial(kernel_name: str, trials_dir: str) -> dict | None:
     """The measured winner a port carries, or ``None`` when there is none to carry."""
     from xe_forge.core.trial_manager import TrialManager
 
@@ -75,25 +122,28 @@ def _best_trial(kernel_name: str, trials_dir: str) -> str | None:
     # The same test `finalize` applies: a measured regression is not a winner.
     if best is None or not mgr.keepable(best):
         return None
-    return f"{best['id']}: speedup {best.get('speedup') or best.get('verdict') or 'parity'}"
+    variant = (mgr._load_state(kernel_name).get("measured_against") or {}).get("variant")
+    return {**best, "measured_variant": variant}
 
 
 def _port_one(clone: Path) -> tuple[list[str], bool] | None:
-    """Write ``output/<clone>.patch`` and compile what it touches; ``None`` when unchanged."""
-    # New files are part of the change; intent-to-add puts them in the diff.
-    _git("-C", str(clone), "add", "--intent-to-add", "--all")
-    diff = _git("-C", str(clone), "diff", "--binary").stdout
+    """Write ``output/<clone>.patch`` and ``.mbox`` and compile what it touches; ``None`` when
+    the clone has no commits over its base."""
+    base = _base(clone)
+    diff = _git("-C", str(clone), "diff", "--binary", f"{base}..HEAD").stdout
     if not diff.strip():
         return None
-    base = _git("-C", str(clone), "rev-parse", "HEAD").stdout.strip()
     origin = _git("-C", str(clone), "remote", "get-url", "origin", check=False).stdout.strip()
     touched = [
         name
-        for name in _git("-C", str(clone), "diff", "--name-only", "-z").stdout.split("\0")
+        for name in _git(
+            "-C", str(clone), "diff", "--name-only", "-z", f"{base}..HEAD"
+        ).stdout.split("\0")
         if name
     ]
     patch = (OUTPUT / f"{clone.name}.patch").resolve()
     patch.write_text(diff)
+    write_mbox(clone, base, patch.with_suffix(".mbox"))
 
     ok = True
     checks = []
@@ -130,6 +180,10 @@ def _patch(args) -> int:
         print("No upstream/ clone; run `upstream clone <repo>` first.")
         return 1
     best = _best_trial(args.kernel_name, args.trials_dir)
+    problems = [p for c in clones for p in commit_problems(c, _base(c))]
+    if problems:
+        print("\n".join(problems))
+        return 1
     if best is None:
         print(
             f"No measured winner for {args.kernel_name} (none, or a regression); nothing to port."
@@ -139,7 +193,7 @@ def _patch(args) -> int:
     ported = [(c, _port_one(c)) for c in clones]
     ported = [(c, r) for c, r in ported if r is not None]
     if not ported:
-        print("No clone has changes; nothing to port.")
+        print("No clone has commits over its base; commit the port, then run this again.")
         return 1
 
     lines = [
@@ -149,7 +203,8 @@ def _patch(args) -> int:
             if args.kind == "serving-only"
             else ""
         ),
-        f"best trial: {best}",
+        f"best trial: {best['id']}: speedup "
+        f"{best.get('speedup') or best.get('verdict') or 'parity'}",
     ]
     for _, (block, _) in ported:
         lines += block
@@ -175,8 +230,20 @@ def _patch(args) -> int:
         return 1
     if args.notes:
         lines += ["notes:", args.notes]
+    facts = {
+        "kernel": args.kernel_name, "port": args.kind, "trial": best["id"],
+        "strategy": best.get("strategy"), "measured at": best.get("measured_variant"),
+        "baseline (us)": best.get("baseline_us"), "patched (us)": best.get("triton_us"),
+        "speedup": best.get("speedup"), "correctness": best.get("correctness"),
+        **{f"base commit ({c.name})": _base(c) for c, _ in ported},
+        "stack check": f"{verdict} {evidence}".strip() if verdict else None,
+    }  # fmt: skip
+    if not measured_pr(OUTPUT / "PR.md", facts):
+        print("No output/PR.md: write the pull-request description, then run this again.")
+        return 1
     (OUTPUT / "PORT.txt").write_text("\n".join(lines) + "\n")
-    print(f"Wrote {', '.join(f'output/{c.name}.patch' for c, _ in ported)} and output/PORT.txt")
+    print(f"Wrote {', '.join(f'output/{c.name}.patch' for c, _ in ported)}, the .mbox of each, "
+          "output/PORT.txt and the measurements in output/PR.md")  # fmt: skip
     print("\n".join(lines))
     return 0 if stack_ok and all(ok for _, (_, ok) in ported) else 1
 

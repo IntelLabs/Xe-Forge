@@ -499,7 +499,8 @@ result to report, not a thing to work around.
 If finalize wrote `output/` and the best trial is a measured win -- a speedup above 1, not a
 gate's parity -- dispatch the **port-back** agent once; a kernel at parity changes nothing
 worth porting, so say so in the summary instead. Port-back turns the winner into
-`output/upstream.patch` against `{{ kernel_repo }}` without touching the repository. Name
+`output/upstream.patch`, its commits and `output/PR.md` against `{{ kernel_repo }}`, without
+touching the repository. Name
 the patch, or the reason there is none, in the summary.
 {%- if stack_check %} A stack check is on: port-back builds the port into its stack and runs
 its tests and the model there, on the GPU -- do not tell it not to; `PORT.txt` must carry

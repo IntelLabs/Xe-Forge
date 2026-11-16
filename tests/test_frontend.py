@@ -946,6 +946,7 @@ def _patch_dir(tmp_path, tokens, base_from="parent", gaps=((0, 0, 0, 0), (0, 0.2
         "python": sys.executable, "repo": "fw", "package": "json",
         "base": base if base_from == "parent" else "0" * 40}))  # fmt: skip
     (work / "generate.sh").write_text(f"echo '{json.dumps(tokens)}' > \"$OUT/tokens.json\"\n")
+    (work / "PR.md").write_text("Add the Toy architecture.\n")
     fw = _exe(tmp_path / "fw-python", "#!/bin/bash\necho /no/such/prefix\n")
     return work, repos, fw, _ref_stub(tmp_path / "ref-python", gaps)
 
@@ -963,6 +964,30 @@ def test_patch_check_passes_a_patch_that_generates_the_reference(tmp_path):
     rec = json.loads((work / "check.json").read_text())
     assert rec["pass"] and rec["worst"] == [0, 0.2] and rec["files"] == ["model.py"]
     assert "ARCHS = ['Toy']" in (work / "fw.patch").read_text()  # git's diff, written by the tool
+    assert "Subject: [PATCH] add Toy" in (work / "fw.mbox").read_text()  # the commit, as sent
+    pr = (work / "PR.md").read_text()
+    assert (
+        pr.startswith("Add the Toy architecture.")
+        and "| worst gap per sequence (nat) | [0, 0.2] |" in pr
+    )
+    _check(work, repos, fw, ref)
+    assert (work / "PR.md").read_text() == pr  # a re-check replaces its numbers, never adds more
+
+
+@pytest.mark.parametrize("spoil, problem", [
+    (lambda work, repo: (work / "PR.md").unlink(), "no PR.md"),
+    (lambda work, repo: (repo / "model.py").write_text("ARCHS = ['Toy', 'Uncommitted']\n"),
+     "uncommitted changes"),
+    (lambda work, repo: subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+         "--amend", "-m", "add Toy\n\nSigned-off-by: someone <s@s>"], check=True),
+     "Signed-off-by"),
+])  # fmt: skip
+def test_patch_check_fails_a_patch_not_ready_for_its_maintainers(tmp_path, spoil, problem):
+    work, repos, fw, ref = _patch_dir(tmp_path, [[1, 2, 3, 4], [5, 6, 7, 8]])
+    spoil(work, repos / "fw")
+    code, out = _check(work, repos, fw, ref)
+    assert code == 1 and problem in out, out
 
 
 def test_patch_check_uses_the_agents_reference_interpreter(tmp_path):
@@ -1429,6 +1454,30 @@ def test_collect_offers_only_a_win_for_merge(tmp_path, speedup, mergeable):
     row = collect.collect_one(ws, "k", "v", tmp_path / "results")
     assert row["outcome"] == ("win" if speedup else "parity")
     assert row["mergeable"] is mergeable
+
+
+def test_a_port_failing_its_stack_check_leaves_nothing_submit_ready(tmp_path):
+    from xe_forge.core.trial_manager import TrialManager
+    from xe_forge.frontend import collect
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "base.py").write_text("x = 1\n")
+    (ws / "t0.py").write_text("x = 2\n")
+    mgr = TrialManager(ws / "trials")
+    mgr.init("k", ws / "base.py")
+    tid = mgr.save_trial("k", ws / "t0.py", strategy="try")
+    mgr.record_result("k", tid, correctness="pass", speedup=1.5, baseline_us=15.0,
+                      triton_us=10.0, source="measured")  # fmt: skip
+    (ws / "output").mkdir()
+    (ws / "output" / "PORT.txt").write_text("kind: upstream\nstack check python: FAIL tests\n")
+    for name in ("upstream.patch", "upstream.mbox", "PR.md"):
+        (ws / "output" / name).write_text("x\n")
+    row = collect.collect_one(ws, "k", "v", tmp_path / "results")
+    out = Path(row["result"]) / "output"
+    assert row["patches"] == [] and row["pr"] is None
+    assert sorted(p.name for p in out.glob("*.rejected")) == [
+        "PR.md.rejected", "upstream.mbox.rejected", "upstream.patch.rejected"]  # fmt: skip
 
 
 @pytest.mark.parametrize("code_b, says", [(3, "does not parse"), (1, "does not run")])
@@ -1965,3 +2014,51 @@ def test_every_claude_session_lifts_the_background_ceiling(monkeypatch):
     assert claude_env(config)["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] == str(TIMEOUT * 1000)
     monkeypatch.setenv("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", "5")
     assert claude_env(config)["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] == "5"  # the caller's wins
+
+
+def test_a_port_back_is_its_commits_with_a_pr_carrying_the_measured_numbers(tmp_path, monkeypatch):
+    from xe_forge.core.trial_manager import TrialManager
+    from xe_forge.skills import upstream
+
+    repo = tmp_path / "kernels"
+    _git_repo(repo)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.chdir(ws)
+    mgr = TrialManager(ws / "trials")
+    (ws / "base.cpp").write_text("// baseline\n")
+    mgr.init("k", ws / "base.cpp")
+    (ws / "t.cpp").write_text("// faster\n")
+    tid = mgr.save_trial("k", ws / "t.cpp", strategy="tile 64")
+    mgr.record_result(
+        "k",
+        tid,
+        correctness="pass",
+        baseline_us=20.0,
+        triton_us=10.0,
+        speedup=2.0,
+        source="measured",
+    )
+    args = SimpleNamespace(
+        kernel_name="k", kind="upstream", notes="", stack="", trials_dir="trials"
+    )
+    upstream._clone(SimpleNamespace(repo=str(repo), name=None, rev=None))
+    clone = ws / "upstream"
+
+    def git(*a):
+        subprocess.run(["git", "-C", str(clone), "-c", "user.name=t", "-c", "user.email=t@t", *a],
+                       check=True, capture_output=True)  # fmt: skip
+
+    (clone / "a.txt").write_text("b\n")
+    assert upstream._patch(args) == 1  # uncommitted: no patch would carry it
+    git("commit", "-qam", "Tile the loop by 64")
+    assert upstream._patch(args) == 1  # no PR.md yet
+    (ws / "output").mkdir(exist_ok=True)
+    (ws / "output" / "PR.md").write_text("Tile the loop.\n")
+    assert upstream._patch(args) == 0
+    assert "+b" in (ws / "output" / "upstream.patch").read_text()
+    assert "Subject: [PATCH] Tile the loop by 64" in (ws / "output" / "upstream.mbox").read_text()
+    pr = (ws / "output" / "PR.md").read_text()
+    assert "| baseline (us) | 20.0 |" in pr and "| speedup | 2.0 |" in pr
+    upstream._clone(SimpleNamespace(repo=str(repo), name=None, rev=None))  # reused after a commit
+    assert upstream._patch(args) == 0 and (ws / "output" / "PR.md").read_text() == pr
