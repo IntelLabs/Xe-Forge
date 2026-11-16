@@ -21,7 +21,8 @@ interpreter is {{ python }}.
    $OUT/tokens.json as [[ids of sequence 0], ...]. The check sets those four variables (a
    natural-text prompt, the tokens it scores); read them from the environment, no defaults.
 {% else %} - Write generate.sh here: under $FRAMEWORK_PYTHON, run {{ model }} with the framework, on
-   the GPU, eagerly, with a fixed prompt and `seed=42`, one output, and write into $OUT:
+   the GPU, eagerly, with the prompt {{ prompt | tojson }}{% if negative_prompt %} (negative
+   prompt {{ negative_prompt | tojson }}){% endif %} and `seed=42`, one output, and write into $OUT:
      - `prompt_embeds.npy` -- what the text encoder produced. One small tensor, and an op the
        transformer shares with the encoder changes it too, so it cannot be assumed unchanged;
      - `latent_step1.npy` -- the latent after the **first** denoise step, and
@@ -46,9 +47,9 @@ interpreter is {{ python }}.
    torch with the latest transformers), and "trust_remote_code": true when the model needs
    its own code. Then run
      xe-forge-skill patch check . --repos {{ repos }} --framework-python {{ python }} \
-       --model {{ model }} --batch {{ batch }} --input-len {{ input_len }}{% if 'prompts' in inputs %} \
+       --model {{ model }} --batch {{ batch }}{% if workload == "text" %} --input-len {{ input_len }}{% if 'prompts' in inputs %} \
        --prompt-file {{ inputs.prompts.file }}{% endif %}{% if precision is defined and precision.startswith(("float", "bfloat")) %} \
-       --precision {{ precision }}{% endif %}
+       --precision {{ precision }}{% endif %}{% endif %}
    It diffs base..HEAD itself, applies that to a fresh clone, checks the import, runs
    generate.sh, then compares its output against a reference.
 {% if workload == "text" %}   The reference is transformers, scoring your tokens on the GPU: fed each sequence's prompt

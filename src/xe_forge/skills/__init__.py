@@ -294,6 +294,8 @@ def main():
     p_bound.add_argument("--min-share", type=float, default=0.005, help="smallest share listed")
     p_bound.add_argument("--json", action="store_true", help="rows as JSON")
     p_bound.add_argument("--names", default=None, help="a draft names.json to apply first")
+    p_bound.add_argument("--ops", default=None, help="the namer's ops.json: validate --names")
+    p_bound.add_argument("--repos", default=None, help="the kernel repos --names refers to")
 
     # -- inputs --
     p_inputs = subparsers.add_parser("inputs", help="Gate the shapes and weights trials use")

@@ -123,10 +123,11 @@ def collect(run_dir: Path, manifest: dict, runs: list[tuple[str, str]]) -> Path:
     if run.get("precision"):  # what was declared and what ran
         rt, seen = run.get("runtime") or {}, run["precision"]
         lines[1:1] = ["", f"Precision: compute {rt.get('precision')} ({seen.get('compute')} ran); "
-                      f"weights {rt.get('weights')} ({seen.get('w_bytes')} B per GEMM weight "
+                      f"quantization {rt.get('quantization')} ({seen.get('w_bytes')} B per GEMM weight "
                       f"element read)."]  # fmt: skip
         if rt.get("kv_cache") not in (None, "auto"):
-            ran = ", ".join(seen.get("kv_dtypes") or []) or "not checked: no op names it"
+            n = len(seen.get("kv_args") or {})
+            ran = f"checked on {n} named cache arguments" if n else "not checked: no op names it"
             lines[2] += f" KV cache {rt['kv_cache']} ({ran})."
     for entry in manifest["kernels"]:
         name = entry["name"]

@@ -152,9 +152,9 @@ def workloads(ops: list[CapturedOp], total_us: float, naming_fn=None) -> list[Wo
         named_by = op.framework_meta.get("named") or {}
         # The naming agent's config_args select a path (a window, a mode): a value each is a
         # workload, like a shape. Other integer args are runtime sizes.
-        scalar_dims = {k for k in named if not re.search(r"_D\d+$", k)} - set(
-            named_by.get("config_args") or []
-        )
+        scalar_dims = {k for k in named if not re.search(r"_D\d+$", k)} - {
+            str(c).upper() for c in named_by.get("config_args") or []
+        }
         tensors = [a for a in op.args if a is not None]
         family = "gemm" if gemm else named_by.get("family", "other")
         named = named_by

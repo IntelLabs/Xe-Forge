@@ -27,7 +27,7 @@ import subprocess
 from pathlib import Path
 
 from xe_forge.frontend import canonical, ir, naming
-from xe_forge.frontend.dtypes import STORAGE_BYTES, compute_dtype, observed, parse_weights
+from xe_forge.frontend.dtypes import STORAGE_BYTES, compute_dtype, observed, parse_quantization
 from xe_forge.frontend.dtypes import canonical as canonical_dtype
 from xe_forge.frontend.torch_trace import parse_traces
 
@@ -576,26 +576,26 @@ def parse_capture(args) -> int:
     return 1 if problems else 0
 
 
-def kv_args(ops) -> list[tuple]:
-    """(op key, argument, its dtype) of every argument the namer names the stored KV cache
-    (``kv_args``) that has a dtype, once per op key."""
+def kv_args(ops) -> dict[tuple, set[str]]:
+    """{(op key, argument): its dtypes over the op's calls} of every argument the namer names
+    the stored KV cache (``kv_args``) that has a dtype."""
     from xe_forge.frontend.canonical import arg_label
 
-    seen, out = set(), []
+    out: dict[tuple, set[str]] = {}
     for o in ops:
         key = o.framework_meta.get("name_key", o.framework_op)
+        want = (o.framework_meta.get("named") or {}).get("kv_args") or []
         for i, a in enumerate(o.args):
-            name = arg_label(o, i)
-            want = (o.framework_meta.get("named") or {}).get("kv_args") or []
-            if a is not None and a.dtype and name in want and (key, name) not in seen:
-                seen.add((key, name))
-                out.append((key, name, a.dtype))
+            if a is not None and a.dtype and arg_label(o, i) in want:
+                out.setdefault((key, arg_label(o, i)), set()).add(a.dtype)
     return out
 
 
 def _kv_problems(run: dict, ops: list) -> list[str]:
-    """The declared ``runtime.kv_cache`` against the named KV-cache arguments: each the same
-    dtype, or a byte container (uint8/int8) of its size. None named: nothing to check."""
+    """The declared ``runtime.kv_cache`` against the named KV-cache arguments: each holds it
+    in some call -- as that dtype or a byte container (uint8/int8) of its size or of a sub-byte
+    dtype packed into it; a generic op
+    (an indexed store) may write other state in its other calls. None named: no check."""
     declared = (run.get("runtime") or {}).get("kv_cache")
     if declared in (None, "auto"):
         return []
@@ -603,14 +603,16 @@ def _kv_problems(run: dict, ops: list) -> list[str]:
         want = canonical_dtype(str(declared))
     except ValueError as exc:
         return [f"runtime.kv_cache: {exc}"]
-    return [f"declared KV cache {want}, {key!r} holds it in {arg} as {dtype}"
-            for key, arg, dtype in kv_args(ops)
-            if dtype != want and not (dtype in ("uint8", "int8")
-                                      and STORAGE_BYTES.get(dtype) == STORAGE_BYTES[want])]  # fmt: skip
+
+    def holds(d):
+        return d == want or (d in ("uint8", "int8") and STORAGE_BYTES[want] <= 1)
+
+    return [f"declared KV cache {want}, {key!r} holds it in {arg} as {', '.join(sorted(ds))}"
+            for (key, arg), ds in kv_args(ops).items() if not any(holds(d) for d in ds)]  # fmt: skip
 
 
 def _precision_problems(run: dict, named: bool = False, ops: list = ()) -> list[str]:
-    """The declared ``runtime.precision`` / ``runtime.weights`` against what the trace ran;
+    """The declared ``runtime.precision`` / ``runtime.quantization`` against what the trace ran;
     both must name a dtype. Once ``named``, the GEMMs' weights are known: declared weights
     none of them read is a problem too, and GEMMs reading more bytes than stored are one
     unless the namer names the op that widens them (``model.weights_widened_by``); a named op
@@ -619,11 +621,11 @@ def _precision_problems(run: dict, named: bool = False, ops: list = ()) -> list[
     problems = _kv_problems(run, ops) if named else []
     try:
         want = canonical_dtype(str(rt.get("precision")))
-        _, w_dtype = parse_weights(rt.get("weights"))
+        _, w_dtype = parse_quantization(rt.get("quantization"))
     except ValueError as exc:
         return [*problems, f"runtime.precision: {exc}"]
     if w_dtype is None:
-        return [*problems, f"runtime.weights {rt.get('weights')!r} names no stored dtype: write "
+        return [*problems, f"runtime.quantization {rt.get('quantization')!r} names no stored dtype: write "
                 f"'<scheme>:<dtype>' (uint8 for packed sub-byte formats)"]  # fmt: skip
     got = seen["compute"]
     if want and got != want:
@@ -639,7 +641,10 @@ def _precision_problems(run: dict, named: bool = False, ops: list = ()) -> list[
         problems.append(f"declared weights {w_dtype} ({STORAGE_BYTES[w_dtype]} B/element), the "
                         f"GEMMs read {w_bytes} B per weight element")  # fmt: skip
     claim = (run.get("model_facts") or {}).get("weights_widened_by")
-    if ratio > 1.25 and not claim:
+    # Read with the weight: its scales and zero points. A quarter more, or for sub-byte weights
+    # 0.125 B per element (an fp16 scale and zero per 32): int2 at 0.375, not int4's 0.5.
+    stored = STORAGE_BYTES[w_dtype]
+    if w_bytes is not None and w_bytes > max(1.25 * stored, stored + 0.125) and not claim:
         problems.append(f"declared weights {w_dtype} ({STORAGE_BYTES[w_dtype]} B/element), the "
                         f"GEMMs read {w_bytes} B per weight element: loaded wide, or widened on "
                         f"the fly by an op -- then names.json's model.weights_widened_by names "
@@ -705,7 +710,7 @@ def precision_record(capture: ir.CaptureRun) -> dict:
     shares = observed(capture.ops)
     return {"compute": compute_dtype(list(shares)), "dtypes": shares,
             "w_bytes": round(sum(b * us for b, us in gemms) / gemm_us, 4) if gemm_us else None,
-            "kv_dtypes": sorted({d for _, _, d in kv_args(capture.ops)})}  # fmt: skip
+            "kv_args": {f"{k}.{a}": sorted(ds) for (k, a), ds in kv_args(capture.ops).items()}}  # fmt: skip
 
 
 def apply_names(ops: list, names: dict | None) -> list:

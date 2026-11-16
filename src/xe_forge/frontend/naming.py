@@ -34,6 +34,8 @@ def name_op(op: CapturedOp) -> Naming:
 
 ROUTES = ("kernel", "library", "aten", "unnamed")
 ROWS = ("token", "token_expert")
+# An entry's fields it is usable without: a bad one is dropped alone.
+OPTIONAL = ("cost", "config_args", "kv_args", "token_arg", "family")
 
 
 def _pos_int(v) -> bool:
@@ -92,13 +94,22 @@ def validate(names, listing: dict, repos) -> list[str]:
             return
         config = e.get("config_args")
         scalars = {k for k, v in dims.items() if not re.search(r"_D\d+$", k) and type(v) is int}
-        if config is not None and not (isinstance(config, list) and set(config) <= scalars):
-            out.append(f"{where}: config_args {config!r} must be integer scalar dims of the op "
-                       f"({sorted(scalars)})")  # fmt: skip
+        if config is not None and not (
+            isinstance(config, list)
+            and all(isinstance(c, str) for c in config)
+            and {c.upper() for c in config} <= scalars  # an argument, as its dim is named
+        ):
+            out.append(f"{where}: config_args {config!r} must be integer scalar arguments of "
+                       f"the op ({sorted(a for a in args if a.upper() in scalars)})")  # fmt: skip
         kv = e.get("kv_args")
-        if kv is not None and not (isinstance(kv, list) and kv and set(kv) <= set(args)):
-            out.append(f"{where}: kv_args {kv!r} must be a list of the op's arguments")
-        if e.get("token_arg") is not None and e["token_arg"] not in args:
+        if kv is not None and not (
+            isinstance(kv, list) and kv and all(isinstance(a, str) and a in args for a in kv)
+        ):
+            out.append(f"{where}: kv_args {kv!r} must be a list of the op's arguments "
+                       f"({sorted(args)})")  # fmt: skip
+        if e.get("token_arg") is not None and not (
+            isinstance(e["token_arg"], str) and e["token_arg"] in args
+        ):
             out.append(f"{where}: token_arg {e['token_arg']!r} is not an argument")
         specs = e.get("gemm")
         for i, g in enumerate(specs if isinstance(specs, list) else [specs] if specs else []):
@@ -150,15 +161,19 @@ def keep_valid(names, listing: dict, repos) -> tuple[dict | None, list[str]]:
     problems = []
     for key in list(ops):
         wrong = validate({"ops": {key: ops[key]}}, listing, repos)
-        costs = [p for p in wrong if re.search(r"\.cost[.:]", p)]
-        if wrong and len(costs) == len(wrong):  # a bad cost loses the cost, not the naming
-            e = ops[key]
-            groups = (e.get("kernels") or {}) if isinstance(e.get("kernels"), dict) else {}
-            for where, part in [(repr(key), e)] + [(f"{key!r}.kernels[{s!r}]", k)
-                                                     for s, k in groups.items()]:  # fmt: skip
-                if isinstance(part, dict) and any(p.startswith(f"{where}.cost") for p in costs):
-                    part.pop("cost", None)
-            problems += [f"{p}; that cost dropped" for p in costs]
+        e = ops[key]
+        groups = e.get("kernels") if isinstance(e, dict) else None
+        parts = [(repr(key), e)] + [(f"{key!r}.kernels[{s!r}]", k) for s, k in
+                                    (groups.items() if isinstance(groups, dict) else ())]  # fmt: skip
+        # The part and optional field each problem is in; any other problem loses the entry.
+        hits = {p: next(((part, f) for where, part in parts for f in OPTIONAL
+                         if isinstance(part, dict)
+                         and re.match(rf"{re.escape(where)}(\.|: ){f}\b", p)), None)
+                for p in wrong}  # fmt: skip
+        if wrong and all(hits.values()):  # a bad optional field loses the field, not the naming
+            for part, f in hits.values():
+                part.pop(f, None)
+            problems += [f"{p}; that {hits[p][1]} dropped" for p in wrong]
         elif wrong:
             problems += wrong
             del ops[key]

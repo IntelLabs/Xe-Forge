@@ -278,7 +278,7 @@ def test_other_rows_rerun_the_launcher_at_their_size_with_no_agent(
         assert len(ir.load(got).ops) == 4
 
 
-@pytest.mark.parametrize("config_args, n", [(None, 1), (["ARG1"], 2)])
+@pytest.mark.parametrize("config_args, n", [(None, 1), (["ARG1"], 2), (["arg1"], 2)])
 def test_config_args_make_each_value_a_workload(config_args, n):
     """A window is a scalar like a size, so only the naming agent's config_args split on it."""
     from xe_forge.frontend import canonical, naming
@@ -531,7 +531,7 @@ ev() { printf '{"ph": "X", "cat": "gpu_op", "name": "%s", "ts": %s, "dur": %s},'
 LAUNCHER = """#!/bin/bash
 cat > "$RAW_DIR/meta.json" <<'J'
 {"framework": "toyfw", "framework_version": "1", "model": {"name": "toy"},
- "runtime": {"batch": 1, "precision": "float16", "weights": "float16"}, "device": {"type": "xpu"}}
+ "runtime": {"batch": 1, "precision": "float16", "quantization": "float16"}, "device": {"type": "xpu"}}
 J
 cat > "$RAW_DIR/ops.json" <<'J'
 {"rms": {"framework_op": "toy::RMS", "kernels": ["^rms_opt"], "calls": 4,
@@ -588,7 +588,7 @@ echo "${XE_FORGE_TRACE_STEPS:-unset}" > "$RAW_DIR/steps_seen"
 echo "${XE_FORGE_TRACE_STEPS:-unset}" >> "$(dirname "$0")/steps_log"
 cat > "$RAW_DIR/meta.json" <<J
 {"framework": "toyfw", "framework_version": "1", "model": {"name": "toy"},
- "runtime": {"batch": 1, "precision": "float16", "weights": "float16", "steps": ${XE_FORGE_TRACE_STEPS:-50}},
+ "runtime": {"batch": 1, "precision": "float16", "quantization": "float16", "steps": ${XE_FORGE_TRACE_STEPS:-50}},
  "device": {"type": "xpu"}, "repeats": 2}
 J
 cat > "$RAW_DIR/ops.json" <<'J'
@@ -733,6 +733,13 @@ def test_bound_tool_lists_workloads_by_share(tmp_path):
     rows, _, problem = out.partition("bound: PROBLEM")  # the run's weights check on the draft
     assert code == 0 and "rms_v2" in [r["kernel"] for r in json.loads(rows)], out
     assert "no GEMM's weight was captured" in problem  # its FC has no weight argument
+    # With the namer's ops.json, the draft is validated as the run will: what it drops is shown.
+    listing = tmp_path / "ops.json"
+    listing.write_text(json.dumps({"toy::RMS": {"args": [], "dims": {}}}))
+    code, out = _tool("bound", str(cap), "--json", "--min-share", "0", "--names", str(names),
+                      "--ops", str(listing), "--repos", str(tmp_path))  # fmt: skip
+    assert code == 0 and "bound: INVALID 'toy::RMS': repo None" in out, out
+    assert "rms_v2" not in out.partition("bound:")[0]  # applied as the run keeps it: unnamed
 
 
 def test_a_cost_over_unknown_dims_loses_the_cost_not_the_naming(tmp_path):
@@ -757,6 +764,31 @@ def test_a_cost_over_unknown_dims_loses_the_cost_not_the_naming(tmp_path):
     assert got["ops"] == {}
 
 
+def test_a_bad_config_arg_loses_the_config_args_not_the_attentions_kv_args(tmp_path):
+    """vLLM 403197: config_args by an unknown name dropped the attention op, kv_args and all."""
+    from xe_forge.frontend import naming
+
+    (tmp_path / "repo").mkdir()
+    listing = {"op": {"args": [{"name": "arg0", "shape": [8, 128]},
+                               {"name": "arg1", "shape": [64, 4, 128]},
+                               {"name": "arg19", "value": "-1"}],
+                      "dims": {"ARG0_D0": 8, "ARG0_D1": 128, "ARG1_D0": 64, "ARG1_D1": 4,
+                               "ARG1_D2": 128, "ARG19": -1}}}  # fmt: skip
+    entry = {"route": "kernel", "name": "fmha", "repo": "repo", "dsl": "sycl",
+             "kv_args": ["arg1"], "config_args": ["arg19"]}  # fmt: skip
+    # An argument's name is accepted as its dim's (ARG19), as kv_args and token_arg name them.
+    assert naming.validate({"ops": {"op": entry}}, listing, tmp_path) == []
+    got, problems = naming.keep_valid(
+        {"ops": {"op": dict(entry, config_args=["window"])}, "model": {}}, listing, tmp_path
+    )
+    assert got["ops"]["op"]["kv_args"] == ["arg1"] and "config_args" not in got["ops"]["op"]
+    assert len(problems) == 1 and problems[0].endswith("that config_args dropped")
+    for field, bad in (("kv_args", [["arg1"]]), ("token_arg", ["arg0"])):  # not a crash
+        got, _ = naming.keep_valid({"ops": {"op": dict(entry, **{field: bad})}, "model": {}},
+                                   listing, tmp_path)  # fmt: skip
+        assert field not in got["ops"]["op"] and got["ops"]["op"]["name"] == "fmha"
+
+
 def test_naming_family_is_free_text_and_a_bad_gemm_spec_degrades(tmp_path):
     from xe_forge.frontend import canonical, naming
     from xe_forge.frontend.ir import CapturedOp, TensorArg
@@ -779,7 +811,7 @@ def test_naming_family_is_free_text_and_a_bad_gemm_spec_degrades(tmp_path):
 
 SPLIT_LAUNCHER = """#!/bin/bash
 cat > "$RAW_DIR/meta.json" <<'J'
-{"framework": "toyfw", "model": {"name": "toy"}, "runtime": {"batch": 1, "precision": "float16", "weights": "float16"}, "device": {}}
+{"framework": "toyfw", "model": {"name": "toy"}, "runtime": {"batch": 1, "precision": "float16", "quantization": "float16"}, "device": {}}
 J
 cat > "$RAW_DIR/ops.json" <<'J'
 {"rms": {"framework_op": "toy::RMS", "kernels": ["^rms_opt"]},
@@ -1232,17 +1264,20 @@ def test_capture_parse_refuses_a_dtype_name_the_bounds_cannot_size(tmp_path):
 
 
 def test_precision_and_weights_parse_to_torch_dtypes():
-    from xe_forge.frontend.dtypes import canonical, compute_dtype, parse_weights
+    from xe_forge.frontend.dtypes import canonical, compute_dtype, parse_quantization
 
     assert canonical("bf16") == "bfloat16" and canonical("float8_e4m3fn") == "float8_e4m3fn"
     with pytest.raises(ValueError):
         canonical("f16")
-    assert parse_weights("auto") == (None, None)
-    assert parse_weights("int8") == (None, "int8")
-    assert parse_weights("awq:int4") == ("awq", "int4")
-    assert parse_weights("Q4_K_M") == ("Q4_K_M", None)  # a scheme alone is recorded, not checked
+    assert parse_quantization("auto") == (None, None)
+    assert parse_quantization("int8") == (None, "int8")
+    assert parse_quantization("awq:int4") == ("awq", "int4")
+    assert parse_quantization("Q4_K_M") == (
+        "Q4_K_M",
+        None,
+    )  # a scheme alone is recorded, not checked
     with pytest.raises(ValueError):
-        parse_weights("awq:i4")
+        parse_quantization("awq:i4")
     assert compute_dtype(["int8", "int32"], "float32") == "float32"
 
 
@@ -1307,7 +1342,7 @@ def test_capture_parse_checks_the_declared_precision(tmp_path, declared, code):
 def test_declared_weights_are_checked_against_bytes_per_weight_element(weights, w_bytes, ok):
     from xe_forge.skills.capture import _precision_problems
 
-    run = {"runtime": {"precision": "bf16", "weights": weights},
+    run = {"runtime": {"precision": "bf16", "quantization": weights},
            "precision": {"compute": "bfloat16", "dtypes": {"bfloat16": 1.0}, "w_bytes": w_bytes}}  # fmt: skip
     assert (not _precision_problems(run)) is ok
 
@@ -1329,7 +1364,7 @@ def test_weights_widened_on_the_fly_are_the_namers_claim_the_tool_verifies(claim
         return CapturedOp(id=name, framework_op=name, args=[TensorArg([16, 8], dtype)],
                           framework_meta={"name_key": name})  # fmt: skip
 
-    run = {"runtime": {"precision": "bf16", "weights": "fp8:float8_e4m3fn"},
+    run = {"runtime": {"precision": "bf16", "quantization": "fp8:float8_e4m3fn"},
            "model_facts": {"weights_widened_by": claim},
            "precision": {"compute": "bfloat16", "dtypes": {"bfloat16": 1.0}, "w_bytes": w_bytes}}  # fmt: skip
     ops = [op("aten::to", "float8_e4m3fn"), op("aten::linear", "bfloat16")]
@@ -1340,7 +1375,7 @@ def test_weights_widened_on_the_fly_are_the_namers_claim_the_tool_verifies(claim
 def test_named_capture_with_declared_weights_no_gemm_read_is_a_problem(weights, ok):
     from xe_forge.skills.capture import _precision_problems
 
-    run = {"runtime": {"precision": "bfloat16", "weights": weights},
+    run = {"runtime": {"precision": "bfloat16", "quantization": weights},
            "precision": {"compute": "bfloat16", "dtypes": {"bfloat16": 1.0}, "w_bytes": None}}  # fmt: skip
     assert (not _precision_problems(run, named=True)) is ok
 
@@ -1363,11 +1398,11 @@ def test_naming_checks_a_cost_on_shapes_beyond_the_ones_listed():
 def test_summary_states_the_declared_precision_and_what_ran(tmp_path):
     from xe_forge.frontend import collect
 
-    run = {"runtime": {"precision": "bfloat16", "weights": "fp8:float8_e4m3fn"},
+    run = {"runtime": {"precision": "bfloat16", "quantization": "fp8:float8_e4m3fn"},
            "precision": {"compute": "bfloat16", "w_bytes": 2.0}}  # fmt: skip
     (tmp_path / "capture.json").write_text(json.dumps({"run": run}))
     text = collect.collect(tmp_path, {"kernels": []}, []).read_text()
-    assert ("Precision: compute bfloat16 (bfloat16 ran); weights fp8:float8_e4m3fn (2.0 B per "
+    assert ("Precision: compute bfloat16 (bfloat16 ran); quantization fp8:float8_e4m3fn (2.0 B per "
             "GEMM weight element read).") in text.splitlines()[2]  # fmt: skip
     (tmp_path / "capture.json").unlink()  # the fusion step's run dir has none
     assert "Precision" not in collect.collect(tmp_path, {"kernels": []}, []).read_text()
@@ -1657,6 +1692,41 @@ def test_rows_replace_batch_and_lengths(tmp_path):
                   "--framework-python", "py", "--rows", str(f), "--batch", "2"])  # fmt: skip
 
 
+@pytest.mark.parametrize("extra", [
+    ["--prompt", "a cat"],                                   # a prompt is vision's
+    ["--workload", "vision", "--kv-cache", "float8_e4m3fn"],  # no KV cache in a diffusion model
+    ["--workload", "vision", "--prompt-file", "p.txt"],      # token prompts are text's
+])  # fmt: skip
+def test_run_refuses_the_flags_of_the_other_workload(tmp_path, extra):
+    from xe_forge.frontend import cli
+
+    with pytest.raises(SystemExit):
+        cli.main(["run", "-o", str(tmp_path), "--framework", "x", "--model", "m",
+                  "--framework-python", "py", *extra])  # fmt: skip
+
+
+def test_a_vision_prompt_is_the_captures_identity_and_reaches_its_agents():
+    from types import SimpleNamespace
+
+    from xe_forge.claude.generator import render
+    from xe_forge.frontend import cli
+
+    a = SimpleNamespace(workload="vision", batch=1, steps=4, height=64, width=64, frames=1,
+                        input_image=[], prompt="a cat", negative_prompt=None)  # fmt: skip
+    want = cli.workload(a)
+    assert want["prompt"] == "a cat" and cli._same_workload(want, dict(want))
+    assert not cli._same_workload(want, {**want, "prompt": cli.VISION_PROMPT})
+    ctx = dict(model="m", framework="fw", python="py", cache="/c", inputs={}, precision="auto",
+               quantization="auto", kv_cache="auto", refused=[], answer="a.json",
+               framework_notes=[], workload="vision", runtime_keys=cli.WORKLOADS["vision"],
+               repos="/r", what="x", reason="y", **want)  # fmt: skip
+    capture = render("frontend-capture.md.j2", **ctx)
+    assert 'The prompt is "a cat"' in capture and '"prompt", "negative_prompt"' in capture
+    assert "the negative prompt" not in capture  # none given
+    assert '"no blur"' in render("frontend-capture.md.j2", **{**ctx, "negative_prompt": "no blur"})
+    assert 'with the prompt "a cat"' in render("frontend-patch.md.j2", **ctx)
+
+
 def _kv_op(dtype, kv_args=("cache",)):
     from xe_forge.frontend.ir import CapturedOp, TensorArg
 
@@ -1674,12 +1744,55 @@ def _kv_op(dtype, kv_args=("cache",)):
     ("float8_e4m3fn", "bfloat16", (), False),              # none named: nothing to check
     ("auto", "bfloat16", ("cache",), False),
     ("float8_e4m3fn", None, ("cache",), False),            # no dtype: skipped
+    ("int2", "uint8", ("cache",), False),                  # sub-byte: packed in a byte
+    ("uint4", "int8", ("cache",), False),
+    ("int2", "int4", ("cache",), True),
+    ("bfloat16", "uint8", ("cache",), True),               # a byte cannot hold two
 ])  # fmt: skip
 def test_declared_kv_cache_against_the_named_cache_arguments(declared, held, kv_args, bad):
     from xe_forge.skills.capture import _kv_problems
 
     got = _kv_problems({"runtime": {"kv_cache": declared}}, [_kv_op(held, kv_args)])
     assert bool(got) == bad, got
+
+
+def test_sub_byte_dtypes_are_dtypes_at_bits_over_eight():
+    from xe_forge.frontend.dtypes import canonical, parse_quantization, storage_bytes, tensor_bytes
+
+    for s in ("", "u"):
+        for b in range(1, 8):
+            assert storage_bytes(canonical(f"{s}int{b}")) == b / 8
+    assert parse_quantization("hqq:int2") == ("hqq", "int2")
+    assert tensor_bytes([4096, 4096], "int2") == 4096 * 4096 / 4
+    with pytest.raises(ValueError):
+        canonical("int9")
+
+
+@pytest.mark.parametrize("weights, w_bytes, ok", [
+    ("hqq:int2", 0.25, True),
+    ("hqq:int2", 0.375, True),    # an fp16 scale and zero per 32
+    ("hqq:int2", 0.5, False),     # int4's bytes: not int2
+    ("hqq:int2", 0.2, False),     # fewer bytes than int2 stores
+    ("gptq:int4", 0.53, True),    # 4-bit and wider keep the quarter
+    ("gptq:int4", 0.7, False),
+    ("int8", 1.25, True), ("int8", 1.3, False),
+])  # fmt: skip
+def test_sub_byte_weights_allow_their_scales_and_not_a_wider_format(weights, w_bytes, ok):
+    from xe_forge.skills.capture import _precision_problems
+
+    run = {"runtime": {"precision": "bf16", "quantization": weights},
+           "precision": {"compute": "bfloat16", "dtypes": {"bfloat16": 1.0}, "w_bytes": w_bytes}}  # fmt: skip
+    assert (not _precision_problems(run)) is ok, _precision_problems(run)
+
+
+def test_a_generic_store_writing_other_state_too_holds_the_cache_in_some_call():
+    """aten::index_put_ writes the fp8 cache and a bf16 conv state: the call order (time)
+    decides nothing; a launcher whose every call holds bf16 still fails."""
+    from xe_forge.skills.capture import _kv_problems
+
+    run = {"runtime": {"kv_cache": "float8_e4m3fn"}}
+    assert _kv_problems(run, [_kv_op("bfloat16"), _kv_op("uint8")]) == []
+    assert _kv_problems(run, [_kv_op("bfloat16"), _kv_op("bfloat16")])
 
 
 def test_kv_args_must_name_the_ops_arguments(tmp_path):
@@ -1692,17 +1805,18 @@ def test_kv_args_must_name_the_ops_arguments(tmp_path):
     assert naming.validate(good, listing, tmp_path) == []
     for bad in (["key_cache"], "cache", []):
         problems = naming.validate({"ops": {"op": {**entry, "kv_args": bad}}}, listing, tmp_path)
-        assert any("kv_args" in p for p in problems)
+        assert any("kv_args" in p and "['cache', 'q']" in p for p in problems)  # what it can be
 
 
-@pytest.mark.parametrize("kv_dtypes, says", [(["uint8"], "KV cache float8_e4m3fn (uint8)."),
-                                             ([], "(not checked: no op names it)")])  # fmt: skip
-def test_summary_states_the_declared_kv_cache_and_whether_it_was_checked(tmp_path, kv_dtypes,
+@pytest.mark.parametrize("kv_args, says", [
+    ({"store.cache": ["uint8"]}, "KV cache float8_e4m3fn (checked on 1 named cache arguments)."),
+    ({}, "(not checked: no op names it)")])  # fmt: skip
+def test_summary_states_the_declared_kv_cache_and_whether_it_was_checked(tmp_path, kv_args,
                                                                           says):  # fmt: skip
     from xe_forge.frontend import collect
 
-    run = {"runtime": {"precision": "bfloat16", "weights": "auto", "kv_cache": "float8_e4m3fn"},
-           "precision": {"compute": "bfloat16", "w_bytes": 2.0, "kv_dtypes": kv_dtypes}}  # fmt: skip
+    run = {"runtime": {"precision": "bfloat16", "quantization": "auto", "kv_cache": "float8_e4m3fn"},
+           "precision": {"compute": "bfloat16", "w_bytes": 2.0, "kv_args": kv_args}}  # fmt: skip
     (tmp_path / "capture.json").write_text(json.dumps({"run": run}))
     assert says in collect.collect(tmp_path, {"kernels": []}, []).read_text().splitlines()[2]
 
@@ -1712,9 +1826,9 @@ def test_capture_prompt_carries_the_kv_cache_and_run_refuses_a_bad_one(tmp_path)
     from xe_forge.frontend import cli
 
     text = render("frontend-capture.md.j2", model="m", framework="fw", python="py", batch=1,
-                  workload="text", runtime_keys=cli.WORKLOADS["text"], framework_notes=[], quantization=None,
+                  workload="text", runtime_keys=cli.WORKLOADS["text"], framework_notes=[],
                   input_len=4, output_len=2, cache="/c", inputs={}, precision="auto",
-                  weights="auto", kv_cache="float8_e4m3fn", refused=[], answer="a.json")  # fmt: skip
+                  quantization="auto", kv_cache="float8_e4m3fn", refused=[], answer="a.json")  # fmt: skip
     assert "the KV cache\nstored as float8_e4m3fn" in text and '"float8_e4m3fn" verbatim' in text
     with pytest.raises(SystemExit):
         cli.main(["run", "-o", str(tmp_path), "--framework", "x", "--model", "m",

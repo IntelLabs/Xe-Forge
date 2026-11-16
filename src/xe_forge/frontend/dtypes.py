@@ -12,6 +12,11 @@ STORAGE_BYTES = {
     "float8_e8m0fnu": 1, "float4_e2m1fn_x2": 1, "int8": 1, "uint8": 1, "bool": 1,
     # 4-bit types reported at their logical shape.
     "uint4": 0.5, "int4": 0.5, "nf4": 0.5, "float4_e2m1": 0.5,
+    # The other sub-byte integers (torch.int1..int7, uint1..uint7), at their logical shape:
+    # bits / 8. Real data in them is packed into a byte container (uint8), which is the dtype
+    # a trace shows; these name what is packed (--quantization hqq:int2, --kv-cache int2).
+    "int1": 0.125, "int2": 0.25, "int3": 0.375, "int5": 0.625, "int6": 0.75, "int7": 0.875,
+    "uint1": 0.125, "uint2": 0.25, "uint3": 0.375, "uint5": 0.625, "uint6": 0.75, "uint7": 0.875,
 }  # fmt: skip
 
 
@@ -26,7 +31,7 @@ def canonical(name: str) -> str:
     return dtype
 
 
-def parse_weights(text: str | None) -> tuple[str | None, str | None]:
+def parse_quantization(text: str | None) -> tuple[str | None, str | None]:
     """``auto`` | ``<dtype>`` | ``<scheme>`` | ``<scheme>:<dtype>`` -> (scheme, dtype).
 
     The dtype is what code checks; the scheme is free text for the capture agent."""

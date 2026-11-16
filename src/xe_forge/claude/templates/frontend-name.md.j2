@@ -48,7 +48,7 @@ detached or modified checkout was put there on purpose: leave it. Then write nam
            {{ calibration.matmul_tflops }}){% endif %}, bytes / bandwidth and flops / peak
            may not exceed that shape's us_per_call (a kernel group: its kernels_per_call); a
            cost that does is dropped;
-   "config_args": the op's integer scalar dims that select a different path through its
+   "config_args": the op's integer scalar arguments that select a different path through its
             kernel -- a window, a mode, a flag; never a size that changes with each call --
             when they take more than one value: each value is then a configuration of its
             own, bounded and given its own trial shape;
@@ -58,7 +58,10 @@ detached or modified checkout was put there on purpose: leave it. Then write nam
             on its own;
    "kv_args": on every op that reads or writes the stored KV cache, the arguments that are
            the cache tensors themselves -- not the query, nor the new keys and values being
-           written into it -- as the source shows them; a KV PROBLEM `{{ bound_cmd }}`
+           written into it -- as the source shows them. The same cache shows in ops.json
+           under several ops: the one writing it, each reading it, and any holding it as a
+           view or byte container of the same size: find each in the source and name its
+           cache arguments too. A KV PROBLEM `{{ bound_cmd }}`
            prints is the launcher's, so they stay as the source shows them;
    "gemm": only for a matrix multiply whose weight is one of its arguments, and not where
            ops.json already gives the op's "gemm" -- which argument is what, from the
@@ -81,7 +84,8 @@ detached or modified checkout was put there on purpose: leave it. Then write nam
 
 `{{ bound_cmd }}` applies your names.json as you draft it -- its costs and config_args --
 and prints each workload's efficiency against its bound: run it once the draft is written,
-and again after each change. Each value of a config_arg is a row of its own there; one that
+and again after each change. An INVALID line it prints is a part of your answer the run
+drops (a field, or the whole entry): fix it. Each value of a config_arg is a row of its own there; one that
 splits an op into a row per call size named a size, not a path. An efficiency far below what such a kernel reaches usually
 means the cost misses a read: read the kernel, and fix the cost or say in "via" why it is that
 far from it. "shapes" lists an op's 12 costliest;

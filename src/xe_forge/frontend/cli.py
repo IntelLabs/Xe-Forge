@@ -90,9 +90,21 @@ def _agent(step: str, template: str, context: dict, cwd: Path, answer: str, pyth
 # port-back work on ops, shapes and kernels, and the axis a shape varies along is whatever
 # the naming agent declares (``token_arg``), not something this file decides.
 WORKLOADS = {
-    "text": ("batch", "input_len", "output_len", "quantization"),
-    "vision": ("batch", "steps", "height", "width", "frames", "quantization", "input_images"),
+    "text": ("batch", "input_len", "output_len"),
+    "vision": (
+        "batch",
+        "steps",
+        "height",
+        "width",
+        "frames",
+        "input_images",
+        "prompt",
+        "negative_prompt",
+    ),
 }
+# The prompt a vision run uses when none is given: one fixed text, so captures of the same
+# model on two frameworks, or two days, run the same work.
+VISION_PROMPT = "A red fox standing in fresh snow at the edge of a pine forest, morning light"
 
 
 def _add_workload_args(p: argparse.ArgumentParser) -> None:
@@ -100,9 +112,11 @@ def _add_workload_args(p: argparse.ArgumentParser) -> None:
                    help="what one measured run is: a text decoder's prefill and decode "
                    "steps, or a vision model's denoising steps at a resolution")  # fmt: skip
     p.add_argument("--batch", type=int, default=1)
-    p.add_argument("--quantization", default=None,
-                   help="the framework's name for a reduced precision (fp8, awq, ...), or "
-                   "unset for the model's own. The capture agent never picks this: it "
+    p.add_argument("--quantization", default="auto",
+                   help="how the weights are quantized: auto (the checkpoint's own), the "
+                   "framework's name for a scheme (fp8, awq, ...), a stored dtype (int8), or "
+                   "<scheme>:<dtype> (awq:int4) -- the dtype is what the capture checks the "
+                   "GEMMs read. The capture agent never picks this: it "
                    "changes the model's output quality, which only you can judge, and it "
                    "changes which kernels run -- so optimizing a quantized run and serving "
                    "an unquantized one tunes kernels you never execute")  # fmt: skip
@@ -122,6 +136,10 @@ def _add_workload_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--frames", type=int, default=1,
                    help="frames to generate [vision]; 1 is a still image. A video model "
                    "may round this up -- LTX wants 8k+1 -- so record what actually ran")  # fmt: skip
+    p.add_argument("--prompt", help=f"the text prompt [vision], default {VISION_PROMPT!r}. "
+                   "Part of what a capture is, as the input images are")  # fmt: skip
+    p.add_argument("--negative-prompt", help="the negative prompt [vision], for a pipeline "
+                   "that takes one")  # fmt: skip
 
 
 def workload(a) -> dict:
@@ -270,7 +288,7 @@ def capture(
                "framework_notes": getattr(a, "framework_note", []) or [],
                **workload(a), "inputs": getattr(a, "inputs", None) or {},
                "precision": getattr(a, "precision", "auto"),
-               "weights": getattr(a, "weights", "auto"),
+               "quantization": getattr(a, "quantization", "auto"),
                "kv_cache": getattr(a, "kv_cache", "auto"), "refused": refused or []}  # fmt: skip
     for round_ in range(1, 4):
         got = _agent("capture", "frontend-capture.md.j2", context, run_dir, "captured.json",
@@ -489,7 +507,17 @@ def name(
         "dsls": [d.value for d in DSL],
         "calibration": calib and {**calib, "matmul_tflops": calibrate.peaks(calib)[1]},
         "bound_cmd": shlex.join(
-            ["xe-forge-skill", "bound", str(capture_path), "--names", str(work / "names.json")]
+            [
+                "xe-forge-skill",
+                "bound",
+                str(capture_path),
+                "--names",
+                str(work / "names.json"),
+                "--ops",
+                str(work / "ops.json"),
+                "--repos",
+                str(repos),
+            ]
             + (["--calibration", str(calibration)] if calibration else [])
         ),
     }
@@ -498,7 +526,7 @@ def name(
         return None
     answer, problems = naming.keep_valid(answer, listing, repos)
     if problems:
-        what = "not usable" if answer is None else "entries left unnamed or costs dropped"
+        what = "not usable" if answer is None else "entries left unnamed or fields dropped"
         print(f"name: {what} ({len(problems)} problems):", file=sys.stderr)
         for line in problems[:20]:
             print(f"  {line}", file=sys.stderr)
@@ -859,9 +887,6 @@ def main(argv: list[str]) -> int:
         default="auto",
         help="compute dtype: auto (the framework's default) or a torch name / bf16 ...",
     )
-    p.add_argument("--weights", default="auto",
-                   help="weight storage: auto (the checkpoint's own), <dtype>, <scheme> or "
-                   "<scheme>:<dtype>, e.g. int8, awq:int4")  # fmt: skip
     p.add_argument("--kv-cache", default="auto",
                    help="KV cache dtype: auto (the framework's default) or a torch name, e.g. float8_e4m3fn")  # fmt: skip
     _add_analyze_args(p)
@@ -890,17 +915,24 @@ def main(argv: list[str]) -> int:
     )  # fmt: skip
     _add_optimize_args(p)
     a = p.parse_args(rest)
-    from xe_forge.frontend.dtypes import canonical, parse_weights
+    from xe_forge.frontend.dtypes import canonical, parse_quantization
 
     try:
         a.precision = a.precision if a.precision == "auto" else canonical(a.precision)
         a.kv_cache = a.kv_cache if a.kv_cache == "auto" else canonical(a.kv_cache)
-        parse_weights(a.weights)
+        parse_quantization(a.quantization)
         from xe_forge.frontend import rows
 
         given = {k: getattr(a, k) for k in rows.KEYS}
-        if a.rows and a.workload != "text":
-            raise ValueError("--rows is for --workload text: its rows are token counts")
+        if a.workload == "text" and (a.prompt is not None or a.negative_prompt is not None):
+            raise ValueError("--prompt is for --workload vision; a text run's prompts are "
+                             "--prompt-file")  # fmt: skip
+        if a.workload != "text":
+            text_only = {"--rows": a.rows, "--prompt-file": a.prompt_file,
+                         "--kv-cache": a.kv_cache != "auto"}  # fmt: skip
+            if given := [f for f, v in text_only.items() if v]:
+                raise ValueError(f"{', '.join(given)}: for --workload text only")
+            a.prompt = VISION_PROMPT if a.prompt is None else a.prompt
         if a.rows and any(v is not None for v in given.values()):
             raise ValueError("--rows replaces --batch, --input-len and --output-len")
         # the anchor row (the largest) is the one the capture agent captures
@@ -950,11 +982,17 @@ def main(argv: list[str]) -> int:
     # are its own, checked by the parse, not part of which run this is.
     have = {"framework": cap.run.get("framework"), **{k: rt.get(k) for k in workload(a)},
             "prompts": (rt.get("inputs") or {}).get("prompts")}  # fmt: skip
-    for k in ("precision", "weights", "kv_cache"):  # declared ones the launcher writes verbatim
+    for k in (
+        "precision",
+        "quantization",
+        "kv_cache",
+    ):  # declared ones the launcher writes verbatim
         if getattr(a, k) != "auto":
             want[k], have[k] = getattr(a, k), str(rt.get(k))
-    if "weights" in want and have["weights"].rpartition(":")[0] == want["weights"]:
-        have["weights"] = want["weights"]  # a declared scheme, the stored dtype added to it
+    if "quantization" in want and have["quantization"].rpartition(":")[0] == want["quantization"]:
+        have["quantization"] = want[
+            "quantization"
+        ]  # a declared scheme, the stored dtype added to it
     model_was = (cap.run.get("model") or {}).get("name")
     if not _same_workload(want, have) or not _same_model(a.model, model_was):
         print(f"run: {capture_path} is a capture of {have} of {model_was!r}, not {want} of "

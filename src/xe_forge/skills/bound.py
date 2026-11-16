@@ -3,7 +3,8 @@
 The arithmetic ``analyze`` decides on, as a tool an agent can test its claims with: the GEMM
 roofline from shapes and the calibrated peaks, the counters' speed-of-light, and any cost
 names.json states. ``--names`` applies a draft names.json first (its costs and config_args), so
-the naming agent sees what its answer makes of the capture before it answers.
+the naming agent sees what its answer makes of the capture before it answers; with ``--ops``
+and ``--repos`` it is validated first as the run validates it, each part it drops printed as INVALID.
 Exit 1 when the capture has no workloads.
 """
 
@@ -23,13 +24,19 @@ def run(args) -> int:
         from xe_forge.skills.capture import _precision_problems, apply_names, precision_record
 
         names = json.loads(Path(args.names).read_text())
+        if args.ops and args.repos:  # what the run keeps of the answer, applied as it will be
+            listing = json.loads(Path(args.ops).read_text())
+            names, invalid = naming.keep_valid(names, listing, args.repos)
+            for p in invalid:
+                print(f"bound: INVALID {p}", file=sys.stderr)
+            names = names or {}
         cap.ops = apply_names(cap.ops, names)
         cap.workloads = canonical.workloads(cap.ops, cap.run["total_device_us"], naming.name_op)
         # The weights check the run applies to this answer, so the namer sees it first.
         run = {**cap.run, "precision": precision_record(cap), "model_facts": names.get("model")}
         problems = _precision_problems(run, named=True, ops=cap.ops)
         kv = (cap.run.get("runtime") or {}).get("kv_cache")
-        if kv not in (None, "auto") and not run["precision"]["kv_dtypes"]:
+        if kv not in (None, "auto") and not run["precision"]["kv_args"]:
             print(f"bound: NOTE the run declares KV cache {kv}, and no op names its kv_args: "
                   "it goes unchecked", file=sys.stderr)  # fmt: skip
     calib = json.loads(Path(args.calibration).read_text()) if args.calibration else None

@@ -58,9 +58,12 @@ condition on, and this is the model's input, not a reference to compare against:
 Use them as the framework's own entry point takes them. A model that derives the output
 size from its input may ignore the width and height above -- if it does, record the size it
 actually produced in meta.json's runtime, not the size asked for, and say so in "notes".
-{% endif %} Fix everything that makes a run
-differ from the next one: one fixed prompt, one fixed seed, the scheduler and guidance the
-framework uses by default. Do not vary the prompt between the warm-up and the measured run.
+{% endif %} The prompt is {{ prompt | tojson }}{% if negative_prompt %}, the negative prompt
+{{ negative_prompt | tojson }} -- a pipeline that takes none cannot run this workload: say so
+in {"error": ...}{% endif %}; record both in meta.json's runtime exactly as given here. Fix
+everything else that makes a run differ from the next one: one fixed seed, the scheduler and
+guidance the framework uses by default. Do not vary the prompt between the warm-up and the
+measured run.
 {% if frames > 1 %}A video model may round the frame count to what its latent layout allows -- LTX wants 8k+1 --
 so record what actually ran in meta.json's runtime, not what was asked for.{% endif %}
 {%- else -%}
@@ -74,7 +77,7 @@ it. The launcher you write is rerun at other sizes with no agent: it takes the b
 length and output length from $XF_BATCH, $XF_INPUT_LEN and $XF_OUTPUT_LEN when they are set,
 the numbers above otherwise -- in the token ids, the framework's settings and what it records.
 {%- endif %}
-Precision: compute in {{ precision }}, weights stored as {{ weights }}{% if workload == "text" %}, the KV cache
+Precision: compute in {{ precision }}, weights quantized as {{ quantization }}{% if workload == "text" %}, the KV cache
 stored as {{ kv_cache }}{% endif %} -- auto leaves the
 framework's default for this checkpoint alone; anything else is set with the framework's own
 option for it (a checkpoint that must be quantized or converted for it is made once, with
@@ -93,7 +96,7 @@ Weight offloading you may turn on yourself: it moves weights between host and de
 changes neither the numbers the model computes nor the kernels it runs, only the copies
 around them. Say in "notes" that you did.
 
-{% if quantization %}Run at {{ quantization }} precision, which is what was asked for.
+{% if quantization != "auto" %}Run the weights at {{ quantization }}, which is what was asked for.
 {% else %}Run at the model's own precision.{% endif %} **Do not choose a precision to make a
 model fit.** A reduced precision changes what the model produces, and whether that is
 acceptable is a judgement about output quality that you cannot make here; it also changes
@@ -126,9 +129,9 @@ build of the stack is measured) and {{ python }} otherwise, and writes into $RAW
    {{ inputs | tojson }} (copied exactly, the run's own input files that the parse checks;
    files you add, such as a tokenizer, go under another runtime key), "precision": the
    compute dtype that ran, by torch's name ({{ precision | tojson }} verbatim when it is not
-   auto), "weights": "<scheme>:<dtype>", how the weights are stored -- the scheme in words,
+   auto), "quantization": "<scheme>:<dtype>", how the weights are stored -- the scheme in words,
    the dtype by torch's name of the element stored (uint8 for packed sub-byte formats); when
-   {{ weights | tojson }} is not auto, it verbatim, with ":<dtype>" added if it names none
+   {{ quantization | tojson }} is not auto, it verbatim, with ":<dtype>" added if it names none
    {%- if workload == "text" %} -- "kv_cache": the element dtype the KV cache is stored in,
    by torch's name ({{ kv_cache | tojson }} verbatim when it is not auto){% endif %} -- and
    every setting that changes what runs}, "device": {"type", "name"}, "repeats": <how many
