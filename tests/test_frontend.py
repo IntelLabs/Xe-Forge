@@ -1952,3 +1952,16 @@ def test_patch_check_judges_vision_against_the_native_path(tmp_path):
         del os.environ["BREAK"]
     assert problems and "does not match" in problems[0]
     assert _stage_named(rec2["quality"], "step1")["verdict"] == "fail"
+
+
+def test_every_claude_session_lifts_the_background_ceiling(monkeypatch):
+    # A kernel session's benchmark was stopped at headless claude's own ceiling, before its
+    # watchdog could print a verdict (micro_sdpa, B70); frontend and kernel sessions share it.
+    from xe_forge.engines.claude_engine import claude_env
+    from xe_forge.frontend.agent import TIMEOUT
+
+    config = SimpleNamespace(llm=SimpleNamespace(api_base=None, api_key=None, model=None))
+    monkeypatch.delenv("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", raising=False)
+    assert claude_env(config)["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] == str(TIMEOUT * 1000)
+    monkeypatch.setenv("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", "5")
+    assert claude_env(config)["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] == "5"  # the caller's wins

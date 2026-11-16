@@ -508,7 +508,9 @@ def _run_builtin_watched(args=None) -> int:
 
     from xe_forge.config import get_config
 
-    timeout = get_config().external.timeout * max(1, len(_weights(args)) if args else 1)
+    # Per shape; XE_FORGE_BENCHMARK_TIMEOUT lets a caller give up on a hang sooner than a build.
+    per_shape = int(os.environ.get("XE_FORGE_BENCHMARK_TIMEOUT", get_config().external.timeout))
+    timeout = per_shape * max(1, len(_weights(args)) if args else 1)
     child = subprocess.Popen(
         [sys.executable, "-c", "from xe_forge.skills import main; main()", *sys.argv[1:]],
         env={**os.environ, _CHILD_ENV: "1"},
@@ -522,7 +524,7 @@ def _run_builtin_watched(args=None) -> int:
         print("Correctness: FAILED")
         print("VERDICT: TIMEOUT")
         print(
-            f"Error: the benchmark did not finish within {timeout}s (EXTERNAL_TIMEOUT) and was "
+            f"Error: the benchmark did not finish within {timeout}s (XE_FORGE_BENCHMARK_TIMEOUT or EXTERNAL_TIMEOUT, per shape) and was "
             "killed; a kernel that never completes -- a missing barrier, a deadlock, an "
             "out-of-bounds loop -- hangs the device this way."
         )

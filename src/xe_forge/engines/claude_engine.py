@@ -35,6 +35,12 @@ def claude_env(config) -> dict[str, str]:
         # bare model id.
         env.setdefault("ANTHROPIC_MODEL", llm.model.split("/")[-1])
     env.setdefault("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "1")
+    # Headless claude stops a backgrounded command at its own ceiling, before a build or
+    # the benchmark's watchdog (EXTERNAL_TIMEOUT per shape) can report; every session,
+    # frontend or kernel, waits as long as an agent session may run.
+    from xe_forge.frontend.agent import TIMEOUT
+
+    env.setdefault("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", str(TIMEOUT * 1000))
     return env
 
 

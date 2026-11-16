@@ -26,9 +26,7 @@ def run(template: str, context: dict, cwd: Path, answer: str, python: str, max_t
     path = cwd / answer
     path.unlink(missing_ok=True)
     (cwd / "session.log").unlink(missing_ok=True)
-    env = backend.env(config)
-    # Headless claude kills background work after this ceiling; builds need longer.
-    env["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] = str(TIMEOUT * 1000)
+    env = backend.env(config)  # lifts headless claude's background ceiling to TIMEOUT
     prompt = render(template, **{"python": python, "answer": answer, **context}) + render(
         "frontend-rules.md.j2", python=python, answer=answer
     )
