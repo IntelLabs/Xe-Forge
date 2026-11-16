@@ -52,20 +52,41 @@ STEPS_FULL, STEPS_ONE, TIMEOUT = 20, 1, 5400
 # `env` is what gen_<model>.py needs to match diffusers_ref.py's own fixed choices.
 MODELS = [
     # `reps`: an image model's per-step cost is a sliver of its load, so it needs more runs.
-    {"tag": "vision-pixart-sigma", "patch": "patch-1", "label": "PixArt-Sigma 1024x1024",
-     "reps": 5, "slope_steps": 100, "env": {}},
-    {"tag": "vision-sd15", "patch": "patch-2", "label": "SD 1.5 512x512", "reps": 5,
-     "slope_steps": 100,
-     # patch-2 holds the winning pipeline; diffusers_ref.py lives in patch-1.
-     "diffusers_from": "patch-1", "env": {}},
-    {"tag": "vision-cogvideox-2b", "patch": "patch-1", "label": "CogVideoX-2B 480x720x49",
-     "reps": 3, "env": {}},
-    {"tag": "vision-hunyuanvideo", "patch": "patch-1", "label": "HunyuanVideo 544x960x49",
-     "reps": 3,
-     # The gate used fp8 without offload to fit 32 GB. diffusers_ref.py is bf16 + model CPU
-     # offload, which is also what the capture served, so arm B must match it or the
-     # comparison is fp8 against bf16.
-     "env": {"GEN_QUANTIZATION": "", "GEN_CPU_OFFLOAD": "1"}},
+    {
+        "tag": "vision-pixart-sigma",
+        "patch": "patch-1",
+        "label": "PixArt-Sigma 1024x1024",
+        "reps": 5,
+        "slope_steps": 100,
+        "env": {},
+    },
+    {
+        "tag": "vision-sd15",
+        "patch": "patch-2",
+        "label": "SD 1.5 512x512",
+        "reps": 5,
+        "slope_steps": 100,
+        # patch-2 holds the winning pipeline; diffusers_ref.py lives in patch-1.
+        "diffusers_from": "patch-1",
+        "env": {},
+    },
+    {
+        "tag": "vision-cogvideox-2b",
+        "patch": "patch-1",
+        "label": "CogVideoX-2B 480x720x49",
+        "reps": 3,
+        "env": {},
+    },
+    {
+        "tag": "vision-hunyuanvideo",
+        "patch": "patch-1",
+        "label": "HunyuanVideo 544x960x49",
+        "reps": 3,
+        # The gate used fp8 without offload to fit 32 GB. diffusers_ref.py is bf16 + model CPU
+        # offload, which is also what the capture served, so arm B must match it or the
+        # comparison is fp8 against bf16.
+        "env": {"GEN_QUANTIZATION": "", "GEN_CPU_OFFLOAD": "1"},
+    },
 ]
 
 
@@ -119,7 +140,7 @@ def _measure(model: dict, keep: Path) -> dict:
     for arm in ("A", "B"):  # discarded: pulls the weights into the page cache
         _one(model, arm, STEPS_ONE, "warm-up", None)
     for rep in range(1, model["reps"] + 1):
-        for steps in points:        # interleaved, so warm-up drift cannot bias the slope
+        for steps in points:  # interleaved, so warm-up drift cannot bias the slope
             for arm in ("A", "B"):
                 first = rep == 1 and steps == STEPS_FULL
                 dt, why = _one(model, arm, steps, f"r{rep}", keep if first else None)

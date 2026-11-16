@@ -38,14 +38,31 @@ STEPS, GENS, TIMEOUT = 20, 4, 7200
 # Same four runs and the same fairness fix as bench.py: HunyuanVideo's arm B must be bf16 with
 # offload, which is what its capture served and what its diffusers reference uses.
 MODELS = [
-    {"tag": "vision-pixart-sigma", "patch": "patch-1", "label": "PixArt-Sigma 1024x1024",
-     "env": {}},
-    {"tag": "vision-sd15", "patch": "patch-2", "diffusers_from": "patch-1",
-     "label": "SD 1.5 512x512", "env": {}},
-    {"tag": "vision-cogvideox-2b", "patch": "patch-1", "label": "CogVideoX-2B 480x720x49",
-     "env": {}},
-    {"tag": "vision-hunyuanvideo", "patch": "patch-1", "label": "HunyuanVideo 544x960x49",
-     "env": {"GEN_QUANTIZATION": "", "GEN_CPU_OFFLOAD": "1"}},
+    {
+        "tag": "vision-pixart-sigma",
+        "patch": "patch-1",
+        "label": "PixArt-Sigma 1024x1024",
+        "env": {},
+    },
+    {
+        "tag": "vision-sd15",
+        "patch": "patch-2",
+        "diffusers_from": "patch-1",
+        "label": "SD 1.5 512x512",
+        "env": {},
+    },
+    {
+        "tag": "vision-cogvideox-2b",
+        "patch": "patch-1",
+        "label": "CogVideoX-2B 480x720x49",
+        "env": {},
+    },
+    {
+        "tag": "vision-hunyuanvideo",
+        "patch": "patch-1",
+        "label": "HunyuanVideo 544x960x49",
+        "env": {"GEN_QUANTIZATION": "", "GEN_CPU_OFFLOAD": "1"},
+    },
 ]
 
 
@@ -135,6 +152,7 @@ def main() -> int:
             new = _loop(src, arm)
             print(f"\n----- arm {arm}: {src}")
             import difflib
+
             print("\n".join(difflib.unified_diff(src.read_text().splitlines(),
                                                  new.splitlines(), lineterm="", n=1)))  # fmt: skip
         return 0
@@ -170,7 +188,9 @@ def main() -> int:
         report[model["tag"]] = r
         (OUT / "report.json").write_text(json.dumps(report, indent=1) + "\n")
     print("\n" + "=" * 100)
-    print("Generation only, model already loaded. A = diffusers, B = vLLM-Omni. x > 1: omni faster.")
+    print(
+        "Generation only, model already loaded. A = diffusers, B = vLLM-Omni. x > 1: omni faster."
+    )
     print(f"{'model':26s} {'A cold':>9s} {'A warm':>9s} {'B cold':>9s} {'B warm':>9s} "
           f"{'x warm':>7s} {'x cold':>7s} {'spreadA':>8s} {'spreadB':>8s}")  # fmt: skip
     for tag, r in report.items():

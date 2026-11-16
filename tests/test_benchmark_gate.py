@@ -468,6 +468,21 @@ def test_a_hung_builtin_is_killed_with_a_verdict(monkeypatch, capsys):
     assert "Performance:" not in out
 
 
+def test_a_hung_builtin_gives_up_at_the_benchmark_timeout_not_the_build_one(monkeypatch, capsys):
+    import subprocess
+    import time
+
+    popen = subprocess.Popen
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: popen(["sleep", "60"], **kw))
+    monkeypatch.setattr(get_config().external, "timeout", 3600)
+    monkeypatch.setenv("XE_FORGE_BENCHMARK_TIMEOUT", "1")
+
+    start = time.monotonic()
+    assert benchmark._run_builtin_watched() == 1
+    assert time.monotonic() - start < 30
+    assert "VERDICT: TIMEOUT" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("value", ["1", "true", "yes", "ON"])
 def test_the_env_var_runs_the_builtin(monkeypatch, _paths_not_taken, value):
     monkeypatch.setenv(benchmark.BUILTIN_ENV, value)
