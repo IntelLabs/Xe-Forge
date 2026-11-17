@@ -64,8 +64,29 @@ in {"error": ...}{% endif %}; record both in meta.json's runtime exactly as give
 everything else that makes a run differ from the next one: one fixed seed, the scheduler and
 guidance the framework uses by default. Do not vary the prompt between the warm-up and the
 measured run.
-{% if frames > 1 %}A video model may round the frame count to what its latent layout allows -- LTX wants 8k+1 --
+{% if frames > 1 %}A video model may round the frame count to what its latent layout allows,
 so record what actually ran in meta.json's runtime, not what was asked for.{% endif %}
+{%- elif workload == "action" -%}
+The workload: a robot policy called {{ calls }} times in a row, one call per control step, on a
+batch of {{ batch }} observation(s){% if steps %}, each call denoising its actions over {{ steps }} steps{% else %};
+its actions made the way the policy makes them by default (its own denoising step count, if it
+denoises them -- record what ran in meta.json's runtime "steps"){% endif %}. What it sees, these
+camera images, is its input, not a reference to compare against:
+{% for img in input_images %}
+ - {{ img }}
+{% endfor %}
+Map them onto the policy's camera views and history frames in the order given, as its own
+inference entry point takes them, and say in "notes" which went where; a policy that takes
+more views or frames than given, or fewer, cannot run this workload: say so in
+{"error": ...}. The instruction is {{ prompt | tojson }}. The robot state is {% if state %}read from
+{{ state }}{% else %}zeros of the policy's state size{% endif %}; other inputs the policy can do without
+(touch, torque) are left out, and anything it needs that is not given here -- an embodiment or
+robot id, normalisation statistics -- is the checkpoint's own, named in "notes". Record in
+meta.json's runtime exactly what identifies this run, as given here: "prompt" the instruction,
+"input_images" the image paths, "state" {{ state | tojson }} -- the path, not what it holds
+(the values the policy was given may go under another key). Fix everything else
+that makes a run differ from the next one: one fixed seed, the same observation for every
+call. Do not vary the inputs between the warm-up and the measured run.
 {%- else -%}
 The workload: a batch of {{ batch }} sequences of {{ input_len }} prompt tokens each, greedy,
 generating {{ output_len }} tokens with no stop at EOS -- one prefill of the batch and the
@@ -88,7 +109,7 @@ first, outside what is measured.
 Before downloading or running anything large, decide whether this fits the device: the
 model's config (hub metadata, no weights), the device's memory, and how the framework runs
 it at this workload. If it cannot run here -- it does not fit, or it is not a
-{% if workload == "vision" %}model that generates an image from a text prompt{% else %}text decoder that runs on token ids{% endif %} --
+{% if workload == "vision" %}model that generates an image from a text prompt{% elif workload == "action" %}policy that turns camera images, an instruction and a robot state into actions{% else %}text decoder that runs on token ids{% endif %} --
 write {"fits": false, "reason": "<one line>"} as {{ answer }} and stop.
 
 Memory is the usual reason it does not fit, and there are two different answers to it.
@@ -168,8 +189,8 @@ unitrace, which only names the kernels and reads the counters. For the second it
 **XE_FORGE_TRACE_STEPS**, and your launcher has to read it.
 
 This workload repeats one thing many times -- {% if workload == "vision" %}{{ steps }} denoising steps over the same
-transformer{% else %}{{ output_len }} decode steps over the same layers{% endif %}. When XE_FORGE_TRACE_STEPS is in the environment, do that many
-repetitions instead, and change nothing else: same prompt, same seed, {% if workload == "vision" %}same size{% else %}same prompt length{% endif %},
+transformer{% elif workload == "action" %}{{ calls }} calls of the same policy{% else %}{{ output_len }} decode steps over the same layers{% endif %}. When XE_FORGE_TRACE_STEPS is in the environment, do that many
+repetitions instead, and change nothing else: same prompt, same seed, {% if workload == "vision" %}same size{% elif workload == "action" %}same observation{% else %}same prompt length{% endif %},
 same number of repeats of the whole workload. Record what you actually ran in meta.json's
 runtime -- `capture run` compares the two passes' runtime to tell whether you read the
 variable at all, and says so when you did not. Write the output and the trace in both passes
@@ -178,7 +199,7 @@ as usual; the instrumented pass's copies are discarded.
 Honour it even though it looks like it spoils the measurement, because it does not. The
 timed pass keeps the whole workload, and that pass is the measurement. A few repetitions
 still run every kernel the full workload runs, because the shortened run is complete end to
-end -- it still {% if workload == "vision" %}encodes the prompt and decodes the image{% else %}prefills and samples{% endif %} -- so nothing goes
+end -- it still {% if workload == "vision" %}encodes the prompt and decodes the image{% elif workload == "action" %}encodes what it sees and returns actions{% else %}prefills and samples{% endif %} -- so nothing goes
 unnamed; only the call counts fall. What falls with them is the thing that breaks this pass:
 unitrace puts a timing event on every launch and the driver's supply of them is finite, so a
 long workload can exhaust it part way through and lose the whole pass -- after the model has
@@ -196,6 +217,12 @@ a replaced kernel still makes an acceptable picture -- a kernel is kept on a num
 tolerance and a timing comparison, neither of which looks at the output. A person has to,
 and they cannot if the run decoded a video and threw it away. A capture that writes no
 output leaves every patch from this run unjudgeable.
+
+{% elif workload == "action" %}Save the actions the last call returned into $RAW_DIR, beside the trace, as `actions.npy`:
+float32, the array as the policy returns it, before anything sends it to a robot. Nothing
+downstream can tell whether a replaced kernel still makes the same actions otherwise -- a
+kernel is kept on a numeric tolerance and a timing, neither of which looks at what the robot
+would be told to do.
 
 {% endif %}Your launcher is run again later, and not only here. The optimize step re-runs it to
 compare a patched build against an unpatched one, in a freshly built environment with
@@ -224,12 +251,13 @@ run both again until parse passes. Report the numbers it prints; do not edit raw
 capture.json yourself.
 {% if refused %}
 launcher/run.sh here already captured this run: fix it, do not start over. Its capture was
-refused once its ops were named (`capture parse raw -o capture.json --names names.json`):
+refused:
 {% for p in refused %}  - {{ p }}
-{% endfor %}The naming agent saw these and cannot change what was captured. Find in the launcher
-and raw/ why, fix it and run both commands again (the named parse too, to see what is left:
+{% endfor %}Find in the launcher and raw/ why, fix it and run both commands again; when names.json
+is here, the named parse too (`capture parse raw -o capture.json --names names.json`), to see
+what is left -- the naming agent saw these and cannot change what was captured, and
 names.json is the old naming, rewritten once you answer, so a problem in its answer may
-remain); then the tool decides. If the launcher already records exactly what ran and the
+remain. Then the tool decides. If the launcher already records exactly what ran and the
 problem is the naming's, change nothing and write {"error": ...} saying why.
 {% endif %}
 Write {{ answer }}: {"launcher": "launcher/run.sh", "capture": "capture.json", "notes":

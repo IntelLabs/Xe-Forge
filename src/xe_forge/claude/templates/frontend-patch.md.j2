@@ -27,6 +27,19 @@ interpreter is {{ python }}.
    penalty, the checkpoint's generation_config ignored -- and write the generated ids to
    $OUT/tokens.json as [[ids of sequence 0], ...]. The check sets those four variables (a
    natural-text prompt, the tokens it scores); read them from the environment, no defaults.
+{% elif workload == "action" %} - Write generate.sh here: under $FRAMEWORK_PYTHON, call the policy {{ model }} once with the
+   framework, on the GPU, eagerly, on the camera images {{ input_images | join(", ") }}, the
+   instruction {{ prompt | tojson }}, the robot state {% if state %}in {{ state }}{% else %}as zeros{% endif %}{% if steps %} and {{ steps }} denoising steps{% endif %},
+   with `seed=42`, and write into $OUT, each a float32 `.npy` of the array as the policy holds it:
+     - `prompt_embeds.npy` -- what its vision-language backbone produced for that observation
+       and instruction. An op the action head shares with the backbone changes it too, so it
+       cannot be assumed unchanged;
+     - `latent_step1.npy` -- the action latent after the **first** denoise step, and
+       `latent_final.npy` -- after the last, before un-normalising (for a policy that does
+       not denoise: its first decoded action step and all of them);
+     - `actions.npy` -- the actions it returns.
+   Switch off anything that makes one run differ from the next: CPU or layerwise offload,
+   autotuning.
 {% else %} - Write generate.sh here: under $FRAMEWORK_PYTHON, run {{ model }} with the framework, on
    the GPU, eagerly, with the prompt {{ prompt | tojson }}{% if negative_prompt %} (negative
    prompt {{ negative_prompt | tojson }}){% endif %} and `seed=42`, one output, and write into $OUT:
@@ -41,9 +54,10 @@ interpreter is {{ python }}.
    into the next, so a rounding difference grows with every step; at step 1 it has not grown
    yet, and a real defect still stands out by orders of magnitude. Switch off anything that
    makes one run differ from the next: CPU or layerwise offload, autotuning.
- - generate.sh must also honour `XE_FORGE_NATIVE=1`: the same run, with the framework's own
-   plain-torch path instead of your new op -- vLLM's `custom_ops: ["none"]` (or `-<op name>`
-   for one op) and the torch/SDPA attention backend. Nothing else changes: same weights, same
+{% endif %}{% if workload != "text" %} - generate.sh must also honour `XE_FORGE_NATIVE=1`: the same run, with the framework's own
+   existing implementation in place of your new op -- a switch it offers that turns that op
+   off, or its plain or portable path for it; find it in its docs and tests, and say which in
+   notes. Nothing else changes: same weights, same
    seed, same precision. That is the reference the check compares you against, and the two
    wall times are the op gain your patch is worth.
 {% endif %}
@@ -73,6 +87,10 @@ interpreter is {{ python }}.
    the later ones have amplified the difference. The op gain is reported with the verdict.
 {% endif %}   A FAIL there is the patch's: fix it, never the check.
 
-Write {{ answer }}: patch.json's content with "notes": "<what the patch adds and how it was
+{% if redo | default(none) %}This directory already holds your patch for it, and its check, run again, fails:
+{% for p in redo %}  - {{ p }}
+{% endfor %}Fix it here; do not start over.
+
+{% endif %}Write {{ answer }}: patch.json's content with "notes": "<what the patch adds and how it was
 verified>", once the check passes; or {"error": "<why>", "next_step": "<what a person would
 do>"}.

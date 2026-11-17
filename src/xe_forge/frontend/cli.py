@@ -36,9 +36,8 @@ def _tool(python: str, *argv: str, problems: list | None = None, **env: str) -> 
         return subprocess.call(cmd, env=full)
     proc = subprocess.run(cmd, env=full, stdout=subprocess.PIPE, text=True)
     print(proc.stdout, end="", flush=True)
-    problems += [
-        ln.split(": PROBLEM ", 1)[1] for ln in proc.stdout.splitlines() if ": PROBLEM " in ln
-    ]
+    for ln in proc.stdout.splitlines():  # a tool's PROBLEM lines, a check's FAIL lines
+        problems += [ln.split(m, 1)[1] for m in (": PROBLEM ", ": FAIL ") if m in ln][:1]
     return proc.returncode
 
 
@@ -101,16 +100,21 @@ WORKLOADS = {
         "prompt",
         "negative_prompt",
     ),
+    # A robot policy (vision-language-action): what it sees, what it is told, the robot's
+    # state, and the actions it returns -- denoised over `steps` when it denoises them.
+    "action": ("batch", "steps", "calls", "input_images", "state", "prompt"),
 }
-# The prompt a vision run uses when none is given: one fixed text, so captures of the same
-# model on two frameworks, or two days, run the same work.
+# The prompt a vision run, or the instruction an action run, uses when none is given: one
+# fixed text, so captures of the same model on two frameworks, or two days, run the same work.
 VISION_PROMPT = "A red fox standing in fresh snow at the edge of a pine forest, morning light"
+ACTION_PROMPT = "Pick up the red cube and put it in the bowl"
 
 
 def _add_workload_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--workload", default="text", choices=sorted(WORKLOADS),
                    help="what one measured run is: a text decoder's prefill and decode "
-                   "steps, or a vision model's denoising steps at a resolution")  # fmt: skip
+                   "steps, a vision model's denoising steps at a resolution, or a robot "
+                   "policy's calls on what it sees")  # fmt: skip
     p.add_argument("--batch", type=int, default=1)
     p.add_argument("--quantization", default="auto",
                    help="how the weights are quantized: auto (the checkpoint's own), the "
@@ -124,22 +128,32 @@ def _add_workload_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--input-len", type=int, default=512, help="prompt tokens [text]")
     p.add_argument("--output-len", type=int, default=32, help="tokens generated [text]")
     # vision
-    p.add_argument("--steps", type=int, default=28, help="denoising steps [vision]")
+    p.add_argument("--steps", type=int, default=None,
+                   help="denoising steps [vision: default 28; action: the policy's own when "
+                   "not given, recorded as it ran]")  # fmt: skip
     p.add_argument("--height", type=int, default=1024, help="image height [vision]")
     p.add_argument("--width", type=int, default=1024, help="image width [vision]")
     p.add_argument("--input-image", action="append", default=[], metavar="PATH",
-                   help="an image the model takes as input [vision]: the one being edited, "
-                   "or the first frame of a video. Repeatable -- some editing models take "
+                   help="an image the model takes as input [vision, action]: the one being "
+                   "edited, the first frame of a video, or a camera view a policy sees -- "
+                   "required for action. Repeatable -- some editing models take "
                    "several references. Its size decides the shapes the model runs at, so "
                    "it is part of what a capture is: a capture made with one image is not "
                    "a capture made with another")  # fmt: skip
     p.add_argument("--frames", type=int, default=1,
                    help="frames to generate [vision]; 1 is a still image. A video model "
-                   "may round this up -- LTX wants 8k+1 -- so record what actually ran")  # fmt: skip
-    p.add_argument("--prompt", help=f"the text prompt [vision], default {VISION_PROMPT!r}. "
-                   "Part of what a capture is, as the input images are")  # fmt: skip
+                   "may round this up to what its latent layout allows, so record what actually ran")  # fmt: skip
+    p.add_argument("--prompt", help=f"the text prompt [vision], default {VISION_PROMPT!r}; "
+                   f"the instruction [action], default {ACTION_PROMPT!r}. Part of what a "
+                   "capture is, as the input images are")  # fmt: skip
     p.add_argument("--negative-prompt", help="the negative prompt [vision], for a pipeline "
                    "that takes one")  # fmt: skip
+    # action
+    p.add_argument("--calls", type=int, default=8,
+                   help="policy calls in one measured run, one per control step [action]")  # fmt: skip
+    p.add_argument("--state", metavar="PATH",
+                   help="the robot state the policy is given [action], a .npy or .json; "
+                   "zeros of the policy's state size when not given")  # fmt: skip
 
 
 def workload(a) -> dict:
@@ -158,6 +172,8 @@ def workload(a) -> dict:
             # the field still matches -- the trap quantization already taught us.
             paths = getattr(a, "input_image", []) or []
             v = sorted(str(Path(x).resolve()) for x in paths) or None
+        elif k == "state" and v:
+            v = str(Path(v).resolve())
         out[k] = v
     return out
 
@@ -204,7 +220,7 @@ def _image_paths(value) -> list[str] | None:
 def _same_workload(want: dict, have: dict) -> bool:
     """Whether a capture is of the workload asked for, comparing each field as it means."""
     for key in want:
-        if key == "input_images":
+        if key in ("input_images", "state"):
             if _image_paths(want[key]) != _image_paths(have.get(key)):
                 return False
         elif key in ("prompt", "negative_prompt"):
@@ -218,6 +234,38 @@ def _same_workload(want: dict, have: dict) -> bool:
         elif want[key] != have.get(key):
             return False
     return True
+
+
+def _wanted(a) -> dict:
+    """What identifies the run ``a`` asks for, as JSON reads it back."""
+    want = {"framework": a.framework, "model": a.model, **workload(a),
+            "prompts": a.inputs.get("prompts")}  # fmt: skip
+    want |= {
+        k: getattr(a, k)
+        for k in ("precision", "quantization", "kv_cache")
+        if getattr(a, k) != "auto"
+    }  # declared ones, written verbatim
+    if want.get("steps", 0) is None:  # left to the policy: whatever it ran is this run
+        del want["steps"]
+    return json.loads(json.dumps(want))
+
+
+def _not_this_run(a, cap) -> str | None:
+    """Why ``cap`` is not a capture of the run ``a`` asks for; None when it is."""
+    rt, want = cap.run.get("runtime") or {}, _wanted(a)
+    model_was = (cap.run.get("model") or {}).get("name")
+    # The run's one input is its prompt file; other files the launcher records (a tokenizer)
+    # are its own, checked by the parse, not part of which run this is.
+    have = {"framework": cap.run.get("framework"), **{k: rt.get(k) for k in workload(a)},
+            "prompts": (rt.get("inputs") or {}).get("prompts")}  # fmt: skip
+    have |= {k: str(rt.get(k)) for k in ("precision", "quantization", "kv_cache") if k in want}
+    if "quantization" in want and have["quantization"].rpartition(":")[0] == want["quantization"]:
+        have["quantization"] = want["quantization"]  # a declared scheme, the stored dtype added
+    want.pop("model")
+    if _same_workload(want, have) and _same_model(a.model, model_was):
+        return None
+    return (f"meta.json's runtime records {have} of {model_was!r}; this run is {want} of "
+            f"{a.model!r} -- record what ran exactly as the capture was asked")  # fmt: skip
 
 
 def _same_model(want: str, have: str | None) -> bool:
@@ -259,9 +307,11 @@ def _collect_outputs(run_dir: Path) -> None:
         if not place.is_dir():
             continue
         for src in sorted(place.iterdir()):
-            if src.suffix.lower() not in {".png", ".jpg", ".jpeg", ".mp4", ".wav"}:
+            # A policy's actions are a few hundred bytes: small, and still the whole output.
+            actions = src.name == "actions.npy"
+            if not actions and src.suffix.lower() not in {".png", ".jpg", ".jpeg", ".mp4", ".wav"}:
                 continue
-            if not src.is_file() or src.stat().st_size < 1024:
+            if not src.is_file() or (not actions and src.stat().st_size < 1024):
                 continue
             prefix = "" if place == run_dir else f"{place.parent.name}-{place.name}-"
             name = (prefix + src.name).replace(f"{run_dir.name}-", "")
@@ -275,6 +325,107 @@ def _collect_outputs(run_dir: Path) -> None:
             f"run: {len(seen)} generated output(s) in {out} -- look at these before using "
             "any patch from this run"
         )
+
+
+def _source(spec: str | None) -> tuple[str | None, str | None]:
+    """``URL@REF`` -> (URL, REF). An scp-style ``git@host:org/repo`` has its @ before the
+    host, so an @ is a ref only when what precedes it already looks like a repository."""
+    if not spec:
+        return None, None
+    url, sep, ref = spec.rpartition("@")
+    return (url, ref) if sep and "/" in url else (spec, None)
+
+
+def _setup_environ(got: dict, venv: Path) -> tuple[dict, list[str]]:
+    """(this process's environment with the build's additions, why they are refused).
+
+    A build only adds: ``env`` sets variables this node leaves unset, ``prepend`` puts
+    directories inside the venv before a path variable's own value. A build that recorded a
+    node's whole library path ran there and on no node set up otherwise (B70, RLDX-1 setup).
+    """
+    full, problems = dict(os.environ), []
+    for k, v in (got.get("env") or {}).items():
+        if k in os.environ and os.environ[k] != str(v):
+            problems.append(f"env {k} replaces this node's own value; extend a path with prepend")
+        full[str(k)] = str(v)
+    for k, dirs in (got.get("prepend") or {}).items():
+        dirs = [str(d) for d in (dirs if isinstance(dirs, list) else [dirs])]
+        problems += [f"prepend {k}: {d} is not inside {venv}" for d in dirs
+                     if not d.startswith(str(venv) + os.sep)]  # fmt: skip
+        full[str(k)] = os.pathsep.join([*dirs, *filter(None, [os.environ.get(k)])])
+    return full, problems
+
+
+# What setup's additions replaced (None: unset). They are the framework's: Xe-Forge's own
+# sessions run without them, or its torch loads the framework's runtime libraries (B70,
+# RLDX-1: libur_loader from the RLDX venv under Xe-Forge's libsycl, every optimize exit 1).
+_NODE_ENV: dict[str, str | None] = {}
+
+
+def setup(a, run_dir: Path, turns: int) -> str | None:
+    """The framework's interpreter, from a venv the setup agent builds; None when there is none.
+
+    Built once per framework and source: a venv whose record (``xe-forge-setup.json``) asks for
+    the same is reused, its additions to the environment applied again. What the agent built
+    is not the verdict: torch must see the device under the venv's python, checked here.
+    """
+    import hashlib
+
+    from xe_forge.frontend import CACHE
+
+    asked = {"framework": a.framework, "source": a.framework_source}
+    key = hashlib.sha256(json.dumps(asked, sort_keys=True).encode()).hexdigest()[:12]
+    venv = Path(a.framework_venv or CACHE / "frameworks" / f"{a.framework}-{key}")
+    venv = venv.expanduser().absolute()
+    record = venv / "xe-forge-setup.json"
+    got = json.loads(record.read_text()) if record.is_file() else None
+    if got is not None and got.get("asked") != asked:
+        print(f"setup: {venv} holds {got.get('asked')}, not {asked}; pass another "
+              "--framework-venv", file=sys.stderr)  # fmt: skip
+        return None
+    redo = _setup_environ(got, venv)[1] if got else []
+    if got is None or redo or not Path(got.get("python", "")).is_file():
+        if redo:
+            print(f"setup: {record} is refused ({'; '.join(redo)}); back to the agent", flush=True)
+        source, ref = _source(a.framework_source)
+        context = {"framework": a.framework, "model": a.model, "device": a.device,
+                   "source": source, "ref": ref, "venv": str(venv), "redo": redo}  # fmt: skip
+        got = _agent("setup", "frontend-setup.md.j2", context, run_dir / "setup", "setup.json",
+                     sys.executable, turns)  # fmt: skip
+        if got is None:
+            return None
+        python = str(got.get("python", ""))
+        if not python.startswith(str(venv) + os.sep) or not Path(python).is_file():
+            print(f"setup: the agent's python {python!r} is not in {venv}", file=sys.stderr)
+            return None
+        environ, problems = _setup_environ(got, venv)
+        if problems:
+            print(f"setup: {'; '.join(problems)}", file=sys.stderr)
+            return None
+        probe = "import sys, torch; d = getattr(torch, sys.argv[1], None); sys.exit(not (d and d.is_available()))"
+        if subprocess.call([python, "-c", probe, a.device], env=environ) != 0:
+            print(f"setup: torch under {python} does not see the {a.device}", file=sys.stderr)
+            return None
+        got = {**got, "asked": asked}
+        record.write_text(json.dumps(got, indent=1) + "\n")
+    # The build is part of which run this is: a capture made in another is not this one's.
+    kept = run_dir / "setup" / "framework.json"
+    was = json.loads(kept.read_text()) if kept.is_file() else None
+    if was and (run_dir / "capture.json").is_file() and was.get("commit") != got.get("commit"):
+        print(f"setup: {run_dir / 'capture.json'} was captured on {a.framework} "
+              f"{was.get('commit')}, not {got.get('commit')}; remove it to capture again",
+              file=sys.stderr)  # fmt: skip
+        return None
+    kept.parent.mkdir(parents=True, exist_ok=True)
+    kept.write_text(json.dumps(got, indent=1) + "\n")
+    for k, v in _setup_environ(got, venv)[0].items():
+        if os.environ.get(k) != v:
+            _NODE_ENV.setdefault(k, os.environ.get(k))
+            os.environ[k] = v
+    a.framework_note = [*a.framework_note, *(str(n) for n in got.get("notes") or [])]
+    print(f"setup: {a.framework} {got.get('version')} ({got.get('source')}@{got.get('ref')}, "
+          f"{str(got.get('commit'))[:12]}) in {venv}", flush=True)  # fmt: skip
+    return got["python"]
 
 
 def capture(
@@ -298,9 +449,25 @@ def capture(
                "precision": getattr(a, "precision", "auto"),
                "quantization": getattr(a, "quantization", "auto"),
                "kv_cache": getattr(a, "kv_cache", "auto"), "refused": refused or []}  # fmt: skip
-    for round_ in range(1, 4):
-        got = _agent("capture", "frontend-capture.md.j2", context, run_dir, "captured.json",
-                     python, turns)  # fmt: skip
+    stack = run_dir / "stack.json"
+    for _ in range(3):
+        rounds = json.loads(stack.read_text())["patches"] if stack.is_file() else []
+        work = run_dir / f"patch-{len(rounds) + 1}"  # after the stack: a resume never overwrites
+        # A resume into a patch that was asked on this stack and workload: the capture agent
+        # is not asked again what it already answered.
+        kept = (
+            json.loads((work / "request.json").read_text())
+            if (work / "request.json").is_file()
+            else None
+        )
+        if kept and (kept.get("python"), kept.get("model"), kept.get("workload")) != (
+            python,
+            a.model,
+            json.loads(json.dumps(workload(a))),
+        ):
+            kept = None
+        got = kept or _agent("capture", "frontend-capture.md.j2", context, run_dir,
+                             "captured.json", python, turns)  # fmt: skip
         if got is None:
             return 1, python
         if got.get("fits") is False:
@@ -313,19 +480,32 @@ def capture(
         if "unsupported" not in got:
             # What the agent reports is not the verdict: the tool checks raw/ again here.
             raw, out = str(run_dir / "raw"), str(run_dir / "capture.json")
+            if a.workload == "action" and not (run_dir / "raw" / "actions.npy").is_file():
+                print(f"capture: no {raw}/actions.npy -- nothing could tell whether a patch "
+                      "changes what the robot is told to do", file=sys.stderr)  # fmt: skip
+                return 1, python
             return _tool(python, "capture", "parse", raw, "-o", out), python
         print(f"capture: {a.framework} lacks {got['unsupported']} {got.get('what')} "
               f"({got.get('reason')}); a patch first", flush=True)  # fmt: skip
-        work = run_dir / f"patch-{round_}"
         ctx = {**context, "what": got.get("what"), "reason": got.get("reason"), "repos": repos}
-        if (
-            _agent("patch", "frontend-patch.md.j2", ctx, work, "patched.json", python, turns)
-            is None
-        ):
-            return 1, python
+        # Finished before (patched.json exists only once the agent answered): checked again,
+        # not redone. A patch is the agent's hours; its check is minutes.
+        done = kept is not None and all(
+            (work / f).is_file() for f in ("patched.json", "patch.json")
+        )
+        if not done:
+            work.mkdir(parents=True, exist_ok=True)
+            request = {k: got.get(k) for k in ("unsupported", "what", "reason")}
+            (work / "request.json").write_text(json.dumps(
+                {**request, "python": python, "model": a.model, "workload": workload(a)},
+                indent=1) + "\n")  # fmt: skip
+            if _agent("patch", "frontend-patch.md.j2", ctx, work, "patched.json", python,
+                      turns) is None:  # fmt: skip
+                return 1, python
         check = ["patch", "check", str(work), "--repos", str(repos), "--framework-python",
-                 python, "--model", a.model, "--batch", str(a.batch), "--input-len",
-                 str(getattr(a, "input_len", 0))]  # fmt: skip
+                 python, "--model", a.model, "--batch", str(a.batch)]  # fmt: skip
+        if a.workload == "text":
+            check += ["--input-len", str(a.input_len)]
         # An image or a video has no token to teacher-force, but it still has a reference:
         # `patch check` runs generate.sh a second time with XE_FORGE_NATIVE=1 -- the
         # framework's own plain-torch path for the same op -- and compares the two, stage by
@@ -336,12 +516,19 @@ def capture(
             check += ["--prompt-file", context["inputs"]["prompts"]["file"]]
         if str(context["precision"]).startswith(("float", "bfloat")):  # declared, not auto
             check += ["--precision", context["precision"]]
-        if _tool(python, *check) != 0:  # the gate is the tool's, not the agent's word
+        redo: list = []
+        code = _tool(python, *check, problems=redo)  # the gate is the tool's, not the agent's word
+        if code != 0 and done:
+            print(f"capture: the patch kept in {work} fails its check; back to its agent",
+                  file=sys.stderr)  # fmt: skip
+            if _agent("patch", "frontend-patch.md.j2", {**ctx, "redo": redo}, work,
+                      "patched.json", python, turns) is None:  # fmt: skip
+                return 1, python
+            code = _tool(python, *check)
+        if code != 0:
             print(f"capture: the patch in {work} does not pass its check", file=sys.stderr)
             return 1, python
         python = json.loads((work / "patch.json").read_text())["python"]
-        stack = run_dir / "stack.json"
-        rounds = json.loads(stack.read_text())["patches"] if stack.is_file() else []
         stack.write_text(json.dumps({"python": python, "patches": [*rounds, str(work)]},
                                     indent=1) + "\n")  # fmt: skip
     print("capture: still unsupported after 3 patches", file=sys.stderr)
@@ -768,8 +955,10 @@ def fuse(capture_path: Path, run_dir: Path, a, python, turns, repos) -> Path | N
 
 def _session_env() -> dict:
     """This interpreter's bin first on PATH: the session's ``python`` and ``xe-forge-skill``
-    are then the ones running it, however ``run`` itself was started."""
-    env = dict(os.environ)
+    are then the ones running it, however ``run`` itself was started; the environment as it was
+    before the framework's setup added to it."""
+    env = {k: v for k, v in os.environ.items() if k not in _NODE_ENV}
+    env.update({k: v for k, v in _NODE_ENV.items() if v is not None})
     env["PATH"] = os.pathsep.join([str(Path(sys.executable).parent), env.get("PATH", "")])
     return env
 
@@ -863,17 +1052,26 @@ def main(argv: list[str]) -> int:
 
     p = argparse.ArgumentParser(prog="xe-forge run", allow_abbrev=False)
     p.add_argument("-o", "--output", type=Path, required=True, help="run directory")
-    p.add_argument("--framework", required=True, help="what runs the model (vllm, openvino, ...)")
+    p.add_argument("--framework", required=True, help="what runs the model, by its "
+                   "project's name: free text, handed to the agents")  # fmt: skip
     p.add_argument("--model", required=True, help="HF id or local path")
-    p.add_argument("--framework-python", required=True, help="the framework's interpreter")
+    p.add_argument("--framework-python",
+                   help="the framework's interpreter, already installed; without it the setup "
+                   "agent builds a venv for --framework on this device, from its own install "
+                   "docs, and later runs reuse it")  # fmt: skip
+    p.add_argument("--framework-source", metavar="URL[@REF]",
+                   help="the repository the setup agent builds from, at a tag, branch or "
+                   "commit (default: the framework's upstream, latest release)")  # fmt: skip
+    p.add_argument("--framework-venv", type=Path, metavar="DIR",
+                   help="where the setup agent builds it (default: "
+                   "$XE_FORGE_CACHE/frameworks/<framework>-<hash of the source>)")  # fmt: skip
     p.add_argument(
         "--framework-note", action="append", default=[], metavar="TEXT",
         help="a constraint the capture agent cannot discover: a setting this framework "
         "needs on this machine, and why. Repeatable. The code never reads it -- it is "
-        "handed to the agent verbatim. Example: LTX on XPU needs "
-        "--stage-overrides '{\"0\":{\"extras\":{\"ltx2_use_conv_vae\":true}}}' because the "
-        "default VAE decoder loads a NATTEN kernel that has no XPU build, and the failure "
-        "lands after the whole denoise is paid for",
+        "handed to the agent verbatim. Example: a stage option that swaps a decoder whose "
+        "kernel has no build for this device, where the failure would land only after the "
+        "whole run is paid for",
     )  # fmt: skip
     p.add_argument(
         "--reference-python",
@@ -933,7 +1131,7 @@ def main(argv: list[str]) -> int:
 
         given = {k: getattr(a, k) for k in rows.KEYS}
         if a.workload == "text" and (a.prompt is not None or a.negative_prompt is not None):
-            raise ValueError("--prompt is for --workload vision; a text run's prompts are "
+            raise ValueError("--prompt is for --workload vision or action; a text run's prompts are "
                              "--prompt-file")  # fmt: skip
         if a.workload != "text":
             text_only = {"--rows": a.rows, "--prompt-file": a.prompt_file,
@@ -943,7 +1141,23 @@ def main(argv: list[str]) -> int:
             # AttributeError before the run started.
             if text_given := [f for f, v in text_only.items() if v]:
                 raise ValueError(f"{', '.join(text_given)}: for --workload text only")
-            a.prompt = VISION_PROMPT if a.prompt is None else a.prompt
+            default = ACTION_PROMPT if a.workload == "action" else VISION_PROMPT
+            a.prompt = default if a.prompt is None else a.prompt
+        if a.workload == "vision" and a.steps is None:
+            a.steps = 28
+        if a.workload == "action" and not a.input_image:
+            raise ValueError("--workload action needs --input-image: a policy acts on what it sees")
+        if a.workload == "action" and a.negative_prompt is not None:
+            raise ValueError("--negative-prompt is for --workload vision")
+        if a.workload != "action" and a.state is not None:
+            raise ValueError("--state is for --workload action")
+        if a.state is not None and (
+            not Path(a.state).is_file() or Path(a.state).suffix.lower() not in (".npy", ".json")
+        ):
+            raise ValueError(f"--state {a.state}: not a .npy or .json file")
+        if a.framework_python and (a.framework_source or a.framework_venv):
+            raise ValueError("--framework-source and --framework-venv are for the setup agent, "
+                             "which builds the framework only without --framework-python")  # fmt: skip
         if a.rows and any(v is not None for v in given.values()):
             raise ValueError("--rows replaces --batch, --input-len and --output-len")
         # the anchor row (the largest) is the one the capture agent captures
@@ -964,8 +1178,13 @@ def main(argv: list[str]) -> int:
     if missing:
         print(f"run: no such input image: {', '.join(missing)}", file=sys.stderr)
         return 1
+    # Without an interpreter, an agent builds one: every run, so its env and notes apply.
+    framework_python = a.framework_python or setup(a, run_dir, turns)
+    if framework_python is None:
+        print("run: stopped before capture (no framework environment)", file=sys.stderr)
+        return 1
     stack = run_dir / "stack.json"  # a patched framework, when one was needed
-    python = json.loads(stack.read_text())["python"] if stack.is_file() else a.framework_python
+    python = json.loads(stack.read_text())["python"] if stack.is_file() else framework_python
     # The run's inputs (runtime.inputs): a copy in the run dir, so every agent and gate reads
     # one stable path, tied by its sha256. Room for other kinds (images, observations).
     a.inputs = {}
@@ -977,8 +1196,10 @@ def main(argv: list[str]) -> int:
         if not prompts.is_file() or prompts.read_bytes() != Path(a.prompt_file).read_bytes():
             shutil.copyfile(a.prompt_file, prompts)
         a.inputs = {"prompts": {"file": str(prompts), "sha256": _sha256(prompts)}}
-    capture_path = run_dir / "capture.json"
+    capture_path, asked = run_dir / "capture.json", run_dir / "capture-request.json"
     if not capture_path.is_file():
+        run_dir.mkdir(parents=True, exist_ok=True)
+        asked.write_text(json.dumps(_wanted(a), indent=1) + "\n")  # what this capture is of
         code, python = capture(a, python, run_dir, turns, repos)
         if code != 0:
             why = f"killed by signal {-code}" if code < 0 else f"exit {code}"
@@ -987,27 +1208,17 @@ def main(argv: list[str]) -> int:
     from xe_forge.frontend import ir
 
     cap = ir.load(capture_path)  # once; the parse with names below rewrites it for analyze
-    rt = cap.run.get("runtime") or {}
-    want = {"framework": a.framework, **workload(a), "prompts": a.inputs.get("prompts")}
-    # The run's one input is its prompt file; other files the launcher records (a tokenizer)
-    # are its own, checked by the parse, not part of which run this is.
-    have = {"framework": cap.run.get("framework"), **{k: rt.get(k) for k in workload(a)},
-            "prompts": (rt.get("inputs") or {}).get("prompts")}  # fmt: skip
-    for k in (
-        "precision",
-        "quantization",
-        "kv_cache",
-    ):  # declared ones the launcher writes verbatim
-        if getattr(a, k) != "auto":
-            want[k], have[k] = getattr(a, k), str(rt.get(k))
-    if "quantization" in want and have["quantization"].rpartition(":")[0] == want["quantization"]:
-        have["quantization"] = want[
-            "quantization"
-        ]  # a declared scheme, the stored dtype added to it
-    model_was = (cap.run.get("model") or {}).get("name")
-    if not _same_workload(want, have) or not _same_model(a.model, model_was):
-        print(f"run: {capture_path} is a capture of {have} of {model_was!r}, not {want} of "
-              f"{a.model!r}; remove it to capture again", file=sys.stderr)  # fmt: skip
+    problem = _not_this_run(a, cap)
+    if problem and asked.is_file() and json.loads(asked.read_text()) == _wanted(a):
+        # Captured for exactly this run, so the launcher recorded it wrong: its agent fixes it.
+        print(f"run: {problem}; back to the capture agent", file=sys.stderr)
+        code, python = capture(a, python, run_dir, turns, repos, refused=[problem])
+        if code != 0:
+            return code if code > 0 else 1
+        cap = ir.load(capture_path)
+        problem = _not_this_run(a, cap)
+    if problem:
+        print(f"run: {capture_path}: {problem}; remove it to capture again", file=sys.stderr)
         return 1
     code, python = name_and_read(a, cap, run_dir, python, turns, repos)
     if code != 0:
@@ -1048,8 +1259,8 @@ def main(argv: list[str]) -> int:
               "framework's own torch path (patch-*/quality.json, with the op gain), but an "
               "optimized kernel is not: it is kept on a per-kernel tolerance, and --prove "
               "compares time only. A kernel can pass its tolerance and still shift the "
-              "picture over the denoising steps, so look at the images before using any "
-              "patch from this run.")  # fmt: skip
+              "output over the denoising steps, so look at the images or actions before "
+              "using any patch from this run.")  # fmt: skip
     if a.analyze_only:
         return 0
     a.stack_python = python if a.stack_check else None

@@ -1745,6 +1745,12 @@ def test_rows_replace_batch_and_lengths(tmp_path):
     ["--prompt", "a cat"],                                   # a prompt is vision's
     ["--workload", "vision", "--kv-cache", "float8_e4m3fn"],  # no KV cache in a diffusion model
     ["--workload", "vision", "--prompt-file", "p.txt"],      # token prompts are text's
+    ["--workload", "action"],                                # a policy acts on what it sees
+    ["--workload", "action", "--input-image", "v.png", "--negative-prompt", "n"],
+    ["--workload", "action", "--input-image", "v.png", "--kv-cache", "int8"],
+    ["--state", "s.npy"],                                    # a robot state is action's
+    ["--workload", "action", "--input-image", "v.png", "--state", "missing.npy"],
+    ["--framework-source", "https://x/y@v1"],                # the setup agent's, not a given venv's
 ])  # fmt: skip
 def test_run_refuses_the_flags_of_the_other_workload(tmp_path, extra):
     from xe_forge.frontend import cli
@@ -2106,3 +2112,381 @@ def test_no_prompt_is_the_same_whether_none_or_empty():
     assert not _same_workload(want, {**want, "negative_prompt": "blurry"})
     # And a field that is not a prompt keeps comparing exactly: 0 is not None.
     assert not _same_workload({**want, "steps": None}, {**want, "steps": 0})
+
+
+def test_an_action_run_is_a_policy_on_what_it_sees_and_its_agents_save_the_actions(tmp_path):
+    from xe_forge.claude.generator import render
+    from xe_forge.frontend import cli
+
+    a = SimpleNamespace(workload="action", batch=1, steps=None, calls=8, prompt="open it",
+                        input_image=[str(tmp_path / "b.png"), str(tmp_path / "a.png")],
+                        state=str(tmp_path / "s.npy"), framework="fw", model="m", inputs={},
+                        precision="auto", quantization="auto", kv_cache="auto")  # fmt: skip
+    want = cli.workload(a)
+    assert want["input_images"] == sorted(want["input_images"]) and want["state"].endswith("s.npy")
+    assert "steps" not in cli._wanted(a)  # the policy's own: whatever it ran is this run
+    assert cli._wanted(SimpleNamespace(**{**vars(a), "steps": 10}))["steps"] == 10
+    assert not cli._same_workload(want, {**want, "state": None})
+    assert not cli._same_workload({**want, "steps": 10}, {**want, "steps": 4})
+    ctx = dict(model="m", framework="fw", python="py", cache="/c", inputs={}, precision="auto",
+               quantization="auto", kv_cache="auto", refused=[], answer="a.json",
+               framework_notes=[], workload="action", runtime_keys=cli.WORKLOADS["action"],
+               repos="/r", what="x", reason="y", **want)  # fmt: skip
+    capture = render("frontend-capture.md.j2", **ctx)
+    assert "called 8 times" in capture and 'The instruction is "open it"' in capture
+    assert "`actions.npy`" in capture and "the KV cache" not in capture
+    assert f'"state" "{want["state"]}" -- the path, not what it holds' in capture
+    assert "denoising its actions over" not in capture  # no step count given: the policy's own
+    patch = render("frontend-patch.md.j2", **{**ctx, "steps": 4})
+    assert "call the policy m" in patch and "4 denoising steps" in patch
+    assert "`actions.npy`" in patch and "XE_FORGE_NATIVE=1" in patch and "--input-len" not in patch
+
+
+def test_a_policys_actions_are_compared_when_nothing_else_was_saved(tmp_path):
+    import numpy as np
+
+    from xe_forge.frontend import quality
+
+    for arm, v in (("A", 1.0), ("B", 1.0 + 1e-5)):
+        (tmp_path / arm).mkdir()
+        np.save(tmp_path / arm / "actions.npy", np.full((4, 7), v, dtype=np.float32))
+    dirs = {"A": [tmp_path / "A"], "B": [tmp_path / "B"]}
+    judged = quality.quality(tmp_path, dirs, dirs)
+    stage = next(s for s in judged["stages"] if s["stage"] == "actions")
+    assert stage["verdict"] == "pass" and judged["verdict"] == "pass"
+
+
+def test_a_framework_source_is_a_repository_and_maybe_a_ref():
+    from xe_forge.frontend import cli
+
+    assert cli._source("https://github.com/o/r@v1.1.0") == ("https://github.com/o/r", "v1.1.0")
+    assert cli._source("https://github.com/o/r") == ("https://github.com/o/r", None)
+    assert cli._source("git@github.com:o/r") == ("git@github.com:o/r", None)
+    assert cli._source("git@github.com:o/r@release/2") == ("git@github.com:o/r", "release/2")
+    assert cli._source(None) == (None, None)
+
+
+def _setup_args(tmp_path, **kw):
+    return SimpleNamespace(framework="fw", model="m", device="xpu", framework_note=["given"],
+                           framework_source="https://x/fw@v2", framework_venv=tmp_path / "venv",
+                           **kw)  # fmt: skip
+
+
+def _fake_build(tmp_path, calls, sees=True, python=None, commit="c1"):
+    def agent(step, template, context, cwd, answer, py, turns):
+        calls.append((step, template, context))
+        exe = Path(python or f"{context['venv']}/bin/python")
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        exe.write_text(f"#!/bin/sh\nexit {0 if sees else 1}\n")  # the device probe's verdict
+        exe.chmod(0o755)
+        return {
+            "python": str(exe),
+            "source": "https://x/fw",
+            "ref": "v2",
+            "commit": commit,
+            "version": "2.0",
+            "env": {"XF_TEST_SETUP_ATTN": "sdpa"},
+            "notes": ["two views"],
+            "dropped": [{"package": "cuda-only", "why": "CUDA"}],
+        }
+
+    return agent
+
+
+def test_a_framework_the_setup_agent_built_is_reused_with_its_env_and_notes(tmp_path, monkeypatch):
+    from xe_forge.frontend import cli
+
+    calls: list = []
+    monkeypatch.setattr(cli, "_agent", _fake_build(tmp_path, calls))
+    monkeypatch.delenv("XF_TEST_SETUP_ATTN", raising=False)
+    a = _setup_args(tmp_path)
+    python = cli.setup(a, tmp_path / "run", 5)
+    assert python == str(tmp_path / "venv" / "bin" / "python") and len(calls) == 1
+    _, template, context = calls[0]
+    assert template == "frontend-setup.md.j2" and context["ref"] == "v2"
+    assert os.environ["XF_TEST_SETUP_ATTN"] == "sdpa" and a.framework_note == ["given", "two views"]
+    record = json.loads((tmp_path / "venv" / "xe-forge-setup.json").read_text())
+    assert record["asked"] == {"framework": "fw", "source": "https://x/fw@v2"}
+    monkeypatch.delenv("XF_TEST_SETUP_ATTN")
+    b = _setup_args(tmp_path)
+    assert cli.setup(b, tmp_path / "run", 5) == python and len(calls) == 1  # no second build
+    assert os.environ["XF_TEST_SETUP_ATTN"] == "sdpa" and b.framework_note == ["given", "two views"]
+    monkeypatch.delenv("XF_TEST_SETUP_ATTN")
+    # the same venv asked for another source is refused, not rebuilt over
+    other = _setup_args(tmp_path)
+    other.framework_source = "https://x/fw@v3"
+    assert cli.setup(other, tmp_path / "run", 5) is None and len(calls) == 1
+
+
+def test_a_capture_made_on_another_build_of_the_framework_is_refused(tmp_path, monkeypatch):
+    from xe_forge.frontend import cli
+
+    calls: list = []
+    monkeypatch.setattr(cli, "_agent", _fake_build(tmp_path, calls, commit="c1"))
+    run = tmp_path / "run"
+    assert cli.setup(_setup_args(tmp_path), run, 5)
+    (run / "capture.json").write_text("{}")
+    (tmp_path / "venv" / "xe-forge-setup.json").unlink()  # the venv rebuilt, at another commit
+    monkeypatch.setattr(cli, "_agent", _fake_build(tmp_path, calls, commit="c2"))
+    assert cli.setup(_setup_args(tmp_path), run, 5) is None
+    monkeypatch.delenv("XF_TEST_SETUP_ATTN", raising=False)
+
+
+@pytest.mark.parametrize("bad", ["outside", "blind"])
+def test_a_framework_build_is_kept_only_in_its_venv_and_seeing_the_device(tmp_path, monkeypatch,
+                                                                          bad):  # fmt: skip
+    from xe_forge.frontend import cli
+
+    calls: list = []
+    build = (_fake_build(tmp_path, calls, python=tmp_path / "elsewhere" / "python")
+             if bad == "outside" else _fake_build(tmp_path, calls, sees=False))  # fmt: skip
+    monkeypatch.setattr(cli, "_agent", build)
+    assert cli.setup(_setup_args(tmp_path), tmp_path / "run", 5) is None
+    assert not (tmp_path / "venv" / "xe-forge-setup.json").exists()
+
+
+def test_the_setup_agent_builds_the_venv_and_only_it():
+    from xe_forge.claude.generator import render
+
+    ctx = {
+        "framework": "rldx",
+        "model": "RLWRLD/RLDX-1-MT-DROID",
+        "device": "xpu",
+        "source": "https://github.com/RLWRLD/RLDX-1",
+        "ref": "v1.1.0",
+        "venv": "/v",
+        "answer": "s.json",
+    }
+    text = render("frontend-setup.md.j2", **ctx)
+    assert "at v1.1.0" in text and "/v/src" in text and "PyTorch's own index" in text
+    assert '"dropped"' in text and "Change no source" in text and "Do not load" in text
+    assert "latest release" in render("frontend-setup.md.j2", **{**ctx, "source": None})
+    assert '"prepend"' in text and "Never record a whole path variable" in text
+    redo = render("frontend-setup.md.j2", **{**ctx, "redo": ["env X replaces this node's own"]})
+    assert "Keep what is built" in redo and "env X replaces" in redo and "Keep what" not in text
+    rules = render("frontend-rules.md.j2", python="py", answer="s.json", venv="/v")
+    assert "building the framework's venv, /v" in rules and "never use uv" not in rules
+    assert "never use uv" in render("frontend-rules.md.j2", python="py", answer="s.json")
+
+
+@pytest.mark.parametrize("workload", ["vision", "action"])
+def test_a_valid_non_text_run_gets_past_its_flags_to_the_framework(tmp_path, monkeypatch,
+                                                                   workload):  # fmt: skip
+    from xe_forge.frontend import cli
+
+    image, state = tmp_path / "v.png", tmp_path / "s.npy"
+    image.write_bytes(b"png"), state.write_bytes(b"npy")
+    reached = []
+    monkeypatch.setattr(cli, "setup", lambda a, run_dir, turns: reached.append(a) and None)
+    extra = ["--state", str(state)] if workload == "action" else []
+    code = cli.main(["run", "-o", str(tmp_path / "run"), "--framework", "x", "--model", "m",
+                     "--framework-source", "https://x/y@v1", "--workload", workload,
+                     "--input-image", str(image), *extra])  # fmt: skip
+    assert code == 1 and len(reached) == 1  # the fake setup builds nothing: stopped there
+    assert reached[0].batch == 1 and reached[0].prompt
+
+
+def test_patch_check_of_a_run_without_tokens_needs_no_input_len(tmp_path):
+    # An action run's check was refused by argparse before generate.sh ran (B70 job 403757).
+    work, repos, fw, _ = _patch_dir(tmp_path, [[1, 2, 3, 4]])
+    (work / "generate.sh").write_text(
+        'test -z "${INPUT_LEN+x}" || exit 9\n'  # not set when not given
+        'python3 -I -c "import os, numpy as np; '
+        "np.save(os.environ['OUT'] + '/actions.npy', np.ones((16, 7), np.float32))\"\n"
+    )
+    argv = ["patch", "check", str(work), "--repos", str(repos), "--framework-python", str(fw),
+            "--model", "toy", "--batch", "1"]  # fmt: skip
+    code, out = _tool(*argv)
+    assert code == 0, out
+    assert _stage_named(json.loads((work / "check.json").read_text())["quality"], "actions")
+    (work / "generate.sh").write_text("echo '[[1, 2, 3, 4]]' > \"$OUT/tokens.json\"\n")
+    code, out = _tool(*argv)  # tokens are scored on a prompt: its length is needed
+    assert code != 0 and "pass --input-len" in out
+
+
+def test_a_build_only_adds_to_the_environment_it_runs_in(tmp_path, monkeypatch):
+    # The RLDX-1 setup recorded the node's whole LD_LIBRARY_PATH: right there, stale elsewhere.
+    from xe_forge.frontend import cli
+
+    venv = tmp_path / "venv"
+    monkeypatch.setenv("XF_TEST_LIBS", "/node/lib")
+    full, problems = cli._setup_environ({"prepend": {"XF_TEST_LIBS": [f"{venv}/lib"]}}, venv)
+    assert full["XF_TEST_LIBS"] == f"{venv}/lib{os.pathsep}/node/lib" and not problems
+    _, problems = cli._setup_environ({"env": {"XF_TEST_LIBS": f"{venv}/lib:/node/lib"}}, venv)
+    assert problems and "replaces this node's own" in problems[0]
+    _, problems = cli._setup_environ({"prepend": {"XF_TEST_LIBS": "/opt/elsewhere"}}, venv)
+    assert problems and "not inside" in problems[0]
+
+    calls: list = []
+    monkeypatch.setattr(cli, "_agent", _fake_build(tmp_path, calls))
+    monkeypatch.delenv("XF_TEST_SETUP_ATTN", raising=False)
+    assert cli.setup(_setup_args(tmp_path), tmp_path / "run", 5) and len(calls) == 1
+    record = venv / "xe-forge-setup.json"
+    old = json.loads(record.read_text())
+    record.write_text(json.dumps({**old, "env": {"XF_TEST_LIBS": "/snapshot"}}))
+    assert cli.setup(_setup_args(tmp_path), tmp_path / "run", 5) and len(calls) == 2
+    assert calls[1][2]["redo"] and "XF_TEST_LIBS" in calls[1][2]["redo"][0]  # repaired, not reused
+    assert os.environ["XF_TEST_LIBS"] == "/node/lib"  # the node's own value survives
+    monkeypatch.delenv("XF_TEST_SETUP_ATTN", raising=False)
+
+
+def test_the_frameworks_environment_stays_out_of_xe_forges_own_sessions(tmp_path, monkeypatch):
+    # B70, RLDX-1: the venv's lib/ on LD_LIBRARY_PATH reached optimize, and Xe-Forge's torch
+    # loaded the framework's libur_loader; every kernel exited 1 at import.
+    from xe_forge.frontend import cli
+
+    monkeypatch.setattr(cli, "_NODE_ENV", {})
+    monkeypatch.setenv("XF_TEST_LIBS", "/node/lib")
+    monkeypatch.delenv("XF_TEST_SETUP_ATTN", raising=False)
+    build = _fake_build(tmp_path, [])
+
+    def with_libs(*args):
+        got = build(*args)
+        return {**got, "prepend": {"XF_TEST_LIBS": [f"{tmp_path / 'venv'}/lib"]}}
+
+    monkeypatch.setattr(cli, "_agent", with_libs)
+    assert cli.setup(_setup_args(tmp_path), tmp_path / "run", 5)
+    assert os.environ["XF_TEST_LIBS"].startswith(f"{tmp_path / 'venv'}/lib")  # the framework's
+    assert os.environ["XF_TEST_SETUP_ATTN"] == "sdpa"
+    own = cli._session_env()
+    assert own["XF_TEST_LIBS"] == "/node/lib" and "XF_TEST_SETUP_ATTN" not in own
+    monkeypatch.delenv("XF_TEST_SETUP_ATTN")
+
+
+def test_no_framework_or_model_is_named_in_the_frontend_templates_or_help(capsys):
+    # Agents find the framework's specifics; a name in a template or a flag's help steers
+    # every other framework toward one framework's options.
+    import re
+
+    from xe_forge.frontend import cli
+
+    names = re.compile(r"\b(vllm|openvino|sglang|llama|ltx|flux|natten|rldx|qwen|wan2?)\b", re.I)
+    templates = Path(cli.SRC_DIR) / "xe_forge" / "claude" / "templates"
+    found = [f"{f.name}:{i}: {line.strip()}" for f in sorted(templates.glob("frontend-*.j2"))
+             for i, line in enumerate(f.read_text().splitlines(), 1) if names.search(line)]  # fmt: skip
+    with pytest.raises(SystemExit):
+        cli.main(["run", "--help"])
+    found += [f"run --help: {line.strip()}" for line in capsys.readouterr().out.splitlines()
+              if names.search(line)]  # fmt: skip
+    assert not found, "\n".join(found)
+
+
+def test_a_resume_checks_a_finished_patch_again_rather_than_redoing_it(tmp_path, monkeypatch):
+    # B70 job 403757: the patch passed its agent's own check, the harness's check failed on an
+    # argument; the resume redid the capture and the patch agents before checking anything.
+    from xe_forge.frontend import cli
+
+    seen, verdicts = [], iter([1, 0])  # the first check fails, the resumed one passes
+
+    def agent(step, template, ctx, cwd, answer, python, turns):
+        seen.append((step, python, tuple(ctx.get("redo") or ())))
+        if step == "patch":
+            (cwd / "patch.json").write_text('{"python": "/patched/python"}')
+            (cwd / "patched.json").write_text("{}")  # agent.run's answer: written once done
+            return {"notes": "patched"}
+        if python == "/fw/python":
+            return {"unsupported": "op", "what": "gqa", "reason": "attn.py:1"}
+        return {"launcher": "launcher/run.sh"}
+
+    def tool(py, *argv, problems=None, **env):
+        seen.append((argv[0], py, ()))
+        return next(verdicts) if argv[0] == "patch" else 0
+
+    monkeypatch.setattr(cli, "_agent", agent)
+    monkeypatch.setattr(cli, "_tool", tool)
+    a = SimpleNamespace(model="m", framework="fw", workload="action", batch=1, calls=8,
+                        steps=None, input_image=["/i/a.png"], state=None, prompt="go")  # fmt: skip
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / "actions.npy").write_bytes(b"x")
+    assert cli.capture(a, "/fw/python", tmp_path, 5, tmp_path / "repos")[0] == 1
+    assert json.loads((tmp_path / "patch-1" / "request.json").read_text())["what"] == "gqa"
+    seen.clear()
+    assert cli.capture(a, "/fw/python", tmp_path, 5, tmp_path / "repos") == (0, "/patched/python")
+    assert [s[0] for s in seen] == ["patch", "capture", "capture"]  # check, capture agent, parse
+    assert seen[1][1] == "/patched/python"
+
+    # A kept patch whose check fails again goes back to its agent with the failures.
+    (tmp_path / "stack.json").unlink()
+    seen.clear()
+    verdicts = iter([1, 0])
+
+    def failing(py, *argv, problems=None, **env):
+        seen.append((argv[0], py, ()))
+        if argv[0] == "patch" and problems is not None:
+            problems.append("prompt_embeds does not match")
+        return next(verdicts) if argv[0] == "patch" else 0
+
+    monkeypatch.setattr(cli, "_tool", failing)
+    assert cli.capture(a, "/fw/python", tmp_path, 5, tmp_path / "repos")[0] == 0
+    assert seen[1] == ("patch", "/fw/python", ("prompt_embeds does not match",))
+    assert "do not start over" in render_patch_redo()
+
+
+def render_patch_redo():
+    from xe_forge.claude.generator import render
+    from xe_forge.frontend import cli
+
+    want = {"batch": 1, "steps": None, "calls": 8, "input_images": ["/a"], "state": None,
+            "prompt": "go"}  # fmt: skip
+    return render("frontend-patch.md.j2", model="m", framework="fw", python="py", cache="/c",
+                  inputs={}, precision="auto", quantization="auto", kv_cache="auto",
+                  refused=[], answer="a.json", framework_notes=[], workload="action",
+                  runtime_keys=cli.WORKLOADS["action"], repos="/r", what="x", reason="y",
+                  redo=["prompt_embeds does not match"], **want)  # fmt: skip
+
+
+def test_a_launcher_that_misrecords_the_run_it_was_asked_for_goes_back_to_its_agent(
+    tmp_path, monkeypatch
+):
+    # B70 job 403762: a good RLDX-1 capture recorded the state's values, not its path, and the
+    # run stopped with "remove it to capture again".
+    from xe_forge.frontend import cli, ir
+
+    image, state, run = tmp_path / "v.png", tmp_path / "s.npy", tmp_path / "run"
+    image.write_bytes(b"png"), state.write_bytes(b"npy")
+    recorded = iter([[0.5, 0.1], str(state)])  # first the values, then, fixed, the path
+    calls = []
+
+    def capture(a, python, run_dir, turns, repos, refused=None):
+        calls.append(refused)
+        rt = {"batch": 1, "calls": 8, "steps": 4, "prompt": a.prompt,
+              "input_images": [str(image)], "state": next(recorded)}  # fmt: skip
+        (run_dir / "capture.json").write_text(json.dumps(rt))
+        return 0, python
+
+    monkeypatch.setattr(cli, "capture", capture)
+    monkeypatch.setattr(
+        ir,
+        "load",
+        lambda p: SimpleNamespace(
+            run={
+                "framework": "x",
+                "model": {"name": "m"},
+                "runtime": json.loads(Path(p).read_text()),
+            }
+        ),
+    )
+    monkeypatch.setattr(cli, "name_and_read", lambda *a, **k: (7, "py"))  # stop after the check
+    argv = [
+        "run",
+        "-o",
+        str(run),
+        "--framework",
+        "x",
+        "--model",
+        "m",
+        "--framework-python",
+        "py",
+        "--workload",
+        "action",
+        "--input-image",
+        str(image),
+        "--state",
+        str(state),
+    ]
+    assert cli.main(argv) == 7
+    assert calls[0] is None and "records" in calls[1][0] and "0.5" in calls[1][0]
+    other = tmp_path / "t.npy"
+    other.write_bytes(b"npy")
+    calls.clear()  # a resume asking for another state: not this capture, and not its launcher's
+    assert cli.main([*argv[:-1], str(other)]) == 1 and calls == []

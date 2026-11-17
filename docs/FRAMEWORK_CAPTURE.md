@@ -14,10 +14,22 @@ and each measured win with its patch.
 Nothing in the code knows a framework. **Agents do the framework- and model-specific work;
 code measures and checks it**, through `xe-forge-skill` tools the agents call themselves.
 
+`--workload` says what one measured run is:
+- **text** (the default): a decoder's prefill and decode, with `--batch`, `--input-len`,
+  `--output-len` or `--rows`.
+- **vision**: a diffusion model's denoising steps at a resolution. See [VISION.md](VISION.md).
+- **action**: a robot policy (vision-language-action), called `--calls` times on what it
+  sees. It takes `--input-image` (one per camera view or history frame, required),
+  `--prompt` (the instruction), `--state` (the robot state, `.npy` or `.json`; zeros when not
+  given) and `--steps` (denoising steps; the policy's own when not given). The launcher saves
+  `actions.npy`. A patch is checked against the framework's own torch path, on the backbone
+  embedding, the action latents and the actions.
+
 ## Steps
 
 | Step | Who | Writes | Checked by |
 |---|---|---|---|
+| setup (no `--framework-python`) | agent (`frontend-setup.md.j2`): builds a venv for `--framework` on this device from the project's own install docs, from `--framework-source URL[@REF]` or its latest release; drops what runs only on another vendor's device, edits no source | `<venv>/xe-forge-setup.json` (reused by later runs asking for the same framework and source), `setup/framework.json` | the python is in the venv and torch sees `--device` under it; a capture made on another commit is refused |
 | capture | agent (`frontend-capture.md.j2`): decides whether the model fits, converts it if the framework needs that, writes `launcher/run.sh` | `raw/`, `capture.json` | `capture run`, `capture parse` (below); `run` re-runs `parse` itself |
 | name | agent (`frontend-name.md.j2`): finds each op's kernel source, clones or fast-forwards its repository | `names.json` | `naming.validate`: the symbol greps in the repo, the dsl exists, every stated cost holds at every measured shape |
 | analyze | code (`analyze.py`) | `kernels.yaml`, `specs/`, `analysis.json` | bound arithmetic: GEMM roofline, counter speed-of-light, agent-stated costs |

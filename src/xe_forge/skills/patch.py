@@ -201,8 +201,9 @@ def check(args) -> tuple[list[str], dict]:
         t0 = time.perf_counter()
         run = subprocess.run(["bash", str(work / "generate.sh")], cwd=work,
                              env=_env(FRAMEWORK_PYTHON=python, OUT=out, BATCH=str(args.batch),
-                                      INPUT_LEN=str(args.input_len), OUTPUT_LEN=str(n),
-                                      PROMPT_FILE=prompt),
+                                      OUTPUT_LEN=str(n), PROMPT_FILE=prompt,
+                                      **({} if args.input_len is None
+                                         else {"INPUT_LEN": str(args.input_len)})),
                              capture_output=True, text=True)  # fmt: skip
         record["patched_s"] = round(time.perf_counter() - t0, 1)
         got_path = Path(out) / "tokens.json"
@@ -218,6 +219,8 @@ def check(args) -> tuple[list[str], dict]:
                 record.update(reference="skipped (--no-reference)")
                 return problems, record
             return _by_native(work, python, Path(out), record), record
+        if args.input_len is None:  # tokens are scored on the prompt they continue
+            return ["generate.sh wrote tokens.json: pass --input-len to score them"], record
         got = json.loads(got_path.read_text())
         if getattr(args, "no_reference", False):
             # Everything above still had to hold: the patch is git's own diff, it applies

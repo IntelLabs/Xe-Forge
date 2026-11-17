@@ -1,13 +1,14 @@
 """Output quality A/B for a prove run: is the patched arm's output still right?
 
 `compare` answers "is B faster". This answers "is B still correct", from the artifacts the
-launcher saved next to each capture. Three stages, each optional:
+launcher saved next to each capture. Four stages, each optional:
 
 | stage    | file (first match)                              | role   |
 |----------|-------------------------------------------------|--------|
 | `step1`  | `latent_step1.npy`                              | gate   |
 | `latent` | `latent_final.npy`                              | guard  |
 | `image`  | `raw_image.png`, `raw/output.png`, `frames/*.npy` | report |
+| `actions`| `actions.npy` (a policy's returned actions)      | report |
 
 The **gate** decides pass or fail: one denoise step, before rounding is amplified. A **guard**
 fails only on a catastrophe (NaN, a different shape, a difference past its hard limit), since a
@@ -52,6 +53,9 @@ _STAGES = (
     ("image", "report", "timed",
      ("raw_image.png", "output.png", "raw/output.png", "frames/*.npy", "raw/frames/*.npy"),
      "psnr", 40.0, 25.0),
+    # A policy's actions, as returned: its latents are the action latents, so the stages above
+    # gate it, and this reports what the robot would be sent.
+    ("actions", "report", "timed", ("actions.npy", "raw/actions.npy"), "rel", 1e-2, 1e-1),
 )  # fmt: skip
 MARGIN = 0.1  # how much worse than A's worst run B's worst run may be, against the reference
 

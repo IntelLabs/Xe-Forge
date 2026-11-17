@@ -1,7 +1,10 @@
 
-The framework's interpreter is {{ python }}; its venv must not change -- install nothing into
+{% if venv | default(none) %}You are building the framework's venv, {{ venv }}: install into it and nowhere else -- no
+other venv, no system package, no file outside it and this directory changes.
+{% else %}The framework's interpreter is {{ python }}; its venv must not change -- install nothing into
 it, never use uv. Anything missing goes into a venv you create here, layered over it (a .pth
-calling site.addsitedir on its site-packages, after the venv's own). Run builds and exports
+calling site.addsitedir on its site-packages, after the venv's own).
+{% endif %}Run builds and exports
 with the ANTHROPIC_* and OPENAI_* variables unset, so no log carries them, and never print
 the environment or any credential. Long builds and exports are expected: this session ends
 when you stop and anything still running is killed, so wait for all of it, and stop only

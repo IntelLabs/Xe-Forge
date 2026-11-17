@@ -272,7 +272,9 @@ def main():
     )
     pc.add_argument("--model", required=True)
     pc.add_argument("--batch", type=int, required=True)
-    pc.add_argument("--input-len", type=int, required=True)
+    pc.add_argument(
+        "--input-len", type=int, help="prompt tokens; a model that returns tokens needs it"
+    )
     pc.add_argument("--min-match", type=int, default=32, help="tokens scored per sequence")
     pc.add_argument("--tolerance", type=float, default=0.3,
                     help="nat a token may fall below transformers' best")  # fmt: skip

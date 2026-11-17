@@ -28,7 +28,7 @@ def run(template: str, context: dict, cwd: Path, answer: str, python: str, max_t
     (cwd / "session.log").unlink(missing_ok=True)
     env = backend.env(config)  # lifts headless claude's background ceiling to TIMEOUT
     prompt = render(template, **{"python": python, "answer": answer, **context}) + render(
-        "frontend-rules.md.j2", python=python, answer=answer
+        "frontend-rules.md.j2", python=python, answer=answer, venv=context.get("venv")
     )
     (cwd / "prompt.md").write_text(prompt)
     log_path, deadline = cwd / "session.log", time.monotonic() + TIMEOUT
