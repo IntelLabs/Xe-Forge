@@ -103,7 +103,7 @@ def _timeline(scratch: Path) -> list[list]:
     """[[kernel, us], ...] of every launch, in submission order, from --chrome-kernel-logging.
 
     Each process's launches are ordered by unitrace's launch id, which counts submissions: their
-    device start times can be skewed enough to swap neighbours (seen with oneDNN kernels), and
+    device start times can be skewed enough to swap neighbours, and
     the order would then differ from run to run. Without ids, by start time. Processes follow
     one another by their first launch."""
     procs = []
@@ -150,11 +150,9 @@ _SAMPLING_SHM = Path("/dev/shm/uctrlunitrace_metric_sampling_control")  # unitra
 
 
 # torch and unitrace name the same device copy differently, and a workload that streams
-# weights is mostly copies. An LTX capture with layerwise offload (mandatory: the model
-# does not fit 31.89 GiB otherwise) had 20.2% of device time in copies -- 3.4 s of H2D
-# weight streaming and 2.5 s moving a 97x544x960x3 video to host -- and failed the 90%
-# check at 78.8%, because torch calls them "Memcpy H2D (...)" while unitrace calls the very
-# same transfers "zeCommandListAppendMemoryCopy(H2D)[bytes]".
+# weights is mostly copies: torch calls them "Memcpy H2D (...)" while unitrace calls the
+# very same transfers "zeCommandListAppendMemoryCopy(H2D)[bytes]", so unmapped they count
+# against the coverage check.
 #
 # Mapped rather than excluded. A copy is real device time: dropping it from the check would
 # pass the capture and then hide a fifth of the run from the ranking, which is the opposite
@@ -214,8 +212,8 @@ def _has_group(unitrace: str, group: str, env: dict) -> bool:
     counters: reading them needs metrics discovery (libigdmd, which the GPU stacks ship) and
     the metrics library (libigdml, which none of them ships). Build intel/metrics-library and
     put its lib64 on LD_LIBRARY_PATH -- it is user-space code and needs no root; the steps are
-    in docs/FRAMEWORK_CAPTURE.md -- and the same Arc Pro B70 lists 13 groups, ComputeBasic
-    among them, where it listed one before.
+    in docs/PROFILING.md -- and the device then lists its full set of groups,
+    ComputeBasic among them.
     """
     try:
         out = subprocess.run([unitrace, "--metric-list"], capture_output=True, text=True,
@@ -230,7 +228,7 @@ def _has_group(unitrace: str, group: str, env: dict) -> bool:
           "(bounds take them as unknown). If it lists EuStallSampling only, the metrics "
           "library (libigdml) is probably not on LD_LIBRARY_PATH: build "
           "intel/metrics-library (no root needed) and add its lib64, as "
-          "docs/FRAMEWORK_CAPTURE.md describes")  # fmt: skip
+          "docs/PROFILING.md describes")  # fmt: skip
     return False
 
 
@@ -278,21 +276,10 @@ def run_capture(args) -> int:
             # all: unitrace stops partway and writes a truncated metrics file that parses to
             # zero records, with no error and exit 0.
             #
-            # The 25 us default is a measurement, not a property of metric sampling: it was
-            # taken on an Arc Pro B70 with two real launchers (a 0.5B and a 9B text model,
-            # 44 ms and 1013 ms of device time). Another device, or a much shorter or longer
-            # run, may need a different interval -- `--sampling-interval-us`, env
-            # XE_FORGE_SAMPLING_INTERVAL_US. Share of device time keeping a counter bound:
-            #
-            #            0.5B, 44 ms      9B, 1013 ms
-            #   50 us       0.2%             0.1%      works, useless
-            #   25 us      86.5%            94.6%     works
-            #   10 us       0.0%             0.0%      no records
-            #
-            # 10 us is not reliably broken, which is what makes it dangerous: it returned
-            # 96% on the 0.5B once and nothing on the same launcher and node later. 25 us
-            # has produced records on every run of both lengths. Device time moved under 2%
-            # across intervals, so this shares the pass with --device-timing.
+            # 25 us is the default. Another device, or a much shorter or longer run, may
+            # need a different interval -- `--sampling-interval-us`, env
+            # XE_FORGE_SAMPLING_INTERVAL_US. Sampling barely moves device time, so this
+            # shares the pass with --device-timing.
             cmd[-2:-2] = ["--metric-sampling", "--group", "ComputeBasic",
                           "--sampling-interval", str(args.sampling_interval)]  # fmt: skip
         if args.trace_steps:
@@ -569,8 +556,10 @@ def parse_capture(args) -> int:
     problems += _precision_problems(r, named=names is not None, ops=capture.ops)
     if not capture.ops:
         problems.append("no ops")
-    if known_pct < 90:
-        problems.append(f"only {known_pct:.1f}% of op time is in kernels unitrace saw")
+    least = getattr(args, "min_known", 90.0)
+    if known_pct < least:
+        problems.append(f"only {known_pct:.1f}% of op time is in kernels unitrace saw "
+                        f"(--min-known {least:g})")  # fmt: skip
     for p in problems:
         print(f"capture parse: PROBLEM {p}")
     return 1 if problems else 0
@@ -729,11 +718,8 @@ def _usable(records: list) -> list:
     """The records that carry a counter at all.
 
     ``_counters`` weights every rate by ``time_ns`` and skips a record without one, so such
-    a record is no counter, however many of them come back. Counting records instead of
-    these let the PixArt capture print "counters for 134 records" and keep none: every
-    record arrived with ``time_ns`` None and ``counters`` {}, the no-records branch never
-    ran, the metrics files went with the scratch directory, and every bound fell back to
-    arithmetic unannounced -- the exact failure that branch exists to report.
+    a record is no counter, however many of them come back. Counting all records instead
+    would hide a capture with no usable counters from the no-records branch.
     """
     return [r for r in records if r.get("time_ns")]
 

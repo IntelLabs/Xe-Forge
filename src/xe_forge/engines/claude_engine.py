@@ -90,10 +90,10 @@ class ClaudeEngine(BaseEngine):
         self.backend.prepare(workspace)
 
         if not self.always_launch:
-            print(f"\nClaude Code workspace ready at: {workspace}")
+            print(f"\n{self.backend.name} workspace ready at: {workspace}")
             print("Run:")
             print(f"  cd {workspace}")
-            print(f"  claude /optimize-kernel {kernel_name}")
+            print(f"  {self.backend.interactive(kernel_name)}")
 
         if not (self.always_launch or self.config.engine.auto_launch):
             # Nothing was attempted, so there is nothing to report as done.

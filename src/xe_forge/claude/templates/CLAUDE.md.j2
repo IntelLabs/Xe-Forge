@@ -285,7 +285,6 @@ call is what is optimized. The library itself is never edited and no new kernel 
 - **The ceiling is the card, not the library's default.** The spec names the shapes; a
   call already at its bandwidth or compute bound has nothing left, and a trial that cannot
   move the implementation the library picks is a finding, not a failure. Say so in the lessons.
-  A hand-written GEMM is a different route (Xe-Forge's `--tile-tune`), not this one.
 - **Port back to the call site** the profile names (the framework's Python, or the
   plugin's implementation of the op over the library), never to the library itself.
 {% endif %}
@@ -308,9 +307,14 @@ call is what is optimized. The library itself is never edited and no new kernel 
   repository's source; write none of them yourself. Change only what building outside the
   repository requires (includes, a namespace, dispatch branches the workload never takes).
   Every kernel's device code -- the kernel class and the mainloop, epilogue, scheduler and
-  reduction it instantiates -- is copied into the file; from the repository only headers of
-  the libraries it builds on (CUTLASS/CuTe, SYCL, oneDNN, torch) may be included by `-I`,
-  never the op's own kernel headers.
+  reduction it instantiates -- is copied into the file; only the headers of the libraries
+  it builds on may be included by `-I`, never the op's own kernel headers.
+  When part of the kernel is not source you can copy -- code the library generates or
+  assembles when it runs and joins to the kernel's binary -- the baseline is not a copy:
+  it makes the library's own call, as the model made it, so it runs the binary the model
+  ran. A re-implementation of that part is a trial, never the baseline.{% if has_spec %}
+  `benchmark` refuses a baseline slower than the kernel ran in the model by more than its
+  allowance (`VERDICT: BASELINE_NOT_CAPTURED_KERNEL`, with both times).{% endif %}
 {%- if reference_workload and not baseline_oracle %} When the reference covers a chain of
   ops (its docstring names each), the op is all of them: copy each one's kernels, in the
   order the model calls them, and a trial may run the chain as fewer kernels.

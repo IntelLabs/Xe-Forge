@@ -42,6 +42,10 @@ class Claude:
     def resume(self, session: str, prompt: str, max_turns: int, config=None) -> list[str]:
         return [self.path(), "--resume", session, "-p", prompt, *self._stream(max_turns)]
 
+    def interactive(self, kernel_name: str) -> str:
+        """The command a person runs in the workspace to start the loop."""
+        return f"claude /optimize-kernel {kernel_name}"
+
     def task(self, workspace: Path, kernel_name: str) -> str:
         return f"/optimize-kernel {kernel_name}"
 
@@ -127,6 +131,11 @@ class Codex(Claude):
     def resume(self, session: str, prompt: str, max_turns: int, config=None) -> list[str]:
         return [self.path(), "exec", *self._EXEC, "--dangerously-bypass-approvals-and-sandbox",
                 *self._endpoint(config), "resume", session, prompt]  # fmt: skip
+
+    def interactive(self, kernel_name: str) -> str:
+        """The command a person runs in the workspace to start the loop."""
+        return (f'codex "Follow .claude/commands/optimize-kernel.md with $ARGUMENTS = '
+                f'{kernel_name}"')  # fmt: skip
 
     def task(self, workspace: Path, kernel_name: str) -> str:
         text = (workspace / ".claude" / "commands" / "optimize-kernel.md").read_text()

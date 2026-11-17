@@ -493,9 +493,8 @@ def test_profile_cli_forwards_parent_profile(monkeypatch, interval, metric_group
             "unitrace_bin": "unitrace",
             "parent_profile": "parent-artifacts",
             "capture_assembly": False,
-            # Omitting the flag no longer means "unset": the default is the interval that
-            # was measured to work (25 us, or XE_FORGE_SAMPLING_INTERVAL_US). unitrace's own
-            # default of 50 samples almost nothing here.
+            # Omitting the flag no longer means "unset": the default is 25 us, or
+            # XE_FORGE_SAMPLING_INTERVAL_US.
             "sampling_interval_us": interval
             if interval is not None
             else int(os.environ.get("XE_FORGE_SAMPLING_INTERVAL_US", 25)),

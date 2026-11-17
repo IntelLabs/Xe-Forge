@@ -16,6 +16,7 @@ _DSL_NAMES: dict[str, str] = {
     "gluon": "Gluon",
     "sycl": "SYCL/Sycl-tla",
     "cuda": "CUDA C++",
+    "opencl": "OpenCL C",
 }
 
 _DEVICE_DESCS: dict[str, str] = {

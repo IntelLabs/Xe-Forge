@@ -8,14 +8,14 @@ kernels.yaml and analysis.json.
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 
 from xe_forge.frontend import formula
 from xe_forge.frontend.calibrate import peak_of
 from xe_forge.frontend.calibrate import peaks as calib_peaks
 from xe_forge.frontend.canonical import resolve_dims
 from xe_forge.frontend.dtypes import storage_bytes
-from xe_forge.frontend.ir import CaptureRun, Workload
+from xe_forge.frontend.ir import CaptureRun, Naming, Workload
 from xe_forge.models import DSL
 
 _ROUTE_REASONS = {
@@ -88,14 +88,6 @@ AT_ROOFLINE = 0.8
 NOISE = 0.1  # a bound this far above its measurement is timer noise; further is an error
 
 
-def experts_touched(experts: int, rows: int, topk: int | None) -> float:
-    """Expected distinct experts a grouped GEMM reads under uniform routing."""
-    k = topk or 1
-    if experts <= 1 or rows <= 0:
-        return float(max(1, experts))
-    return experts * (1.0 - (1.0 - min(k, experts) / experts) ** (rows / k))
-
-
 def _points(w: Workload) -> list[tuple[int | None, int, float]]:
     """(token count, calls, device us) per captured token count, or the workload as one."""
     if w.var_axes:
@@ -137,7 +129,7 @@ def gemm_bound(
         {**w.attrs, "N": w.dims["N"], "K": w.dims["K"], "E": w.dims.get("E")}
     ]
 
-    def part_time(p: dict, m, sure: bool = False) -> float | None:
+    def part_time(p: dict, m) -> float | None:
         if "w_bytes" not in p:
             return None
         a_b, w_b, o_b = p.get("a_bytes", size), p["w_bytes"], p.get("o_bytes", size)
@@ -150,24 +142,17 @@ def gemm_bound(
             if e is None:
                 return None  # never assume E=1
             rows = m * (topk or 1) if p.get("rows") == "token" else m
-            e_eff = w.attrs.get("active_experts") or (
-                # guaranteed: at least top-k experts
-                min(e, topk or 1) if sure else experts_touched(e, rows, topk)
-            )
+            # Measured, else what is certain: at least top-k experts are read. No routing
+            # model: a stated cost (the naming agent's) is the way to say more.
+            e_eff = w.attrs.get("active_experts") or min(e, topk or 1)
         n, k = p["N"], p["K"]
         moved = rows * k * a_b + e_eff * k * n * w_b + rows * n * o_b
         return max(moved / (bw * 1e3), 2 * rows * n * k / (peak * 1e6))
 
-    estimated = any(p.get("grouped") for p in parts) and not w.attrs.get("active_experts")
-
     def per_call(m):
         m = w.dims["M"] if m is None else m
         times = [part_time(p, m) for p in parts]
-        if None in times:
-            return None
-        if not estimated:
-            return sum(times)
-        return sum(times), sum(part_time(p, m, sure=True) for p in parts)
+        return None if None in times else sum(times)
 
     return _against(w, per_call)
 
@@ -359,14 +344,24 @@ def analyze(
         for w in capture.workloads
     }
 
-    groups: dict[tuple, list[Workload]] = defaultdict(list)
+    # A kernel reached through a library call is also that call, tuned as a library route:
+    # the same captured shapes, decided again for the route.
+    calls = [replace(w, naming=Naming("library", via=str(w.naming.call.get("via", "")),
+                                      tolerance=w.naming.tolerance,
+                                      **{k: w.naming.call.get(k) for k in ("name", "repo", "dsl")}))
+             for w in capture.workloads if w.naming.route == "kernel" and w.naming.call]  # fmt: skip
+    groups: dict[tuple, list[tuple]] = defaultdict(list)
     for w in capture.workloads:
         n = w.naming
-        groups[(n.route, n.repo, n.name)].append(w)
+        groups[(n.route, n.repo, n.name)].append((w, decisions[w.workload_id]))
+    for w in calls:
+        n = w.naming
+        groups[(n.route, n.repo, n.name)].append(
+            (w, _decide(w, min_gain, calibration, ctx, at_roofline)))  # fmt: skip
 
     entries = []
-    for (route, repo, name), ws in groups.items():
-        ds = [decisions[w.workload_id] for w in ws]
+    for (route, repo, name), pairs in groups.items():
+        ws, ds = [w for w, _ in pairs], [d for _, d in pairs]
         # Worth is per kernel: many small workloads pass when they add up.
         small = [d for d in ds if d.small]
         total = sum(d.gain for d in ds if d.enabled or d.small)

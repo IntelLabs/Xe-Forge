@@ -41,6 +41,11 @@ class Naming:
     repo: str | None = None
     dsl: str | None = None
     via: str = ""
+    # A kernel reached through a library call: the function making it, tuned as a library
+    # route of its own ({name, repo, dsl, via}) besides the kernel's rewrite.
+    call: dict | None = None
+    # {rtol, atol} a trial is checked at, as the naming agent judged it for this op.
+    tolerance: dict | None = None
 
 
 @dataclass

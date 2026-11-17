@@ -42,8 +42,6 @@ DRAWS = 8  # float32 forwards of a sequence the first pass fails: one clean, the
 
 _REFERENCE = """
 import json, sys, torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-import transformers
 from xe_forge.frontend import profile
 model_id, batch, input_len, n, trust = sys.argv[1], *map(int, sys.argv[2:5]), sys.argv[5] == "1"
 got = json.load(open(sys.argv[6]))
@@ -52,22 +50,43 @@ rows = [int(i) for i in sys.argv[9].split(",")] if sys.argv[9] else range(min(le
 dev = profile.device_type()
 if dev == "cpu":
     sys.exit("the reference interpreter sees no GPU")
-tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=trust)
-m = AutoModelForCausalLM.from_pretrained(model_id, dtype=getattr(torch, dtype), trust_remote_code=trust)
-try:
-    m = m.to(dev).eval()
-except RuntimeError as e:  # float32 that does not fit the GPU runs on the CPU
-    if dtype != "float32" or "out of memory" not in str(e).lower():
-        raise
-    m, dev = m.to("cpu").eval(), "cpu"
-prompts = profile.token_ids(profile.hf_vocab(tok), batch, input_len, prompt_file)
+ref_path = sys.argv[11] if len(sys.argv) > 11 else ""
+if ref_path:  # the agent's runner: load(model, dtype, device) -> (model, tokenizer or Vocab)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("xf_reference", ref_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    m, tok = mod.load(model_id, getattr(torch, dtype), dev)
+    m, source = m.eval(), [ref_path, ""]
+else:
+    import transformers
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=trust)
+    m = AutoModelForCausalLM.from_pretrained(model_id, dtype=getattr(torch, dtype), trust_remote_code=trust)
+    source = [transformers.__version__, transformers.__file__]
+    try:
+        m = m.to(dev).eval()
+    except RuntimeError as e:  # float32 that does not fit the GPU runs on the CPU
+        if dtype != "float32" or "out of memory" not in str(e).lower():
+            raise
+        m, dev = m.to("cpu").eval(), "cpu"
+vocab = tok if hasattr(tok, "ordinary") else profile.hf_vocab(tok)
+prompts = profile.token_ids(vocab, batch, input_len, prompt_file)
+def logits(x):  # transformers' output, a tuple's first item, or the tensor itself
+    out = m(input_ids=x, use_cache=False) if not ref_path else m(x)
+    out = getattr(out, "logits", out)
+    return out[0] if isinstance(out, (tuple, list)) else out
 seed = [None]  # draw k > 0: the embeddings times (1 + 1e-6 * N(0, 1)), seeded k
 def perturb(mod, inp, out):
     if seed[0] is None:
         return out
     z = torch.randn(out.shape, generator=torch.Generator().manual_seed(seed[0]))
     return out * (1 + 1e-6 * z.to(out.device, out.dtype))
-m.get_input_embeddings().register_forward_hook(perturb)
+embed = getattr(m, "get_input_embeddings", None)
+if embed is not None:
+    embed().register_forward_hook(perturb)
+else:  # nothing to perturb: one clean forward, no spread
+    draws = 1
 gaps = {}
 for i in rows:
     p, g = prompts[i], got[i][:n]  # one row, the whole sequence's logits: no batch, no slice
@@ -76,21 +95,20 @@ for i in rows:
         seed[0] = k or None
         with torch.no_grad():
             x = torch.tensor([p + g], device=dev)
-            lp = m(input_ids=x, use_cache=False).logits[0, len(p) - 1:-1].float().log_softmax(-1)
+            lp = logits(x)[0, len(p) - 1:-1].float().log_softmax(-1)
         best = lp.max(-1).values
         gaps[i].append((best - lp[torch.arange(len(g), device=dev),
                                   torch.tensor(g, device=dev)]).tolist())
-print(json.dumps({"gaps": gaps, "device": dev,
-                  "transformers": [transformers.__version__, transformers.__file__]}))
+print(json.dumps({"gaps": gaps, "device": dev, "transformers": source}))
 """
 
 
 def _native(work: Path, python: str, out: Path) -> tuple[subprocess.CompletedProcess, float]:
     """generate.sh again, with the framework's own plain-torch path instead of the new op.
 
-    ``XE_FORGE_NATIVE=1`` asks generate.sh for vLLM's ``custom_ops: ["none"]`` and the torch
-    attention backend: the same build, weights, seed and precision, with the patched kernels
-    unused. So the comparison differs in one thing only -- who runs the op -- which is what a
+    ``XE_FORGE_NATIVE=1`` asks generate.sh for the framework's own plain path for the op (the
+    switch it offers, which the patch agent finds): the same build, weights, seed and
+    precision, with the patched kernels unused. So the comparison differs in one thing only -- who runs the op -- which is what a
     reference has to do. The two wall times are the patch's worth: the op gain.
     """
     t0 = time.perf_counter()
@@ -111,7 +129,8 @@ def _env(**extra) -> dict:
     return {**env, **extra}
 
 
-def _by_native(work: Path, python: str, patched: Path, record: dict) -> list[str]:
+def _by_native(work: Path, python: str, patched: Path, record: dict,
+               margin: float | None = None) -> list[str]:  # fmt: skip
     """Judge an image or video patch against the framework's own torch path for the same op.
 
     Writes ``quality.json`` beside the patch: the artifacts generate.sh saved (the prompt
@@ -133,7 +152,8 @@ def _by_native(work: Path, python: str, patched: Path, record: dict) -> list[str
         if record.get("patched_s"):
             record["op_gain"] = round(native_s / record["patched_s"], 3)
         judged = quality.quality(work, {"A": [Path(nat)], "B": [patched]},
-                                 {"A": [Path(nat)], "B": [patched]})  # fmt: skip
+                                 {"A": [Path(nat)], "B": [patched]},
+                                 margin=quality.MARGIN if margin is None else margin)  # fmt: skip
         record["reference"] = f"the framework's plain-torch path ({judged['verdict']})"
         record["quality"] = judged
         if judged["verdict"] == "absent":
@@ -218,7 +238,9 @@ def check(args) -> tuple[list[str], dict]:
             if getattr(args, "no_reference", False):
                 record.update(reference="skipped (--no-reference)")
                 return problems, record
-            return _by_native(work, python, Path(out), record), record
+            return _by_native(
+                work, python, Path(out), record, getattr(args, "margin", None)
+            ), record
         if args.input_len is None:  # tokens are scored on the prompt they continue
             return ["generate.sh wrote tokens.json: pass --input-len to score them"], record
         got = json.loads(got_path.read_text())
@@ -233,6 +255,9 @@ def check(args) -> tuple[list[str], dict]:
             record.update(output=got, reference="skipped (--no-reference)")
             return problems, record
 
+        # The model's own reference runner, when transformers cannot load it (patch.json).
+        runner = str((work / meta["reference"]).resolve()) if meta.get("reference") else ""
+
         def score(dtype: str, rows: list[int] | None = None, draws: int = 1):
             """Teacher forcing on the candidate's own tokens, on the GPU."""
             return subprocess.run([
@@ -240,15 +265,15 @@ def check(args) -> tuple[list[str], dict]:
                 "-c", _REFERENCE, args.model, str(args.batch), str(args.input_len), str(n),
                 "1" if args.trust_remote_code or meta.get("trust_remote_code") else "0",
                 str(got_path), prompt, dtype,
-                ",".join(map(str, rows)) if rows else "", str(draws)],
+                ",".join(map(str, rows)) if rows else "", str(draws), runner],
                 capture_output=True, text=True, env=_env())  # fmt: skip
 
         ref = score(args.precision)
         if ref.returncode != 0:
             return [
-                f"the transformers reference failed ({ref.stderr.strip()[-400:]}); patch.json's "
-                '"reference_python" (GPU torch and a transformers that loads the model) and '
-                '"trust_remote_code" set it up'
+                f"the reference failed ({ref.stderr.strip()[-400:]}); patch.json's "
+                '"reference_python" (GPU torch and what loads the model), "trust_remote_code", '
+                'or "reference" (a runner with load(model, dtype, device)) set it up'
             ], record
         res = json.loads(ref.stdout.strip().splitlines()[-1])
         first = [res["gaps"][k][0] for k in sorted(res["gaps"], key=int)]
@@ -310,11 +335,8 @@ def run(args) -> int:
     for p in problems:
         print(f"patch check: FAIL {p}")
     if not problems:
-        # The message must only describe checks that actually ran. Reading
-        # record['tolerance'] unconditionally raised KeyError on the --no-reference path --
-        # after the patch had PASSED -- and the caller read the crash as a failed gate.
-        # Three models' worth of working XPU ops (Z-Image, Qwen-Image, Wan2.2) were
-        # discarded by this line reporting a success.
+        # The message must only describe checks that actually ran: a record may have no
+        # tolerance (the --no-reference path).
         if "tolerance" in record:
             how = (f"tokens within {record['tolerance']} nat of transformers "
                    f"(worst {max(record['worst'])})")  # fmt: skip

@@ -14,6 +14,17 @@ __all__ = [
 ]
 
 
+def load_env() -> None:
+    """Load ``.env`` before anything reads the environment: the working directory's, then
+    the checkout's; a variable already set wins. A framework's venv may lack python-dotenv."""
+    try:
+        from dotenv import find_dotenv, load_dotenv
+    except ImportError:
+        return
+    load_dotenv(find_dotenv(usecwd=True))
+    load_dotenv()
+
+
 # Lazy: the capture tools run inside a framework's venv and must not pull in the config stack.
 _LAZY = {
     "Config": "xe_forge.config",

@@ -66,12 +66,7 @@ def test_counters_average_only_measured_records():
 
 
 def test_records_without_a_time_are_no_counters():
-    """What the PixArt-Sigma capture got back: records, samples, launches -- no values.
-
-    ``capture run`` chose its success branch on ``if records:``, so it reported "counters
-    for 134 records", wrote counters.json, deleted the metrics files with the scratch
-    directory and left every bound on arithmetic without saying so.
-    """
+    """Records with samples and launches but no time carry no counter."""
     empty = [
         {"kernel": "k", "time_ns": None, "samples": 196, "launches": 196, "counters": {},
          "memory": {"read": {"bytes": None}, "write": {"bytes": None}}}
@@ -163,7 +158,8 @@ def test_every_runtime_size_at_a_token_count_reaches_the_spec(tmp_path):
                              scalars=[None, str(ctx)], kernel_symbols={"fmha": us}, calls=1,
                              device_us=us,
                              framework_meta={"named": {"route": "kernel", "name": "fmha",
-                                                       "family": "attention"}})  # fmt: skip
+                                                       "family": "attention",
+                                                       "tolerance": {"rtol": 0.02, "atol": 0.01}}})  # fmt: skip
 
     ops = [op(512, 512, 90.0), op(4, 513, 10.0), op(4, 514, 11.0), op(4, 515, 12.0)]
     (w,) = canonical.workloads(ops, 123.0, naming.name_op)
@@ -176,6 +172,17 @@ def test_every_runtime_size_at_a_token_count_reaches_the_spec(tmp_path):
     ir.dump(ir.CaptureRun(run={}, ops=ops, workloads=[w]), cap)
     got = shares({"dataset": str(cap), "variants": record})
     assert sorted(v["device_us"] for v in got.values()) == [10.0, 11.0, 12.0, 90.0]
+    assert spec["bench-t512"][0]["rtol"] == 0.02 and spec["bench-t512"][0]["atol"] == 0.01
+    # The tolerance is the naming agent's judgment: without one there is no spec, no default.
+    w.naming.tolerance = None
+    assert manifest.build_spec(Entry(name="fmha", repo="r", dsl="sycl", workloads=[w],
+                                     decisions=[], target="kernel")) is None  # fmt: skip
+    listing = {"fa::fwd": {"args": [], "dims": {}}}
+    (tmp_path / "r").mkdir()
+    bad = {"route": "kernel", "name": "fmha", "repo": "r", "dsl": "sycl",
+           "tolerance": {"rtol": 0, "atol": 0.01}}  # fmt: skip
+    got, problems = naming.keep_valid({"ops": {"fa::fwd": bad}, "model": {}}, listing, tmp_path)
+    assert "tolerance" not in got["ops"]["fa::fwd"] and "that tolerance dropped" in problems[0]
 
 
 def _row_capture(row, ops_us):
@@ -765,7 +772,7 @@ def test_a_cost_over_unknown_dims_loses_the_cost_not_the_naming(tmp_path):
 
 
 def test_a_bad_config_arg_loses_the_config_args_not_the_attentions_kv_args(tmp_path):
-    """vLLM 403197: config_args by an unknown name dropped the attention op, kv_args and all."""
+    """A config_arg by an unknown name must not drop the attention op and its kv_args."""
     from xe_forge.frontend import naming
 
     (tmp_path / "repo").mkdir()
@@ -787,6 +794,34 @@ def test_a_bad_config_arg_loses_the_config_args_not_the_attentions_kv_args(tmp_p
         got, _ = naming.keep_valid({"ops": {"op": dict(entry, **{field: bad})}, "model": {}},
                                    listing, tmp_path)  # fmt: skip
         assert field not in got["ops"]["op"] and got["ops"]["op"]["name"] == "fmha"
+
+
+def test_a_kernel_a_library_launches_is_also_tuned_as_its_call(tmp_path):
+    from xe_forge.frontend import analyze, naming
+    from xe_forge.frontend.ir import CaptureRun, Naming, Workload
+
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "app").mkdir()
+    listing = {"op": {"args": [{"name": "q", "shape": [1, 16, 160, 72]}], "dims": {}}}
+    call = {"name": "attend", "repo": "app", "dsl": "sycl", "via": "model.py:211"}
+    entry = {"route": "kernel", "name": "micro_sdpa", "repo": "lib", "dsl": "opencl",
+             "call": call}  # fmt: skip
+    assert naming.validate({"ops": {"op": entry}}, listing, tmp_path) == []
+    got, problems = naming.keep_valid(
+        {"ops": {"op": dict(entry, call={**call, "repo": "nowhere"})}, "model": {}}, listing,
+        tmp_path)  # fmt: skip
+    assert "call" not in got["ops"]["op"] and problems[0].endswith("that call dropped")
+    assert naming.validate({"ops": {"op": dict(entry, route="aten")}}, listing, tmp_path)
+
+    w = Workload(workload_id="attn/a", family="attention", dims={"S": 160}, dtypes=["bfloat16"],
+                 layout=[], attrs={}, var_axes={}, calls=10, device_us=100.0, share=0.5, ops=[],
+                 naming=Naming("kernel", "micro_sdpa", "lib", "opencl", call=call))  # fmt: skip
+    cap = CaptureRun(run={"total_device_us": 200.0}, ops=[], workloads=[w])
+    out = analyze.analyze(cap, top=3)
+    by = {e.name: e for e in out.entries}
+    assert by["micro_sdpa"].target == "kernel" and by["micro_sdpa"].repo == "lib"
+    assert by["attend"].target == "library" and by["attend"].repo == "app"
+    assert by["attend"].workloads[0].workload_id == "attn/a" and w.naming.route == "kernel"
 
 
 def test_naming_family_is_free_text_and_a_bad_gemm_spec_degrades(tmp_path):
@@ -1307,7 +1342,7 @@ def test_precision_and_weights_parse_to_torch_dtypes():
 
 
 def test_a_template_variable_the_caller_did_not_pass_is_an_error():
-    """A missing variable once rendered blank: every step prompt said `Write : {...}`."""
+    """A template variable the caller did not pass raises instead of rendering blank."""
     from jinja2 import UndefinedError
 
     from xe_forge.claude.generator import render
@@ -1319,7 +1354,7 @@ def test_a_template_variable_the_caller_did_not_pass_is_an_error():
 
 def test_an_fp8_model_computes_in_bf16_and_its_gemms_in_fp8():
     """Block-scaled fp8 GEMMs (fp8 operands, fp32 scales) count as fp8, not as their scales;
-    the model's compute dtype is still the bf16 the rest runs in (B70, Qwen3-1.7B-FP8)."""
+    the model's compute dtype is still the bf16 the rest runs in."""
     from xe_forge.frontend.dtypes import compute_dtype, observed
 
     def op(us, *dtypes):
@@ -1512,6 +1547,55 @@ def test_prove_tells_a_refused_parse_from_a_model_that_does_not_run(tmp_path, mo
     got = prove.prove(tmp_path, recapture, sys.executable, 1, 5)
     assert says in got, got
     assert seen["launcher"] == tmp_path / "launcher" / "run.sh"  # the build agent holds it
+
+
+def test_a_patch_that_breaks_the_model_is_found_and_the_rest_still_proved(tmp_path, monkeypatch):
+    from xe_forge.frontend import agent, compare, prove
+
+    rows, table = [], ["# Results", "", "| kernel | repo | variant | decision | outcome | "
+                       "speedup | trial | kind | stack | mergeable | patches |", "|---|"]  # fmt: skip
+    for k in ("good", "bad"):
+        res = tmp_path / "results" / f"{k}__v"
+        (res / "output").mkdir(parents=True)
+        (res / "output" / "upstream.patch").write_text("diff\n")
+        rows.append({"kernel": k, "variant": "v", "outcome": "win", "speedup": 1.5,
+                     "result": str(res), "patches": ["output/upstream.patch"]})  # fmt: skip
+        table.append(f"| `{k}` | r | v | optimize | win | 1.500x | t1 | upstream | - | yes | "
+                     "output/upstream.patch |")  # fmt: skip
+    (tmp_path / "results" / "summary.json").write_text(json.dumps(rows))
+    (tmp_path / "results" / "SUMMARY.md").write_text("\n".join(table) + "\n")
+    (tmp_path / "launcher").mkdir()
+    (tmp_path / "launcher" / "run.sh").write_text("#!/bin/bash\n")
+    built = []
+
+    def build(template, ctx, cwd, answer, python, turns):
+        kinds = sorted(Path(p).parts[-3].split("__")[0] for p in ctx["patches"])
+        built.append(kinds)
+        b = _exe(cwd / ("b-" + "-".join(kinds)), "#!/bin/bash\n")
+        return {"A": sys.executable, "B": str(b)}
+
+    def recapture(run_dir, out, python):
+        if "bad" in Path(python).name:
+            return 1
+        out.mkdir(parents=True)
+        (out / "capture.json").write_text("{}")
+        return 0
+
+    monkeypatch.setattr(agent, "run", build)
+    t = {"speedup": 1.2, "spread_a": 0.01, "spread_b": 0.01, "us_a": 120, "us_b": 100}
+    monkeypatch.setattr(compare, "compare", lambda a, b: [t])
+    monkeypatch.setattr(compare, "write", lambda table, d: d / "compare.md")
+    got = prove.prove(tmp_path, recapture, sys.executable, 1, 5)
+    assert built == [["bad", "good"], ["good"], ["bad"]]  # together, then each alone
+    assert "each was proved alone" in got and "bad__v" in got and "x1.2" in got
+    after = {
+        r["kernel"]: r for r in json.loads((tmp_path / "results" / "summary.json").read_text())
+    }
+    assert "not proven in the model" in after["bad"]["outcome"] and not after["bad"]["mergeable"]
+    assert after["good"]["outcome"] == "win"
+    md = (tmp_path / "results" / "SUMMARY.md").read_text()
+    assert "| `bad` | r | v | optimize | win (not proven in the model" in md and "| no |" in md
+    assert "| `good` | r | v | optimize | win | 1.500x" in md
 
 
 # ── fuse ────────────────────────────────────────────────────────────────────
@@ -1969,6 +2053,29 @@ def test_quality_lets_the_worst_gate_stage_decide(tmp_path):
     assert rec["verdict"] == "fail"
 
 
+@pytest.mark.parametrize("nan, verdict", [(False, "identical"), (True, "fail")])
+def test_a_guard_fails_the_verdict_only_on_a_catastrophe(tmp_path, nan, verdict):
+    """The gate holds; a guard further from the reference warns, a NaN in it fails."""
+    import numpy as np
+
+    from xe_forge.frontend import quality
+
+    rng = np.random.default_rng(0)
+    ref = rng.standard_normal((4, 16)).astype(np.float32)
+    (tmp_path / "reference").mkdir()
+    np.save(tmp_path / "reference" / "latent.npy", ref)
+    a, b = tmp_path / "a", tmp_path / "b"
+    for d, noise in ((a, 1e-3), (b, 1e-1)):
+        _latent(d, np.ones((4, 4), dtype=np.float32))
+        final = ref + rng.standard_normal(ref.shape).astype(np.float32) * noise
+        if nan and d == b:
+            final[0, 0] = np.nan
+        np.save(d / "latent_final.npy", final)
+    rec = quality.quality(tmp_path, {"A": []}, {"A": [a], "B": [b]})
+    assert _stage_named(rec, "latent")["verdict"] == "fail"
+    assert rec["verdict"] == verdict
+
+
 def test_patch_check_judges_vision_against_the_native_path(tmp_path):
     """No tokens: the reference is generate.sh under XE_FORGE_NATIVE, and the op gain is timed."""
     from xe_forge.skills import patch
@@ -2010,8 +2117,8 @@ def test_patch_check_judges_vision_against_the_native_path(tmp_path):
 
 
 def test_every_claude_session_lifts_the_background_ceiling(monkeypatch):
-    # A kernel session's benchmark was stopped at headless claude's own ceiling, before its
-    # watchdog could print a verdict (micro_sdpa, B70); frontend and kernel sessions share it.
+    # Headless claude's own background ceiling must not stop a benchmark before its watchdog
+    # can print a verdict; frontend and kernel sessions share the lifted ceiling.
     from xe_forge.engines.claude_engine import claude_env
     from xe_forge.frontend.agent import TIMEOUT
 
@@ -2073,12 +2180,6 @@ def test_a_port_back_is_its_commits_with_a_pr_carrying_the_measured_numbers(tmp_
 def test_vision_run_reaches_its_first_check(tmp_path):
     """A vision run must get through argument handling without touching an agent.
 
-    `given` holds the row keys (batch, input_len, output_len) read off the namespace, and a
-    walrus in the vision branch rebound it to the list of text-only flags. On a vision run
-    that list is empty, so nothing was raised and `given` was left as [] -- then
-    `given.items()` raised AttributeError before the capture agent started. Every vision run
-    died there and no test covered it.
-
     The missing input image is the first check past that point and it needs no agent, no GPU
     and no model, which is what makes it usable as the probe.
     """
@@ -2095,14 +2196,7 @@ def test_vision_run_reaches_its_first_check(tmp_path):
 
 
 def test_no_prompt_is_the_same_whether_none_or_empty():
-    """A capture is not a different workload because it recorded '' where the CLI held None.
-
-    The CLI leaves --negative-prompt None when it is not given. A launcher records the empty
-    string it really passed, because the pipeline wants a string. Comparing them raw refused
-    a fresh PixArt-Sigma capture that had already passed its patch gate and parsed at 99.99%
-    attribution, with "is a capture of {...'negative_prompt': ''...}, not {...None...};
-    remove it to capture again".
-    """
+    """A capture is not a different workload because it recorded '' where the CLI held None."""
     from xe_forge.frontend.cli import _same_workload
 
     want = {"framework": "vllm-omni", "steps": 20, "prompt": "a fox", "negative_prompt": None}
@@ -2249,10 +2343,10 @@ def test_the_setup_agent_builds_the_venv_and_only_it():
     from xe_forge.claude.generator import render
 
     ctx = {
-        "framework": "rldx",
-        "model": "RLWRLD/RLDX-1-MT-DROID",
+        "framework": "fw",
+        "model": "org/model",
         "device": "xpu",
-        "source": "https://github.com/RLWRLD/RLDX-1",
+        "source": "https://x/fw",
         "ref": "v1.1.0",
         "venv": "/v",
         "answer": "s.json",
@@ -2287,7 +2381,6 @@ def test_a_valid_non_text_run_gets_past_its_flags_to_the_framework(tmp_path, mon
 
 
 def test_patch_check_of_a_run_without_tokens_needs_no_input_len(tmp_path):
-    # An action run's check was refused by argparse before generate.sh ran (B70 job 403757).
     work, repos, fw, _ = _patch_dir(tmp_path, [[1, 2, 3, 4]])
     (work / "generate.sh").write_text(
         'test -z "${INPUT_LEN+x}" || exit 9\n'  # not set when not given
@@ -2305,7 +2398,6 @@ def test_patch_check_of_a_run_without_tokens_needs_no_input_len(tmp_path):
 
 
 def test_a_build_only_adds_to_the_environment_it_runs_in(tmp_path, monkeypatch):
-    # The RLDX-1 setup recorded the node's whole LD_LIBRARY_PATH: right there, stale elsewhere.
     from xe_forge.frontend import cli
 
     venv = tmp_path / "venv"
@@ -2331,8 +2423,6 @@ def test_a_build_only_adds_to_the_environment_it_runs_in(tmp_path, monkeypatch):
 
 
 def test_the_frameworks_environment_stays_out_of_xe_forges_own_sessions(tmp_path, monkeypatch):
-    # B70, RLDX-1: the venv's lib/ on LD_LIBRARY_PATH reached optimize, and Xe-Forge's torch
-    # loaded the framework's libur_loader; every kernel exited 1 at import.
     from xe_forge.frontend import cli
 
     monkeypatch.setattr(cli, "_NODE_ENV", {})
@@ -2360,9 +2450,14 @@ def test_no_framework_or_model_is_named_in_the_frontend_templates_or_help(capsys
 
     from xe_forge.frontend import cli
 
-    names = re.compile(r"\b(vllm|openvino|sglang|llama|ltx|flux|natten|rldx|qwen|wan2?)\b", re.I)
+    names = re.compile(
+        r"\b(vllm|openvino|sglang|llama|ltx|flux|natten|rldx|qwen|wan2?|"
+        r"onednn|onemkl|cutlass|ocloc|grf)\b",
+        re.I,
+    )
     templates = Path(cli.SRC_DIR) / "xe_forge" / "claude" / "templates"
-    found = [f"{f.name}:{i}: {line.strip()}" for f in sorted(templates.glob("frontend-*.j2"))
+    files = [*sorted(templates.glob("frontend-*.j2")), templates / "kernel-locator.md.j2"]
+    found = [f"{f.name}:{i}: {line.strip()}" for f in files
              for i, line in enumerate(f.read_text().splitlines(), 1) if names.search(line)]  # fmt: skip
     with pytest.raises(SystemExit):
         cli.main(["run", "--help"])
@@ -2372,8 +2467,6 @@ def test_no_framework_or_model_is_named_in_the_frontend_templates_or_help(capsys
 
 
 def test_a_resume_checks_a_finished_patch_again_rather_than_redoing_it(tmp_path, monkeypatch):
-    # B70 job 403757: the patch passed its agent's own check, the harness's check failed on an
-    # argument; the resume redid the capture and the patch agents before checking anything.
     from xe_forge.frontend import cli
 
     seen, verdicts = [], iter([1, 0])  # the first check fails, the resumed one passes
@@ -2438,8 +2531,6 @@ def render_patch_redo():
 def test_a_launcher_that_misrecords_the_run_it_was_asked_for_goes_back_to_its_agent(
     tmp_path, monkeypatch
 ):
-    # B70 job 403762: a good RLDX-1 capture recorded the state's values, not its path, and the
-    # run stopped with "remove it to capture again".
     from xe_forge.frontend import cli, ir
 
     image, state, run = tmp_path / "v.png", tmp_path / "s.npy", tmp_path / "run"

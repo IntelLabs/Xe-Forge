@@ -201,11 +201,9 @@ def _model_id(name: str) -> str:
 def _image_paths(value) -> list[str] | None:
     """The image paths in a recorded or requested ``input_images``, resolved and sorted.
 
-    A launcher is right to record more than a path -- a FLUX editing capture recorded
-    ``{"path", "size": [4544, 2805], "mode": "RGB", "note": "the pipeline resizes to
-    <=1024*1024 area"}``, which is exactly the kind of thing a reader wants. Comparing the
-    whole structure refused that capture after it had already succeeded. The path is what
-    identifies the input; the rest is description.
+    A launcher is right to record more than a path (size, mode, a note), which is what a
+    reader wants. The path is what identifies the input; the rest is description, so it is
+    not compared.
     """
     if not value:
         return None
@@ -226,9 +224,7 @@ def _same_workload(want: dict, have: dict) -> bool:
         elif key in ("prompt", "negative_prompt"):
             # No prompt is written two ways and means one thing. The CLI leaves the field
             # None when it was not given; a launcher records the empty string it really
-            # passed, because the pipeline wants a string. A fresh PixArt capture was
-            # refused after it had already succeeded -- patch gate passed, 200 ops, 99.99%
-            # attributed -- over None against ''.
+            # passed, because the pipeline wants a string. None and '' are the same prompt.
             if (want[key] or None) != (have.get(key) or None):
                 return False
         elif want[key] != have.get(key):
@@ -272,10 +268,7 @@ def _same_model(want: str, have: str | None) -> bool:
     """Whether two model names mean the same model.
 
     They often differ without disagreeing: pass a local snapshot directory and the capture
-    agent records the canonical id it resolved to. A 9B run was refused for exactly that,
-    after a good capture -- "capture of {'model': 'Qwen/Qwen3.5-9B'}, not
-    {'model': '/data/.../models--Qwen--Qwen3.5-9B/snapshots/c202236...'}". A local Flux
-    directory has the same shape.
+    agent records the canonical id it resolved to. Both reduce to the same model id.
     """
     if not have:
         return False
@@ -293,9 +286,9 @@ def _collect_outputs(run_dir: Path) -> None:
     the picture, so the picture has to be easy to find. The launcher and each prove arm
     write theirs wherever suits them, which is no use for comparing before against after.
 
-    Only the places a model writes are searched. Walking the run directory instead pulled in
-    135 files, nearly all of them documentation images out of cloned kernel repositories --
-    CUTLASS logos and oneDNN diagrams -- which is worse than collecting nothing.
+    Only the places a model writes are searched. Walking the whole run directory would pull
+    in documentation images from cloned kernel repositories, which is worse than collecting
+    nothing.
     """
     out = run_dir / "outputs"
     places = [run_dir, run_dir / "raw"]
@@ -340,8 +333,7 @@ def _setup_environ(got: dict, venv: Path) -> tuple[dict, list[str]]:
     """(this process's environment with the build's additions, why they are refused).
 
     A build only adds: ``env`` sets variables this node leaves unset, ``prepend`` puts
-    directories inside the venv before a path variable's own value. A build that recorded a
-    node's whole library path ran there and on no node set up otherwise (B70, RLDX-1 setup).
+    directories inside the venv before a path variable's own value.
     """
     full, problems = dict(os.environ), []
     for k, v in (got.get("env") or {}).items():
@@ -357,8 +349,7 @@ def _setup_environ(got: dict, venv: Path) -> tuple[dict, list[str]]:
 
 
 # What setup's additions replaced (None: unset). They are the framework's: Xe-Forge's own
-# sessions run without them, or its torch loads the framework's runtime libraries (B70,
-# RLDX-1: libur_loader from the RLDX venv under Xe-Forge's libsycl, every optimize exit 1).
+# sessions run without them, or its torch loads the framework's runtime libraries.
 _NODE_ENV: dict[str, str | None] = {}
 
 
@@ -760,6 +751,8 @@ def _stamp(cap) -> dict:
 def _add_analyze_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--top", type=int, default=3, help="kernels to optimize")
     p.add_argument("--min-gain", type=float, default=0.005, help="smallest share worth it")
+    p.add_argument("--at-roofline", type=float, default=0.8,
+                   help="efficiency of its bound at which a kernel is left alone")  # fmt: skip
     p.add_argument("--calibration", type=Path, help="xe-forge calibrate output")
 
 
@@ -769,7 +762,8 @@ def analyze(capture_path: Path, out_dir: Path, a: argparse.Namespace, weights=No
 
     cap = ir.load(capture_path)
     calib = json.loads(a.calibration.read_text()) if a.calibration else None
-    result = an.analyze(cap, top=a.top, min_gain=a.min_gain, calibration=calib)
+    result = an.analyze(cap, top=a.top, min_gain=a.min_gain, calibration=calib,
+                        at_roofline=getattr(a, "at_roofline", an.AT_ROOFLINE))  # fmt: skip
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "analysis.json").write_text(json.dumps(result.as_dict(), indent=1) + "\n")
     path = manifest.emit(result, cap, capture_path, out_dir, weights)
@@ -985,7 +979,10 @@ def _add_optimize_args(p: argparse.ArgumentParser) -> None:
         help="the agent CLI (claude, codex) for every agent of the run, or dspy-agent for the "
         "kernels (default: $XE_FORGE_AGENT, else claude)",
     )  # fmt: skip
-    p.add_argument("--device", default="xpu")
+    p.add_argument(
+        "--device",
+        help="xpu, cuda, ... (default: $XE_FORGE_DEVICE, else the first device torch sees)",
+    )
     p.add_argument("--max-turns", type=int, default=80)
     p.add_argument("--only", nargs="*", help="kernel names to run (default: every enabled)")
     p.add_argument(
@@ -1010,6 +1007,15 @@ def _use_agent(a) -> None:
         os.environ["XE_FORGE_AGENT"] = a.engine
 
 
+def _use_device(a) -> None:
+    """``--device``, else XE_FORGE_DEVICE, else the first device torch sees; exported, so
+    every step and the processes it starts (launchers, checks, calibration) use it."""
+    from xe_forge.frontend.profile import device_type
+
+    a.device = a.device or device_type()
+    os.environ["XE_FORGE_DEVICE"] = a.device
+
+
 def main(argv: list[str]) -> int:
     if not argv or argv[0] not in COMMANDS:
         raise SystemExit(f"usage: xe-forge {{{','.join(COMMANDS)}}} ...")
@@ -1028,7 +1034,9 @@ def main(argv: list[str]) -> int:
         p.add_argument("--matmul-n", type=int, default=8192, help="square matmul size")
         p.add_argument("--iters", type=int, default=20)
         p.add_argument("--dtypes", nargs="*", help="matmul dtypes to measure (default: all)")
+        p.add_argument("--device", help="default: $XE_FORGE_DEVICE, else the first torch sees")
         a = p.parse_args(rest)
+        _use_device(a)
         _use_agent(a)
         return calibrate.main(a.output, a.read_bytes, a.matmul_n, a.iters, a.dtypes)
 
@@ -1039,6 +1047,7 @@ def main(argv: list[str]) -> int:
         p.add_argument("manifest", type=Path)
         _add_optimize_args(p)
         a = p.parse_args(rest)
+        _use_device(a)
         _use_agent(a)
         a.passthrough = passthrough
         run_dir = a.manifest.resolve().parent
@@ -1103,7 +1112,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--analyze-only", action="store_true", help="stop after the manifest")
     p.add_argument(
         "--agent-max-turns", type=int,
-        help="turn limit of the capture, name and prove agents (default: --max-turns)",
+        help="turn limit of every frontend agent (default: --max-turns)",
     )  # fmt: skip
     p.add_argument(
         "--prove", action="store_true", help="build the stack with the winning patches and "
@@ -1121,6 +1130,7 @@ def main(argv: list[str]) -> int:
     )  # fmt: skip
     _add_optimize_args(p)
     a = p.parse_args(rest)
+    _use_device(a)
     from xe_forge.frontend.dtypes import canonical, parse_quantization
 
     try:
@@ -1136,9 +1146,7 @@ def main(argv: list[str]) -> int:
         if a.workload != "text":
             text_only = {"--rows": a.rows, "--prompt-file": a.prompt_file,
                          "--kv-cache": a.kv_cache != "auto"}  # fmt: skip
-            # Not `given`: that name holds the row keys read above, and rebinding it here
-            # left it an empty list on every vision run -- so `given.items()` below raised
-            # AttributeError before the run started.
+            # Not `given`: that name holds the row keys read above and is used below.
             if text_given := [f for f, v in text_only.items() if v]:
                 raise ValueError(f"{', '.join(text_given)}: for --workload text only")
             default = ACTION_PROMPT if a.workload == "action" else VISION_PROMPT

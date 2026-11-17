@@ -3,7 +3,7 @@ Configuration Manager for Xe-Forge kernel optimization pipeline
 """
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -387,15 +387,18 @@ class ConfigManager:
         """Override configuration values programmatically"""
         # Map legacy "xpu_*" keys to device_config
         _section_aliases = {"xpu": "device_config"}
+        sections = sorted((f.name for f in fields(self.config)), key=len, reverse=True)
         for key, value in kwargs.items():
-            parts = key.split("_", 1)
-            if len(parts) == 2:
-                section, attr = parts
-                section = _section_aliases.get(section, section)
-                if hasattr(self.config, section):
-                    section_obj = getattr(self.config, section)
-                    if hasattr(section_obj, attr):
-                        setattr(section_obj, attr, value)
+            # A section name may itself hold "_" (device_config): match the longest prefix.
+            section = next((s for s in sections if key.startswith(s + "_")), None)
+            if section is None:
+                alias, _, attr = key.partition("_")
+                section = _section_aliases.get(alias)
+            else:
+                attr = key[len(section) + 1 :]
+            section_obj = getattr(self.config, section, None) if section else None
+            if section_obj is not None and hasattr(section_obj, attr):
+                setattr(section_obj, attr, value)
         return self
 
     def get(self) -> Config:

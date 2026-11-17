@@ -245,6 +245,7 @@ def generate_workspace(
                 kernel_repo=kernel_repo,
                 profile_path=KERNEL_LOCATOR_PROFILE_PATH,
                 baseline_oracle=baseline_oracle,
+                reference_given=bool(reference_code),
             )
         )
         (agent_dir / "port-back.md").write_text(

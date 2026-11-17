@@ -17,6 +17,9 @@ import os
 
 
 def main():
+    from xe_forge import load_env
+
+    load_env()  # before the parser defaults and the tools read the environment
     parser = argparse.ArgumentParser(
         prog="xe-forge-skill",
         description="Xe-Forge skill tools (used by Claude Code and standalone)",
@@ -56,7 +59,10 @@ def main():
         "--variant", default=None, help="Spec variant (defaults to the spec's default_variant)"
     )
     p_bench.add_argument("--baseline-us", type=float, default=None, help="Cached baseline time")
-    p_bench.add_argument("--device", default="xpu", help="Target device")
+    p_bench.add_argument(
+        "--device",
+        help="Target device (default: $XE_FORGE_DEVICE, else the first device torch sees)",
+    )
     p_bench.add_argument(
         "--dsl", default="triton", choices=["triton", "sycl", "gluon", "cuda", "opencl"]
     )
@@ -169,7 +175,7 @@ def main():
         help="Profiler backend; auto tries unitrace ComputeBasic first, then VTune. "
         "Hardware counters require device/driver support and permissions.",
     )
-    p_profile.add_argument("--unitrace-bin", default="unitrace")
+    p_profile.add_argument("--unitrace-bin", default=os.environ.get("UNITRACE_BIN", "unitrace"))
     p_profile.add_argument(
         "--metric-group",
         choices=["ComputeBasic", "EuStallSampling", "all"],
@@ -230,12 +236,10 @@ def main():
     c_run.add_argument("--unitrace", default=os.environ.get("UNITRACE_BIN", "unitrace"))
     c_run.add_argument("--sampling-interval", type=int,
                        default=int(os.environ.get("XE_FORGE_SAMPLING_INTERVAL_US", 25)),
-                       help="unitrace metric sampling interval in us. Too coarse and every "
-                       "kernel shorter than a tick goes unsampled (unitrace's own default "
-                       "of 50 keeps a counter bound on 0.1-0.2%% of device time); too fine "
-                       "and unitrace stops partway and returns no records at all with exit "
-                       "0 (10 does this). 25 kept 86-95%% on both a 0.5B and a 9B capture "
-                       "(env XE_FORGE_SAMPLING_INTERVAL_US)")  # fmt: skip
+                       help="unitrace metric sampling interval in us (default 25, env "
+                       "XE_FORGE_SAMPLING_INTERVAL_US). Too coarse and every kernel shorter "
+                       "than a tick goes unsampled; too fine and unitrace stops partway and "
+                       "returns no records at all with exit 0")  # fmt: skip
     c_run.add_argument("--trace-steps", type=int,
                        default=int(os.environ.get("XE_FORGE_TRACE_STEPS", 2)),
                        help="how many of whatever the workload repeats -- denoising steps, "
@@ -255,6 +259,8 @@ def main():
     c_parse.add_argument("raw", help="raw/ directory capture run wrote")
     c_parse.add_argument("-o", "--output", required=True, help="capture.json to write")
     c_parse.add_argument("--names", default=None, help="names.json to apply")
+    c_parse.add_argument("--min-known", type=float, default=90.0,
+                         help="least %% of op time that must be in kernels unitrace saw")  # fmt: skip
 
     # -- patch --
     p_patch = subparsers.add_parser("patch", help="Gate a patch that makes a framework run a model")
@@ -263,6 +269,10 @@ def main():
         "check", help="git diff, fresh apply, import, tokens scored by transformers"
     )
     pc.add_argument("dir", help="holds patch.json and generate.sh")
+    pc.add_argument("--margin", type=float, default=0.1,
+                    help="non-text output: how much worse than the native run's worst the "
+                    "patched run's worst may be against a float32 reference (relative; dB "
+                    "for images)")  # fmt: skip
     pc.add_argument("--repos", required=True, help="the clones' directory (--kernel-repos)")
     pc.add_argument(
         "--framework-python", required=True, help="the unpatched framework's interpreter"

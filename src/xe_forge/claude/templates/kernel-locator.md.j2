@@ -18,15 +18,15 @@ reads the file instead of re-exploring the repository.
 
 ## What to find
 
-This repository may register kernels as PyTorch ops (`TORCH_LIBRARY_EXPAND`, `.def(...)`
-followed by `.impl(...)`), build them via CMake with named targets, and test/benchmark
-them with plain pytest and profiler scripts -- or it may do none of that. Do not assume
-the convention; read the actual files.
+This repository may register its kernels as framework ops, build them with named targets,
+and test and benchmark them with its own scripts -- or it may do none of that. Do not
+assume the convention; read the actual files.
 
 1. **Registration and schema.** Search for where `{{ kernel_name }}` is registered as an
-   op (grep for the literal name near `.def(` / `.impl(`). Read the exact schema string
-   and the C++ symbol it dispatches to. A kernel need not be registered at all: a Triton
-   kernel is a `@triton.jit` function plus the Python launcher that calls it -- find both.
+   op (grep for the literal name where the repository declares its ops). Read the exact
+   schema and the symbol it dispatches to. A kernel need not be registered at all: a
+   just-in-time compiled kernel is its kernel function plus the launcher that calls it --
+   find both.
    If `test_kernels/{{ kernel_name }}_pytorch.py` exists, it defines the scope: locate every
    op its docstring and `forward` cover, as in points 1-3, in whichever of the repositories
    holds it -- not only the one named `{{ kernel_name }}`.
@@ -37,8 +37,8 @@ the convention; read the actual files.
    equivalent) compiles the implementation file, and the exact command that rebuilds
    only that target -- not the whole project, if the project supports scoping it. Record,
    from the build files, what compiling it outside that build takes: compile flags and
-   defines, **device-link flags** (SPIR-V extensions, GRF or other ocloc options, AOT
-   device), and any pinned dependency revision (e.g. a CUTLASS/sycl-tla tag).
+   defines, **device-link flags** (what the build passes to the device compiler and
+   linker, ahead-of-time targets), and any pinned dependency revision.
 4. **Existing test.** Search `tests/` (or wherever this project keeps them) for literal
    use of `{{ kernel_name }}` -- not a filename guess, the actual call. If one exists,
    read it fully: what tensors it constructs, what a correct call looks like, what
@@ -62,6 +62,12 @@ the convention; read the actual files.
    constructed: shape, dtype, layout and, for every structured input (index or block
    tables, offsets, sequence lengths, scales, routing), the invariants it satisfies --
    each with file:line.
+{%- elif reference_given | default(false) %}
+7. **The reference was given -- check it, never write it.** `test_kernels/{{ kernel_name }}_pytorch.py`
+   is the semantic reference this workspace was given. Do not write, replace or edit it.
+   Check it against the implementation file from point 2 -- accumulation dtype, rounding,
+   order of operations, constants -- and report every difference, with file:line, in the
+   profile.
 {%- else %}
 7. **A standard reference, if one exists -- verified against the real kernel, not
    memory.** Many ops here are ordinary, well-known functions -- a normalization, an
@@ -104,11 +110,11 @@ the convention; read the actual files.
    accumulation dtype, rounding count and placement, operation order and constant
    placement must match what point 2's implementation file actually does. State in the
    profile which line(s) of the implementation each property was checked against --
-   "standard RMSNorm" with no line reference is not a check, and is not acceptable.
+   "a standard op" with no line reference is not a check, and is not acceptable.
 
 ## Output
 
-Write `{{ profile_path }}`{% if not baseline_oracle %}, and -- only for a standard op, per point 7 above --
+Write `{{ profile_path }}`{% if not baseline_oracle and not (reference_given | default(false)) %}, and -- only for a standard op, per point 7 above --
 `test_kernels/{{ kernel_name }}_pytorch.py`{% endif %}. Nothing else. Create parent directories if
 needed.
 
@@ -118,7 +124,7 @@ Answer, in this order, from what is on disk:
 - **Implementation file**: path, and the function/class that is the actual kernel body.
 - **Build target and rebuild command**: the exact command that compiles just this
   kernel's target.
-- **Language and build**: Triton, SYCL, SYCL-TLA (CUTLASS) or other, and what a
+- **Language and build**: the kernel's language and build system, and what a
   self-contained copy needs: every kernel the op launches, in launch order, with the file
   each is defined in (the full chain, not only the main kernel) and, for each kernel, the
   repository headers holding its device code (kernel, mainloop, epilogue, scheduler), which
@@ -132,6 +138,9 @@ Answer, in this order, from what is on disk:
   correctly.
 {%- if baseline_oracle %}
 - **Inputs**: point 7 -- how each argument is constructed, with file:line.
+{%- elif reference_given | default(false) %}
+- **Reference**: every difference between the given reference and the implementation, or
+  "matches" with the lines checked.
 {%- else %}
 - **Reference**: whether you wrote `test_kernels/{{ kernel_name }}_pytorch.py` (a standard
   op) or not (bespoke logic) -- and if not, that the project's own test is the correctness

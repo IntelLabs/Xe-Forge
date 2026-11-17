@@ -14,8 +14,14 @@ from pathlib import Path
 
 
 def device_type() -> str:
+    """The device asked for (``XE_FORGE_DEVICE``, which ``run`` sets from ``--device``), else
+    the first one torch sees."""
+    import os
+
     import torch
 
+    if os.environ.get("XE_FORGE_DEVICE"):
+        return os.environ["XE_FORGE_DEVICE"].split(":")[0]
     if hasattr(torch, "xpu") and torch.xpu.is_available():
         return "xpu"
     if torch.cuda.is_available():

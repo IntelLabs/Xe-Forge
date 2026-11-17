@@ -15,12 +15,6 @@ from xe_forge.frontend.analyze import Analysis, Entry
 from xe_forge.frontend.canonical import resolve_dims
 from xe_forge.frontend.ir import CaptureRun, Workload
 
-_TOLERANCE = {
-    "bfloat16": (0.02, 0.01),
-    "float16": (0.01, 0.005),
-    "float32": (1e-4, 1e-5),
-}
-
 _READ_WITH = """\
 `{capture}` is an `xe_forge.capture/v1` file written by `xe-forge-skill capture parse` from a run of
 `{model}` under {framework}. Each variant above names a workload in its `workloads` list
@@ -39,7 +33,7 @@ def _dtype(w: Workload) -> str:
 
 def _variants(e: Entry) -> list[tuple]:
     """(variant, workload, var axis, value, device us, its shape's sizes or None, record
-    ref) for every captured shape -- each token count's every runtime size too, costliest
+    ref, calls) for every captured shape -- each token count's every runtime size too, costliest
     first: which of them a trial is scored on, and how much each counts, is the inputs
     agent's choice (``weights``)."""
     rows = []
@@ -48,7 +42,8 @@ def _variants(e: Entry) -> list[tuple]:
             continue
         suffix = f"-w{i}" if len(e.workloads) > 1 else ""
         if not w.var_axes:
-            rows.append((f"bench{suffix}", w, None, None, w.device_us, None, w.workload_id))
+            rows.append((f"bench{suffix}", w, None, None, w.device_us, None, w.workload_id,
+                         w.calls))  # fmt: skip
             continue
         axis, hist = next(iter(w.var_axes.items()))
         for value, h in hist.items():
@@ -56,11 +51,11 @@ def _variants(e: Entry) -> list[tuple]:
             pts = h.get("points") or []
             if len(pts) <= 1:
                 rows.append((f"bench-t{value}{suffix}", w, axis, int(value), h["device_us"], None,
-                             ref))  # fmt: skip
+                             ref, h["calls"]))  # fmt: skip
                 continue
             for j, p in enumerate(pts):
                 rows.append((f"bench-t{value}-s{j}{suffix}", w, axis, int(value), p["device_us"],
-                             p["with"], f"{ref}#{j}"))  # fmt: skip
+                             p["with"], f"{ref}#{j}", p["calls"]))  # fmt: skip
     rows.sort(key=lambda r: -r[4])
     return rows
 
@@ -77,12 +72,18 @@ def build_spec(
     chosen = weights or {r[0]: r[4] / total for r in rows if r[4] > 0}
     chosen = dict(sorted(chosen.items(), key=lambda kv: -kv[1]))
     spec: dict = {"default_variant": next(iter(chosen)),
-                  "weights": {k: round(v, 4) for k, v in chosen.items()}}  # fmt: skip
+                  "weights": {k: round(v, 4) for k, v in chosen.items()},
+                  # The kernel's own time per call, in the model: a baseline far slower is
+                  # not that kernel, and a speedup over it is not one over the kernel.
+                  "captured_us": {r[0]: round(r[4] / r[7], 3) for r in rows
+                                  if r[0] in chosen and r[7]}}  # fmt: skip
     record: dict[str, str] = {}
     smallest = min(rows, key=lambda r: r[3] if r[3] is not None else 0)
-    for name, w, _axis, value, _, with_, ref in [("ci", *smallest[1:]), *rows]:
-        rtol, atol = _TOLERANCE.get(_dtype(w), (0.05, 0.05))
-        spec[name] = [{"dtype": _dtype(w), "rtol": rtol, "atol": atol,
+    for name, w, _axis, value, _, with_, ref, _calls in [("ci", *smallest[1:]), *rows]:
+        tol = w.naming.tolerance
+        if not tol:  # the naming agent's to judge, from the dtype and the kernel; no default
+            return None
+        spec[name] = [{"dtype": _dtype(w), "rtol": tol["rtol"], "atol": tol["atol"],
                        "dims": resolve_dims(w, value, with_)}]  # fmt: skip
         if name != "ci":
             record[name] = ref
@@ -167,7 +168,11 @@ def emit(
             )
         elif e.enabled:
             item["enabled"] = False
-            item["reason"] += "; no spec could be built"
+            item["reason"] += "; no spec could be built" + (
+                ""
+                if all(w.naming.tolerance for w in e.workloads)
+                else ": the naming agent stated no tolerance"
+            )
         kernels.append(item)
 
     manifest = out_dir / "kernels.yaml"

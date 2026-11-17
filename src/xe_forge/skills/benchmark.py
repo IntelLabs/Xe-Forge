@@ -28,6 +28,7 @@ import io
 import os
 import re
 import sys
+from pathlib import Path
 
 BUILTIN_ENV = "XE_FORGE_BUILTIN_BENCHMARK"
 
@@ -415,6 +416,47 @@ def _weights(args) -> dict[str, float]:
     return load_spec(args.spec).weights
 
 
+# How much slower than the captured kernel a baseline may run before it is not that kernel.
+BASELINE_SLACK = float(os.environ.get("XE_FORGE_BASELINE_SLACK", "1.5"))
+
+
+def _not_the_captured_kernel(args, name: str, baseline_us) -> str | None:
+    """Why the baseline measured at ``name`` is not the kernel the capture timed, or None."""
+    from xe_forge.core.spec_loader import load_spec
+
+    captured = load_spec(args.spec).captured_us.get(name)
+    if not captured or baseline_us is None or baseline_us <= BASELINE_SLACK * captured:
+        return None
+    return (f"the baseline ran {baseline_us:.2f} us at {name}; the kernel it copies ran "
+            f"{captured:.2f} us per call there in the model (captured_us), "
+            f"{baseline_us / captured:.1f}x slower, over the {BASELINE_SLACK}x allowed. A trial "
+            "would be scored against this copy, not the kernel: make the baseline run the "
+            "kernel the model ran -- where part of it cannot be built from source, through "
+            "the library's own call")  # fmt: skip
+
+
+def _one_shape(args, single) -> int:
+    """One shape's run, refused like a weighted one when its baseline is not the captured
+    kernel (the spec's ``captured_us`` at that shape)."""
+    from xe_forge.core.spec_loader import load_spec
+
+    spec = load_spec(args.spec) if args.spec and Path(args.spec).is_file() else None
+    name = args.variant or (spec.default_variant if spec else None)
+    if not (spec and spec.captured_us.get(name)):
+        return single()
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = single()
+    out = parse_outcome(buf.getvalue()) or {}
+    why = out.get("correctness") == "pass" and _not_the_captured_kernel(
+        args, name, out.get("baseline_us"))  # fmt: skip
+    if why:
+        print(f"Correctness: FAILED\nVERDICT: BASELINE_NOT_CAPTURED_KERNEL\nError: {why}")
+        return 1
+    print(buf.getvalue(), end="")
+    return code
+
+
 def _weighted(args, single) -> int:
     """Every weighted shape of the spec, one ``single`` run each, scored as one result.
 
@@ -425,7 +467,7 @@ def _weighted(args, single) -> int:
     """
     weights = _weights(args)
     if not weights:
-        return single()
+        return _one_shape(args, single)
     if args.baseline_us is not None:
         print("Correctness: FAILED\nError: --baseline-us is one shape's; a weighted spec "
               "times every shape's baseline afresh")  # fmt: skip
@@ -442,6 +484,10 @@ def _weighted(args, single) -> int:
             if out["correctness"] != "pass":
                 print(f"Variant: {name}\n{text.rstrip()}")
                 return code or 1
+            why = _not_the_captured_kernel(args, name, out.get("baseline_us"))
+            if why:
+                print(f"Correctness: FAILED\nVERDICT: BASELINE_NOT_CAPTURED_KERNEL\nError: {why}")
+                return 1
             timer = re.search(r"^TIMER: .*$", text, re.M)
             if timer and not rows:
                 print(timer.group(0))
@@ -471,6 +517,10 @@ def _weighted(args, single) -> int:
 
 
 def run(args):
+    if not args.device:
+        from xe_forge.frontend.profile import device_type
+
+        args.device = device_type()
     target = _trial_target(args)
     template = _external_template(args)
     if template:

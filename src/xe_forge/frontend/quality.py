@@ -1,24 +1,25 @@
-"""Output quality A/B for a prove run: is the patched arm's output still right?
+"""Output quality A/B for `patch check` on a non-text workload: is the patched arm's output
+still right? Arm A is the framework's own path, arm B the patched one, from the artifacts the
+launcher saved. The stages, each optional (`_STAGES` holds the files and limits):
 
-`compare` answers "is B faster". This answers "is B still correct", from the artifacts the
-launcher saved next to each capture. Four stages, each optional:
-
-| stage    | file (first match)                              | role   |
-|----------|-------------------------------------------------|--------|
-| `step1`  | `latent_step1.npy`                              | gate   |
-| `latent` | `latent_final.npy`                              | guard  |
-| `image`  | `raw_image.png`, `raw/output.png`, `frames/*.npy` | report |
-| `actions`| `actions.npy` (a policy's returned actions)      | report |
+| stage         | file (first match)                                  | role   |
+|---------------|-----------------------------------------------------|--------|
+| `prompt`      | `prompt_embeds.npy`                                 | gate   |
+| `step1`       | `latent_step1.npy`                                  | gate   |
+| `step1_image` | the 1-step picture, when no latent was saved        | gate   |
+| `latent`      | `latent_final.npy`                                  | guard  |
+| `image`       | `raw_image.png`, `raw/output.png`, `frames/*.npy`   | report |
+| `actions`     | `actions.npy` (a policy's returned actions)         | report |
 
 The **gate** decides pass or fail: one denoise step, before rounding is amplified. A **guard**
 fails only on a catastrophe (NaN, a different shape, a difference past its hard limit), since a
 defect that needs many steps or lives in the VAE cannot show at step 1. A **report** stage only
-warns. If no gate artifact exists, the guard becomes the gate and the section says so.
+warns, but for the same catastrophe. If no gate artifact exists, the guard becomes the gate and
+the section says so.
 
 Order of judgement, per stage:
 
-1. **Hashes.** One hash per arm and the two equal -> `identical`, pass, nothing measured. Three
-   of four B70 diffusion runs land here (see the prove runs under `runs/vision-*`).
+1. **Hashes.** One hash per arm and the two equal -> `identical`, pass, nothing measured.
 2. **Against a float32 reference** (`<prove>/reference/<stage>.<ext>`, same seed and steps), when
    one exists: the error of every run against it, then `max(e_B) <= max(e_A) * (1 + margin)`
    passes, `min(e_B) > max(e_A)` fails, and a B inside A's own spread passes. Both arms round, so
@@ -122,9 +123,14 @@ def _judge(stage: dict, metric: str, warn: float, hard: float, margin: float = M
     stage["deterministic"] = {"a": len(ha) == 1, "b": len(hb) == 1}
     if len(ha) == 1 and ha == hb:
         return {**stage, "verdict": "identical", "why": "every run of both arms is byte-identical"}
-    bad = [r for r in a + b if r.get("ref", {}).get("nan") or r.get("ab", {}).get("shape")]
+    bad = [
+        r
+        for r in a + b
+        if r.get("ref", {}).get("nan") or r.get("ab", {}).get("nan") or r.get("ab", {}).get("shape")
+    ]
     if bad:
-        return {**stage, "verdict": "fail", "why": "not a number, or a different shape"}
+        return {**stage, "verdict": "fail", "catastrophe": True,
+                "why": "not a number, or a different shape"}  # fmt: skip
     ea = [r["ref"][metric] for r in a if r.get("ref", {}).get(metric) is not None]
     eb = [r["ref"][metric] for r in b if r.get("ref", {}).get(metric) is not None]
     if len(ea) == len(a) and len(eb) == len(b) and ea and eb:
@@ -155,7 +161,7 @@ def _judge(stage: dict, metric: str, warn: float, hard: float, margin: float = M
         return {**stage, "verdict": "pass",
                 "why": f"A vs B ({worst:.4g}) is inside A's own spread ({inside:.4g})"}  # fmt: skip
     if _worse(metric, hard, worst):
-        return {**stage, "verdict": "fail",
+        return {**stage, "verdict": "fail", "catastrophe": True,
                 "why": f"A vs B ({worst:.4g}) is past the hard limit {hard:.4g} "
                        f"(a convention, no float32 reference was given)"}  # fmt: skip
     if _worse(metric, warn, worst):
@@ -222,9 +228,9 @@ def quality(
                     s["role"] = f"{role}, promoted to gate: no earlier artifact"
             break
     # Several gate stages: the worst of them decides, so a clean prompt embedding cannot cover a
-    # bad latent. A guard or report stage can still fail the whole thing on a catastrophe.
+    # bad latent. A guard or report stage fails the whole thing only on a catastrophe.
     rank = ("fail", "inconclusive", "warn", "pass", "identical")
-    fails = [s for s in stages if s["verdict"] == "fail"]
+    fails = [s for s in stages if s["verdict"] == "fail" and (s in gates or s.get("catastrophe"))]
     verdict = (
         "fail" if fails
         else min((s["verdict"] for s in gates), key=rank.index, default="absent")

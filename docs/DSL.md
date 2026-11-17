@@ -1,24 +1,23 @@
-# Adding a New DSL to Xe Forge
+# Adding a DSL
 
-A **DSL** is the source language kernels are written in. Xe Forge is DSL-aware end to
-end — analyzer, planner, optimizer, executor, knowledge base, and prompts all branch
-on the active DSL. It ships with four, defined in `src/xe_forge/models.py`:
+A DSL is the language kernels are written in. The analyzer, planner, optimizer, executor,
+knowledge base, prompts and workspace templates all branch on it. Xe-Forge has five,
+defined in `src/xe_forge/models.py`:
 
-| DSL | Value | Language | Executor |
-|-----|-------|----------|----------|
-| Triton | `triton` | Python | `KernelBenchExecutor` |
-| Gluon | `gluon` | Python | `KernelBenchExecutor` |
-| SYCL | `sycl` | C++ | `SyclExecutor` |
-| CUDA | `cuda` | Python | `KernelBenchExecutor` |
+| DSL | Value | File | Executor |
+|---|---|---|---|
+| Triton | `triton` | `.py` | `KernelBenchExecutor` |
+| Gluon | `gluon` | `.py` | `KernelBenchExecutor` |
+| SYCL | `sycl` | `.cpp` | `SyclExecutor` |
+| CUDA | `cuda` | `.cu` | `KernelBenchExecutor` (built by the pipeline) |
+| OpenCL | `opencl` | `.py`, holding the OpenCL C source, launched through `xe_forge.opencl` | `KernelBenchExecutor` |
 
-The DSL is chosen with `--dsl <name>` or the `DSL` env var, ending up in
-`config.device_config.dsl`. **Triton is the reference path**: anything that doesn't
-special-case a DSL falls back to it. A Python + KernelBench-`Model`-shaped DSL on XPU
-only needs Steps 1, 2, and 5.
+The DSL is chosen with `--dsl` or `DSL` and ends up in `config.device_config.dsl`. Triton
+is the reference path: code that does not special-case a DSL falls back to it. A DSL whose
+kernels are Python files with a `Model` class needs steps 1, 2, 5 and 9 and, for the
+workspace engines, step 10.
 
----
-
-## Step 1 — Register the DSL enum
+## Step 1: Register the enum
 
 `src/xe_forge/models.py`:
 
@@ -28,23 +27,33 @@ class DSL(StrEnum):
     GLUON = "gluon"
     SYCL = "sycl"
     CUDA = "cuda"
+    OPENCL = "opencl"
     MOJO = "mojo"  # new
 
     @property
     def code_language(self) -> str:
-        if self in (DSL.SYCL, DSL.CUDA):  # add MOJO here if it is C++-like
+        if self in (DSL.SYCL, DSL.CUDA):
             return "cpp"
         return "python"
+
+    @property
+    def kernel_ext(self) -> str:
+        if self == DSL.SYCL:
+            return ".cpp"
+        if self == DSL.CUDA:
+            return ".cu"
+        return ".py"
 ```
 
-`code_language` decides saved-file extension (`.py`/`.cpp`), comment marker, and the
-`dspy.Code["python"|"cpp"]` type. The enum value (`"mojo"`) is the string used for the
-flag, env var, and knowledge-base directory — keep it lowercase.
+`code_language` decides the comment marker and the `dspy.Code["python"|"cpp"]` type.
+`kernel_ext` is the suffix a kernel is written to, and the suffix that makes `-i` a
+baseline rather than a reference. The value is the string of the flag, the variable and
+the knowledge-base directory; keep it lowercase.
 
-## Step 2 — Declare supported stages
+## Step 2: Declare the supported stages
 
-`src/xe_forge/dsl_registry.py`. The planner output is filtered to this set, so omitted
-stages never run.
+`src/xe_forge/dsl_registry.py`. The plan is filtered to this set, so a stage left out never
+runs; a DSL with no entry gets the Triton set.
 
 ```python
 DSL_SUPPORTED_STAGES = {
@@ -56,108 +65,98 @@ DSL_SUPPORTED_STAGES = {
         OptimizationStage.FUSION,
         OptimizationStage.MEMORY_ACCESS,
         OptimizationStage.DEVICE_SPECIFIC,
-        OptimizationStage.AUTOTUNING,
         OptimizationStage.DISCOVERY,
     },
 }
 ```
 
-Include only stages that make sense (e.g. SYCL omits `TENSOR_DESCRIPTORS` and
-`PERSISTENT_KERNEL`). Missing DSL → falls back to the Triton set.
+## Step 3: Executor
 
-## Step 3 — Executor
+The executor compiles, runs, times and compares kernels; the feedback of
+`compare_kernels()` goes back to the LLM. It exposes `execute(...) -> ExecutionResult` and
+`compare_kernels(...)`, whose result carries the time ratio, the feedback message and
+whether each arm was correct (`ComparisonResult` in `src/xe_forge/core/executor.py`).
 
-The executor compiles, runs, times, and compares kernels; its `compare_kernels()`
-feedback string is fed back to the LLM. It must expose:
+- Importable kernels: reuse `KernelBenchExecutor` (`src/xe_forge/core/executor.py`). Emit
+  code that imports cleanly and defines `class Model` with `forward()`.
+- Compiled, out-of-process kernels: model a class on `SyclExecutor`
+  (`src/xe_forge/core/sycl_executor.py`), which writes the source to a file, compiles it,
+  runs it, parses the timing and compares outputs. Export it from
+  `src/xe_forge/core/__init__.py`.
 
-```python
-def execute(...) -> ExecutionResult: ...
-def compare_kernels(...):   # result has .speedup, .feedback_message, .optimized_correct, .is_slower
-```
+## Step 4: Executor selection
 
-- **Python / importable kernels** (Triton, Gluon, CUDA): reuse `KernelBenchExecutor`
-  (`src/xe_forge/core/executor.py`). Just emit code that imports cleanly and exposes a
-  `class Model` with `forward()` (or a named callable). Usually **no new executor needed**.
-- **Compiled / out-of-process** (like SYCL): model a new class on `SyclExecutor`
-  (`src/xe_forge/core/sycl_executor.py`) — write source to temp file, compile, run as
-  subprocess, parse timing, compare output dumps. Export it from `src/xe_forge/core/__init__.py`.
+Three places pick the executor:
 
-## Step 4 — Wire executor selection
+- `src/xe_forge/pipeline.py` (constructor): `DSL.SYCL` goes through
+  `create_executor_from_config`, everything else gets `KernelBenchExecutor`.
+- `src/xe_forge/core/__init__.py` (`create_executor_from_config`): the same split.
+- `src/xe_forge/cli.py`: with a spec, the CLI builds a `KernelBenchExecutor` for the dspy
+  engine unless the DSL is `sycl` or `cuda`, which the pipeline builds itself.
 
-Two spots pick the executor. Add a branch or let it fall through to
-`KernelBenchExecutor`:
+A DSL that runs from M/N/K dims rather than input shapes follows the `_is_sycl` branches
+in `pipeline.py`.
 
-```python
-# src/xe_forge/pipeline.py  (constructor)  and  src/xe_forge/core/__init__.py (create_executor_from_config)
-if config.device_config.dsl == DSL.SYCL:
-    executor = SyclExecutor(...)
-else:
-    executor = KernelBenchExecutor(...)  # triton/gluon/cuda/mojo
-```
+## Step 5: Prompts
 
-If your DSL runs from M/N/K dims instead of `input_shapes`, follow the `_is_sycl`
-branches in `pipeline.py`.
-
-## Step 5 — Prompt library
-
-`src/xe_forge/prompts/device_prompts.py`. At minimum register the display name:
+`src/xe_forge/prompts/device_prompts.py`. Register the display name:
 
 ```python
 _DSL_NAMES = {
     "triton": "Triton",
+    "gluon": "Gluon",
     "sycl": "SYCL/Sycl-tla",
+    "cuda": "CUDA C++",
     "mojo": "Mojo",  # new
 }
 ```
 
-Then add cases as needed in `code_requirements()` (validation rules) and
-`stage_guidance(stage)` (per-stage hints). Unhandled cases degrade to generic text.
+A DSL missing here is shown upper-cased (`opencl` is). Add cases to `code_requirements()`
+and `stage_guidance(stage)` as needed; a DSL without them gets generic text.
 
-## Step 6 — Agent signatures (only if code rules differ from Triton)
+## Step 6: Agent signatures (only if the code rules differ from Triton)
 
-Agents pick a DSPy signature per DSL — today it's SYCL vs Triton-shaped:
+The agents pick a DSPy signature by DSL, SYCL or Triton-shaped:
 
 ```python
 # analyzer_agent.py
 sig = SyclAnalysisSignature if self.dsl == DSL.SYCL else AnalysisSignature
-# optimizer_agent.py: SyclOptimizationSignature / SyclAlgorithmicOptimizationSignature else Triton
 ```
 
-Python+`Model`-shaped DSLs reuse the default signatures (only adjust Step 5). For a
-C++/compiled DSL, add `MojoAnalysisSignature` / `MojoOptimizationSignature` modeled on
-the SYCL ones, extend the `if self.dsl == DSL.MOJO:` branches in
-`analyzer_agent.py`, `optimizer_agent.py`, `react_agent.py`, and add a `_verify_<dsl>`
-helper for the CoVeR verify callback if the structural checks differ from the Triton
-`ast.parse` + `@triton.jit`/`Model` checks.
+`optimizer_agent.py` and `react_agent.py` branch the same way, and the optimizer's
+`compile_and_verify` tool calls `verify_sycl` (`src/xe_forge/agents/utils.py`) for SYCL and
+runs the Triton structural checks (`ast.parse`, `import triton`, `@triton.jit`, `Model`)
+otherwise. A compiled DSL adds signatures modeled on the SYCL ones and a branch in each.
 
-## Step 7 — Knowledge base (optional, recommended)
+## Step 7: Knowledge base
 
-Loaded by `src/xe_forge/knowledge/loader.py`, enabled with
-`KNOWLEDGE_BASE_ENABLED=true`. Layout (priority: `common` → `<dsl>/common` → `<dsl>/<device>`):
+Optional. Read by the dspy engine when `KNOWLEDGE_BASE_ENABLED=true`, loaded by
+`src/xe_forge/knowledge/loader.py` in this order: `common/`, `<dsl>/common/`,
+`<dsl>/<device>/`.
 
 ```
 knowledge_base/
-├── common/                  # DSL-agnostic, always loaded
-└── mojo/xpu/                # your <dsl>/<device>
-    ├── *.yaml               # patterns + constraints
-    └── examples/
-        ├── index.yaml
-        └── *.py / *.cpp
+  common/                  every DSL
+  mojo/xpu/                <dsl>/<device>
+    *.yaml                 patterns and constraints
+    examples/
+      index.yaml
+      *.py / *.cpp
 ```
 
-Pattern / constraint YAML:
+Pattern and constraint YAML:
 
 ```yaml
 patterns:
   - id: large_tiles
     name: Use large tiles on XPU
-    stage: device_specific        # aliases ok: memory, dtype, xpu_specific, stream_k...
+    stage: device_specific        # aliases: memory, dtype, xpu_specific, ...
     description: ...
     rationale: ...
     pattern_before: |
-      ...code...
+      ...
     pattern_after: |
-      ...code...
+      ...
 
 constraints:
   - id: grf_mode_constexpr        # stage inferred from keywords in the id
@@ -166,7 +165,7 @@ constraints:
     description: ...
 ```
 
-Examples manifest (`examples/index.yaml`):
+Examples manifest (`<dsl>/<device>/examples/index.yaml`):
 
 ```yaml
 examples:
@@ -178,76 +177,58 @@ examples:
     optimized: gemm_activation_optimized.py
 ```
 
-`format_for_stage()` shows only the constraints/patterns/examples for the stage
-currently running, so context stays lean. Copy `knowledge_base/triton/xpu/` or
-`knowledge_base/sycl/xpu/` as a starting template.
+`format_for_stage()` shows only the current stage's constraints, patterns and examples.
+`knowledge_base/triton/xpu/` and `knowledge_base/sycl/xpu/` are starting templates.
 
-## Step 8 — Issue types (only if needed)
+## Step 8: Issue types (only if needed)
 
-Usually skip this: the LLM can propose novel optimizations via the `OPEN_ENDED` /
-`DISCOVERY` path, and unknown issue strings are auto-routed by keyword/prefix in
-`src/xe_forge/knowledge/patterns.py`. To add a real type: add it to `IssueType`
-(`models.py`), map it in `_MAPPING` (`patterns.py`), and give it a description in
-`_build_issue_categories` (`analyzer_agent.py`).
+Usually skip this: the `discovery` stage handles optimizations no type names, and unknown
+issue strings are routed by keyword in `src/xe_forge/knowledge/patterns.py`. To add a type,
+add it to `IssueType` (`models.py`), map it in `_MAPPING` (`patterns.py`), and describe it
+in `_build_issue_categories` (`analyzer_agent.py`).
 
-## Step 9 — CLI / config
+## Step 9: CLI and skills
 
-`--dsl` already accepts any string. Just check the DSL-string gates in
-`src/xe_forge/cli.py` (e.g. `if dsl not in ("sycl", "cuda")` for reading the reference
-implementation and default variant) and add your DSL where it should follow the
-compiled-flow path instead of the Python/reference path. Device defaults are keyed on
-device type, not DSL, so `config.py` rarely needs changes.
+- `src/xe_forge/cli.py`: add the value to the `--dsl` choices, and check the DSL-string
+  gates (`dsl in ("sycl",)` for the default variant, `dsl not in ("sycl", "cuda")` for the
+  CLI-built executor).
+- `src/xe_forge/skills/__init__.py`: add it to the `--dsl` choices of `validate` and
+  `benchmark`.
+- `src/xe_forge/skills/benchmark.py` builds a `KernelBenchExecutor` directly; a compiled
+  DSL needs a branch there, or a host benchmark command.
+- `src/xe_forge/core/validator.py`: `validate()` dispatches to `_validate_triton` or
+  `_validate_sycl` and falls back to `_validate_generic`. Add a `_validate_<dsl>` if the
+  generic checks are not enough.
 
-## Step 10 — Skills folder
+Device defaults are keyed on the device, not the DSL, so `config.py` rarely changes.
 
-`src/xe_forge/skills/` is a thin CLI wrapper around the core modules (`validate`,
-`benchmark`, `analyze`, `profile`, `trial`). Even though they just call core, their
-DSL knowledge is hardcoded and must be updated:
+## Step 10: Workspace templates (claude, codex, dspy-agent)
 
-```python
-# src/xe_forge/skills/__init__.py — add the value to every --dsl choices list
-p_validate.add_argument(
-    "--dsl", default="triton", choices=["triton", "sycl", "gluon", "cuda", "mojo"]
-)
-```
-
-- `skills/benchmark.py` constructs `KernelBenchExecutor` directly — switch it to
-  `create_executor_from_config(...)` (or branch on the DSL) so a compiled DSL gets the
-  right executor.
-- `skills/validate.py` forwards `--dsl` to `KernelValidator.validate(code, dsl=...)`
-  in `src/xe_forge/core/validator.py`, which dispatches `_validate_triton` /
-  `_validate_sycl`. Add a `_validate_<dsl>` branch there (else it falls back to the
-  Triton checks).
-
-## Step 11 — Claude engine templates (only for the Claude engine)
-
-The Claude engine renders `src/xe_forge/claude/templates/*.j2` with the `dsl`
-variable. If you want it to support your DSL, make those templates handle the new
-value (build/run commands, extensions). The DSPy and Claude engines are independent.
-
----
+The workspace engines render the `.j2` files in `src/xe_forge/claude/templates/` with `dsl`; codex and
+dspy-agent run the same workspace. Make the templates handle the new value: build and run
+commands, the file suffix, and how a `Model` launches the kernel (see the `sycl` and
+`opencl` branches of `CLAUDE.md.j2`).
 
 ## Test
 
 ```bash
-python -m xe_forge.cli --dsl mojo --device xpu --kernel my_kernel.<ext> --spec my_kernel.yaml
+xe-forge --dsl mojo --device xpu -i my_kernel.<ext> -s my_kernel.yaml
 ```
 
-Confirm: baseline measures, planned stages are filtered to your supported set, the KB
-load log (`Knowledge base loaded (dsl=mojo): N patterns ...`) is clean with no
-"unmappable stage" warnings, and the executor's compile/run/compare feedback flows
-back into the agent. Mirror the kernel+spec pairs in `test_kernels/`.
+Check that the baseline measures, the planned stages are within the supported set, the
+knowledge-base log line (`Knowledge base loaded (dsl=mojo, ...)`) comes with no
+"unknown/unmappable stage" warning, and the executor's feedback reaches the agent. Add kernel and spec pairs to
+`test_kernels/`.
 
 ## Checklist
 
-- [ ] Step 1 — `DSL` enum + `code_language` (`models.py`)
-- [ ] Step 2 — `DSL_SUPPORTED_STAGES` entry (`dsl_registry.py`)
-- [ ] Step 3 — executor: reuse `KernelBenchExecutor` or add one (`core/`)
-- [ ] Step 4 — executor selection (`pipeline.py`, `core/__init__.py`)
-- [ ] Step 5 — `_DSL_NAMES` + `PromptLibrary` branches (`prompts/device_prompts.py`)
-- [ ] Step 6 — agent signatures (only if code rules differ from Triton)
-- [ ] Step 7 — `knowledge_base/<dsl>/<device>/` (optional)
-- [ ] Step 8 — issue types (only if needed)
-- [ ] Step 9 — CLI DSL-string checks (`cli.py`)
-- [ ] Step 10 — skills folder: `--dsl` choices, executor, validator (`skills/`, `core/validator.py`)
-- [ ] Step 11 — Claude engine templates (only for the Claude engine)
+- [ ] 1: `DSL` enum, `code_language`, `kernel_ext` (`models.py`)
+- [ ] 2: `DSL_SUPPORTED_STAGES` (`dsl_registry.py`)
+- [ ] 3: executor (`core/`)
+- [ ] 4: executor selection (`pipeline.py`, `core/__init__.py`, `cli.py`)
+- [ ] 5: `_DSL_NAMES` and `PromptLibrary` cases (`prompts/device_prompts.py`)
+- [ ] 6: agent signatures, only if the code rules differ
+- [ ] 7: `knowledge_base/<dsl>/<device>/`, optional
+- [ ] 8: issue types, only if needed
+- [ ] 9: `--dsl` choices and DSL gates (`cli.py`, `skills/`, `core/validator.py`)
+- [ ] 10: workspace templates

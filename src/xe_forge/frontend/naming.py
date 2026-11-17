@@ -28,6 +28,8 @@ def name_op(op: CapturedOp) -> Naming:
             entry.get("repo"),
             entry.get("dsl"),
             via=entry.get("via", "named by the naming agent"),
+            call=entry.get("call") if entry.get("route") == "kernel" else None,
+            tolerance=entry.get("tolerance"),
         )
     return Naming("unnamed", _base(op.framework_op), via="not named (no names.json entry)")
 
@@ -35,7 +37,7 @@ def name_op(op: CapturedOp) -> Naming:
 ROUTES = ("kernel", "library", "aten", "unnamed")
 ROWS = ("token", "token_expert")
 # An entry's fields it is usable without: a bad one is dropped alone.
-OPTIONAL = ("cost", "config_args", "kv_args", "token_arg", "family")
+OPTIONAL = ("cost", "config_args", "kv_args", "token_arg", "family", "call", "tolerance")
 
 
 def _pos_int(v) -> bool:
@@ -70,6 +72,22 @@ def validate(names, listing: dict, repos) -> list[str]:
                 out.append(f"{where}: repo {repo!r} not found under {repos}")
             if e.get("dsl") not in dsls:
                 out.append(f"{where}: dsl {e.get('dsl')!r} not one of {sorted(dsls)}")
+        tol = e.get("tolerance")
+        if tol is not None and not (
+            isinstance(tol, dict)
+            and set(tol) == {"rtol", "atol"}
+            and all(type(v) in (int, float) and v >= 0 for v in tol.values())
+            and tol["rtol"] > 0
+        ):
+            out.append(f"{where}.tolerance: {tol!r} is not {{'rtol': > 0, 'atol': >= 0}}")
+        call = e.get("call")
+        if call is not None:
+            if route != "kernel" or not isinstance(call, dict):
+                out.append(
+                    f"{where}.call: only a kernel route's, an object {{name, repo, dsl, via}}"
+                )
+            else:
+                entry(f"{where}.call", {**call, "route": "library"}, args, dims, kernel_level=True)
         family = e.get("family")
         if family is not None and not (
             isinstance(family, str) and re.fullmatch(r"[a-z_]+", family)

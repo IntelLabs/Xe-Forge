@@ -86,6 +86,19 @@ def test_a_shape_that_fails_correctness_ends_the_trial(tmp_path, capsys):
     assert code == 1 and out["correctness"] == "fail" and "Variant: pre" in text
 
 
+@pytest.mark.parametrize("dec_us, refused", [(14.0, False), (16.0, True)])
+def test_a_baseline_far_slower_than_the_captured_kernel_is_refused(tmp_path, capsys, monkeypatch,
+                                                                   dec_us, refused):  # fmt: skip
+    monkeypatch.setitem(SPEC, "captured_us", {"dec": 10.0, "pre": 100.0})
+    code, text, out, _ = _gate(tmp_path, capsys, {"dec": (True, dec_us, 2, None),
+                                                  "pre": (True, 100, 50, None)})  # fmt: skip
+    if refused:
+        assert code == 1 and out["correctness"] == "fail"
+        assert out["verdict"] == "BASELINE_NOT_CAPTURED_KERNEL" and "1.6x slower" in text
+    else:
+        assert code == 0 and out["correctness"] == "pass" and "verdict" not in out
+
+
 def test_one_variant_asked_for_is_one_shape(tmp_path, capsys):
     args = _args(tmp_path)
     args.variant = "pre"
@@ -106,7 +119,7 @@ def _manifest(tmp_path):
                         dtypes=["float16"], layout=[], attrs={}, calls=20, device_us=dec + pre,
                         share=0.5, var_axes={"M": {"4": {"calls": 19, "device_us": dec},
                                                    "2048": {"calls": 1, "device_us": pre}}},
-                        ops=[], naming=Naming(route="kernel"))  # fmt: skip
+                        ops=[], naming=Naming(route="kernel", tolerance={"rtol": 0.02, "atol": 0.01}))  # fmt: skip
 
     ws = [w("gemm/a", 896, 30.0, 20.0), w("gemm/b", 4864, 30.0, 20.0)]
     e = Entry(name="mm", repo="r", dsl="sycl", workloads=ws, decisions=[], enabled=True)
@@ -121,6 +134,9 @@ def test_every_captured_shape_is_a_variant_weighted_by_its_time_or_the_agents(tm
     spec = load_spec(tmp_path / "out" / "specs" / "mm.yaml")
     assert spec.weights == {"bench-t4-w0": 0.3, "bench-t4-w1": 0.3, "bench-t2048-w0": 0.2,
                             "bench-t2048-w1": 0.2}  # fmt: skip
+    # each shape's own time per call in the model: 30 us over 19 calls, 20 us in one
+    assert spec.captured_us == {"bench-t4-w0": 1.579, "bench-t4-w1": 1.579,
+                                "bench-t2048-w0": 20.0, "bench-t2048-w1": 20.0}  # fmt: skip
     chosen = {"mm": {"bench-t2048-w0": 0.5, "bench-t2048-w1": 0.5}}
     manifest.emit(analysis, cap, tmp_path / "capture.json", tmp_path / "out", chosen)
     assert load_spec(tmp_path / "out" / "specs" / "mm.yaml").weights == chosen["mm"]

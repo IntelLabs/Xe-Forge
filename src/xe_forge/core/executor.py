@@ -84,9 +84,9 @@ class KernelBenchExecutor:
         self.warmup_iters = warmup_iters
         self.benchmark_iters = benchmark_iters
         self.rounds = rounds
-        # The smallest speedup reported as one. Interleaving and slot swapping leave a
-        # consistent ~1% between identical builds on this part (an A/A check measured
-        # it); anything inside this band is reported as indistinguishable, not a result.
+        # The smallest speedup reported as one. Identical builds can still differ by a
+        # small consistent margin even with interleaving and slot swapping; anything inside
+        # this band is reported as indistinguishable, not a result.
         if min_effect is None:
             min_effect = float(os.environ.get("BENCHMARK_MIN_EFFECT", "0.02"))
         self.min_effect = min_effect

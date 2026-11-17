@@ -8,6 +8,7 @@ Parses YAML spec files to get:
 - Per-variant correctness tolerances (rtol, atol)
 """
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
@@ -92,6 +93,10 @@ class KernelSpec:
     # each by the share of the kernel's time it stands for (see skills/benchmark.py).
     weights: dict[str, float] = field(default_factory=dict)
 
+    # Optional {variant: us}: the kernel's own device time per call at that shape, as the
+    # model ran it (the frontend's capture); the baseline is checked against it.
+    captured_us: dict[str, float] = field(default_factory=dict)
+
     # Base-prefix → attribute name for the four standard families.
     _VARIANT_MAP_KEYS: ClassVar[dict[str, str]] = {
         "ci": "ci",
@@ -120,19 +125,19 @@ class KernelSpec:
 
         return []
 
-    def resolve_variant(self, cli_variant: str | None = None) -> str:
+    def resolve_variant(self, cli_variant: str | None = None, fallback: str = "bench-gpu") -> str:
         """Resolve which variant to use.
 
         Priority order:
           1. Explicit CLI ``--variant`` value (when not None).
           2. ``default_variant`` declared in the YAML spec.
-          3. Falls back to ``bench-gpu``.
+          3. ``fallback``: ``bench-gpu``, or the DSL's own family (``bench-xpu`` for sycl).
         """
         if cli_variant is not None:
             return cli_variant
         if self.default_variant is not None:
             return self.default_variant
-        return "bench-gpu"
+        return fallback
 
     def get_variant(self, variant_type: str = "bench-gpu") -> VariantSpec | None:
         """Get first variant of specified type."""
@@ -424,7 +429,7 @@ def parse_spec(data: dict) -> KernelSpec:
     }
 
     # Non-variant scalar/dict keys that should never be treated as variants.
-    NON_VARIANT_KEYS = {SpecKey.INS, SpecKey.INITS, "default_variant", "weights"}
+    NON_VARIANT_KEYS = {SpecKey.INS, SpecKey.INITS, "default_variant", "weights", "captured_us"}
 
     ci: list[VariantSpec] = []
     bench_cpu: list[VariantSpec] = []
@@ -439,6 +444,11 @@ def parse_spec(data: dict) -> KernelSpec:
             continue  # skip scalar keys
 
         parsed = [_parse_variant_entry(vd) for vd in value]
+        if len(parsed) > 1:
+            # Every tool reads entry 0; the rest would be silently untimed.
+            logging.getLogger(__name__).warning(
+                "spec variant %r has %d entries and only the first is used; give each its "
+                "own variant key (%s-1, %s-2, ...)", key, len(parsed), key, key)  # fmt: skip
 
         if key in BASE_FAMILY_KEYS:
             # Standard family key — populate both the attribute and named_variants
@@ -468,6 +478,7 @@ def parse_spec(data: dict) -> KernelSpec:
         _named_variants=named_variants,
         default_variant=default_variant,
         weights={str(k): float(v) for k, v in (data.get("weights") or {}).items()},
+        captured_us={str(k): float(v) for k, v in (data.get("captured_us") or {}).items()},
     )
 
 

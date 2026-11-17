@@ -69,7 +69,10 @@ interpreter is {{ python }}.
    patch changes, importable>"}, plus "reference_python": "<an interpreter with the GPU torch
    and a transformers that loads {{ model }}>" when {{ python }}'s cannot (a venv over its
    torch with the latest transformers), and "trust_remote_code": true when the model needs
-   its own code. Then run
+   its own code. When no transformers loads it at all, add "reference": "<a Python file here>"
+   defining `load(model, dtype, device)` that returns the model, as the model's own code builds
+   it, and its tokenizer (or an `xe_forge.frontend.profile.Vocab`); the model is called on a
+   (1, T) tensor of ids and returns logits. Then run
      xe-forge-skill patch check . --repos {{ repos }} --framework-python {{ python }} \
        --model {{ model }} --batch {{ batch }}{% if workload == "text" %} --input-len {{ input_len }}{% if 'prompts' in inputs %} \
        --prompt-file {{ inputs.prompts.file }}{% endif %}{% if precision is defined and precision.startswith(("float", "bfloat")) %} \
@@ -77,8 +80,9 @@ interpreter is {{ python }}.
    It diffs base..HEAD itself (and writes the commits as an `.mbox`), applies that to a
    fresh clone, checks the import, runs
    generate.sh, then compares its output against a reference.
-{% if workload == "text" %}   The reference is transformers, scoring your tokens on the GPU: fed each sequence's prompt
-   and generated prefix, every generated token must be within 0.3 nat of transformers' best. It scores in {{ precision if precision is defined and precision.startswith(("float", "bfloat")) else "bf16" }}; a sequence that fails there is judged again in
+{% if workload == "text" %}   The reference is transformers, or your "reference" runner, scoring your tokens on the GPU:
+   fed each sequence's prompt and generated prefix, every generated token must be within
+   0.3 nat of the reference's best. It scores in {{ precision if precision is defined and precision.startswith(("float", "bfloat")) else "bf16" }}; a sequence that fails there is judged again in
    float32 over several slightly perturbed forwards, a token failing only by more than the
    reference's own spread there. The reference runs the checkpoint as it is specified,
    activation quantization included: a dequantized one is stable and wrong.
