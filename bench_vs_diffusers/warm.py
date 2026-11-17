@@ -193,7 +193,7 @@ def main() -> int:
     )
     print(f"{'model':26s} {'A cold':>9s} {'A warm':>9s} {'B cold':>9s} {'B warm':>9s} "
           f"{'x warm':>7s} {'x cold':>7s} {'spreadA':>8s} {'spreadB':>8s}")  # fmt: skip
-    for tag, r in report.items():
+    for r in report.values():
         if "warm_speedup" not in r:
             print(f"{r['label'][:26]:26s}  incomplete: "
                   f"{r.get('A', {}).get('error') or r.get('B', {}).get('error')}")  # fmt: skip

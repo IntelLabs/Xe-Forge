@@ -189,7 +189,7 @@ def main() -> int:
     print("A = diffusers, B = vLLM-Omni. 'x' > 1 means the vLLM-Omni pipeline is faster.")
     print(f"{'model':26s} {'A 20st':>9s} {'B 20st':>9s} {'x':>6s} {'A/step':>9s} {'B/step':>9s} "
           f"{'x/step':>7s} {'+-/step':>8s} {'spreadA':>8s} {'spreadB':>8s}")  # fmt: skip
-    for tag, r in report.items():
+    for r in report.values():
         if "A" not in r or "B" not in r:
             print(f"{r['label'][:26]:26s}  incomplete: {r.get('notes')}")
             continue
