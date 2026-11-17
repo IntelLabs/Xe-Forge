@@ -2062,3 +2062,47 @@ def test_a_port_back_is_its_commits_with_a_pr_carrying_the_measured_numbers(tmp_
     assert "| baseline (us) | 20.0 |" in pr and "| speedup | 2.0 |" in pr
     upstream._clone(SimpleNamespace(repo=str(repo), name=None, rev=None))  # reused after a commit
     assert upstream._patch(args) == 0 and (ws / "output" / "PR.md").read_text() == pr
+
+
+def test_vision_run_reaches_its_first_check(tmp_path):
+    """A vision run must get through argument handling without touching an agent.
+
+    `given` holds the row keys (batch, input_len, output_len) read off the namespace, and a
+    walrus in the vision branch rebound it to the list of text-only flags. On a vision run
+    that list is empty, so nothing was raised and `given` was left as [] -- then
+    `given.items()` raised AttributeError before the capture agent started. Every vision run
+    died there and no test covered it.
+
+    The missing input image is the first check past that point and it needs no agent, no GPU
+    and no model, which is what makes it usable as the probe.
+    """
+    out = subprocess.run(
+        [sys.executable, "-m", "xe_forge.cli", "run", "--framework", "vllm-omni",
+         "--workload", "vision", "--model", "X", "--framework-python", "/bin/false",
+         "-o", str(tmp_path / "run"), "--steps", "20", "--height", "1024", "--width", "1024",
+         "--frames", "1", "--batch", "1", "--input-image", str(tmp_path / "absent.png")],
+        capture_output=True, text=True, timeout=600,
+    )  # fmt: skip
+    assert "AttributeError" not in out.stderr, out.stderr[-600:]
+    assert "no such input image" in out.stderr
+    assert out.returncode == 1
+
+
+def test_no_prompt_is_the_same_whether_none_or_empty():
+    """A capture is not a different workload because it recorded '' where the CLI held None.
+
+    The CLI leaves --negative-prompt None when it is not given. A launcher records the empty
+    string it really passed, because the pipeline wants a string. Comparing them raw refused
+    a fresh PixArt-Sigma capture that had already passed its patch gate and parsed at 99.99%
+    attribution, with "is a capture of {...'negative_prompt': ''...}, not {...None...};
+    remove it to capture again".
+    """
+    from xe_forge.frontend.cli import _same_workload
+
+    want = {"framework": "vllm-omni", "steps": 20, "prompt": "a fox", "negative_prompt": None}
+    assert _same_workload(want, {**want, "negative_prompt": ""})
+    assert _same_workload({**want, "negative_prompt": ""}, want)
+    # A real negative prompt still has to match.
+    assert not _same_workload(want, {**want, "negative_prompt": "blurry"})
+    # And a field that is not a prompt keeps comparing exactly: 0 is not None.
+    assert not _same_workload({**want, "steps": None}, {**want, "steps": 0})
