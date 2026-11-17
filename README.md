@@ -24,7 +24,6 @@ In active development: interfaces change without notice, and it is not meant for
 
 Blue steps are agents and green steps are code: agents do the framework-, model- and
 hardware-specific work, and code measures and checks each step before its result is kept.
-The source is [assets/how-it-works.tex](assets/how-it-works.tex).
 
 ## Install
 
@@ -94,8 +93,7 @@ See [docs/FRAMEWORK.md](docs/FRAMEWORK.md) and the [per-framework pages](docs/fr
   <img src="assets/support.svg" alt="Frameworks, engines, kernel languages, measurement and devices Xe-Forge works with; Intel GPU works, NVIDIA GPU for kernels only, CPU and NPU planned" width="900"/>
 </p>
 
-Source: [assets/support.tex](assets/support.tex). The per-framework pages are in
-[docs/frameworks/](docs/frameworks/README.md).
+The per-framework pages are in [docs/frameworks/](docs/frameworks/README.md).
 
 ## Requirements
 
