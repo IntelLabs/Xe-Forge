@@ -51,6 +51,18 @@ class ComparisonResult:
     verdict: str | None = None
 
 
+def noise_band() -> float:
+    """The smallest speed change reported as one (``BENCHMARK_MIN_EFFECT``)."""
+    return float(os.environ.get("BENCHMARK_MIN_EFFECT", "0.02"))
+
+
+def no_change_message(speedup: float, band: float, original_us: float, optimized_us: float) -> str:
+    """Feedback for a ratio inside the noise band: not a regression, not a win."""
+    return (f"NO MEASURABLE CHANGE: {speedup:.3f}x, within {band:.0%} of the original "
+            f"(Original: {original_us:.2f}μs, Optimized: {optimized_us:.2f}μs). Not a "
+            "regression and not a win: try a change that moves the bottleneck.")  # fmt: skip
+
+
 class KernelBenchExecutor:
     """
     Executes GPU kernels using KernelBench-style testing.
@@ -88,7 +100,7 @@ class KernelBenchExecutor:
         # small consistent margin even with interleaving and slot swapping; anything inside
         # this band is reported as indistinguishable, not a result.
         if min_effect is None:
-            min_effect = float(os.environ.get("BENCHMARK_MIN_EFFECT", "0.02"))
+            min_effect = noise_band()
         self.min_effect = min_effect
         self.require_correctness = require_correctness
         self.rtol = rtol
@@ -544,13 +556,17 @@ class KernelBenchExecutor:
         # Check correctness
         original_correct = original_result.output_correct is not False
 
-        # Determine if optimization made things worse
-        is_slower = speedup < 1.0
+        # Slower only past the noise band: inside it, neither a regression nor a win.
+        is_slower = speedup < 1.0 - self.min_effect
+        within_noise = not is_slower and speedup < 1.0 + self.min_effect
 
         # Generate feedback message for CoVeR agent
         feedback_parts = []
 
-        if is_slower:
+        if within_noise:
+            feedback_parts.append(no_change_message(speedup, self.min_effect,
+                                                    original_time_us, optimized_time_us))  # fmt: skip
+        elif is_slower:
             slowdown = 1.0 / speedup if speedup > 0 else float("inf")
             feedback_parts.append(
                 f"PERFORMANCE REGRESSION: Optimized kernel is {slowdown:.2f}x SLOWER than original. "
@@ -650,7 +666,7 @@ class KernelBenchExecutor:
                     original_time_us=original_time,
                     optimized_time_us=optimized_time,
                     speedup=speedup,
-                    is_slower=optimized_time > original_time,
+                    is_slower=verdict is None and speedup < 1.0 - self.min_effect,
                     verdict=verdict,
                     feedback_message=(
                         "Reference outputs and updated buffers verified for two calls "

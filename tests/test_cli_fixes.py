@@ -224,3 +224,20 @@ def test_a_grouped_gemm_is_bounded_without_a_routing_model(active, experts_read)
     rows = 4 * 2
     moved = rows * k * 2 + experts_read * k * n * 2 + rows * n * 2
     assert eff == pytest.approx(moved / (1000.0 * 1e3) / 10_000.0)
+
+
+@pytest.mark.parametrize("opt_ms, says, slower", [(1.0008, "NO MEASURABLE CHANGE", False),
+                                                   (0.9990, "NO MEASURABLE CHANGE", False),
+                                                   (1.10, "PERFORMANCE REGRESSION", True),
+                                                   (0.80, "SUCCESS", False)])  # fmt: skip
+def test_a_difference_inside_the_noise_band_is_no_regression(monkeypatch, opt_ms, says, slower):
+    from xe_forge.core.executor import KernelBenchExecutor
+    from xe_forge.models import ExecutionResult
+
+    ex = KernelBenchExecutor(device="cpu", min_effect=0.02)
+    times = iter([1.0, opt_ms])
+    monkeypatch.setattr(ex, "_check_correctness", lambda **k: True)
+    monkeypatch.setattr(ex, "execute", lambda *a, **k: ExecutionResult(
+        success=True, execution_time_ms=next(times), output_correct=True))  # fmt: skip
+    got = ex.compare_kernels("orig", "opt", kernel_name="k")
+    assert says in got.feedback_message and got.is_slower is slower

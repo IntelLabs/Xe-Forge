@@ -25,6 +25,7 @@ from ai_bench.harness.runner.benchmark_compare import set_all_seeds
 from ai_bench.sycl.compiler import SYCLCompiler, SYCLRunResult
 
 from xe_forge.core.build_backend import BuildError, BuildSpec, resolve_build_backend
+from xe_forge.core.executor import no_change_message, noise_band
 from xe_forge.models import ExecutionResult
 
 logger = logging.getLogger(__name__)
@@ -666,7 +667,8 @@ class SyclExecutor:
             )
         speedup = orig_ms / opt_ms
 
-        is_slower = speedup < 1.0
+        band = noise_band()
+        is_slower = speedup < 1.0 - band
         orig_tflops = orig_result.tflops
         opt_tflops = opt_result.tflops
 
@@ -721,6 +723,8 @@ class SyclExecutor:
                 f"Original: {orig_ms:.4f}ms, Optimized: {opt_ms:.4f}ms. "
                 "Fix numerical correctness before optimizing for speed."
             )
+        elif speedup < 1.0 + band and not is_slower:
+            msg = no_change_message(speedup, band, orig_ms * 1e3, opt_ms * 1e3)
         elif is_slower:
             slowdown = 1.0 / speedup if speedup > 0 else float("inf")
             msg = (
