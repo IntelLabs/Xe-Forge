@@ -207,6 +207,14 @@ def _same_workload(want: dict, have: dict) -> bool:
         if key == "input_images":
             if _image_paths(want[key]) != _image_paths(have.get(key)):
                 return False
+        elif key in ("prompt", "negative_prompt"):
+            # No prompt is written two ways and means one thing. The CLI leaves the field
+            # None when it was not given; a launcher records the empty string it really
+            # passed, because the pipeline wants a string. A fresh PixArt capture was
+            # refused after it had already succeeded -- patch gate passed, 200 ops, 99.99%
+            # attributed -- over None against ''.
+            if (want[key] or None) != (have.get(key) or None):
+                return False
         elif want[key] != have.get(key):
             return False
     return True
@@ -930,8 +938,11 @@ def main(argv: list[str]) -> int:
         if a.workload != "text":
             text_only = {"--rows": a.rows, "--prompt-file": a.prompt_file,
                          "--kv-cache": a.kv_cache != "auto"}  # fmt: skip
-            if given := [f for f, v in text_only.items() if v]:
-                raise ValueError(f"{', '.join(given)}: for --workload text only")
+            # Not `given`: that name holds the row keys read above, and rebinding it here
+            # left it an empty list on every vision run -- so `given.items()` below raised
+            # AttributeError before the run started.
+            if text_given := [f for f, v in text_only.items() if v]:
+                raise ValueError(f"{', '.join(text_given)}: for --workload text only")
             a.prompt = VISION_PROMPT if a.prompt is None else a.prompt
         if a.rows and any(v is not None for v in given.values()):
             raise ValueError("--rows replaces --batch, --input-len and --output-len")
