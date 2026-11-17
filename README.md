@@ -4,8 +4,10 @@
 
 # Xe Forge
 
-Xe-Forge finds the GPU kernels a model spends its time in and optimizes them with LLM agents.
-A change is kept only when code measures it correct and not slower.
+Agentic kernel optimization for GPUs. Point Xe-Forge at a model in the framework that serves
+it, or at a single kernel: LLM agents profile it, find where the time goes, and rewrite the
+kernels and library calls behind it, and every change is verified and measured before it
+becomes a patch for the upstream project.
 
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/IntelLabs/Xe-Forge/badge)](https://scorecard.dev/viewer/?uri=github.com/IntelLabs/Xe-Forge)
 
