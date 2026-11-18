@@ -12,7 +12,14 @@ import dspy
 
 from xe_forge.agents.base import Optimizer
 from xe_forge.agents.cover import CoVeR
-from xe_forge.agents.utils import SUCCESS_MESSAGE, extract_gemm_dims, verify_sycl
+from xe_forge.agents.utils import (
+    SUCCESS_MESSAGE,
+    extract_gemm_dims,
+    missing_python_kernel_part,
+    not_power_of_two,
+    verify_sycl,
+)
+from xe_forge.dsl_registry import TRITON_FAMILY
 from xe_forge.knowledge.loader import KnowledgeBase
 from xe_forge.models import (
     DSL,
@@ -24,10 +31,10 @@ logger = logging.getLogger(__name__)
 
 
 class OptimizationSignature(dspy.Signature):
-    """Apply a single optimization stage to a Triton kernel to improve performance."""
+    """Apply a single optimization stage to a kernel to improve performance."""
 
-    original_code: str = dspy.InputField(desc="Original Triton kernel code for reference")
-    current_code: str = dspy.InputField(desc="Current Triton kernel code to optimize")
+    original_code: str = dspy.InputField(desc="Original kernel code for reference")
+    current_code: str = dspy.InputField(desc="Current kernel code to optimize")
     stage: str = dspy.InputField(desc="Optimization stage to apply")
     issues: str = dspy.InputField(desc="Specific issues to fix in this stage")
     xpu_config: str = dspy.InputField(desc="Intel XPU configuration parameters")
@@ -53,15 +60,15 @@ class OptimizationSignature(dspy.Signature):
         "they are validated optimizations for Intel XPU."
     )
     optimized_code: dspy.Code["python"] = dspy.OutputField(
-        desc="Complete optimized Triton kernel code with all imports, decorators, kernel, and Model class."
+        desc="Complete optimized kernel code with all imports, decorators, kernel, and Model class."
     )
 
 
 class AlgorithmicOptimizationSignature(dspy.Signature):
     """Apply algorithmic/mathematical optimization to reduce FLOPs while preserving output equivalence."""
 
-    original_code: str = dspy.InputField(desc="Original Triton kernel code for reference")
-    current_code: str = dspy.InputField(desc="Current Triton kernel code to optimize")
+    original_code: str = dspy.InputField(desc="Original kernel code for reference")
+    current_code: str = dspy.InputField(desc="Current kernel code to optimize")
     pytorch_code: str = dspy.InputField(
         desc="Original PyTorch implementation for context (may be empty)"
     )
@@ -80,7 +87,7 @@ class AlgorithmicOptimizationSignature(dspy.Signature):
         "Empty string if KB is disabled. Follow these patterns precisely."
     )
     optimized_code: dspy.Code["python"] = dspy.OutputField(
-        desc="Complete optimized Triton kernel with algorithmic improvements."
+        desc="Complete optimized kernel with algorithmic improvements."
     )
 
 
@@ -287,43 +294,17 @@ class OptimizerAgent(Optimizer):
                         pass
                 return result
 
-            # --- Triton path ---
+            # --- Python DSL path ---
             try:
                 ast.parse(code)
             except SyntaxError as e:
                 return f"SYNTAX ERROR at line {e.lineno}: {e.msg}"
 
-            for check, msg in [
-                ("import triton" in code or "from triton" in code, "MISSING: import triton"),
-                (
-                    "triton.language" in code or "import triton.language" in code,
-                    "MISSING: import triton.language",
-                ),
-                ("@triton.jit" in code, "MISSING: @triton.jit decorator"),
-                ("class Model" in code, "MISSING: class Model"),
-            ]:
-                if not check:
-                    return msg
-
-            warps_match = re.search(r"num_warps\s*=\s*(\d+)", code)
-            if warps_match:
-                nw = int(warps_match.group(1))
-                if nw <= 0 or (nw & (nw - 1)) != 0:
-                    return f"INVALID num_warps={nw}: Must be power of 2."
-
-            for bn in [
-                "BLOCK_M",
-                "BLOCK_N",
-                "BLOCK_K",
-                "BLOCK_SIZE_M",
-                "BLOCK_SIZE_N",
-                "BLOCK_SIZE_K",
-            ]:
-                bm = re.search(rf"{bn}\s*[=:]\s*(\d+)", code)
-                if bm:
-                    bs = int(bm.group(1))
-                    if bs <= 0 or (bs & (bs - 1)) != 0:
-                        return f"INVALID {bn}={bs}: Must be power of 2."
+            missing = missing_python_kernel_part(code, dsl)
+            if missing:
+                return missing
+            if dsl in TRITON_FAMILY and (bad := not_power_of_two(code)):
+                return f"INVALID {bad[0]}={bad[1]}: Must be power of 2."
 
             if re.search(r"triton\.Config\s*\([^)]*grf_mode", code):
                 return (
@@ -344,6 +325,12 @@ class OptimizerAgent(Optimizer):
                     r"torch\.nn\.functional\.linear",
                 ]:
                     if re.search(_vp, code):
+                        if dsl not in TRITON_FAMILY:
+                            return (
+                                "INVALID: fusion replaced a kernel with a vendor call. "
+                                "Keep all original kernels. "
+                                "Do not replace them with torch.matmul/mm/bmm."
+                            )
                         return (
                             "INVALID: fusion replaced a Triton kernel with a vendor call. "
                             "Keep all @triton.jit kernels. "
@@ -996,8 +983,11 @@ class OptimizerAgent(Optimizer):
         else:
             if not self._valid_py(opt):
                 return False, None, None, None, "Invalid Python syntax"
-            if not self._valid_triton(opt):
-                return False, None, None, None, "Not valid Triton"
+            if self.dsl in TRITON_FAMILY:
+                if not self._valid_triton(opt):
+                    return False, None, None, None, "Not valid Triton"
+            elif missing := missing_python_kernel_part(opt, self.dsl):
+                return False, None, None, None, missing
         if self.executor and (self.dsl == DSL.SYCL or shapes):
             try:
                 if cached_comparison is not None:

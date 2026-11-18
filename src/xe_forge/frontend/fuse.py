@@ -24,13 +24,13 @@ def origin(patch: Path) -> tuple[str, str]:
     """(repository, base commit) the PORT.txt beside a patch names for it."""
     text = (patch.parent / "PORT.txt").read_text()
     block = text.split(f"output/{patch.name}:", 1)[-1]
-    repo = re.search(r"repository:\s*(\S+)", block)
+    repo = re.search(r"repository:[ \t]*(\S.*)", block)
     base = re.search(r"base commit:\s*(\S+)", block)
     if not (repo and base):
         raise ValueError(
             f"{patch.parent / 'PORT.txt'} names no repository and base for {patch.name}"
         )
-    return repo.group(1), base.group(1)
+    return repo.group(1).strip(), base.group(1)
 
 
 def stack(patches: list[Path], out: Path) -> dict[str, str]:
@@ -42,7 +42,7 @@ def stack(patches: list[Path], out: Path) -> dict[str, str]:
     for p in patches:
         repo, base = origin(p)
         if repo not in made:
-            clone = out / Path(repo).name
+            clone = out / f"{len(made)}-{Path(repo).name}"  # repositories may share a basename
             _git("clone", "--quiet", "--shared", "--no-checkout", repo, str(clone))
             _git("-C", str(clone), "checkout", "--quiet", "--detach", base)
             made[repo] = {"clone": str(clone), "origin": repo, "base": base, "patches": []}

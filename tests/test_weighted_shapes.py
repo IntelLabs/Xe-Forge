@@ -102,6 +102,18 @@ def test_weights_that_are_not_finite_non_negative_shares_are_refused(tmp_path, c
     assert code == 1 and out["correctness"] == "fail" and "must be finite" in text
 
 
+@pytest.mark.parametrize("weights, says", [({"dec": 0.5, "ghost": 0.5}, "lacks: ghost"),
+                                           ({"dec": None, "pre": 1.0}, "must be numbers"),
+                                           ({"dec": True, "pre": 1.0}, "must be numbers"),
+                                           (["dec"], "must map variant names")])  # fmt: skip
+def test_malformed_weights_fail_the_trial_without_a_traceback(tmp_path, capsys, monkeypatch,
+                                                              weights, says):  # fmt: skip
+    monkeypatch.setitem(SPEC, "weights", weights)
+    code, text, out, _ = _gate(tmp_path, capsys, {"dec": (True, 10, 5, None),
+                                                  "pre": (True, 100, 80, None)})  # fmt: skip
+    assert code == 1 and out["correctness"] == "fail" and says in text
+
+
 def test_a_shape_that_fails_correctness_ends_the_trial(tmp_path, capsys):
     code, text, out, _ = _gate(tmp_path, capsys, {"dec": (True, 10, 5, None),
                                                   "pre": (False, 0, 0, None)})  # fmt: skip
@@ -236,6 +248,8 @@ GOOD = {"bench-t4-w0": _g("bench-t4-w0", "bench-t2048-w0", w=0.5),
      ({"bench-t4-w0": _g("bench-t2048-w0", w=0.5), "bench-t4-w1": GOOD["bench-t4-w1"]},
       "must be in its own stands_for"),
      ({"bench-t9-w0": _g("bench-t9-w0", w=1.0)}, "not a shape the capture ran"),
+     ({**GOOD, "bench-t4-w0": _g("bench-t4-w0", "bench-t2048-w0", {"a": 1}, ["b"], w=0.5)},
+      "must be shape names"),
      ({k: {**g, "weight": 0.4} for k, g in GOOD.items()}, "sum to 0.8000")],
 )  # fmt: skip
 def test_inputs_check_holds_every_configuration(tmp_path, shapes, problem):

@@ -60,6 +60,9 @@ DSL_SUPPORTED_STAGES: dict[DSL, set[OptimizationStage]] = {
     },
 }
 
+# Written in Triton's Python API: its launch constraints, checks and prompt text apply.
+TRITON_FAMILY: frozenset[DSL] = frozenset({DSL.TRITON, DSL.GLUON})
+
 
 def get_stages_for_dsl(dsl: DSL | str) -> list[OptimizationStage]:
     """Return the ordered list of supported stages for a given DSL."""

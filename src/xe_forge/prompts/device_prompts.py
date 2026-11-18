@@ -18,6 +18,7 @@ _DSL_NAMES: dict[str, str] = {
     "gluon": "Gluon",
     "sycl": "SYCL/Sycl-tla",
     "cuda": "CUDA C++",
+    "opencl": "OpenCL C",
 }
 
 
@@ -107,6 +108,10 @@ class PromptLibrary:
         if self.dsl == "cuda":
             return [
                 "Must be valid CUDA C++ code",
+            ]
+        if self.dsl == "opencl":
+            return [
+                "Must be a Python file holding the OpenCL C source and its launch",
             ]
         return []
 

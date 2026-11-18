@@ -415,20 +415,26 @@ def _recording(target, args, produce) -> int:
 
 def _weights(args) -> dict[str, float]:
     """The spec's weighted shapes, each weight divided by their sum, unless one ``--variant``
-    was asked for. ValueError when a weight is negative or not finite, or they sum to 0."""
-    if args.variant or not args.spec:
+    was asked for. ValueError when the spec's weights are malformed, a weight is negative or
+    not finite, they sum to 0, or one names a variant the spec lacks."""
+    # A --variant run still loads the spec, so malformed weights fail here, not later.
+    if not args.spec or (args.variant and not Path(args.spec).is_file()):
         return {}
     import math
 
     from xe_forge.core.spec_loader import load_spec
 
-    weights = load_spec(args.spec).weights
-    if not weights:
+    spec = load_spec(args.spec)
+    weights = spec.weights
+    if args.variant or not weights:
         return {}
     total = sum(weights.values())
     if any(not math.isfinite(w) or w < 0 for w in weights.values()) or not total > 0:
         raise ValueError(f"the spec's weights {weights} must be finite, non-negative and "
                          "sum above 0")  # fmt: skip
+    unknown = [name for name in weights if spec.get_variant(name) is None]
+    if unknown:
+        raise ValueError(f"the spec's weights name variants it lacks: {', '.join(unknown)}")
     return {name: w / total for name, w in weights.items()}
 
 

@@ -72,6 +72,9 @@ def check(answer: dict, manifest: dict) -> tuple[dict[str, list[str]], list[str]
         for rep, g in shapes.items():
             g = g if isinstance(g, dict) else {}
             group = g.get("stands_for") if isinstance(g.get("stands_for"), list) else []
+            if any(not isinstance(v, str) for v in group):
+                bad.append(f"stands_for of {rep!r} must be shape names")
+                group = [v for v in group if isinstance(v, str)]
             if rep not in group:
                 bad.append(f"{rep!r} must be in its own stands_for")
             if len({config[v] for v in group if v in config}) > 1:

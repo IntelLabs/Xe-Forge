@@ -745,6 +745,71 @@ def _stamp(cap) -> dict:
     }
 
 
+CALIBRATE_TIMEOUT = int(os.environ.get("XE_FORGE_CALIBRATE_TIMEOUT", 1800))
+
+
+def calibrate_missing(path: Path, cap, run_dir: Path) -> Path:
+    """Measure into the calibration at ``path`` the matmul peaks the capture's bounds read
+    and it lacks, so naming, analyze and the tools they start bound each dtype at its own.
+    The calibration file the run reads from here: ``path``, or a copy in ``run_dir`` when
+    ``path`` cannot be written."""
+    import tempfile
+
+    from xe_forge.frontend import calibrate
+    from xe_forge.frontend.analyze import peak_dtypes
+
+    def measure(dtypes: list[str]) -> dict | None:
+        # A child process: measured here, the device memory and context would stay held
+        # through the launchers and benchmarks this run starts next.
+        with tempfile.TemporaryDirectory(prefix="xf-calibrate-") as tmp:
+            out = Path(tmp) / "calibration.json"
+            env = dict(os.environ)
+            env["PYTHONPATH"] = os.pathsep.join(
+                p for p in (str(SRC_DIR), env.get("PYTHONPATH")) if p
+            )
+            cmd = [sys.executable, "-m", "xe_forge.cli", "calibrate", "-o", str(out),
+                   "--dtypes", *dtypes]  # fmt: skip
+            print(f"run: {shlex.join(cmd)}", flush=True)
+            try:
+                subprocess.call(cmd, env=env, timeout=CALIBRATE_TIMEOUT)
+                return json.loads(out.read_text())
+            except (subprocess.TimeoutExpired, OSError, ValueError):
+                return None  # did not finish: nothing of it is kept
+
+    calib = json.loads(path.read_text())
+    merged = calibrate.complete(calib, peak_dtypes(cap), measure)
+    if merged is calib:
+        return path
+    print(f"run: matmul TFLOP/s now {merged['matmul_tflops']}", flush=True)
+    for target in (path, run_dir / "calibration.json"):
+        try:
+            _write_atomic(target, json.dumps(merged, indent=1) + "\n")
+        except OSError as exc:
+            print(f"run: cannot write {target} ({exc})", file=sys.stderr)
+            continue
+        print(f"run: -> {target}", flush=True)
+        return target
+    print(f"run: the steps after this one read {path}, without the peaks just measured",
+          file=sys.stderr)  # fmt: skip
+    return path
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """``text`` into ``path`` whole or not at all: a reader never sees half a file."""
+    import tempfile
+
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        if path.exists():
+            os.chmod(tmp, path.stat().st_mode & 0o777)
+        os.replace(tmp, path)
+    except OSError:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 # ── analyze ────────────────────────────────────────────────────────────────
 
 
@@ -771,8 +836,9 @@ def analyze(capture_path: Path, out_dir: Path, a: argparse.Namespace, weights=No
     if cap.run.get("counters"):
         print(f"analyze: counters cover {result.options['counters_pct']}% of device time")
     for d in result.options["unpeaked"]:
-        print(f"analyze: {d} has no matmul peak in the calibration; bounded at the fastest "
-              "measured dtype's, so its efficiency may read low or high")  # fmt: skip
+        print(f"analyze: {d} has no measured matmul peak in the calibration, so its compute "
+              "bound is unknown: its workloads are bounded by bandwidth alone and left to the "
+              "agents, never stopped at roofline")  # fmt: skip
     print(
         f"analyze: {len(cap.workloads)} workloads -> {len(result.entries)} kernels, "
         f"{len(enabled)} enabled ({', '.join(e.name for e in enabled) or 'none'}) -> {path}"
@@ -1230,6 +1296,8 @@ def main(argv: list[str]) -> int:
     if problem:
         print(f"run: {capture_path}: {problem}; remove it to capture again", file=sys.stderr)
         return 1
+    if a.calibration:
+        a.calibration = calibrate_missing(a.calibration, cap, run_dir)
     code, python = name_and_read(a, cap, run_dir, python, turns, repos)
     if code != 0:
         return code

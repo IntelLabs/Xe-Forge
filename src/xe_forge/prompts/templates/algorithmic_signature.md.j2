@@ -16,9 +16,16 @@ Think about:
 Maintain the Model class signature. Produce equivalent outputs.
 
 === CODE REQUIREMENTS ===
+{% if generic_python %}
+- Include ALL imports, the {{ dsl_name }} kernel source and its launch, Model class
+- NEVER replace the kernels with torch.matmul, torch.mm, or any vendor library.
+{% else %}
 - Include ALL imports, @triton.jit decorator, kernel function, Model class
 - NEVER replace @triton.jit kernels with torch.matmul, torch.mm, or any vendor library.
+{% endif %}
 {% if device_type == "xpu" %}
+{% if not generic_python %}
 - Use tl.extra.intel.libdevice for exp2/sigmoid operations
+{% endif %}
 - Avoid .cpu() returns — output must stay on XPU
 {% endif %}

@@ -38,6 +38,89 @@ def test_opencl_has_no_triton_stages():
         assert triton_only not in stages
 
 
+OPENCL_KERNEL = """
+from xe_forge import opencl
+
+SRC = "__kernel void k(__global float* x) { x[get_global_id(0)] += 1.0f; }"
+
+
+class Model:
+    def forward(self, x):
+        return opencl.run(SRC, "k", x)
+"""
+
+
+GLUON_KERNEL = """
+import triton
+import triton.language as tl
+from triton.experimental import gluon
+
+
+@gluon.jit
+def k(x):
+    pass
+
+
+class Model:
+    def forward(self, x):
+        return k[(1,)](x, num_warps=4)
+"""
+
+
+@pytest.mark.parametrize("dsl, code, says, final", [
+    ("opencl", OPENCL_KERNEL, None, None),
+    ("opencl", OPENCL_KERNEL.replace("class Model", "class Other"), "MISSING: class Model",
+     "MISSING: class Model"),
+    ("triton", OPENCL_KERNEL, "MISSING: import triton", "Not valid Triton"),
+    ("triton", "import triton\nimport triton.language as tl\n\nclass Model:\n    pass\n",
+     "MISSING: @triton.jit decorator", None),
+    ("gluon", GLUON_KERNEL, None, None),
+    ("gluon", GLUON_KERNEL.replace("num_warps=4", "num_warps=3"),
+     "INVALID num_warps=3: Must be power of 2.", None),
+])  # fmt: skip
+def test_the_dspy_optimizer_holds_only_triton_kernels_to_triton(dsl, code, says, final):
+    from xe_forge.agents.optimizer_agent import OptimizerAgent
+    from xe_forge.agents.utils import SUCCESS_MESSAGE
+
+    measured = []
+
+    def compare_kernels(**kw):
+        measured.append(kw["optimized_code"])
+        return SimpleNamespace(optimized_correct=True, is_slower=False, speedup=1.5,
+                               original_time_us=10.0, optimized_time_us=6.0,
+                               original_tflops=None, optimized_tflops=None)  # fmt: skip
+
+    agent = OptimizerAgent(executor=SimpleNamespace(compare_kernels=compare_kernels), dsl=dsl)
+    tool, _ = agent._create_verify_tool(code, "k", [(4,)], None)
+    assert tool.func(code) == (says or SUCCESS_MESSAGE)
+    assert len(measured) == (says is None)  # the executor runs what passes the checks
+    ok, speedup, _, _, err = agent._final_verify(code, code, "k", [(4,)], None, None)
+    assert err == final and ok is (final is None)
+    assert speedup == (1.5 if final is None else None)
+
+
+@pytest.mark.parametrize("device", ["xpu", "cuda", "cpu"])
+def test_dspy_prompts_offer_a_non_triton_dsl_only_its_own_stages(device):
+    import re
+
+    from xe_forge.agents.analyzer_agent import _build_issue_categories
+    from xe_forge.prompts import PromptLibrary
+
+    lib = PromptLibrary("opencl", device)
+    for template in ("optimization_signature", "optimization_react_signature",
+                     "algorithmic_signature", "coordinator_signature"):  # fmt: skip
+        text = lib.render_for_signature(template)
+        assert "OpenCL C" in text and "triton" not in text.lower(), template
+        assert "TENSOR_DESCRIPTORS" not in text and "PERSISTENT_KERNEL" not in text, template
+    cats = _build_issue_categories(DSL.OPENCL)
+    assert "TENSOR DESCRIPTORS" not in cats and "AUTOTUNING" not in cats
+    assert not re.search(r"\btl\.|triton|grf_mode|num_warps|BLOCK_M", cats, re.I)
+    assert "TENSOR DESCRIPTORS" in _build_issue_categories(DSL.TRITON)
+    assert "tl.load" in _build_issue_categories(DSL.TRITON)
+    assert "tl.make_tensor_descriptor" in PromptLibrary("triton", device).render_for_signature(
+        "optimization_signature")  # fmt: skip
+
+
 # ── counters: unknown is not zero ───────────────────────────────────────────
 
 
@@ -457,6 +540,23 @@ def test_oneshot_stages_inputs_and_reads_the_answer(tmp_path, monkeypatch, backe
         "rows": [{"batch": 1}]}  # fmt: skip
     argv = json.loads(record.read_text())["argv"]
     assert argv[-1] == "suggest rows" if backend == "codex" else argv[1] == "suggest rows"
+
+
+def test_oneshot_timeout_kills_the_sessions_detached_work(tmp_path, monkeypatch):
+    from xe_forge.frontend import agent
+
+    pidfile = tmp_path / "child.pid"
+    _stub_cli(tmp_path, monkeypatch, "claude",
+              f"#!/bin/sh\nsleep 60 &\necho $! > {pidfile}\nsleep 60\n")  # fmt: skip
+    start = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        agent.oneshot("p", {}, {"type": "object"}, timeout=1)
+    assert time.monotonic() - start < 5
+    pid = int(pidfile.read_text())
+    deadline = time.monotonic() + 15
+    while _alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert not _alive(pid), "the session's detached work outlived the timeout"
 
 
 def test_tool_profiles_map_to_each_cli(tmp_path, monkeypatch):
@@ -1788,6 +1888,22 @@ def test_fusions_build_on_the_kernels_winning_patches_applied_in_order(tmp_path)
     assert (tmp_path / "origin" / "a.txt").read_text() == "a\n"  # the origin is untouched
 
 
+def test_fusions_stack_repositories_with_spaced_paths_and_shared_basenames(tmp_path):
+    from xe_forge.frontend import fuse
+
+    one, two = tmp_path / "my repos" / "one" / "src", tmp_path / "my repos" / "two" / "src"
+    one.parent.mkdir(parents=True)
+    two.parent.mkdir(parents=True)
+    b1, b2 = _git_repo(one), _git_repo(two)
+    p1 = _winning_patch(tmp_path / "results", "k1", one, b1, "a", "b")
+    p2 = _winning_patch(tmp_path / "results", "k2", two, b2, "a", "c")
+    assert fuse.origin(p1) == (str(one), b1)
+    stacked = fuse.stack([p1, p2], tmp_path / "stacked")
+    assert set(stacked) == {str(one), str(two)} and len(set(stacked.values())) == 2
+    assert (Path(stacked[str(one)]) / "a.txt").read_text() == "b\n"
+    assert (Path(stacked[str(two)]) / "a.txt").read_text() == "c\n"
+
+
 def test_prove_applies_fusions_after_the_kernels_and_names_their_stack(tmp_path, monkeypatch):
     from xe_forge.frontend import agent, prove
 
@@ -1857,16 +1973,213 @@ def test_optimize_keeps_a_workspace_that_finished(tmp_path, monkeypatch):
     assert cli.optimize(tmp_path / "kernels.yaml", tmp_path, opts) == [("k", "bench")]
 
 
-def test_a_dtype_without_a_calibrated_peak_is_bounded_at_the_fastest_and_noted():
+def test_a_dtype_without_a_measured_peak_has_no_compute_bound_and_is_noted():
     from xe_forge.frontend.calibrate import peak_of, unpeaked_note
 
     tflops, ctx = {"bfloat16": 150.0, "int8": 280.0}, {}
     assert peak_of(tflops, "bfloat16", ctx) == 150.0 and ctx == {}
-    assert peak_of(tflops, "float32", ctx) == 280.0  # another dtype's peak
-    assert peak_of(tflops, None, ctx) == 280.0 and ctx == {"unpeaked": {"float32"}}
-    (note,) = unpeaked_note(tflops, ctx)
-    assert note.startswith("float32 has no matmul peak") and "int8, 280.0" in note
-    assert "reads low" in note and "high" in note
+    assert peak_of(tflops, "float32", ctx) is None  # never another dtype's peak
+    assert peak_of(tflops, None, ctx) is None and ctx == {"unpeaked": {"float32"}}
+    (note,) = unpeaked_note(ctx)
+    assert note.startswith("float32 has no measured matmul peak")
+    assert "compute bound is unknown" in note and "bandwidth alone" in note
+
+
+def _stub_measure(seen):
+    def measure(dtypes):
+        seen.append(list(dtypes))
+        return {"matmul_tflops": {"float16": 90.0, "float64": None},
+                "unmeasured": {"matmul_tflops.float64": "failed"}}  # fmt: skip
+
+    return measure
+
+
+def test_calibration_measures_only_the_dtypes_it_lacks():
+    from xe_forge.frontend import calibrate
+
+    calib = {"bandwidth_gbs": 500.0, "matmul_tflops": {"float32": 10.0, "bfloat16": 100.0},
+             "unmeasured": {}}  # fmt: skip
+    seen = []
+    # float8_e4m3fn is held exactly in bfloat16, which is measured: it has a peak already.
+    need = {"float32", "bfloat16", "float8_e4m3fn", "float16", "float64", "uint8"}
+    got = calibrate.complete(calib, need, _stub_measure(seen))
+    assert seen == [["float16", "float64"]]  # uint8 has no matmul to measure it with
+    assert got["matmul_tflops"] == {"float32": 10.0, "bfloat16": 100.0, "float16": 90.0,
+                                    "float64": None, "uint8": None}  # fmt: skip
+    assert got["unmeasured"] == {"matmul_tflops.float64": "failed",
+                                 "matmul_tflops.uint8": "no matmul in this dtype to measure"}  # fmt: skip
+    assert calib["matmul_tflops"] == {"float32": 10.0, "bfloat16": 100.0}  # not changed in place
+    seen.clear()
+    assert calibrate.complete(got, need, _stub_measure(seen)) == got and seen == []
+
+
+@pytest.mark.parametrize("rec", [
+    None,                                                      # the measurement did not finish
+    {"matmul_tflops": {}, "unmeasured": {"all": "no GPU"}},    # no device to measure on
+    {"matmul_tflops": {"float16": None}, "unmeasured": {}},    # no reason of its own
+])  # fmt: skip
+def test_a_failure_without_a_reason_of_its_own_is_tried_again(rec):
+    from xe_forge.frontend import calibrate
+
+    calib = {"bandwidth_gbs": 500.0, "matmul_tflops": {"float32": 10.0}}
+    assert calibrate.complete(calib, {"float16"}, lambda ds: rec) is calib
+
+
+def test_a_measured_peak_clears_its_old_failure():
+    from xe_forge.frontend import calibrate
+
+    calib = {"matmul_tflops": {"float32": 10.0}, "unmeasured": {"matmul_tflops.float16": "x"}}
+    got = calibrate.complete(calib, {"float16"},
+                             lambda ds: {"matmul_tflops": {"float16": 90.0}})  # fmt: skip
+    assert got["matmul_tflops"]["float16"] == 90.0 and got["unmeasured"] == {}
+
+
+def test_a_peak_measured_on_another_device_is_not_merged(capsys):
+    from xe_forge.frontend import calibrate
+
+    calib = {"device": {"type": "xpu", "name": "a", "torch": "1"},
+             "matmul_tflops": {"float32": 10.0}}  # fmt: skip
+    other = {"device": {"type": "xpu", "name": "b", "torch": "1"},
+             "matmul_tflops": {"float16": 90.0}}  # fmt: skip
+    assert calibrate.complete(calib, {"float16"}, lambda ds: other) is calib
+    assert "not merged" in capsys.readouterr().err
+    same = {**other, "device": {**calib["device"], "torch": "2"}}  # another torch, one device
+    assert calibrate.complete(calib, {"float16"}, lambda ds: same)["matmul_tflops"]["float16"]
+
+
+def test_peak_dtypes_are_every_measurable_dtype_the_capture_ran():
+    from xe_forge.frontend.ir import CapturedOp, CaptureRun, TensorArg
+
+    args = [TensorArg([4], d) for d in ("float32", "int8", "bfloat16", "int64")]
+    cap = CaptureRun(run={}, ops=[CapturedOp(id="o", framework_op="f", args=[*args, None])])
+    assert analyze.peak_dtypes(cap) == {"float32", "int8", "bfloat16"}
+
+
+def _gemm(dtype, us, route="library"):
+    from xe_forge.frontend.ir import Naming, Workload
+
+    return Workload(workload_id=f"g/{dtype}", family="gemm", dims={"M": 4, "N": 1000, "K": 1000},
+                    dtypes=[dtype], layout=[], attrs={"w_bytes": 2}, var_axes={}, calls=1,
+                    device_us=us, share=0.5, ops=[],
+                    naming=Naming(route, name=f"mm_{dtype}", repo="r", dsl="sycl"))  # fmt: skip
+
+
+def _calib_cap(tmp_path):
+    from xe_forge.frontend.ir import CapturedOp, CaptureRun, TensorArg
+
+    path = tmp_path / "calibration.json"
+    path.write_text(json.dumps({"bandwidth_gbs": 500.0, "matmul_tflops": {"float32": 10.0}}))
+    op = CapturedOp(id="o", framework_op="f", args=[TensorArg([4, 4], "float16")])
+    return path, CaptureRun(run={}, ops=[op], workloads=[_gemm("bfloat16", 1.0)])
+
+
+def test_run_writes_back_the_peaks_the_capture_needs(tmp_path, monkeypatch):
+    import xe_forge.frontend.cli as fcli
+
+    path, cap = _calib_cap(tmp_path)
+    asked = []
+
+    def call(cmd, env, timeout):
+        asked.append(cmd[cmd.index("--dtypes") + 1 :])
+        out = Path(cmd[cmd.index("-o") + 1])
+        out.write_text(json.dumps({"matmul_tflops": dict.fromkeys(asked[-1], 50.0)}))
+        return 0
+
+    monkeypatch.setattr(fcli.subprocess, "call", call)
+    assert fcli.calibrate_missing(path, cap, tmp_path / "run") == path
+    assert asked == [["bfloat16", "float16"]]
+    assert json.loads(path.read_text())["matmul_tflops"] == {
+        "float32": 10.0, "bfloat16": 50.0, "float16": 50.0}  # fmt: skip
+    assert fcli.calibrate_missing(path, cap, tmp_path / "run") == path
+    assert len(asked) == 1  # nothing left to measure
+
+
+@pytest.mark.parametrize("fail", ["timeout", "no output"])
+def test_a_calibration_that_did_not_finish_leaves_the_file_alone(tmp_path, monkeypatch, fail):
+    import xe_forge.frontend.cli as fcli
+
+    path, cap = _calib_cap(tmp_path)
+    before = path.read_text()
+
+    def call(cmd, env, timeout):
+        if fail == "timeout":
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        return -9
+
+    monkeypatch.setattr(fcli.subprocess, "call", call)
+    assert fcli.calibrate_missing(path, cap, tmp_path) == path
+    assert path.read_text() == before
+
+
+def test_a_calibration_that_cannot_be_written_back_is_kept_in_the_run(tmp_path, monkeypatch):
+    import xe_forge.frontend.cli as fcli
+
+    path, cap = _calib_cap(tmp_path)
+    before = path.read_text()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    def call(cmd, env, timeout):
+        out = Path(cmd[cmd.index("-o") + 1])
+        out.write_text(json.dumps({"matmul_tflops": {"bfloat16": 50.0, "float16": 50.0}}))
+        return 0
+
+    write = fcli._write_atomic
+
+    def refuse(target, text):
+        if target == path:
+            raise PermissionError("read-only")
+        write(target, text)
+
+    monkeypatch.setattr(fcli.subprocess, "call", call)
+    monkeypatch.setattr(fcli, "_write_atomic", refuse)
+    got = fcli.calibrate_missing(path, cap, run_dir)
+    assert got == run_dir / "calibration.json" and path.read_text() == before
+    assert json.loads(got.read_text())["matmul_tflops"]["bfloat16"] == 50.0
+    assert [p.name for p in run_dir.iterdir()] == ["calibration.json"]  # no temp file left
+
+
+def test_a_cost_with_flops_and_no_dtype_is_noted_unpeaked():
+    from xe_forge.frontend.ir import Naming, Workload
+
+    w = Workload(workload_id="c", family="other", dims={}, dtypes=["int32"], layout=[],
+                 attrs={"cost": {"bytes": "1000", "flops": "1000"}}, var_axes={}, calls=1,
+                 device_us=1.0, share=1.0, ops=[], naming=Naming("kernel"))  # fmt: skip
+    ctx = {}
+    assert analyze.cost_bound(w, {"bandwidth_gbs": 1.0, "matmul_tflops": {"float32": 1.0}}, ctx)
+    assert ctx["unpeaked"] == {analyze.UNKNOWN_DTYPE}
+
+
+def test_a_cost_is_not_refuted_by_another_dtypes_peak():
+    from xe_forge.frontend import naming
+
+    calib = {"bandwidth_gbs": 1000.0, "matmul_tflops": {"float32": 10.0}}
+    names = {"ops": {"K": {"cost": {"bytes": "1000000", "flops": "1000000000"}}}}
+
+    def shapes(dtype):
+        return {"K": {"shapes": [{"us_per_call": 60.0, "dims": {}, "dtype": dtype}]}}
+
+    # flops / the float32 peak is 100 us > 60 us measured; bfloat16 has no peak of its own
+    assert naming.refuted(names, shapes("bfloat16"), calib, 0.05) == []
+    assert naming.refuted(names, shapes("float32"), calib, 0.05)
+
+
+@pytest.mark.parametrize("route", ["library", "kernel"])
+def test_an_unpeaked_gemm_is_not_stopped_at_roofline(route):
+    from xe_forge.frontend.ir import CaptureRun
+
+    calib = {"bandwidth_gbs": 1000.0, "matmul_tflops": {"float32": 10.0}}
+    # bytes / bandwidth is ~2 us of the 2.2 us measured: 0.9 of the bandwidth's bound
+    ws = [_gemm("bfloat16", 2.2, route), _gemm("float32", 4.2, route)]
+    for w in ws[1:]:
+        w.attrs["w_bytes"] = 4
+    result = analyze.analyze(CaptureRun(run={}, ops=[], workloads=ws), top=5, calibration=calib)
+    bf16, fp32 = (result.decisions[w.workload_id] for w in ws)
+    assert fp32.reason.startswith("at roofline") and not fp32.enabled
+    assert bf16.enabled and bf16.eff >= analyze.AT_ROOFLINE and bf16.unpeaked == ["bfloat16"]
+    (entry,) = [e for e in result.entries if e.name == "mm_bfloat16"]
+    assert entry.enabled and "bfloat16 has no measured matmul peak" in entry.reason
+    assert result.options["unpeaked"] == ["bfloat16"]
 
 
 def test_a_matmul_dtype_held_exactly_in_a_faster_one_takes_its_peak():
@@ -2667,3 +2980,37 @@ def test_compare_reads_calls_that_differ_across_an_arms_captures_as_calls_differ
     row = next(r for r in compare.compare(a, b) if r["workload_id"] == "gemm/a")
     assert row["status"] == "calls_differ" and row["speedup"] is None
     assert row["per_call_b"] is None and row["calls_a"] == 100
+
+
+def _compare_cap(path: Path, config: dict, runtime: dict, total: float) -> Path:
+    from xe_forge.frontend import ir
+    from xe_forge.frontend.ir import CaptureRun
+
+    run = {"framework": "f", "model": {"name": "m", "config": config}, "runtime": runtime,
+           "total_device_us": total}  # fmt: skip
+    ir.dump(CaptureRun(run=run, ops=[], workloads=[]), path)
+    return path
+
+
+@pytest.mark.parametrize(
+    "a, b, same",
+    [(({"layers": 2}, {}), ({"layers": 4}, {}), False),
+     (({"layers": 2, "heads": 8}, {"inputs": {"p": {"file": "/x/p.txt", "sha256": "aa"}},
+                                   "opts": {"u": 1, "v": 2}}),
+      ({"heads": 8, "layers": 2}, {"opts": {"v": 2, "u": 1},
+                                   "inputs": {"p": {"file": "/y/p.txt", "sha256": "aa"}}}), True),
+     (({}, {"inputs": {"p": {"file": "/x/p.txt", "sha256": "aa"}}}),
+      ({}, {"inputs": {"p": {"file": "/x/p.txt", "sha256": "bb"}}}), False),
+     (({}, {"inputs": {"p": {"file": "/x/p.txt"}}}),
+      ({}, {"inputs": {"p": {"file": "/y/q.txt"}}}), False)],
+)  # fmt: skip
+def test_compare_keys_arms_by_config_and_input_content(tmp_path, a, b, same):
+    from xe_forge.frontend import compare
+
+    pa = [_compare_cap(tmp_path / "a.json", *a, 200.0)]
+    pb = [_compare_cap(tmp_path / "b.json", *b, 100.0)]
+    if same:
+        assert compare.compare(pa, pb)[0]["speedup"] == 2.0
+    else:
+        with pytest.raises(SystemExit, match="different work"):
+            compare.compare(pa, pb)

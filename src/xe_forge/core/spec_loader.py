@@ -477,9 +477,20 @@ def parse_spec(data: dict) -> KernelSpec:
         bench_xpu=bench_xpu,
         _named_variants=named_variants,
         default_variant=default_variant,
-        weights={str(k): float(v) for k, v in (data.get("weights") or {}).items()},
-        captured_us={str(k): float(v) for k, v in (data.get("captured_us") or {}).items()},
+        weights=_numbers(data, "weights"),
+        captured_us=_numbers(data, "captured_us"),
     )
+
+
+def _numbers(data: dict, key: str) -> dict[str, float]:
+    """``data[key]`` as {name: number}; ValueError unless it is a mapping of numbers."""
+    got = data.get(key) or {}
+    if not isinstance(got, dict):
+        raise ValueError(f"spec {key} must map variant names to numbers, not {got!r}")
+    bad = {k: v for k, v in got.items() if isinstance(v, bool) or not isinstance(v, int | float)}
+    if bad:
+        raise ValueError(f"spec {key} must be numbers: {bad}")
+    return {str(k): float(v) for k, v in got.items()}
 
 
 def get_test_config_from_spec(

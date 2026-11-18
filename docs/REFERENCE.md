@@ -103,7 +103,7 @@ passed to every per-kernel `xe-forge` run (for example `-- --no-unitrace`).
 | `--top` | 3 | Kernels to optimize |
 | `--at-roofline` | 0.8 | Efficiency of its bound at which a kernel is left alone |
 | `--min-gain` | 0.005 | Smallest share of device time worth optimizing |
-| `--calibration` | none (counter bounds only) | `xe-forge calibrate` output |
+| `--calibration` | none (counter bounds only) | `xe-forge calibrate` output. Before naming, a matmul peak the capture's GEMMs and costs need and the file lacks is measured into it; a dtype that cannot be measured has no compute bound, is bounded by bandwidth alone, and is never stopped at roofline |
 | `--name-coverage` | 0.99 | Share of device time whose ops the naming agent must place |
 | `--analyze-only` | off | Stop after the manifest (`kernels.yaml`) |
 | `--agent-max-turns` | `--max-turns` | Turn limit of every frontend agent |

@@ -95,14 +95,23 @@ def oneshot(prompt: str, inputs: dict[str, str], schema: dict, profile: dict | N
         schema_file, answer = Path(tmp) / "schema.json", Path(tmp) / "answer.json"
         schema_file.write_text(json.dumps(schema))
         argv = backend.oneshot(prompt, schema_file, answer, profile or agents.READ_ONLY, config)
-        proc = subprocess.run(argv, cwd=work, env=backend.env(config), capture_output=True,
-                              text=True, timeout=timeout, start_new_session=True)  # fmt: skip
-        if any(backend.auth_failed(line) for line in (proc.stdout + proc.stderr).splitlines()):
+        proc = subprocess.Popen(argv, cwd=work, env=backend.env(config), stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True,
+                                start_new_session=True)  # fmt: skip
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            raise
+        finally:
+            _kill_groups([proc.pid])
+        if any(backend.auth_failed(line) for line in (stdout + stderr).splitlines()):
             raise agents.AgentError(f"the LLM endpoint rejected the {backend.name} key")
         if proc.returncode != 0:
             raise agents.AgentError(f"{backend.name} exited {proc.returncode}: "
-                                    f"{(proc.stderr or proc.stdout)[-300:]}")  # fmt: skip
-        return backend.oneshot_answer(proc.stdout, answer)
+                                    f"{(stderr or stdout)[-300:]}")  # fmt: skip
+        return backend.oneshot_answer(stdout, answer)
 
 
 def _kill_groups(groups: list[int], grace: float = 10.0) -> None:

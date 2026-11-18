@@ -12,18 +12,29 @@ from pathlib import Path
 from xe_forge.frontend import ir
 
 
+def _key(c: ir.CaptureRun) -> tuple:
+    """What a capture ran: inputs by content, not by where they were read from."""
+    model = c.run.get("model") or {}
+    rt = dict(c.run.get("runtime") or {})
+    if isinstance(rt.get("inputs"), dict):
+        rt["inputs"] = {
+            k: (v.get("sha256") or v) if isinstance(v, dict) else v for k, v in rt["inputs"].items()
+        }
+    return (
+        c.run.get("framework"),
+        model.get("name"),
+        json.dumps(model.get("config") or {}, sort_keys=True, default=str),
+        json.dumps(rt, sort_keys=True, default=str),
+    )
+
+
 def _arm(paths: list[Path]) -> tuple[list[ir.CaptureRun], dict]:
     caps = [ir.load(p) for p in paths]
-    key = lambda c: (  # noqa: E731
-        c.run.get("framework"),
-        (c.run.get("model") or {}).get("name"),
-        tuple(sorted((k, str(v)) for k, v in (c.run.get("runtime") or {}).items())),
-    )
-    if len({key(c) for c in caps}) != 1:
+    if len({_key(c) for c in caps}) != 1:
         raise SystemExit(
-            f"captures in one arm differ in framework/model/run: {[key(c) for c in caps]}"
+            f"captures in one arm differ in framework/model/run: {[_key(c) for c in caps]}"
         )
-    return caps, dict(zip(("framework", "model", "run"), key(caps[0]), strict=True))
+    return caps, dict(zip(("framework", "model", "config", "run"), _key(caps[0]), strict=True))
 
 
 def _reduce(caps: list[ir.CaptureRun]) -> tuple[dict, dict, dict]:

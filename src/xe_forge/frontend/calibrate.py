@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 
 from xe_forge import frontend
@@ -17,6 +18,8 @@ DTYPES = ("bfloat16", "float16", "float32")
 # to be slower than one in those (convert, then multiply), whatever the card's own kernel does.
 # Not int8: its int32 result is not one a 16-bit float matmul computes.
 EXACT_IN = dict.fromkeys(("float8_e4m3fn", "float8_e5m2"), ("bfloat16", "float16"))
+# Matmul dtypes measured by their own kernel, not torch.matmul.
+SPECIAL = ("int8", "float8_e4m3fn")
 
 
 def peaks(calib: dict | None) -> tuple[float | None, dict[str, float]]:
@@ -32,23 +35,75 @@ def peaks(calib: dict | None) -> tuple[float | None, dict[str, float]]:
 
 
 def peak_of(tflops: dict[str, float], dtype, ctx: dict | None = None) -> float | None:
-    """``dtype``'s matmul peak. One the calibration lacks is bounded at the fastest measured,
-    another dtype's peak: its efficiency then reads low when its own peak is lower, and high
-    (unbounded, or at roofline) when its own is higher. Noted in ``ctx["unpeaked"]``, for the
-    agent reading the bounds to weigh."""
+    """``dtype``'s measured matmul peak, else None: its compute bound is unknown, and one the
+    calibration lacks is noted in ``ctx["unpeaked"]`` for the agent reading the bounds."""
     if dtype in tflops:
         return tflops[dtype]
-    if ctx is not None and dtype and tflops:
+    if ctx is not None and dtype:
         ctx.setdefault("unpeaked", set()).add(dtype)
-    return max(tflops.values(), default=None)
+    return None
 
 
-def unpeaked_note(tflops: dict[str, float], ctx: dict) -> list[str]:
-    best = max(tflops, key=tflops.get, default=None)
-    return [f"{d} has no matmul peak in the calibration: its GEMMs are bounded at the fastest "
-            f"measured ({best}, {tflops.get(best)} TFLOP/s), so their efficiency reads low if "
-            "their own peak is lower, and high (even at roofline) if it is higher"
+def unpeaked_note(ctx: dict) -> list[str]:
+    return [f"{d} has no measured matmul peak in the calibration, so its compute bound is "
+            "unknown: its GEMMs and costs are bounded by bandwidth alone, so their "
+            "efficiency reads low when compute is what limits them"
             for d in sorted(ctx.get("unpeaked", ()))]  # fmt: skip
+
+
+def measurable(name: str) -> bool:
+    """Whether :func:`measure` has a matmul in dtype ``name``."""
+    import torch
+
+    dt = getattr(torch, name, None)
+    return name in SPECIAL or (isinstance(dt, torch.dtype) and dt.is_floating_point)
+
+
+def _identity(device: dict) -> tuple:
+    return device.get("type"), device.get("name")
+
+
+def complete(calib: dict, dtypes, measure_fn=None) -> dict:
+    """``calib`` with a matmul peak measured for each of ``dtypes`` it has no entry for (a
+    dtype held exactly in a measured one has its peak). ``measure_fn(dtypes)`` returns a
+    :func:`measure` record, or None when the measurement did not finish.
+
+    A dtype the record gives a reason for, or that has no matmul to measure, is kept as
+    ``None`` with that reason in ``unmeasured``, so it is not tried again; one that failed
+    for no reason of its own (no device, the measurement stopped) is left out, to be tried
+    on the next run. A record of another device is not merged at all."""
+    have, tried = peaks(calib)[1], calib.get("matmul_tflops") or {}
+    missing = sorted({d for d in dtypes if d and d not in have and d not in tried})
+    if not missing:
+        return calib
+    todo = [d for d in missing if measurable(d)]
+    rec = (measure_fn or (lambda ds: measure(dtypes=tuple(ds))))(todo) if todo else {}
+    if rec is None:
+        print(f"calibrate: the measurement of {', '.join(todo)} did not finish; their "
+              "compute bound stays unknown", file=sys.stderr)  # fmt: skip
+        rec = {}
+    if (
+        rec.get("device")
+        and calib.get("device")
+        and _identity(rec["device"]) != _identity(calib["device"])
+    ):
+        print(f"calibrate: measured on {rec['device']}, not the calibration's "
+              f"{calib['device']}; not merged, the compute bound of {', '.join(missing)} "
+              "stays unknown", file=sys.stderr)  # fmt: skip
+        return calib
+    out = {**calib, "matmul_tflops": dict(tried), "unmeasured": dict(calib.get("unmeasured") or {})}
+    why, changed = rec.get("unmeasured") or {}, False
+    for d in missing:
+        key = f"matmul_tflops.{d}"
+        value = (rec.get("matmul_tflops") or {}).get(d)
+        reason = why.get(key) or (None if d in todo else "no matmul in this dtype to measure")
+        if value:
+            out["matmul_tflops"][d] = value
+            out["unmeasured"].pop(key, None)
+        elif reason:
+            out["matmul_tflops"][d], out["unmeasured"][key] = None, reason
+        changed = changed or bool(value or reason)
+    return out if changed else calib
 
 
 def _time_us(fn, dev, iters: int) -> float:
@@ -113,10 +168,17 @@ def measure(
         b = torch.randn(n, n, device=dev).to(torch.float8_e4m3fn).t()
         return lambda: torch._scaled_mm(a, b, scale_a=one, scale_b=one, out_dtype=torch.bfloat16)
 
-    kernels = {**{name: (lambda name=name: fp(getattr(torch, name))) for name in DTYPES},
-               "int8": int8, "float8_e4m3fn": fp8}  # fmt: skip
+    special = {"int8": int8, "float8_e4m3fn": fp8}
+    # Any other floating dtype asked for is measured the same way as the defaults.
+    names = [n for n in dtypes if n not in special] if dtypes else list(DTYPES)
+    kernels = {**{name: (lambda name=name: fp(getattr(torch, name))) for name in names},
+               **special}  # fmt: skip
     for name, make in kernels.items():
         if dtypes and name not in dtypes:
+            continue
+        if not measurable(name):
+            rec["matmul_tflops"][name] = None
+            rec["unmeasured"][f"matmul_tflops.{name}"] = "not a floating torch dtype"
             continue
         try:
             us = _time_us(make(), dev, max(1, iters // 2))

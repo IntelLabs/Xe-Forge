@@ -13,7 +13,15 @@ _env = Environment(
 
 
 def render_signature_instructions(template_name: str, **context) -> str:
-    """Render a Signature instruction block from a Jinja2 template."""
+    """Render a Signature instruction block from a Jinja2 template. From the registry, by
+    ``dsl``: ``stages`` (the stage values it supports) and ``generic_python`` (a Python
+    file that is not Triton's API, so none of Triton's text applies to it)."""
+    from xe_forge.dsl_registry import TRITON_FAMILY, get_stages_for_dsl
+    from xe_forge.models import DSL
+
+    dsl = DSL(str(context.get("dsl") or "triton"))
+    context.setdefault("stages", [s.value for s in get_stages_for_dsl(dsl)])
+    context.setdefault("generic_python", dsl.code_language == "python" and dsl not in TRITON_FAMILY)
     return _env.get_template(f"{template_name}.md.j2").render(**context)
 
 

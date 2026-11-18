@@ -872,3 +872,19 @@ def test_every_win_ports_and_an_integration_repo_widens_what_may_change(tmp_path
         < port_back.index("**serving-only**")
         < port_back.index("**none**")
     )
+
+
+def test_a_sycl_result_inside_the_noise_band_still_says_correctness_went_unchecked(
+    tmp_path, monkeypatch
+):
+    from xe_forge.core.sycl_executor import SyclExecutor
+    from xe_forge.models import ExecutionResult
+
+    ex = SyclExecutor.__new__(SyclExecutor)
+    ex._backend = ex._build_dir = ex._cached_input_dir = None
+    times = iter([1.0, 1.0])
+    monkeypatch.setattr(ex, "execute", lambda **k: ExecutionResult(
+        success=True, execution_time_ms=next(times)))  # fmt: skip
+    got = ex.compare_kernels("orig", "opt", input_dir=str(tmp_path))
+    assert "NO MEASURABLE CHANGE" in got.feedback_message
+    assert "no output files for comparison" in got.feedback_message

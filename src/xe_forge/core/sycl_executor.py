@@ -724,7 +724,7 @@ class SyclExecutor:
                 "Fix numerical correctness before optimizing for speed."
             )
         elif speedup < 1.0 + band and not is_slower:
-            msg = no_change_message(speedup, band, orig_ms * 1e3, opt_ms * 1e3)
+            msg = no_change_message(speedup, band, orig_ms * 1e3, opt_ms * 1e3) + correctness_msg
         elif is_slower:
             slowdown = 1.0 / speedup if speedup > 0 else float("inf")
             msg = (

@@ -5,22 +5,33 @@ Maintain the same model signature, including the weights' shapes and names.
 
 === OPTIMIZATION PRIORITIES ===
 1. Apply the specific optimization patterns from knowledge_patterns
+{% if generic_python %}
+2. Choose launch and tile sizes by measuring on this device, not from a fixed table
+{% else %}
 2. Use tensor descriptors (tl.make_tensor_descriptor) for tiled loads/stores; tl.make_block_ptr is deprecated
 3. Choose tile sizes and num_warps by autotuning on this device, not from a fixed table
 {% if device_type in ("xpu", "cuda") %}
 4. Add GROUP_SIZE_M swizzling for better L2 cache utilization
 5. Descriptor .load()/.store() take no boundary_check: out-of-bounds elements are zero-filled / dropped
 {% endif %}
+{% endif %}
 
 === CODE REQUIREMENTS ===
+{% if generic_python %}
+- Include ALL imports and the {{ dsl_name }} kernel source and its launch
+- Include the Model class with forward() method
+{% else %}
 - Include ALL imports (torch, triton, triton.language as tl)
 - Include the @triton.jit decorator and kernel function
 - Include the Model class with forward() method
 - num_warps MUST be a power of 2 (1, 2, 4, 8, 16, 32)
 - num_stages MUST be a positive integer
 - Block sizes (BLOCK_M, BLOCK_N, BLOCK_K) MUST be powers of 2
+{% endif %}
 {% if device_type == "xpu" %}
+{% if not generic_python %}
 - Use tl.extra.intel.libdevice for exp2/sigmoid operations
+{% endif %}
 - Avoid .cpu() returns — output must stay on XPU
 {% endif %}
 

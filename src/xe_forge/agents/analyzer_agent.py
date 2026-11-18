@@ -80,6 +80,32 @@ _SYCL_SKIP_ISSUES: set[IssueType] = {
     IssueType.TRANSPOSE_IN_LOOP,
 }
 
+_OPENCL_DESCRIPTIONS: dict[IssueType, str] = {
+    IssueType.MISSING_BOUNDARY_CHECK: "global loads/stores not guarded for sizes that are not a multiple of the work-group tile",
+    IssueType.UNCOALESCED_ACCESS: "adjacent work-items do not read adjacent addresses — kills bandwidth",
+    IssueType.SUBOPTIMAL_TILE_SIZE: "work-group tile too small or too large for these shapes on this device",
+    IssueType.SUBOPTIMAL_WARPS: "local work size or sub-group size suboptimal for this device",
+    IssueType.NO_SWIZZLING: "work-group order gives poor L2 reuse across neighbouring tiles",
+    IssueType.SIGMOID_SLOW_EXP: "sigmoid uses exp — exp2 or native_exp may be faster",
+    IssueType.HIGH_REGISTER_PRESSURE: "too many live values per work-item — reduces occupancy",
+    IssueType.CACHE_EVICTION_RISK: "local memory or tile size too large for the caches",
+}
+
+# Triton language APIs and Triton launch options with no OpenCL C counterpart.
+_OPENCL_SKIP_ISSUES: set[IssueType] = {
+    IssueType.MULTIPLE_OF_MISUSE,
+    IssueType.MANUAL_POINTER_ARITHMETIC,
+    IssueType.DEPRECATED_BLOCK_POINTERS,
+    IssueType.MISSING_TENSOR_DESCRIPTORS,
+    IssueType.MISSING_TMA,
+    IssueType.MISSING_GRF_MODE,
+    IssueType.MISSING_AUTOTUNE,
+    IssueType.SUBOPTIMAL_AUTOTUNE_CONFIGS,
+    IssueType.AUTOTUNE_KEY_MISSING,
+    IssueType.AUTOTUNE_DUPLICATE_PARAMS,
+    IssueType.PERSISTENT_NUM_PROGS_HARDCODED,
+}
+
 
 def _build_issue_categories(dsl: DSL = DSL.TRITON) -> str:
     """
@@ -189,9 +215,17 @@ def _build_issue_categories(dsl: DSL = DSL.TRITON) -> str:
     if dsl == DSL.SYCL:
         skip = _SYCL_SKIP_ISSUES
         desc_overrides = _SYCL_DESCRIPTIONS
+    elif dsl == DSL.OPENCL:
+        skip = _OPENCL_SKIP_ISSUES
+        desc_overrides = _OPENCL_DESCRIPTIONS
     else:
         skip = set()
         desc_overrides = {}
+
+    from xe_forge.dsl_registry import get_stages_for_dsl
+
+    supported = set(get_stages_for_dsl(dsl))
+    stage_order = [s for s in stage_order if s in supported]
 
     # Group by stage
     by_stage: dict[OptimizationStage, list[IssueType]] = {s: [] for s in stage_order}
@@ -219,20 +253,15 @@ def _build_issue_categories(dsl: DSL = DSL.TRITON) -> str:
     return "\n".join(lines)
 
 
-# Build once at import time — cheap, just string formatting
-_ISSUE_CATEGORIES_BLOCK = _build_issue_categories(DSL.TRITON)
-_SYCL_ISSUE_CATEGORIES_BLOCK = _build_issue_categories(DSL.SYCL)
-
-
 # ---------------------------------------------------------------------------
 # DSPy Signature
 # ---------------------------------------------------------------------------
 
 
 class AnalysisSignature(dspy.Signature):
-    """Analyze a Triton kernel for optimization opportunities across all categories."""
+    """Analyze a kernel for optimization opportunities across all categories."""
 
-    kernel_code: dspy.Code["python"] = dspy.InputField(desc="Triton kernel source code to analyze.")
+    kernel_code: dspy.Code["python"] = dspy.InputField(desc="Kernel source code to analyze.")
     reference_code: str = dspy.InputField(
         desc="Original PyTorch implementation. May be empty if not available."
     )
@@ -242,7 +271,7 @@ class AnalysisSignature(dspy.Signature):
 
     knowledge_base_context: str = dspy.InputField(
         desc="Critical constraints from the knowledge base that commonly manifest "
-        "as bugs in Triton/XPU kernels. Use these to guide detection: if a "
+        "as bugs in kernels on this device. Use these to guide detection: if a "
         "constraint is violated in the code, flag the corresponding issue. "
         "Empty string if KB is disabled."
     )
@@ -293,9 +322,7 @@ class AnalyzerAgent:
 
         try:
             cfg = get_config()
-            issue_block = (
-                _SYCL_ISSUE_CATEGORIES_BLOCK if self.dsl == DSL.SYCL else _ISSUE_CATEGORIES_BLOCK
-            )
+            issue_block = _build_issue_categories(self.dsl)
             template_instructions = render_signature_instructions(
                 "analysis_signature",
                 dsl=cfg.device_config.dsl,

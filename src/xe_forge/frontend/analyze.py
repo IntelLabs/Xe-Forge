@@ -36,6 +36,7 @@ class Decision:
     reason: str = ""
     small: bool = False  # below --min-gain on its own; its kernel's total may still pass
     eff: float | None = None  # fraction of its bound
+    unpeaked: list[str] = field(default_factory=list)  # dtypes its bound had no peak for
 
 
 @dataclass
@@ -85,6 +86,7 @@ class Analysis:
 
 
 AT_ROOFLINE = 0.8
+UNKNOWN_DTYPE = "unknown dtype"  # what a bound with flops and no dtype is noted under
 NOISE = 0.1  # a bound this far above its measurement is timer noise; further is an error
 
 
@@ -122,7 +124,7 @@ def gemm_bound(
     dtype = w.dtypes[0] if w.dtypes else None
     size = storage_bytes(dtype)
     bw, peaks = calib_peaks(calib)
-    if not bw or not peaks:
+    if not bw:
         return None
     topk = ctx.get("topk")
     parts = w.attrs.get("parts") or [
@@ -133,7 +135,7 @@ def gemm_bound(
         if "w_bytes" not in p:
             return None
         a_b, w_b, o_b = p.get("a_bytes", size), p["w_bytes"], p.get("o_bytes", size)
-        peak = peak_of(peaks, p.get("compute", dtype), ctx)
+        peak = peak_of(peaks, p.get("compute", dtype) or UNKNOWN_DTYPE, ctx)
         rows, e_eff = m, 1
         if p.get("grouped"):
             e = p.get("E")
@@ -147,7 +149,8 @@ def gemm_bound(
             e_eff = w.attrs.get("active_experts") or min(e, topk or 1)
         n, k = p["N"], p["K"]
         moved = rows * k * a_b + e_eff * k * n * w_b + rows * n * o_b
-        return max(moved / (bw * 1e3), 2 * rows * n * k / (peak * 1e6))
+        # No measured peak: the compute bound is unknown, so the bound is the bandwidth's.
+        return max(moved / (bw * 1e3), 2 * rows * n * k / (peak * 1e6) if peak else 0.0)
 
     def per_call(m):
         m = w.dims["M"] if m is None else m
@@ -166,7 +169,8 @@ def cost_bound(
     if not bw or "bytes" not in cost:
         return None
     dtype = next((d for d in w.dtypes if d.startswith(("bfloat", "float"))), None)
-    peak = peak_of(peaks, dtype, ctx) if cost.get("flops") else None
+    # No dtype to look up is no peak either, and noted like one the calibration lacks.
+    peak = peak_of(peaks, dtype or UNKNOWN_DTYPE, ctx) if cost.get("flops") else None
 
     def per_call(value):
         dims = resolve_dims(w, value)
@@ -174,9 +178,9 @@ def cost_bound(
         if moved is None:
             return None
         flops = formula.evaluate(cost["flops"], dims) if cost.get("flops") else 0.0
-        if flops is None or (flops and not peak):
+        if flops is None:
             return None
-        return max(moved / (bw * 1e3), (flops / (peak * 1e6)) if flops else 0.0)
+        return max(moved / (bw * 1e3), (flops / (peak * 1e6)) if flops and peak else 0.0)
 
     return _against(w, per_call)
 
@@ -243,6 +247,19 @@ def _sol_parts(w: Workload, calib: dict | None, ctx: dict | None) -> tuple | Non
     return sol / weight, mem / weight, comp / weight
 
 
+def peak_dtypes(capture: CaptureRun) -> set[str]:
+    """The dtypes whose matmul peak a bound of this capture may read: every dtype of its ops'
+    arguments and its workloads (a GEMM's compute dtype included) that has a matmul to
+    measure."""
+    from xe_forge.frontend.calibrate import measurable
+
+    out = {a.dtype for op in capture.ops for a in op.args if a}
+    for w in capture.workloads:
+        out |= set(w.dtypes)
+        out |= {p.get("compute") for p in w.attrs.get("parts") or [w.attrs]}
+    return {d for d in out if d and measurable(d)}
+
+
 # A stated cost takes precedence over these (see ``bound``).
 BOUNDERS = {"gemm": gemm_bound}
 
@@ -274,11 +291,16 @@ def _decide(
         mean_us=round(w.device_us / w.calls, 3) if w.calls else 0.0,
     )
     n = w.naming
-    bounded = bound(w, calib, ctx)
+    ctx = {} if ctx is None else ctx
+    mine = {**ctx, "unpeaked": set()}  # this workload's, then added to the run's
+    bounded = bound(w, calib, mine)
+    d.unpeaked = sorted(mine["unpeaked"])
+    ctx.setdefault("unpeaked", set()).update(d.unpeaked)
     if bounded is not None:
         d.eff = round(bounded[1], 3)
         d.gain = w.share * (bounded[0] / w.device_us) if w.device_us else 0.0
-        if d.eff >= at_roofline:
+        # Without its compute bound, nearness to the bandwidth's says nothing of the roofline.
+        if d.eff >= at_roofline and not d.unpeaked:
             d.reason = f"at roofline (eff {d.eff:.2f} of the card's measured bound)"
             return d
     if not (n.route == "kernel" or (n.route == "library" and bounded is not None and n.repo)):
@@ -385,6 +407,10 @@ def analyze(
         e.reason = f"{share:.2%} of device time; {round(calls, 3)} calls;" + (
             bound if e.enabled else ds[0].reason
         )
+        unpeaked = sorted({t for d in ds for t in d.unpeaked})
+        if unpeaked:
+            e.reason += (f"; {', '.join(unpeaked)} has no measured matmul peak, so its compute "
+                         "bound is unknown (bounded by bandwidth alone)")  # fmt: skip
         entries.append(e)
 
     entries.sort(key=lambda e: (-e.priority, -sum(w.share for w in e.workloads)))
