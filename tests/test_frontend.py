@@ -75,6 +75,11 @@ class Model:
     ("triton", "import triton\nimport triton.language as tl\n\nclass Model:\n    pass\n",
      "MISSING: @triton.jit decorator", None),
     ("gluon", GLUON_KERNEL, None, None),
+    ("gluon", GLUON_KERNEL.replace("import triton\nimport triton.language as tl\n",
+                                   "from triton.experimental.gluon import language as gl\n"),
+     None, None),
+    ("triton", GLUON_KERNEL.replace("@gluon.jit", "@triton.jit").replace(
+        "import triton.language as tl\n", ""), "MISSING: import triton.language", None),
     ("gluon", GLUON_KERNEL.replace("num_warps=4", "num_warps=3"),
      "INVALID num_warps=3: Must be power of 2.", None),
 ])  # fmt: skip

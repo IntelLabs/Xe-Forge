@@ -8,22 +8,17 @@ SUCCESS_MESSAGE = "Success! Optimization verified and kernel is faster."
 
 
 def missing_python_kernel_part(code: str, dsl) -> str | None:
-    """What a Python kernel file in ``dsl`` lacks, as feedback, or None. The Triton family is
-    held to Triton's imports, Triton alone to its decorator; every Python DSL needs
-    ``class Model``."""
+    """What a Python kernel file in ``dsl`` lacks, as feedback, or None. The Triton family
+    imports triton; Triton alone is held to ``triton.language`` and its decorator; every
+    Python DSL needs ``class Model``."""
     from xe_forge.dsl_registry import TRITON_FAMILY
     from xe_forge.models import DSL
 
     checks = []
     if dsl in TRITON_FAMILY:
-        checks = [
-            ("import triton" in code or "from triton" in code, "MISSING: import triton"),
-            (
-                "triton.language" in code or "import triton.language" in code,
-                "MISSING: import triton.language",
-            ),
-        ]
+        checks.append(("import triton" in code or "from triton" in code, "MISSING: import triton"))
     if dsl == DSL.TRITON:
+        checks.append(("triton.language" in code, "MISSING: import triton.language"))
         checks.append(("@triton.jit" in code, "MISSING: @triton.jit decorator"))
     checks.append(("class Model" in code, "MISSING: class Model"))
     return next((msg for ok, msg in checks if not ok), None)
