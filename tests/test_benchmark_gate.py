@@ -560,7 +560,7 @@ def test_cached_baseline_requires_reference_correctness(
     spec.get_init_args.return_value = [8]
     monkeypatch.setattr(spec_loader, "load_spec", Mock(return_value=spec))
 
-    executor = Mock()
+    executor = Mock(min_effect=0.02)
     executor._check_correctness.return_value = outputs_match
     executor.execute.return_value = SimpleNamespace(
         success=execution_success, execution_time_ms=0.005, error_message="execution failed"
@@ -838,6 +838,7 @@ def test_spec_tolerances_decide_correctness_on_the_spec_path(tmp_path, monkeypat
             optimized_time_us=1.0,
             speedup=2.0,
             feedback_message="",
+            verdict=None,
         )
 
     executor.compare_kernels = compare_kernels

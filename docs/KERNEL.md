@@ -157,13 +157,14 @@ the tree. `trial finalize --require-measured` keeps only results the tool record
   host command is set). With neither it fails with `VERDICT: NO_BENCHMARK_CONFIGURED`.
 - The first passing benchmark pins the tree to its variant; a recorded benchmark on
   another variant is refused.
-- Two times closer than `BENCHMARK_MIN_EFFECT` count as equal. Parity is finalized; a
-  regression never is.
+- Two times closer than `BENCHMARK_MIN_EFFECT` count as equal (`speedup=none`,
+  `VERDICT: INDISTINGUISHABLE`). Parity is finalized; a regression never is.
 - **Weighted shapes.** With `weights` in the spec, `benchmark` without `--variant` runs
   every weighted variant and reports one result. Every shape must pass. A shape measured
   slower makes the trial a regression at that shape's ratio (`VERDICT: SLOWER_ON`),
   whatever the others gain. Otherwise the result is the time-weighted total,
-  `1 / sum(weight / ratio)`, where a shape too close to call counts as 1. `--baseline-us`
+  `1 / sum(weight / ratio)`, where a shape too close to call counts as 1. Weights are
+  divided by their sum; a negative or non-finite weight, or a zero sum, fails. `--baseline-us`
   is refused, since each shape's baseline is timed afresh.
 - **Baseline against captured time.** For every shape run, weighted or one `--variant`,
   when `captured_us` names it and the baseline runs there more than `XE_FORGE_BASELINE_SLACK` times

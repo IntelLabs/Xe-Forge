@@ -5,7 +5,7 @@ configuration must have a shape of its own: the kernel has to hold at all of the
 one configuration the agent may merge the token counts that take the same path, naming
 one to stand for the others.
 
-<inputs.json>: {"<kernel name>": {"shapes": {"<variant>": {"stands_for": ["<variant>", ...],
+<inputs.json>: {"<kernel key>": {"shapes": {"<variant>": {"stands_for": ["<variant>", ...],
 "weight": <w>}, ...}, "why": "..."}} for every enabled kernel of the manifest. Each shape a
 captured one, in its own group; a group within one configuration; the groups disjoint and
 together every shape the capture ran; weights positive, summing to 1. Prints each group's
@@ -47,13 +47,16 @@ def _number(w) -> bool:
 
 
 def check(answer: dict, manifest: dict) -> tuple[dict[str, list[str]], list[str]]:
-    """({kernel: problems} for the kernels that fail, report lines)."""
+    """({kernel: problems} for the kernels that fail, report lines). A kernel is keyed by
+    :func:`xe_forge.frontend.manifest.key`, unique where two entries share a name."""
+    from xe_forge.frontend.manifest import key
+
     problems: dict[str, list[str]] = {}
     lines: list[str] = []
     for entry in manifest["kernels"]:
         if not entry.get("enabled") or not entry.get("record"):
             continue
-        name = entry["name"]
+        name = key(entry)
         bad = problems.setdefault(name, [])
         record = json.loads(Path(entry["record"]).read_text())
         captured = shares(record)

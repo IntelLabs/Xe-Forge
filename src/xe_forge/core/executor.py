@@ -608,6 +608,7 @@ class KernelBenchExecutor:
             original_correct=original_correct,
             optimized_correct=True,
             is_slower=is_slower,
+            verdict="INDISTINGUISHABLE" if within_noise else None,
             feedback_message=feedback_message,
         )
 
@@ -660,6 +661,8 @@ class KernelBenchExecutor:
                         original_time = workload.measure(workload.original, self.time_forward)
                     optimized_time = workload.measure(workload.optimized, self.time_forward)
                     speedup = original_time / optimized_time if optimized_time > 0 else 0.0
+                    if abs(speedup - 1.0) < self.min_effect:
+                        verdict = "INDISTINGUISHABLE"
                 if original_time <= 0 or optimized_time <= 0:
                     raise ValueError("Benchmark timings must be positive")
                 return ComparisonResult(

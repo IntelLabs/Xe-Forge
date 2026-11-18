@@ -771,7 +771,8 @@ def analyze(capture_path: Path, out_dir: Path, a: argparse.Namespace, weights=No
     if cap.run.get("counters"):
         print(f"analyze: counters cover {result.options['counters_pct']}% of device time")
     for d in result.options["unpeaked"]:
-        print(f"analyze: {d} has no matmul peak in the calibration; bounded at the fastest")
+        print(f"analyze: {d} has no matmul peak in the calibration; bounded at the fastest "
+              "measured dtype's, so its efficiency may read low or high")  # fmt: skip
     print(
         f"analyze: {len(cap.workloads)} workloads -> {len(result.entries)} kernels, "
         f"{len(enabled)} enabled ({', '.join(e.name for e in enabled) or 'none'}) -> {path}"
@@ -786,7 +787,8 @@ def inputs(manifest_path: Path, run_dir: Path, a, python, turns, repos) -> dict:
     from xe_forge.skills import inputs as tool
 
     m = manifest.load(manifest_path)
-    kernels = [e for e in m["kernels"] if e.get("enabled") and e.get("record")]
+    kernels = [{**e, "key": manifest.key(e)} for e in m["kernels"]
+               if e.get("enabled") and e.get("record")]  # fmt: skip
     if not kernels:
         return {}
     work = run_dir / "inputs"
@@ -799,7 +801,7 @@ def inputs(manifest_path: Path, run_dir: Path, a, python, turns, repos) -> dict:
     problems, _ = tool.check(answer if isinstance(answer, dict) else {}, m)  # the tool's verdict
     for kernel, bad in problems.items():
         print(f"inputs: {kernel} not optimized: {'; '.join(bad)}", file=sys.stderr)
-    passed = [e["name"] for e in kernels if e["name"] not in problems]
+    passed = [e["key"] for e in kernels if e["key"] not in problems]
     return tool.weights(answer, passed) if passed else {}
 
 
@@ -1010,9 +1012,9 @@ def _use_agent(a) -> None:
 def _use_device(a) -> None:
     """``--device``, else XE_FORGE_DEVICE, else the first device torch sees; exported, so
     every step and the processes it starts (launchers, checks, calibration) use it."""
-    from xe_forge.frontend.profile import device_type
+    from xe_forge.frontend.profile import device
 
-    a.device = a.device or device_type()
+    a.device = a.device or device()
     os.environ["XE_FORGE_DEVICE"] = a.device
 
 

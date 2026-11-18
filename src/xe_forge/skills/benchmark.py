@@ -258,11 +258,14 @@ def _run_builtin(args) -> int:
             baseline_ms = sum(baseline_us) / len(baseline_us) / 1000.0
             opt_ms = optimized_result.execution_time_ms
             speedup = baseline_ms / opt_ms if opt_ms > 0 else 0
+            within_noise = abs(speedup - 1.0) < executor.min_effect
             print("Correctness: PASSED")
             print(
-                f"Performance: baseline_us={baseline_ms * 1000:.2f}, "
-                f"kernel_us={opt_ms * 1000:.2f}, speedup={speedup:.2f}x"
+                f"Performance: baseline_us={baseline_ms * 1000:.2f}, kernel_us={opt_ms * 1000:.2f}, "
+                f"speedup={'none' if within_noise else f'{speedup:.2f}x'}"
             )
+            if within_noise:
+                print("VERDICT: INDISTINGUISHABLE")
         else:
             print("Correctness: FAILED")
             print(f"Error: {optimized_result.error_message}")
@@ -284,10 +287,13 @@ def _run_builtin(args) -> int:
                 print(f"Feedback: {result.feedback_message}")
             return 1
         if result.original_time_us and result.optimized_time_us:
+            ratio = "none" if result.verdict else f"{result.speedup:.2f}x"
             print(
                 f"Performance: baseline_us={result.original_time_us:.2f}, "
-                f"kernel_us={result.optimized_time_us:.2f}, speedup={result.speedup:.2f}x"
+                f"kernel_us={result.optimized_time_us:.2f}, speedup={ratio}"
             )
+            if result.verdict:
+                print(f"VERDICT: {result.verdict}")
         if result.feedback_message:
             print(f"Feedback: {result.feedback_message}")
     return 0
@@ -408,12 +414,22 @@ def _recording(target, args, produce) -> int:
 
 
 def _weights(args) -> dict[str, float]:
-    """The spec's weighted shapes, unless one ``--variant`` was asked for."""
+    """The spec's weighted shapes, each weight divided by their sum, unless one ``--variant``
+    was asked for. ValueError when a weight is negative or not finite, or they sum to 0."""
     if args.variant or not args.spec:
         return {}
+    import math
+
     from xe_forge.core.spec_loader import load_spec
 
-    return load_spec(args.spec).weights
+    weights = load_spec(args.spec).weights
+    if not weights:
+        return {}
+    total = sum(weights.values())
+    if any(not math.isfinite(w) or w < 0 for w in weights.values()) or not total > 0:
+        raise ValueError(f"the spec's weights {weights} must be finite, non-negative and "
+                         "sum above 0")  # fmt: skip
+    return {name: w / total for name, w in weights.items()}
 
 
 # How much slower than the captured kernel a baseline may run before it is not that kernel.
@@ -465,7 +481,11 @@ def _weighted(args, single) -> int:
     whatever the others gain; otherwise the speedup is the time-weighted total,
     1 / sum(w / s) -- a shape whose comparison was gated (too close to call) counts as 1.
     """
-    weights = _weights(args)
+    try:
+        weights = _weights(args)
+    except ValueError as exc:
+        print(f"Correctness: FAILED\nError: {exc}")
+        return 1
     if not weights:
         return _one_shape(args, single)
     if args.baseline_us is not None:
@@ -560,7 +580,11 @@ def _run_builtin_watched(args=None) -> int:
 
     # Per shape; XE_FORGE_BENCHMARK_TIMEOUT lets a caller give up on a hang sooner than a build.
     per_shape = int(os.environ.get("XE_FORGE_BENCHMARK_TIMEOUT", get_config().external.timeout))
-    timeout = per_shape * max(1, len(_weights(args)) if args else 1)
+    try:
+        shapes = len(_weights(args)) if args else 1
+    except ValueError:
+        shapes = 1  # the child refuses them
+    timeout = per_shape * max(1, shapes)
     child = subprocess.Popen(
         [sys.executable, "-c", "from xe_forge.skills import main; main()", *sys.argv[1:]],
         env={**os.environ, _CHILD_ENV: "1"},

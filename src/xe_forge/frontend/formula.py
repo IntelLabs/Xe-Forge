@@ -81,8 +81,9 @@ def evaluate(expr, dims: dict) -> float | None:
 
     try:
         value = walk(tree)
-    except (ValueError, ZeroDivisionError, OverflowError):
+    except (ValueError, TypeError, ZeroDivisionError, OverflowError):
         return None
-    # A negative base to a fractional power is complex; inf/nan, or below zero, is no cost.
+    # A negative base to a fractional power is complex (a TypeError where min/max or a
+    # comparison meets it); inf/nan, or below zero, is no cost.
     ok = isinstance(value, float) and math.isfinite(value) and value >= 0
     return value if ok else None

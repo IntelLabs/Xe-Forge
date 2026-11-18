@@ -313,7 +313,7 @@ def main():
     p_inputs = subparsers.add_parser("inputs", help="Gate the shapes and weights trials use")
     inputs_sub = p_inputs.add_subparsers(dest="inputs_command", required=True)
     ic = inputs_sub.add_parser("check", help="each chosen shape captured, weights sum to 1")
-    ic.add_argument("inputs", help="inputs.json: {kernel: {weights, why}}")
+    ic.add_argument("inputs", help="inputs.json: {kernel: {shapes, why}}")
     ic.add_argument("--manifest", required=True, help="kernels.yaml")
 
     # -- fuse --

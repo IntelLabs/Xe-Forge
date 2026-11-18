@@ -108,6 +108,24 @@ def test_the_device_asked_for_wins_over_what_torch_sees(monkeypatch):
     assert a.device == "cpu"  # the exported choice carries on
 
 
+def test_the_device_index_asked_for_reaches_naming_and_calibration(monkeypatch):
+    import torch
+
+    from xe_forge.frontend import calibrate, cli, profile
+
+    monkeypatch.setenv("XE_FORGE_DEVICE", "xpu:1")
+    assert profile.device() == "xpu:1" and profile.device_type() == "xpu"
+    a = argparse.Namespace(device=None)
+    cli._use_device(a)
+    assert a.device == "xpu:1"
+    seen = []
+    monkeypatch.setattr(torch.xpu, "get_device_name", lambda i=0: seen.append(("name", i)) or "g")
+    monkeypatch.setattr(torch.xpu, "set_device", lambda i: seen.append(("set", i)))
+    assert profile.device_info()["name"] == "g" and seen == [("name", 1)]
+    calibrate.measure(read_bytes=16, n=2, iters=1, dtypes=("float32",))
+    assert ("set", 1) in seen
+
+
 def test_a_given_reference_is_never_the_locators_to_write():
     from xe_forge.claude.generator import _render
 
@@ -241,3 +259,38 @@ def test_a_difference_inside_the_noise_band_is_no_regression(monkeypatch, opt_ms
         success=True, execution_time_ms=next(times), output_correct=True))  # fmt: skip
     got = ex.compare_kernels("orig", "opt", kernel_name="k")
     assert says in got.feedback_message and got.is_slower is slower
+    assert (got.verdict == "INDISTINGUISHABLE") is (says == "NO MEASURABLE CHANGE")
+
+
+def test_the_builtin_skill_prints_no_ratio_inside_the_noise_band(tmp_path, monkeypatch, capsys):
+    from xe_forge.core.executor import KernelBenchExecutor
+    from xe_forge.models import ExecutionResult
+    from xe_forge.skills import benchmark
+
+    spec = tmp_path / "s.yaml"
+    spec.write_text(yaml.safe_dump({"weights": {"dec": 0.5, "pre": 0.5},
+                                    "dec": [{"dims": {"N": 1}}], "pre": [{"dims": {"N": 2}}]}))  # fmt: skip
+    for name in ("base.py", "opt.py"):
+        (tmp_path / name).write_text("x = 1\n")
+    times = iter([1.0, 1.01, 1.0, 0.5])  # dec inside the band, pre 2x faster
+    monkeypatch.setattr(KernelBenchExecutor, "_check_correctness", lambda self, **k: True)
+    monkeypatch.setattr(KernelBenchExecutor, "execute", lambda self, *a, **k: ExecutionResult(
+        success=True, execution_time_ms=next(times), output_correct=True))  # fmt: skip
+    args = argparse.Namespace(spec=str(spec), variant="dec", baseline_us=None, device="cpu",
+                              baseline=str(tmp_path / "base.py"), dsl=None,
+                              optimized=str(tmp_path / "opt.py"), reference=None)  # fmt: skip
+    assert benchmark._run_builtin(args) == 0
+    text = capsys.readouterr().out
+    out = benchmark.parse_outcome(text)
+    assert "speedup=none" in text and out["verdict"] == "INDISTINGUISHABLE"
+    assert "speedup" not in out and out["correctness"] == "pass"
+    times = iter([1.01])
+    args.baseline_us = "1000"
+    assert benchmark._run_builtin(args) == 0
+    assert benchmark.parse_outcome(capsys.readouterr().out)["verdict"] == "INDISTINGUISHABLE"
+    times, args.baseline_us = iter([1.0, 1.01, 1.0, 0.5]), None
+    args.variant = None
+    assert benchmark._weighted(args, lambda: benchmark._run_builtin(args)) == 0
+    out = benchmark.parse_outcome(capsys.readouterr().out)
+    assert out.get("verdict") != "SLOWER_ON"
+    assert out["speedup"] == pytest.approx(1 / (0.5 + 0.5 / 2), abs=0.01)

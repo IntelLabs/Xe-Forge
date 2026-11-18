@@ -13,15 +13,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-def device_type() -> str:
-    """The device asked for (``XE_FORGE_DEVICE``, which ``run`` sets from ``--device``), else
-    the first one torch sees."""
+def device() -> str:
+    """The device asked for, index included (``XE_FORGE_DEVICE``, which ``run`` sets from
+    ``--device``), else the first one torch sees."""
     import os
 
     import torch
 
     if os.environ.get("XE_FORGE_DEVICE"):
-        return os.environ["XE_FORGE_DEVICE"].split(":")[0]
+        return os.environ["XE_FORGE_DEVICE"]
     if hasattr(torch, "xpu") and torch.xpu.is_available():
         return "xpu"
     if torch.cuda.is_available():
@@ -29,15 +29,18 @@ def device_type() -> str:
     return "cpu"
 
 
+def device_type() -> str:
+    """:func:`device` without its index."""
+    return device().split(":")[0]
+
+
 def device_info() -> dict:
     import torch
 
     dev = device_type()
     info = {"type": dev, "torch": torch.__version__}
-    if dev == "xpu":
-        info["name"] = torch.xpu.get_device_name(0)
-    elif dev == "cuda":
-        info["name"] = torch.cuda.get_device_name(0)
+    if dev in ("xpu", "cuda"):
+        info["name"] = getattr(torch, dev).get_device_name(torch.device(device()).index or 0)
     return info
 
 

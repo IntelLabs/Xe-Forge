@@ -32,9 +32,10 @@ def peaks(calib: dict | None) -> tuple[float | None, dict[str, float]]:
 
 
 def peak_of(tflops: dict[str, float], dtype, ctx: dict | None = None) -> float | None:
-    """``dtype``'s matmul peak. One the calibration lacks is bounded at the fastest measured
-    -- still a lower bound, but its efficiency then reads low -- and noted in
-    ``ctx["unpeaked"]``, for the agent reading the bounds to weigh."""
+    """``dtype``'s matmul peak. One the calibration lacks is bounded at the fastest measured,
+    another dtype's peak: its efficiency then reads low when its own peak is lower, and high
+    (unbounded, or at roofline) when its own is higher. Noted in ``ctx["unpeaked"]``, for the
+    agent reading the bounds to weigh."""
     if dtype in tflops:
         return tflops[dtype]
     if ctx is not None and dtype and tflops:
@@ -45,7 +46,8 @@ def peak_of(tflops: dict[str, float], dtype, ctx: dict | None = None) -> float |
 def unpeaked_note(tflops: dict[str, float], ctx: dict) -> list[str]:
     best = max(tflops, key=tflops.get, default=None)
     return [f"{d} has no matmul peak in the calibration: its GEMMs are bounded at the fastest "
-            f"measured ({best}, {tflops.get(best)} TFLOP/s), so their efficiency reads low"
+            f"measured ({best}, {tflops.get(best)} TFLOP/s), so their efficiency reads low if "
+            "their own peak is lower, and high (even at roofline) if it is higher"
             for d in sorted(ctx.get("unpeaked", ()))]  # fmt: skip
 
 
@@ -73,7 +75,7 @@ def measure(
     """``read_bytes`` must exceed the card's caches; ``n`` is the square matmul size."""
     import torch
 
-    from xe_forge.frontend.profile import device_info, device_type
+    from xe_forge.frontend.profile import device, device_info, device_type
 
     dev = device_type()
     rec: dict = {
@@ -85,6 +87,9 @@ def measure(
     if dev == "cpu":
         rec["unmeasured"]["all"] = "no GPU visible to torch"
         return rec
+    index = torch.device(device()).index
+    if index is not None:  # tensors below are allocated on the current device
+        getattr(torch, dev).set_device(index)
     try:
         # Random data: a constant fill compresses and reads faster than real tensors.
         x = torch.rand(read_bytes // 2, dtype=torch.float16, device=dev)

@@ -27,7 +27,11 @@ def _arm(paths: list[Path]) -> tuple[list[ir.CaptureRun], dict]:
 
 
 def _reduce(caps: list[ir.CaptureRun]) -> tuple[dict, dict, dict]:
-    """(workload id -> (median us, calls, spread), workload metadata, totals)."""
+    """(workload id -> (median us, calls, spread), workload metadata, totals).
+
+    Calls are None unless every capture ran the workload the same number of times: a
+    median time is only comparable per call when the calls behind it agree.
+    """
     per: dict[str, list[tuple[float, int]]] = {}
     meta: dict[str, ir.Workload] = {}
     for c in caps:
@@ -38,7 +42,8 @@ def _reduce(caps: list[ir.CaptureRun]) -> tuple[dict, dict, dict]:
     for wid, vals in per.items():
         us = [v[0] for v in vals]
         med = statistics.median(us)
-        stats[wid] = (med, vals[0][1], (max(us) - min(us)) / med if med and len(us) > 1 else 0.0)
+        calls = vals[0][1] if len({v[1] for v in vals}) == 1 and len(vals) == len(caps) else None
+        stats[wid] = (med, calls, (max(us) - min(us)) / med if med and len(us) > 1 else 0.0)
     totals = [c.run.get("total_device_us", 0.0) for c in caps]
     med_t = statistics.median(totals)
     total = (med_t, None, (max(totals) - min(totals)) / med_t if med_t and len(totals) > 1 else 0.0)
@@ -60,7 +65,7 @@ def compare(a_paths: list[Path], b_paths: list[Path]) -> list[dict]:
             status = "only_b"
         elif ub is None:
             status = "only_a"
-        elif ca is not None and ca != cb:
+        elif ca is None or cb is None or ca != cb:
             status = "calls_differ"
         speed = round(ua / ub, 4) if status == "matched" and ub else None
         return {

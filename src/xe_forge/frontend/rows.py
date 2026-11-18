@@ -53,18 +53,23 @@ def ran(cap: ir.CaptureRun, row: dict) -> bool:
 def merge(caps: list[ir.CaptureRun], rows: list[dict]) -> ir.CaptureRun:
     """One capture of ``rows`` (anchor first, its capture first): row r's calls and times
     scaled by w_r x T / T_r (T the anchor's total device time), which keeps each op's time
-    per call; op ids prefixed ``rNN:``; each kernel's counters those of every row, by time."""
+    per call; op ids prefixed ``rNN:``; each kernel's counters those of every row, by time,
+    and its unitrace time the sum of every row's, scaled the same."""
     from xe_forge.frontend.analyze import combine
 
     total = caps[0].run["total_device_us"]
     ops: list[ir.CapturedOp] = []
     attributed = 0.0
     counters: dict[str, list[dict]] = {}
+    traced: dict[str, dict] = {}
     for r, (cap, row) in enumerate(zip(caps, rows, strict=True), 1):
         scale = row["weight"] * total / (cap.run["total_device_us"] or 1.0)
         attributed += scale * cap.run.get("attributed_device_us", 0.0)
         for name, c in (cap.run.get("counters") or {}).items():
             counters.setdefault(name, []).append({**c, "us": c["us"] * scale})
+        for name, k in (cap.run.get("unitrace_kernels") or {}).items():
+            seen = traced.setdefault(name, {**k, "us": 0.0})
+            seen["us"] += k["us"] * scale
         for op in cap.ops:
             op = copy.deepcopy(op)
             op.id = f"r{r:02d}:{op.id}"
@@ -78,6 +83,8 @@ def merge(caps: list[ir.CaptureRun], rows: list[dict]) -> ir.CaptureRun:
     run["total_device_us"] = round(total, 1)
     run["attributed_device_us"] = round(attributed, 1)
     run["counters"] = {k: c for k, v in counters.items() if (c := combine(v))}
+    if traced:
+        run["unitrace_kernels"] = traced
     run["attributed_pct"] = round(100 * attributed / total, 2) if total else 0.0
     merged = ir.CaptureRun(run=run, ops=ops)
     merged.workloads = canonical.workloads(ops, total, naming.name_op)

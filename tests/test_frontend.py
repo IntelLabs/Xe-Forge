@@ -115,7 +115,10 @@ def test_repo_path_is_one_filename_part():
 # ── formulas from agents are bounded ────────────────────────────────────────
 
 
-@pytest.mark.parametrize("expr", ["10**10**10", "2**(T*H)", "(-2)**0.5", "1/0"])
+@pytest.mark.parametrize(
+    "expr",
+    ["10**10**10", "2**(T*H)", "(-2)**0.5", "1/0", "min((0-1)**0.5, 1)", "max((-T)**0.5, 1)"],
+)
 def test_formula_rejects_unbounded_or_invalid(expr):
     start = time.monotonic()
     assert formula.evaluate(expr, {"T": 4096, "H": 4096}) is None
@@ -228,6 +231,28 @@ def test_rows_merge_each_kernels_counters_by_its_scaled_time():
     got = rows.merge(caps, [anchor, other]).run["counters"]["gelu"]
     # the second row counts as much time as the first (weight 0.5 of 100 us each)
     assert got == {"us": 100.0, "gb_per_s": 250.0, "util_pct": 10.0}
+
+
+def test_rows_merge_scales_each_kernels_unitrace_time_like_its_counters():
+    from xe_forge.frontend import rows
+
+    anchor = {"batch": 8, "input_len": 64, "output_len": 4, "weight": 0.1}
+    other = {"batch": 1, "input_len": 64, "output_len": 4, "weight": 0.9}
+    caps = [_row_capture(anchor, [90.0, 10.0]), _row_capture(other, [40.0, 10.0])]
+    for op in caps[1].ops:  # another workload: gelu runs in the anchor row only
+        op.framework_op, op.kernel_symbols = "aten::silu", {"silu": op.device_us}
+    caps[0].run["counters"] = {"gelu": {"us": 100.0, "gb_per_s": 400.0, "util_pct": 10.0}}
+    caps[0].run["unitrace_kernels"] = {"gelu": {"us": 100.0, "calls": 4},
+                                       "both": {"us": 100.0, "calls": 4}}  # fmt: skip
+    caps[1].run["unitrace_kernels"] = {"silu": {"us": 50.0, "calls": 4},
+                                       "both": {"us": 50.0, "calls": 4}}  # fmt: skip
+    merged = rows.merge(caps, [anchor, other])
+    ran = merged.run["unitrace_kernels"]
+    assert ran["gelu"]["us"] == pytest.approx(10.0) and ran["silu"]["us"] == pytest.approx(90.0)
+    assert ran["both"]["us"] == pytest.approx(100.0)  # 0.1 x 100 + 0.9 x 100/50 x 50
+    w = next(w for w in merged.workloads if "gelu" in w.framework_meta["kernels"])
+    calib = {"bandwidth_gbs": 1000.0}
+    assert analyze._sol_parts(w, calib, analyze.context(merged)) is not None  # fully sampled
 
 
 def test_rows_file_puts_the_largest_row_first_and_refuses_a_bad_one(tmp_path):
@@ -747,6 +772,25 @@ def test_bound_tool_lists_workloads_by_share(tmp_path):
                       "--ops", str(listing), "--repos", str(tmp_path))  # fmt: skip
     assert code == 0 and "bound: INVALID 'toy::RMS': repo None" in out, out
     assert "rms_v2" not in out.partition("bound:")[0]  # applied as the run keeps it: unnamed
+
+
+def test_bound_with_draft_names_bounds_with_their_model_facts(tmp_path, monkeypatch, capsys):
+    import argparse
+
+    from xe_forge.frontend import ir
+    from xe_forge.skills import bound
+
+    cap = tmp_path / "capture.json"
+    ir.dump(ir.CaptureRun(run={"total_device_us": 1.0}, ops=[]), cap)
+    names = tmp_path / "names.json"
+    names.write_text(json.dumps({"ops": {}, "model": {"topk": 4}}))
+    seen = []
+    real = analyze.context
+    monkeypatch.setattr(analyze, "context", lambda c: seen.append(real(c)) or seen[-1])
+    args = argparse.Namespace(capture=str(cap), names=str(names), ops=None, repos=None,
+                              calibration=None, min_share=0.0, json=True)  # fmt: skip
+    bound.run(args)
+    assert seen[0]["topk"] == 4
 
 
 def test_a_cost_over_unknown_dims_loses_the_cost_not_the_naming(tmp_path):
@@ -1679,12 +1723,32 @@ def test_fuse_check_over_several_rows_wants_the_chain_in_every_row(tmp_path):
         "def get_init_inputs(T, H)", "def get_init_inputs(T)")}, "the anchor's dims"),
     ({"ref": _CHAIN.replace("def get_inputs(T, H, dtype)", "def get_inputs(T, H)")}, "the dtype"),
     ({"ref": "import torch\n"}, "defines no Model"),
+    ({"ref": _CHAIN.replace("def get_inputs(T, H, dtype)", "def get_inputs(**kwargs)")},
+     "the anchor's dims"),
+    ({"ops": ["op-0", "op-0"]}, "listed twice"),
 ])  # fmt: skip
 def test_fuse_check_refuses_a_fusion_the_pipeline_cannot_build(tmp_path, over, says):
     from xe_forge.skills import fuse
 
     problems, passed = fuse.check(_fusion(tmp_path, **over), _fusion_capture(), {}, tmp_path)
     assert passed == [] and any(says in p for p in problems), problems
+
+
+@pytest.mark.parametrize("answer, ok", [({"fusions": [], "why": "no chain worth it"}, True),
+                                        ({"fusions": [], "why": " "}, False),
+                                        ({"fusions": None, "why": "x"}, False),
+                                        ({"why": "x"}, False)])  # fmt: skip
+def test_fuse_check_passes_no_fusion_proposed_with_a_reason(tmp_path, answer, ok):
+    from xe_forge.frontend import ir
+    from xe_forge.skills import fuse
+
+    problems, passed = fuse.check(answer, _fusion_capture(), {}, tmp_path)
+    assert passed == [] and (problems == []) is ok, problems
+    (tmp_path / "fusions.json").write_text(json.dumps(answer))
+    ir.dump(_fusion_capture(), tmp_path / "capture.json")
+    args = SimpleNamespace(fusions=str(tmp_path / "fusions.json"), results=None,
+                           capture=str(tmp_path / "capture.json"))  # fmt: skip
+    assert fuse.run(args) == (0 if ok else 1)
 
 
 def _git_repo(path: Path) -> str:
@@ -1798,10 +1862,11 @@ def test_a_dtype_without_a_calibrated_peak_is_bounded_at_the_fastest_and_noted()
 
     tflops, ctx = {"bfloat16": 150.0, "int8": 280.0}, {}
     assert peak_of(tflops, "bfloat16", ctx) == 150.0 and ctx == {}
-    assert peak_of(tflops, "float32", ctx) == 280.0  # still a lower bound on the time
+    assert peak_of(tflops, "float32", ctx) == 280.0  # another dtype's peak
     assert peak_of(tflops, None, ctx) == 280.0 and ctx == {"unpeaked": {"float32"}}
     (note,) = unpeaked_note(tflops, ctx)
     assert note.startswith("float32 has no matmul peak") and "int8, 280.0" in note
+    assert "reads low" in note and "high" in note
 
 
 def test_a_matmul_dtype_held_exactly_in_a_faster_one_takes_its_peak():
@@ -2581,3 +2646,24 @@ def test_a_launcher_that_misrecords_the_run_it_was_asked_for_goes_back_to_its_ag
     other.write_bytes(b"npy")
     calls.clear()  # a resume asking for another state: not this capture, and not its launcher's
     assert cli.main([*argv[:-1], str(other)]) == 1 and calls == []
+
+
+@pytest.mark.parametrize("b_calls", [[100, 50, 50], [100, 100, None]])
+def test_compare_reads_calls_that_differ_across_an_arms_captures_as_calls_differ(tmp_path, b_calls):
+    from xe_forge.frontend import compare, ir
+    from xe_forge.frontend.ir import CaptureRun, Naming, Workload
+
+    def cap(name, calls):
+        ws = [] if calls is None else [
+            Workload(workload_id="gemm/a", family="gemm", dims={}, dtypes=[], layout=[], attrs={},
+                     var_axes={}, calls=calls, device_us=float(calls), share=1.0, ops=[],
+                     naming=Naming("kernel"))]  # fmt: skip
+        run = {"framework": "f", "model": {"name": "m"}, "total_device_us": 100.0}
+        ir.dump(CaptureRun(run=run, ops=[], workloads=ws), tmp_path / f"{name}.json")
+        return tmp_path / f"{name}.json"
+
+    a = [cap(f"a{i}", 100) for i in range(3)]
+    b = [cap(f"b{i}", c) for i, c in enumerate(b_calls)]
+    row = next(r for r in compare.compare(a, b) if r["workload_id"] == "gemm/a")
+    assert row["status"] == "calls_differ" and row["speedup"] is None
+    assert row["per_call_b"] is None and row["calls_a"] == 100

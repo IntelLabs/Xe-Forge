@@ -32,8 +32,10 @@ def run(args) -> int:
             names = names or {}
         cap.ops = apply_names(cap.ops, names)
         cap.workloads = canonical.workloads(cap.ops, cap.run["total_device_us"], naming.name_op)
-        # The weights check the run applies to this answer, so the namer sees it first.
-        run = {**cap.run, "precision": precision_record(cap), "model_facts": names.get("model")}
+        # The weights check the run applies to this answer, so the namer sees it first; the
+        # model facts reach the bounds below, as they do in the run.
+        cap.run = run = {**cap.run, "precision": precision_record(cap),
+                         "model_facts": names.get("model") or {}}  # fmt: skip
         problems = _precision_problems(run, named=True, ops=cap.ops)
         kv = (cap.run.get("runtime") or {}).get("kv_cache")
         if kv not in (None, "auto") and not run["precision"]["kv_args"]:

@@ -80,6 +80,28 @@ def test_a_gated_shape_counts_as_parity(tmp_path, capsys):
     assert out["speedup"] == pytest.approx(1 / (0.75 / 2 + 0.25), abs=0.01)
 
 
+def test_weights_are_normalised_to_their_sum(tmp_path, capsys, monkeypatch):
+    monkeypatch.setitem(SPEC, "weights", {"dec": 0.5})
+    _, _, out, _ = _gate(tmp_path, capsys, {"dec": (True, 10, 10, None)})
+    assert "speedup" not in out and out["verdict"] == "INDISTINGUISHABLE"  # parity, not 2x
+    results = {"dec": (True, 10, 5, None), "pre": (True, 100, 80, None)}
+    monkeypatch.setitem(SPEC, "weights", {"dec": 2, "pre": 2})
+    _, _, big, _ = _gate(tmp_path, capsys, results)
+    monkeypatch.setitem(SPEC, "weights", {"dec": 0.5, "pre": 0.5})
+    _, _, small, _ = _gate(tmp_path, capsys, results)
+    assert big["speedup"] == small["speedup"] == pytest.approx(1 / (0.5 / 2 + 0.5 / 1.25), abs=0.01)
+
+
+@pytest.mark.parametrize("weights", [{"dec": float("nan"), "pre": 1.0}, {"dec": -0.5, "pre": 1.5},
+                                     {"dec": 0.0, "pre": 0.0}, {"dec": float("inf")}])  # fmt: skip
+def test_weights_that_are_not_finite_non_negative_shares_are_refused(tmp_path, capsys,
+                                                                     monkeypatch, weights):  # fmt: skip
+    monkeypatch.setitem(SPEC, "weights", weights)
+    code, text, out, _ = _gate(tmp_path, capsys, {"dec": (True, 10, 5, None),
+                                                  "pre": (True, 100, 80, None)})  # fmt: skip
+    assert code == 1 and out["correctness"] == "fail" and "must be finite" in text
+
+
 def test_a_shape_that_fails_correctness_ends_the_trial(tmp_path, capsys):
     code, text, out, _ = _gate(tmp_path, capsys, {"dec": (True, 10, 5, None),
                                                   "pre": (False, 0, 0, None)})  # fmt: skip
@@ -144,6 +166,55 @@ def test_every_captured_shape_is_a_variant_weighted_by_its_time_or_the_agents(tm
     manifest.emit(analysis, cap, tmp_path / "capture.json", tmp_path / "out", {})
     entry = yaml.safe_load(path.read_text())["kernels"][0]
     assert not entry["enabled"] and "no checked trial shapes" in entry["reason"]
+
+
+def test_a_fusion_spec_carries_no_captured_time(tmp_path):
+    manifest, analysis, cap = _manifest(tmp_path)
+    analysis.entries[0].extra = {"ops": ["op-0", "op-1"]}
+    manifest.emit(analysis, cap, tmp_path / "capture.json", tmp_path / "out")
+    assert load_spec(tmp_path / "out" / "specs" / "mm.yaml").captured_us == {}
+
+
+def test_entries_sharing_a_name_are_keyed_by_their_spec_stem(tmp_path):
+    from types import SimpleNamespace
+
+    from xe_forge.frontend import ir, manifest
+    from xe_forge.frontend.analyze import Entry
+    from xe_forge.frontend.ir import CaptureRun, Naming, Workload
+
+    def w(wid, small, big):
+        return Workload(workload_id=wid, family="gemm", dims={"M": "var", "N": 64, "K": 64},
+                        dtypes=["float16"], layout=[], attrs={}, calls=2, device_us=20.0,
+                        share=0.5, var_axes={"M": {small: {"calls": 1, "device_us": 5.0},
+                                                   big: {"calls": 1, "device_us": 15.0}}},
+                        ops=[], naming=Naming(route="kernel", tolerance={"rtol": 0.02, "atol": 0.01}))  # fmt: skip
+
+    ws = [w("gemm/a", "4", "2048"), w("gemm/b", "8", "1024")]
+    lib = Entry(name="mm", repo="r", dsl="sycl", workloads=ws[:1], decisions=[], enabled=True,
+                target="library")  # fmt: skip
+    kern = Entry(name="mm", repo="r", dsl="sycl", workloads=ws[1:], decisions=[], enabled=True)
+    cap = CaptureRun(run={"model": {"name": "m"}}, ops=[], workloads=ws)
+    ir.dump(cap, tmp_path / "capture.json")
+    analysis = SimpleNamespace(entries=[lib, kern], run_id="r1")
+    path = manifest.emit(analysis, cap, tmp_path / "capture.json", tmp_path / "out")
+    keys = [manifest.key(e) for e in manifest.load(path)["kernels"]]
+    assert keys == ["mm", "mm__r"]
+    answer = {"mm": {"shapes": {"bench-t2048": _g("bench-t2048", "bench-t4", w=1.0)}, "why": "x"},
+              "mm__r": {"shapes": {"bench-t1024": _g("bench-t1024", "bench-t8", w=1.0)},
+                        "why": "x"}}  # fmt: skip
+    problems, _ = inputs.check(answer, manifest.load(path))
+    assert not problems, problems
+    assert inputs.weights(answer, keys) == {
+        "mm": {"bench-t2048": 1.0},
+        "mm__r": {"bench-t1024": 1.0},
+    }
+    # the library entry loses its shapes and its spec; the kernel entry keeps its own stem
+    manifest.emit(analysis, cap, tmp_path / "capture.json", tmp_path / "out",
+                  {"mm__r": {"bench-t1024": 1.0}})  # fmt: skip
+    entries = manifest.load(path)["kernels"]
+    assert not entries[0]["enabled"] and "spec" not in entries[0]
+    assert manifest.key(entries[1]) == "mm__r"
+    assert load_spec(entries[1]["spec"]).weights == {"bench-t1024": 1.0}
 
 
 def _g(*vs, w):

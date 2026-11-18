@@ -261,7 +261,8 @@ Each workload's efficiency against its bound.
 ### `inputs check INPUTS_JSON`
 
 Each chosen shape was captured and the weights sum to 1. `INPUTS_JSON` is
-`{kernel: {weights, why}}`.
+`{kernel: {shapes, why}}`, each kernel keyed by its spec's stem (its name unless two
+entries share one).
 
 | Flag | Default | What it does |
 |---|---|---|
@@ -269,7 +270,9 @@ Each chosen shape was captured and the weights sum to 1. `INPUTS_JSON` is
 
 ### `fuse check FUSIONS_JSON`
 
-The fused ops were captured, the reference fits the anchor, and the fusions are ranked.
+The fused ops were captured, each listed once, the reference fits the anchor (its builders
+name every dim; `**kwargs` does not), and the fusions are ranked. An empty `fusions` list
+with a `why` passes.
 
 | Flag | Default | What it does |
 |---|---|---|

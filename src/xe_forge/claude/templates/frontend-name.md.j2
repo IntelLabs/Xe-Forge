@@ -102,8 +102,9 @@ capture.json has every call, and a cost must hold at all of them. A PROBLEM it p
 the run once you answer: one about the weights' bytes means the GEMMs read more per weight
 than the run stores -- find in the framework's source whether an op widens them on the fly
 (name it) or the weights were loaded wide (then say so in that op's "via"; do not name one).
-A NOTE it prints is yours to weigh: a GEMM bounded at another dtype's peak may be nearer its
-own than its efficiency says -- say so in its "via" when its kernel shows it.
+A NOTE it prints is yours to weigh: a GEMM bounded at another dtype's peak may be nearer to or
+farther from its own than its efficiency says (it reads low, or high up to at roofline, when
+its own peak is lower or higher) -- say so in its "via" when its kernel shows it.
 
 Use the keys exactly as ops.json gives them, and argument names exactly as it lists them.
 Before writing, check each name greps in its repository and each argument you name is one

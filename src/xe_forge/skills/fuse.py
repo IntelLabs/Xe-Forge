@@ -2,7 +2,8 @@
 
 <fusions.json>: {"fusions": [{"name", "repo", "dsl", "ops": ["<capture op id>", ...],
 "anchor": "<one of them>", "reference": "<the chain as a _pytorch.py>",
-"integration_repos": [...], "why"}]}. Each op a captured one, two or more; the anchor's
+"integration_repos": [...], "why"}], "why"}. An empty list passes with a "why". Each op a
+captured one, listed once, two or more; the anchor's
 workload has the shapes the fusion is specified at; a capture of several rows has the
 chain's ops in every row, and the reference's ``get_inputs`` and
 ``get_init_inputs`` between them take exactly its dims and ``dtype``, as a spec passes them
@@ -20,11 +21,12 @@ from pathlib import Path
 
 
 def _params(tree: ast.Module, name: str) -> set[str] | None:
-    """A top-level function's keyword parameters; None if absent, {"**"} if it takes any."""
+    """A top-level function's named parameters; None if absent. A ``**kwargs`` is not one:
+    the spec passes only the dims a builder names."""
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name == name:
             a = node.args
-            return {"**"} if a.kwarg else {p.arg for p in a.args + a.kwonlyargs}
+            return {p.arg for p in a.args + a.kwonlyargs}
     return None
 
 
@@ -39,7 +41,7 @@ def _reference(path: Path, dims: set[str]) -> list[str]:
     got = {fn: _params(tree, fn) for fn in ("get_inputs", "get_init_inputs")}
     bad += [f"reference {path} defines no {fn}" for fn, p in got.items() if p is None]
     params = [p for p in got.values() if p is not None]
-    if params and not any("**" in p for p in params):
+    if params:
         taken, wanted = set().union(*params), dims | {"dtype"}
         if taken != wanted:
             bad.append(f"its builders take {sorted(taken)}, not {sorted(wanted)}: the anchor's "
@@ -67,8 +69,10 @@ def check(answer: dict, capture, won: dict[str, float], base: Path) -> tuple[lis
     rows = {o.framework_meta.get("row") for o in ops.values()} - {None}
     total = capture.run.get("total_device_us") or sum(o.device_us for o in ops.values()) or 1.0
     items = answer.get("fusions")
-    if not isinstance(items, list) or not items:
+    if not isinstance(items, list):
         return ["no 'fusions' list"], []
+    if not items:  # none proposed is an answer, when it says why
+        return ([] if str(answer.get("why") or "").strip() else ['say why in "why"']), []
     problems, passed, seen = [], [], set()
     for f in items:
         name = f.get("name") if isinstance(f, dict) else None
@@ -80,6 +84,7 @@ def check(answer: dict, capture, won: dict[str, float], base: Path) -> tuple[lis
         if len(chain) < 2:
             bad.append("a fusion has two ops or more")
         bad += [f"{i} is not a captured op" for i in chain if i not in ops]
+        bad += [f"{i} is listed twice" for i in sorted({i for i in chain if chain.count(i) > 1})]
         # several rows (rows.merge): the same code runs at every row's size
         listed = {ops[i].framework_meta.get("row") for i in chain if i in ops}
         if rows - listed:
