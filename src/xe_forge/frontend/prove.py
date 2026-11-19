@@ -60,6 +60,11 @@ def _build_arms(
     return arms
 
 
+def applied(row: dict) -> bool:
+    """A summary row whose kernel's win is on the stacked repositories: a win with patches."""
+    return str(row.get("outcome", "")).startswith("win") and bool(row.get("patches"))
+
+
 def winners(results: Path) -> list[Path]:
     """The winning patches in ``results/``, one kernel's best each: variants' overlap."""
     summary = results / "summary.json"
@@ -67,7 +72,7 @@ def winners(results: Path) -> list[Path]:
     best: dict[str, dict] = {}
     for r in rows:
         kernel = r.get("kernel", r.get("result"))
-        if str(r.get("outcome", "")).startswith("win") and r.get("patches"):
+        if applied(r):
             if (r.get("speedup") or 0) >= (best.get(kernel, {}).get("speedup") or 0):
                 best[kernel] = r
     return [Path(r["result"]) / p for r in best.values() for p in r["patches"]]
@@ -185,13 +190,18 @@ def _prove(run_dir: Path, prove_dir: Path, patches: list[Path], recapture, pytho
             caps[arm].append(path)
     table = compare.compare(caps["A"], caps["B"])
     out = compare.write(table, prove_dir)
+    from xe_forge.config import noise_band
+
     t = table[0]
-    noise = max(t["spread_a"] or 0.0, t["spread_b"] or 0.0)
-    verdict = (
-        f"x{t['speedup']}"
-        if t["speedup"] and abs(t["speedup"] - 1) > noise
-        else f"no difference beyond the captures' spread ({noise:.1%})"
-    )
+    noise = max(t["spread_a"] or 0.0, t["spread_b"] or 0.0, noise_band())
+    if t["speedup"] and abs(t["speedup"] - 1) > noise:
+        verdict = f"x{t['speedup']}"
+    else:
+        verdict = f"no difference beyond the captures' spread or the noise band ({noise:.1%})"
+    if t.get("unmatched"):
+        u = t["unmatched"]
+        verdict += (f" ({u['workloads']} workloads holding {u['share_a']:.1%} of A's time did "
+                    f"not match; see compare.md)")  # fmt: skip
     return (
         f"## In model\n\n{len(patches)} patch(es), {repeat} captures per arm: total "
         f"{t['us_a']} -> {t['us_b']} us device time, {verdict}; per workload: "

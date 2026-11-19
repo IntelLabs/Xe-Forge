@@ -63,6 +63,22 @@ def _identity(device: dict) -> tuple:
     return device.get("type"), device.get("name")
 
 
+def other_device(calib: dict | None, run: dict) -> str | None:
+    """A note when the calibration names another device than the capture, or None. A note,
+    not a refusal: the capture's device is the launcher's own words."""
+
+    def device(d) -> dict:
+        return d if isinstance(d, dict) else {}
+
+    mine, theirs = device((calib or {}).get("device")), device(run.get("device"))
+    # Names only: one card is reported under different device types by different stacks.
+    if mine.get("name") and theirs.get("name") and mine["name"] != theirs["name"]:
+        return (f"the calibration was measured on {mine.get('type')} {mine['name']}, the "
+                f"capture ran on {theirs.get('type')} {theirs['name']}: its bounds are that "
+                "device's")  # fmt: skip
+    return None
+
+
 def complete(calib: dict, dtypes, measure_fn=None) -> dict:
     """``calib`` with a matmul peak measured for each of ``dtypes`` it has no entry for (a
     dtype held exactly in a measured one has its peak). ``measure_fn(dtypes)`` returns a

@@ -146,21 +146,24 @@ def test_counters_keep_unknown_as_none():
 
 def _sol(counters: dict):
     return analyze._sol_parts(_workload({"k": 100.0}), {"bandwidth_gbs": 100.0},
-                              {"counters": {"k": counters}})  # fmt: skip
+                              {"counters": {"k": counters},
+                               "unitrace_kernels": {"k": {"us": 100.0}}})  # fmt: skip
 
 
 @pytest.mark.parametrize("known, unknown, measured", [(1, 99, False), (60, 40, True)])
 def test_a_rate_measured_over_too_little_of_a_kernel_does_not_bound_it(known, unknown, measured):
     from xe_forge.frontend import rows
 
-    hit = {"us": float(known), "gb_per_s": 95.0, "util_pct": 90.0}
-    miss = {"us": float(unknown), "gb_per_s": None, "util_pct": None}
+    hit = {"us": float(known), "gb_per_s": 95.0, "util_pct": 90.0, "gb_us": float(known),
+           "util_us": float(known)}  # fmt: skip
+    miss = {"us": float(unknown), "gb_per_s": None, "util_pct": None, "gb_us": 0.0,
+            "util_us": 0.0}  # fmt: skip
     records = [_record("k", known * 1000, 95_000 * known, 0, 90.0),
                _record("k", unknown * 1000, None, None, None)]  # fmt: skip
     # one capture's records; launches under a cut name; rows merged by their weights
     caps = [_row_capture({"batch": b, "input_len": 64, "output_len": 4, "weight": w},
                          [90.0, 10.0]) for b, w in ((8, known / 100), (1, unknown / 100))]  # fmt: skip
-    caps[0].run["counters"] = {"k": {**hit, "us": 100.0}}
+    caps[0].run["counters"] = {"k": {**hit, "us": 100.0, "gb_us": 100.0, "util_us": 100.0}}
     caps[1].run["counters"] = {"k": {**miss, "us": 100.0}}
     merged = rows.merge(caps, [{**c.run["runtime"], "weight": w} for c, w in
                                zip(caps, (known / 100, unknown / 100), strict=True)])  # fmt: skip
@@ -202,9 +205,12 @@ def _workload(kernels):
 def test_sol_ignores_kernels_with_unknown_counters():
     calib = {"bandwidth_gbs": 100.0}
     w = _workload({"k": 10.0})
-    unknown = {"counters": {"k": {"gb_per_s": None, "util_pct": 90.0, "us": 10.0}}}
+    ran = {"k": {"us": 10.0}}
+    unknown = {"counters": {"k": {"gb_per_s": None, "util_pct": 90.0, "us": 10.0, "gb_us": 0.0,
+                                  "util_us": 10.0}}, "unitrace_kernels": ran}  # fmt: skip
     assert analyze._sol_parts(w, calib, unknown) is None  # unmeasured, not 0% of peak
-    known = {"counters": {"k": {"gb_per_s": 95.0, "util_pct": 10.0, "us": 10.0}}}
+    known = {"counters": {"k": {"gb_per_s": 95.0, "util_pct": 10.0, "us": 10.0, "gb_us": 10.0,
+                                "util_us": 10.0}}, "unitrace_kernels": ran}  # fmt: skip
     sol, mem, comp = analyze._sol_parts(w, calib, known)
     assert sol == pytest.approx(0.95) and mem == pytest.approx(0.95)
     assert comp == pytest.approx(0.10)
@@ -214,6 +220,59 @@ def test_sol_needs_a_bandwidth_peak():
     w = _workload({"k": 10.0})
     ctx = {"counters": {"k": {"gb_per_s": 95.0, "util_pct": 10.0, "us": 10.0}}}
     assert analyze._sol_parts(w, {}, ctx) is None
+
+
+def _rated(us, gb=95.0, util=10.0, timed=True):
+    k = {"us": us, "gb_per_s": gb, "util_pct": util}
+    return {**k, "gb_us": us, "util_us": us} if timed else k
+
+
+@pytest.mark.parametrize("calib", [{"bandwidth_gbs": 100.0}, None])
+def test_counters_cover_what_the_measured_bound_can_use(calib):
+    # 100 us in the timed window, 300 us over the whole process, 51 us of it sampled
+    w = _workload({"k": 100.0})
+    ctx = {"counters": {"k": _rated(51.0)}, "unitrace_kernels": {"k": {"us": 300.0}}}
+    assert analyze._sol_parts(w, calib, ctx) is None
+    assert analyze._counted([w], calib, ctx) == 0.0
+    ctx["counters"]["k"] = _rated(300.0)
+    assert (analyze._counted([w], calib, ctx) == 100.0) is (calib is not None)
+    assert (analyze._sol_parts(w, calib, ctx) is not None) is (calib is not None)
+
+
+@pytest.mark.parametrize("ctx", [
+    {"counters": {"k": _rated(100.0, timed=False)}, "unitrace_kernels": {"k": {"us": 100.0}}},
+    {"counters": {"k": _rated(100.0)}},
+])  # fmt: skip
+def test_counters_that_do_not_say_how_much_they_saw_bound_nothing(ctx):
+    w, calib = _workload({"k": 100.0}), {"bandwidth_gbs": 100.0}
+    assert analyze.measured_sol(w, calib, ctx) is None
+    assert analyze._counted([w], calib, ctx) == 0.0
+
+
+def test_unmeasured_kernel_time_is_not_claimed_at_roofline():
+    w, calib = _workload({"a": 50.0, "b": 50.0}), {"bandwidth_gbs": 100.0}
+    ctx = {"counters": {"a": _rated(50.0)}, "unitrace_kernels": {"a": {"us": 50.0}}}
+    assert analyze._sol_parts(w, calib, ctx)[0] == pytest.approx(0.95)  # of what was measured
+    recoverable, eff = analyze.measured_sol(w, calib, ctx)
+    assert eff == pytest.approx(0.475) and eff < analyze.AT_ROOFLINE
+    assert recoverable == pytest.approx(52.5)
+
+
+def test_counters_on_part_of_a_workload_weigh_against_its_whole_bound_as_that_part():
+    from xe_forge.frontend.ir import Naming, Workload
+
+    # a stated cost bounds the whole at 97 us of its 100; counters cover 60 us of it, at 95%
+    w = Workload(workload_id="w", family="x", dims={"M": 1}, dtypes=["float16"], layout=[],
+                 attrs={"cost": {"bytes": str(97 * 100_000)}}, var_axes={}, calls=1,
+                 device_us=100.0, share=0.5, ops=[],
+                 naming=Naming("kernel", name="k", repo="r", dsl="triton"),
+                 framework_meta={"kernels": {"a": 60.0, "b": 40.0}})  # fmt: skip
+    calib = {"bandwidth_gbs": 100.0}
+    ctx = {"counters": {"a": _rated(60.0)},
+           "unitrace_kernels": {"a": {"us": 60.0}, "b": {"us": 40.0}}}  # fmt: skip
+    assert analyze.bound(w, calib, ctx)[1] == pytest.approx(0.95)
+    d = analyze._decide(w, 0.005, calib, ctx)
+    assert not d.enabled and d.reason.startswith("at roofline")
 
 
 # ── names into paths ────────────────────────────────────────────────────────
@@ -345,8 +404,10 @@ def test_rows_merge_each_kernels_counters_by_its_scaled_time():
     anchor = {"batch": 8, "input_len": 64, "output_len": 4, "weight": 0.5}
     other = {"batch": 1, "input_len": 64, "output_len": 4, "weight": 0.5}
     caps = [_row_capture(anchor, [90.0, 10.0]), _row_capture(other, [40.0, 10.0])]
-    caps[0].run["counters"] = {"gelu": {"us": 100.0, "gb_per_s": 400.0, "util_pct": 10.0}}
-    caps[1].run["counters"] = {"gelu": {"us": 50.0, "gb_per_s": 100.0, "util_pct": None}}
+    caps[0].run["counters"] = {"gelu": {"us": 100.0, "gb_per_s": 400.0, "util_pct": 10.0,
+                                        "gb_us": 100.0, "util_us": 100.0}}  # fmt: skip
+    caps[1].run["counters"] = {"gelu": {"us": 50.0, "gb_per_s": 100.0, "util_pct": None,
+                                        "gb_us": 50.0, "util_us": 0.0}}  # fmt: skip
     got = rows.merge(caps, [anchor, other]).run["counters"]["gelu"]
     # the second row counts as much time as the first (weight 0.5 of 100 us each)
     assert got == {"us": 100.0, "gb_per_s": 250.0, "util_pct": 10.0, "gb_us": 100.0,
@@ -361,7 +422,8 @@ def test_rows_merge_scales_each_kernels_unitrace_time_like_its_counters():
     caps = [_row_capture(anchor, [90.0, 10.0]), _row_capture(other, [40.0, 10.0])]
     for op in caps[1].ops:  # another workload: gelu runs in the anchor row only
         op.framework_op, op.kernel_symbols = "aten::silu", {"silu": op.device_us}
-    caps[0].run["counters"] = {"gelu": {"us": 100.0, "gb_per_s": 400.0, "util_pct": 10.0}}
+    caps[0].run["counters"] = {"gelu": {"us": 100.0, "gb_per_s": 400.0, "util_pct": 10.0,
+                                        "gb_us": 100.0, "util_us": 100.0}}  # fmt: skip
     caps[0].run["unitrace_kernels"] = {"gelu": {"us": 100.0, "calls": 4},
                                        "both": {"us": 100.0, "calls": 4}}  # fmt: skip
     caps[1].run["unitrace_kernels"] = {"silu": {"us": 50.0, "calls": 4},
@@ -1102,14 +1164,16 @@ def test_counters_bound_only_a_kernel_of_one_workload_that_they_sampled():
     calib = {"bandwidth_gbs": 100.0}
     w1, w2 = _workload({"gemm_kernel": 10.0}), _workload({"gemm_kernel": 10.0})
     w1.workload_id, w2.workload_id = "gemm/a", "gemm/b"
-    good = {"gb_per_s": 50.0, "util_pct": 10.0, "us": 20.0}
+    good = {"gb_per_s": 50.0, "util_pct": 10.0, "us": 20.0, "gb_us": 20.0, "util_us": 20.0}
+    ran = {"gemm_kernel": {"us": 20.0}}
     # One library kernel for two matmuls: its averaged counters bound neither.
-    ctx = {"counters": {"gemm_kernel": good}, "shared": {"gemm_kernel"}}
+    ctx = {"counters": {"gemm_kernel": good}, "shared": {"gemm_kernel"}, "unitrace_kernels": ran}
     assert analyze._sol_parts(w1, calib, ctx) is None
-    # Its own kernel, but sampled for 2 of its 10 us: a few launches, not the kernel.
-    ctx = {"counters": {"gemm_kernel": dict(good, us=2.0)}, "shared": set()}
+    # Its own kernel, but sampled for 2 of its 20 us: a few launches, not the kernel.
+    few = dict(good, us=2.0, gb_us=2.0, util_us=2.0)
+    ctx = {"counters": {"gemm_kernel": few}, "shared": set(), "unitrace_kernels": ran}
     assert analyze._sol_parts(w1, calib, ctx) is None
-    ctx = {"counters": {"gemm_kernel": good}, "shared": set()}
+    ctx = {"counters": {"gemm_kernel": good}, "shared": set(), "unitrace_kernels": ran}
     assert analyze._sol_parts(w1, calib, ctx)[0] == pytest.approx(0.5)
 
 
@@ -1649,8 +1713,11 @@ def test_summary_states_the_declared_precision_and_what_ran(tmp_path):
     assert "Precision" not in collect.collect(tmp_path, {"kernels": []}, []).read_text()
 
 
-@pytest.mark.parametrize("speedup, mergeable", [(1.12, True), (None, False)])
-def test_collect_offers_only_a_win_for_merge(tmp_path, speedup, mergeable):
+@pytest.mark.parametrize(
+    "speedup, outcome, mergeable",
+    [(1.12, "win", True), (1.02, "win", True), (1.01, "parity", False), (None, "parity", False)],
+)
+def test_collect_offers_only_a_win_for_merge(tmp_path, monkeypatch, speedup, outcome, mergeable):
     """A trial at parity changes nothing worth merging, even when its port passes."""
     from xe_forge.core.trial_manager import TrialManager
     from xe_forge.frontend import collect
@@ -1667,8 +1734,9 @@ def test_collect_offers_only_a_win_for_merge(tmp_path, speedup, mergeable):
                       source="measured")  # fmt: skip
     (ws / "output").mkdir()
     (ws / "output" / "PORT.txt").write_text("kind: upstream\nstack check python: PASS\n")
+    monkeypatch.delenv("BENCHMARK_MIN_EFFECT", raising=False)
     row = collect.collect_one(ws, "k", "v", tmp_path / "results")
-    assert row["outcome"] == ("win" if speedup else "parity")
+    assert row["outcome"] == outcome  # a ratio inside the noise band is no win
     assert row["mergeable"] is mergeable
 
 
@@ -1849,6 +1917,57 @@ def test_fuse_check_over_several_rows_wants_the_chain_in_every_row(tmp_path):
     every = _fusion(tmp_path, ops=["op-0", "op-1", "r02:op-0", "r02:op-1"])
     problems, passed = fuse.check(every, cap, {}, tmp_path)
     assert problems == [] and passed[0]["chain_us"] == 600.0
+
+
+def _two_rows():
+    import copy
+
+    from xe_forge.frontend.ir import CapturedOp
+
+    cap = _fusion_capture()
+    for o in cap.ops:
+        o.framework_meta["row"] = 1
+    for o in copy.deepcopy(cap.ops):
+        o.id, o.framework_meta["row"] = f"r02:{o.id}", 2
+        cap.ops.append(o)
+        next(w for w in cap.workloads if w.ops[0] == o.id[4:]).ops.append(o.id)
+    cap.ops.append(CapturedOp("op-2", "add", [], device_us=10.0, framework_meta={"row": 1}))
+    return cap
+
+
+@pytest.mark.parametrize("ops, says", [
+    (["op-0", "r02:op-0"], "two ops or more in each row"),
+    (["op-0", "op-1", "r02:op-0"], "two ops or more in each row"),
+    (["op-0", "op-1", "op-2", "r02:op-0", "r02:op-1"], "different numbers of ops"),
+])  # fmt: skip
+def test_fuse_check_wants_one_chain_of_two_or_more_ops_in_every_row(tmp_path, ops, says):
+    from xe_forge.skills import fuse
+
+    problems, passed = fuse.check(_fusion(tmp_path, ops=ops), _two_rows(), {}, tmp_path)
+    assert passed == [] and any(says in p for p in problems), problems
+
+
+def test_fuse_check_gives_an_op_to_one_fusion_only(tmp_path):
+    from xe_forge.skills import fuse
+
+    answer = _fusion(tmp_path)
+    answer["fusions"].append({**answer["fusions"][0], "name": "again"})
+    problems, passed = fuse.check(answer, _fusion_capture(), {}, tmp_path)
+    assert [f["name"] for f in passed] == ["rms_mul"]
+    assert problems == ["again: op-0, op-1 already in rms_mul, a fusion ranked before it"]
+
+
+def test_fusion_ranking_counts_only_wins_the_stack_carries(tmp_path):
+    from xe_forge.frontend import prove
+    from xe_forge.skills import fuse
+
+    (tmp_path / "summary.json").write_text(json.dumps([
+        {"kernel": "rms", "outcome": "win", "speedup": 4.0, "patches": ["output/a.patch"],
+         "result": str(tmp_path / "rms")},
+        {"kernel": "mul", "outcome": "win (measured trial, not finalized; no patch)",
+         "speedup": 2.0, "patches": []}]))  # fmt: skip
+    assert fuse.wins(tmp_path / "summary.json") == {"rms": 4.0}
+    assert prove.winners(tmp_path) == [tmp_path / "rms" / "output/a.patch"]
 
 
 @pytest.mark.parametrize("over, says", [
@@ -3080,3 +3199,67 @@ def test_compare_keys_arms_by_config_and_input_content(tmp_path, a, b, same):
     else:
         with pytest.raises(SystemExit, match="different work"):
             compare.compare(pa, pb)
+
+
+@pytest.mark.parametrize("us_b, calls_b, says", [
+    (995.0, 10, "no difference beyond the captures' spread or the noise band (2.0%)"),
+    (500.0, 10, "x2.0"),
+    (500.0, 5, "x2.0 (1 workloads holding 100.0% of A's time did not match; see compare.md)"),
+])  # fmt: skip
+def test_prove_claims_a_total_only_beyond_the_noise_on_the_same_work(
+    tmp_path, monkeypatch, us_b, calls_b, says
+):
+    from xe_forge.frontend import ir, prove
+    from xe_forge.frontend.ir import CaptureRun, Naming, Workload
+
+    monkeypatch.delenv("BENCHMARK_MIN_EFFECT", raising=False)
+    monkeypatch.setattr(prove, "_build_arms", lambda *a, **k: {"A": "a", "B": "b"})
+    arms = {"a": (1000.0, 10), "b": (us_b, calls_b)}
+
+    def recapture(run_dir, out, python):
+        us, calls = arms[python]
+        w = Workload(workload_id="g", family="gemm", dims={}, dtypes=[], layout=[], attrs={},
+                     var_axes={}, calls=calls, device_us=us, share=1.0, ops=[],
+                     naming=Naming("kernel"))  # fmt: skip
+        run = {"framework": "f", "model": {"name": "m"}, "total_device_us": us}
+        ir.dump(CaptureRun(run=run, ops=[], workloads=[w]), out / "capture.json")
+        return 0
+
+    text, status = prove._prove(tmp_path, tmp_path / "prove", [], recapture, "py", 1, 5)
+    assert status == "ok" and says in text, text
+    if calls_b != 10:
+        table = json.loads((tmp_path / "prove" / "compare.json").read_text())["rows"]
+        assert table[0]["status"] == "unmatched: 1 workloads, 100.0% of arm A's time"
+        assert table[0]["speedup"] == 2.0 and table[1]["status"] == "calls_differ"
+
+
+@pytest.mark.parametrize("metric, a, b, verdict", [
+    ("psnr", 40.0, 39.8, "pass"),  # 0.2 dB: under 10 log10(1.1) = 0.41 dB
+    ("psnr", 40.0, 39.0, "fail"),
+    ("rel", 1e-4, 1.09e-4, "pass"),
+    ("rel", 1e-4, 1.2e-4, "fail"),
+])  # fmt: skip
+def test_the_quality_margin_means_one_thing_for_rel_and_psnr(metric, a, b, verdict):
+    from xe_forge.frontend import quality
+
+    def run(value):
+        return {"sha256": str(value), "ref": {metric: value}}
+
+    got = quality._judge({"a": [run(a)], "b": [run(b)]}, metric, 0.0, 0.0, margin=0.1)
+    assert got["verdict"] == verdict, got
+    if verdict == "pass" and metric == "psnr":
+        assert "0.41 dB (10% in squared error)" in got["why"]
+
+
+def test_a_calibration_of_another_device_than_the_capture_is_noted():
+    from xe_forge.frontend.calibrate import other_device
+
+    calib = {"device": {"type": "xpu", "name": "card-a"}}
+    assert "card-a" in other_device(calib, {"device": {"type": "xpu", "name": "card-b"}})
+    assert other_device(calib, {"device": {"type": "xpu", "name": "card-a"}}) is None
+    assert other_device(calib, {}) is None and other_device(None, calib) is None
+    assert other_device(calib, {"device": "card-b"}) is None  # not a record of one
+    assert other_device({"device": "card-a"}, calib) is None
+    note = other_device(calib, {"device": {"type": "gpu", "name": "card-b"}})
+    assert "xpu card-a" in note and "gpu card-b" in note
+    assert other_device(calib, {"device": {"type": "gpu", "name": "card-a"}}) is None

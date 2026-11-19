@@ -262,6 +262,31 @@ def test_a_difference_inside_the_noise_band_is_no_regression(monkeypatch, opt_ms
     assert (got.verdict == "INDISTINGUISHABLE") is (says == "NO MEASURABLE CHANGE")
 
 
+@pytest.mark.parametrize("original_ms, slower, inside", [(0.98, True, False), (1.02, False, False),
+                                                       (0.99, False, True)])  # fmt: skip
+def test_the_noise_band_edges_are_changes(monkeypatch, original_ms, slower, inside):
+    from xe_forge.core.executor import KernelBenchExecutor
+    from xe_forge.core.sycl_executor import SyclExecutor
+    from xe_forge.models import ExecutionResult
+
+    ex = KernelBenchExecutor(device="cpu", min_effect=0.02)
+    times = iter([original_ms, 1.0])
+    monkeypatch.setattr(ex, "_check_correctness", lambda **k: True)
+    monkeypatch.setattr(ex, "execute", lambda *a, **k: ExecutionResult(
+        success=True, execution_time_ms=next(times), output_correct=True))  # fmt: skip
+    got = ex.compare_kernels("orig", "opt", kernel_name="k")
+    assert got.is_slower is slower and (got.verdict == "INDISTINGUISHABLE") is inside
+
+    monkeypatch.setenv("BENCHMARK_MIN_EFFECT", "0.02")
+    sy = SyclExecutor.__new__(SyclExecutor)
+    sy._backend = sy._build_dir = sy._cached_input_dir = None
+    times = iter([original_ms, 1.0])
+    monkeypatch.setattr(sy, "execute", lambda **k: ExecutionResult(
+        success=True, execution_time_ms=next(times)))  # fmt: skip
+    got = sy.compare_kernels("orig", "opt", input_dir="/nonexistent")
+    assert got.is_slower is slower and (got.verdict == "INDISTINGUISHABLE") is inside
+
+
 def test_the_builtin_skill_prints_no_ratio_inside_the_noise_band(tmp_path, monkeypatch, capsys):
     from xe_forge.core.executor import KernelBenchExecutor
     from xe_forge.models import ExecutionResult

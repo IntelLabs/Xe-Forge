@@ -6,7 +6,6 @@ and set_all_seeds utilities (shared with the benchmark harness).
 """
 
 import logging
-import os
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -22,6 +21,7 @@ from ai_bench.harness.runner.benchmark_compare import (
 )
 from ai_bench.utils import count_torch_flop, import_from_path
 
+from xe_forge.config import noise_band
 from xe_forge.core.dtype_utils import make_rand_tensor
 from xe_forge.core.reference_workload import ReferenceWorkload
 from xe_forge.models import ExecutionResult
@@ -49,11 +49,6 @@ class ComparisonResult:
     feedback_message: str = ""
     # Set when the arms could not be told apart: ``speedup`` is then not a result.
     verdict: str | None = None
-
-
-def noise_band() -> float:
-    """The smallest speed change reported as one (``BENCHMARK_MIN_EFFECT``)."""
-    return float(os.environ.get("BENCHMARK_MIN_EFFECT", "0.02"))
 
 
 def no_change_message(speedup: float, band: float, original_us: float, optimized_us: float) -> str:
@@ -556,8 +551,9 @@ class KernelBenchExecutor:
         # Check correctness
         original_correct = original_result.output_correct is not False
 
-        # Slower only past the noise band: inside it, neither a regression nor a win.
-        is_slower = speedup < 1.0 - self.min_effect
+        # Slower only at the noise band's edge or past it: strictly inside it, neither a
+        # regression nor a win.
+        is_slower = speedup <= 1.0 - self.min_effect
         within_noise = not is_slower and speedup < 1.0 + self.min_effect
 
         # Generate feedback message for CoVeR agent
@@ -669,7 +665,7 @@ class KernelBenchExecutor:
                     original_time_us=original_time,
                     optimized_time_us=optimized_time,
                     speedup=speedup,
-                    is_slower=verdict is None and speedup < 1.0 - self.min_effect,
+                    is_slower=verdict is None and speedup <= 1.0 - self.min_effect,
                     verdict=verdict,
                     feedback_message=(
                         "Reference outputs and updated buffers verified for two calls "

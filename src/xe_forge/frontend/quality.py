@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 
 # (stage, role, file patterns, metric, warn, hard) -- warn/hard are the absolute convention of
@@ -138,11 +139,19 @@ def _judge(stage: dict, metric: str, warn: float, hard: float, margin: float = M
         wa, wb = (max(ea), max(eb)) if metric == "rel" else (min(ea), min(eb))
         best_b = min(eb) if metric == "rel" else max(eb)
         spread = abs(max(ea) - min(ea))
-        allow = wa * (1 + margin) if metric == "rel" else wa - margin
+        # One margin for both: a squared error (1 + margin) times A's is a PSNR
+        # 10 log10(1 + margin) dB below A's.
+        db = 10 * math.log10(1 + margin)
+        allow = wa * (1 + margin) if metric == "rel" else wa - db
         stage["reference"] = {"a": ea, "b": eb, "a_spread": spread}
         if not _worse(metric, allow, wb):
+            within = (
+                f"{margin:.0%}"
+                if metric == "rel"
+                else f"{db:.2f} dB ({margin:.0%} in squared error)"
+            )
             return {**stage, "verdict": "pass",
-                    "why": f"B's worst run ({wb:.4g}) is within {margin:.0%} of A's worst "
+                    "why": f"B's worst run ({wb:.4g}) is within {within} of A's worst "
                            f"({wa:.4g}) against the float32 reference"}  # fmt: skip
         if _worse(metric, wa, best_b):
             return {**stage, "verdict": "fail",

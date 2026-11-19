@@ -243,7 +243,7 @@ tokens scored against transformers. `DIR` holds `patch.json` and `generate.sh`.
 | `--prompt-file` | none | The run's prompt text |
 | `--precision` | `bfloat16` | Float dtype scored first: the run's declared compute |
 | `--no-reference` | off | Skip only the reference comparison (for image or video output) |
-| `--margin` | 0.1 | Non-text output: how much worse than the native run's worst the patched run's worst may be against a float32 reference (relative; dB for images) |
+| `--margin` | 0.1 | Non-text output: how much worse than the native run's worst the patched run's worst may be against a float32 reference, as a relative squared error (for PSNR, 10·log10(1 + margin) dB) |
 
 ### `bound CAPTURE_JSON`
 

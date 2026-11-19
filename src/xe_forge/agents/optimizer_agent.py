@@ -392,7 +392,7 @@ class OptimizerAgent(Optimizer):
                             true_spd = comparison.speedup
                         from xe_forge.core.executor import noise_band
 
-                        if true_spd < 1.0 - noise_band():
+                        if true_spd <= 1.0 - noise_band():
                             sd = 1.0 / true_spd if true_spd > 0 else float("inf")
                             return (
                                 f"PERFORMANCE REGRESSION: {sd:.2f}x SLOWER. Try different approach."

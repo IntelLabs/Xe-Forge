@@ -484,15 +484,21 @@ def parse_spec(data: dict) -> KernelSpec:
 
 def _numbers(data: dict, key: str) -> dict[str, float]:
     """``data[key]`` as {name: number}, {} when absent or null; ValueError unless it is a
-    mapping of numbers."""
+    mapping of numbers; ``captured_us`` times must also be finite and above 0 (weights are
+    checked where they are scored)."""
+    import math
+
     got = data.get(key)
     if got is None:
         return {}
     if not isinstance(got, dict):
         raise ValueError(f"spec {key} must map variant names to numbers, not {got!r}")
-    bad = {k: v for k, v in got.items() if isinstance(v, bool) or not isinstance(v, int | float)}
+    bad = {k: v for k, v in got.items()
+           if isinstance(v, bool) or not isinstance(v, int | float)
+           or (key == "captured_us" and not (math.isfinite(v) and v > 0))}  # fmt: skip
     if bad:
-        raise ValueError(f"spec {key} must be numbers: {bad}")
+        what = "finite and above 0" if key == "captured_us" else "numbers"
+        raise ValueError(f"spec {key} must be {what}: {bad}")
     return {str(k): float(v) for k, v in got.items()}
 
 

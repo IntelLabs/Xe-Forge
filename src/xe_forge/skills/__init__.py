@@ -271,8 +271,8 @@ def main():
     pc.add_argument("dir", help="holds patch.json and generate.sh")
     pc.add_argument("--margin", type=float, default=0.1,
                     help="non-text output: how much worse than the native run's worst the "
-                    "patched run's worst may be against a float32 reference (relative; dB "
-                    "for images)")  # fmt: skip
+                    "patched run's worst may be against a float32 reference, as a relative "
+                    "squared error (for PSNR, 10*log10(1 + margin) dB)")  # fmt: skip
     pc.add_argument("--repos", required=True, help="the clones' directory (--kernel-repos)")
     pc.add_argument(
         "--framework-python", required=True, help="the unpatched framework's interpreter"

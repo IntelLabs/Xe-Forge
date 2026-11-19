@@ -68,8 +68,10 @@ def collect_one(
     if not mgr.keepable(best):
         row["outcome"] = "no win (best measured trial is a regression)"
         return row
+    from xe_forge.config import noise_band
+
     speedup = best.get("speedup")
-    row["outcome"] = "win" if speedup and speedup > 1.0 else "parity"
+    row["outcome"] = "win" if speedup and speedup >= 1.0 + noise_band() else "parity"
     dest = results / f"{key or name}__{variant}"
     if dest.exists():
         shutil.rmtree(dest)

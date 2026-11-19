@@ -517,7 +517,8 @@ def _weighted(args, single) -> int:
             timer = re.search(r"^TIMER: .*$", text, re.M)
             if timer and not rows:
                 print(timer.group(0))
-            gated = "speedup" not in out or bool(out.get("verdict"))
+            # Gated: no ratio came back. A host's verdict beside a ratio does not erase it.
+            gated = "speedup" not in out
             rows.append((name, w, 1.0 if gated else out["speedup"], gated, out))
             shown = f"none {out.get('verdict')}" if gated else f"{out['speedup']:.2f}x"
             # Indented: these are not the lines the trial loop reads.
@@ -525,15 +526,24 @@ def _weighted(args, single) -> int:
                   f"kernel_us={out.get('triton_us')}, speedup={shown}")  # fmt: skip
     finally:
         args.variant = None  # what the tree is pinned to: the weighted set
+    from xe_forge.config import noise_band
+
+    noise = noise_band()
     total = 1.0 / sum(w / s for _, w, s, _, _ in rows)
-    times = [(w, r.get("baseline_us")) for _, w, _, _, r in rows]
-    base = sum(w * b for w, b in times) if all(b is not None for _, b in times) else None
-    slower = min((r for r in rows if not r[3] and r[2] < 1.0), key=lambda r: r[2], default=None)
-    noise = float(os.environ.get("BENCHMARK_MIN_EFFECT", "0.02"))
+
+    def weighted(field):
+        got = [(w, r.get(field)) for _, w, _, _, r in rows]
+        return sum(w * v for w, v in got) if all(v is not None for _, v in got) else None
+
+    base, kernel = weighted("baseline_us"), weighted("triton_us")
+    # The executors' band: at its edge or past it is a change, strictly inside it none.
+    slower = min((r for r in rows if not r[3] and r[2] <= 1.0 - noise), key=lambda r: r[2],
+                 default=None)  # fmt: skip
     print("Correctness: PASSED")
     print(f"Weighted: speedup={total:.3f}x over {len(rows)} shapes")
     ratio = slower[2] if slower else (None if abs(total - 1) < noise else total)
-    times_ = f"baseline_us={base:.2f}, kernel_us={base / (ratio or 1.0):.2f}, " if base else ""
+    times_ = "".join(f"{k}={v:.2f}, " for k, v in (("baseline_us", base), ("kernel_us", kernel))
+                     if v is not None)  # fmt: skip
     print(f"Performance: {times_}speedup={f'{ratio:.2f}x' if ratio else 'none'}")
     if slower:
         print(f"VERDICT: SLOWER_ON\nSlower on: {slower[0]} ({slower[2]:.2f}x)")

@@ -107,6 +107,13 @@ def compare(a_paths: list[Path], b_paths: list[Path]) -> list[dict]:
                 sa and sa[2], sb and sb[2], a_meta.get(wid) or b_meta.get(wid))
         )  # fmt: skip
     body.sort(key=lambda r: (-(r["us_a"] or 0.0), -(r["us_b"] or 0.0), r["workload_id"]))
+    # The total compares like with like only as far as every workload ran the same in both
+    # arms: say how much did not (the workloads themselves are in their own rows).
+    unmatched = [r for r in body if r["status"] != "matched"]
+    if unmatched:
+        share = sum(r["us_a"] or 0.0 for r in unmatched) / total_a if total_a else 0.0
+        rows[0]["status"] = f"unmatched: {len(unmatched)} workloads, {share:.1%} of arm A's time"
+        rows[0]["unmatched"] = {"workloads": len(unmatched), "share_a": round(share, 6)}
     return rows + body
 
 

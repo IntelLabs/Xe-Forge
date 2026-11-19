@@ -874,6 +874,23 @@ def test_every_win_ports_and_an_integration_repo_widens_what_may_change(tmp_path
     )
 
 
+@pytest.mark.parametrize("opt_ms, verdict", [(0.995, "INDISTINGUISHABLE"), (0.5, None),
+                                             (1.5, None)])  # fmt: skip
+def test_a_sycl_result_inside_the_noise_band_is_indistinguishable(
+    tmp_path, monkeypatch, opt_ms, verdict
+):
+    from xe_forge.core.sycl_executor import SyclExecutor
+    from xe_forge.models import ExecutionResult
+
+    monkeypatch.delenv("BENCHMARK_MIN_EFFECT", raising=False)
+    ex = SyclExecutor.__new__(SyclExecutor)
+    ex._backend = ex._build_dir = ex._cached_input_dir = None
+    times = iter([1.0, opt_ms])
+    monkeypatch.setattr(ex, "execute", lambda **k: ExecutionResult(
+        success=True, execution_time_ms=next(times)))  # fmt: skip
+    assert ex.compare_kernels("orig", "opt", input_dir=str(tmp_path)).verdict == verdict
+
+
 def test_a_sycl_result_inside_the_noise_band_still_says_correctness_went_unchecked(
     tmp_path, monkeypatch
 ):

@@ -777,6 +777,8 @@ def calibrate_missing(path: Path, cap, run_dir: Path) -> Path:
                 return None  # did not finish: nothing of it is kept
 
     calib = json.loads(path.read_text())
+    if note := calibrate.other_device(calib, cap.run):
+        print(f"run: NOTE {note}", file=sys.stderr)
     merged = calibrate.complete(calib, peak_dtypes(cap), measure)
     if merged is calib:
         return path
@@ -827,6 +829,10 @@ def analyze(capture_path: Path, out_dir: Path, a: argparse.Namespace, weights=No
 
     cap = ir.load(capture_path)
     calib = json.loads(a.calibration.read_text()) if a.calibration else None
+    from xe_forge.frontend.calibrate import other_device
+
+    if note := other_device(calib, cap.run):
+        print(f"analyze: NOTE {note}", file=sys.stderr)
     result = an.analyze(cap, top=a.top, min_gain=a.min_gain, calibration=calib,
                         at_roofline=getattr(a, "at_roofline", an.AT_ROOFLINE))  # fmt: skip
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import re
 
 import pytest
@@ -64,6 +66,46 @@ def test_the_score_is_the_time_weighted_total(tmp_path, capsys):
     assert len(re.findall(r"^Performance:", text, re.M)) == 1  # per-shape lines are indented
 
 
+def test_a_shape_slower_only_inside_the_noise_band_is_no_regression(tmp_path, capsys,
+                                                                    monkeypatch):  # fmt: skip
+    monkeypatch.delenv("BENCHMARK_MIN_EFFECT", raising=False)
+    _, _, out, _ = _gate(tmp_path, capsys, {"dec": (True, 10, 5, None),
+                                            "pre": (True, 100, 101, None)})  # fmt: skip
+    assert out.get("verdict") != "SLOWER_ON" and out["speedup"] > 1.0
+
+
+def test_the_weighted_times_print_what_every_shape_measured(tmp_path, capsys):
+    results = {"dec": (True, 10, 5, None), "pre": (True, 100, 80, None)}
+    single = _shape(results)
+    args = _args(tmp_path)
+
+    def no_kernel_time():
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = single(args)
+        text = buf.getvalue()
+        if args.variant == "pre":  # a host that timed only the baseline here
+            text = re.sub(r"kernel_us=\S+, ", "", text)
+        print(text, end="")
+        return code
+
+    benchmark._weighted(args, no_kernel_time)
+    out = benchmark.parse_outcome(capsys.readouterr().out)
+    assert out["baseline_us"] == pytest.approx(0.75 * 10 + 0.25 * 100) and "triton_us" not in out
+
+
+@pytest.mark.parametrize("dec, pre, verdict, speedup", [
+    ((10, 5), (98, 100), "SLOWER_ON", 0.98),  # at the band's edge: slower
+    ((102, 100), (102, 100), None, 1.02),     # at the band's edge: a change
+    ((101, 100), (101, 100), "INDISTINGUISHABLE", None),
+])  # fmt: skip
+def test_the_weighted_score_counts_the_band_edges_as_changes(tmp_path, capsys, monkeypatch, dec,
+                                                             pre, verdict, speedup):  # fmt: skip
+    monkeypatch.setenv("BENCHMARK_MIN_EFFECT", "0.02")
+    _, _, out, _ = _gate(tmp_path, capsys, {"dec": (True, *dec, None), "pre": (True, *pre, None)})
+    assert out.get("verdict") == verdict and out.get("speedup") == speedup
+
+
 def test_a_shape_measured_slower_is_a_regression_whatever_the_others_gain(tmp_path, capsys):
     _, text, out, _ = _gate(tmp_path, capsys, {"dec": (True, 10, 2, None),
                                                "pre": (True, 100, 125, None)})  # fmt: skip
@@ -112,6 +154,14 @@ def test_malformed_weights_fail_the_trial_without_a_traceback(tmp_path, capsys, 
     code, text, out, _ = _gate(tmp_path, capsys, {"dec": (True, 10, 5, None),
                                                   "pre": (True, 100, 80, None)})  # fmt: skip
     assert code == 1 and out["correctness"] == "fail" and says in text
+
+
+@pytest.mark.parametrize("us", [float("nan"), float("inf"), 0, -1.0])
+def test_a_captured_time_that_is_not_a_positive_finite_number_is_refused(tmp_path, us):
+    spec = tmp_path / "s.yaml"
+    spec.write_text(yaml.safe_dump({"captured_us": {"dec": us}, "dec": [{"dims": {"N": 1}}]}))
+    with pytest.raises(ValueError, match="must be finite and above 0"):
+        load_spec(str(spec))
 
 
 @pytest.mark.parametrize("weights", [[], False, 0, ""])
@@ -193,6 +243,14 @@ def test_every_captured_shape_is_a_variant_weighted_by_its_time_or_the_agents(tm
     manifest.emit(analysis, cap, tmp_path / "capture.json", tmp_path / "out", {})
     entry = yaml.safe_load(path.read_text())["kernels"][0]
     assert not entry["enabled"] and "no checked trial shapes" in entry["reason"]
+
+
+def test_a_shape_that_took_no_time_has_no_captured_time(tmp_path):
+    manifest, analysis, cap = _manifest(tmp_path)
+    cap.workloads[1].var_axes["M"]["2048"]["device_us"] = 0.0
+    chosen = {"mm": {"bench-t4-w1": 0.5, "bench-t2048-w1": 0.5}}
+    manifest.emit(analysis, cap, tmp_path / "capture.json", tmp_path / "out", chosen)
+    assert load_spec(tmp_path / "out" / "specs" / "mm.yaml").captured_us == {"bench-t4-w1": 1.579}
 
 
 def test_a_fusion_spec_carries_no_captured_time(tmp_path):
@@ -310,3 +368,30 @@ def test_a_weighted_spec_benchmarks_every_shape_without_a_variant(tmp_path, weig
     text = (ws / "CLAUDE.md").read_text()
     assert ("--variant dec" not in text.split("| **Benchmark**")[1].split("\n")[0]) is weighted
     assert ("`dec` (weight 0.75), `pre` (weight 0.25)" in text) is weighted
+
+
+HOST = """\
+import sys
+variant, factor = sys.argv[1], float(sys.argv[2])
+base = {"dec": 10.0, "pre": 100.0}[variant]
+print(f"CORRECTNESS: pass\\nBASELINE_US: {base}\\nTRIAL_US: {base * factor}")
+print(f"SPEEDUP: {1 / factor}\\nVERDICT: MEASURED\\nDONE")
+"""
+
+
+@pytest.mark.parametrize("factor, verdict, speedup", [(2.0, "SLOWER_ON", 0.5), (0.5, None, 2.0)])
+def test_a_host_verdict_beside_its_ratio_still_counts(tmp_path, capsys, factor, verdict, speedup):
+    import sys
+
+    host = tmp_path / "host.py"
+    host.write_text(HOST)
+    (tmp_path / "opt.py").write_text("x = 1\n")
+    args = _args(tmp_path, optimized=str(tmp_path / "opt.py"), baseline=None, device="cpu",
+                 dsl="triton")  # fmt: skip
+    template = f"{sys.executable} {host} {{variant}} {factor}"
+    code = benchmark._weighted(args, lambda: benchmark._run_external(args, template))
+    out = benchmark.parse_outcome(capsys.readouterr().out)
+    assert code == 0 and out.get("verdict") == verdict
+    assert out["speedup"] == pytest.approx(speedup)
+    # what the host measured, weighted: 0.75 x dec + 0.25 x pre
+    assert out["triton_us"] == pytest.approx((0.75 * 10 + 0.25 * 100) * factor)

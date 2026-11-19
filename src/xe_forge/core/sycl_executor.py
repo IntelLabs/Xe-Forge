@@ -106,6 +106,7 @@ class SyclComparisonResult:
     optimized_correct: bool = True
     is_slower: bool = False
     feedback_message: str = ""
+    verdict: str | None = None  # the gate that decided, when no ratio is a result
 
     @property
     def original_time_us(self) -> float:
@@ -668,7 +669,7 @@ class SyclExecutor:
         speedup = orig_ms / opt_ms
 
         band = noise_band()
-        is_slower = speedup < 1.0 - band
+        is_slower = speedup <= 1.0 - band
         orig_tflops = orig_result.tflops
         opt_tflops = opt_result.tflops
 
@@ -753,6 +754,7 @@ class SyclExecutor:
                 f"{correctness_msg.strip()} Try more aggressive optimizations."
             )
 
+        inside_band = not is_slower and speedup < 1.0 + band
         return SyclComparisonResult(
             original_time_ms=orig_ms,
             optimized_time_ms=opt_ms,
@@ -763,6 +765,7 @@ class SyclExecutor:
             optimized_correct=opt_correct,
             is_slower=is_slower,
             feedback_message=msg,
+            verdict="INDISTINGUISHABLE" if opt_correct and inside_band else None,
         )
 
     def __del__(self):

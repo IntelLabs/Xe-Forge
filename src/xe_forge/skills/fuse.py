@@ -3,9 +3,9 @@
 <fusions.json>: {"fusions": [{"name", "repo", "dsl", "ops": ["<capture op id>", ...],
 "anchor": "<one of them>", "reference": "<the chain as a _pytorch.py>",
 "integration_repos": [...], "why"}], "why"}. An empty list passes with a "why". Each op a
-captured one, listed once, two or more; the anchor's
-workload has the shapes the fusion is specified at; a capture of several rows has the
-chain's ops in every row, and the reference's ``get_inputs`` and
+captured one, listed once, two or more in each row and as many in every row, and in no
+fusion ranked before it; the anchor's workload has the shapes the fusion is specified at; a capture
+of several rows has the chain's ops in every row, and the reference's ``get_inputs`` and
 ``get_init_inputs`` between them take exactly its dims and ``dtype``, as a spec passes them
 (``core/reference_workload``); the repositories exist (relative paths are read
 from fusions.json's directory). Ranks the fusions by the time their ops took, each divided
@@ -17,6 +17,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+from collections import Counter
 from pathlib import Path
 
 
@@ -50,13 +51,12 @@ def _reference(path: Path, dims: set[str]) -> list[str]:
 
 
 def wins(summary: Path | None) -> dict[str, float]:
-    """{kernel: speedup} of the kernels optimized before, from results/summary.json."""
+    """{kernel: speedup} of the kernels optimized before whose patches the stacked
+    repositories carry, from results/summary.json."""
+    from xe_forge.frontend.prove import applied
+
     rows = json.loads(summary.read_text()) if summary and summary.is_file() else []
-    return {
-        r["kernel"]: r["speedup"]
-        for r in rows
-        if str(r.get("outcome", "")).startswith("win") and r.get("speedup")
-    }
+    return {r["kernel"]: r["speedup"] for r in rows if applied(r) and r.get("speedup")}
 
 
 def check(answer: dict, capture, won: dict[str, float], base: Path) -> tuple[list[str], list[dict]]:
@@ -81,8 +81,12 @@ def check(answer: dict, capture, won: dict[str, float], base: Path) -> tuple[lis
             continue
         seen.add(name)
         chain, bad = f.get("ops") or [], []
-        if len(chain) < 2:
-            bad.append("a fusion has two ops or more")
+        per_row = Counter(ops[i].framework_meta.get("row") for i in chain if i in ops)
+        if len(chain) < 2 or (per_row and min(per_row.values()) < 2):
+            bad.append("a fusion has two ops or more in each row")
+        elif len(set(per_row.values())) > 1:
+            bad.append(f"its rows list different numbers of ops ({dict(sorted(per_row.items()))}): "
+                       "the same chain runs at every row's size")  # fmt: skip
         bad += [f"{i} is not a captured op" for i in chain if i not in ops]
         bad += [f"{i} is listed twice" for i in sorted({i for i in chain if chain.count(i) > 1})]
         # several rows (rows.merge): the same code runs at every row's size
@@ -111,7 +115,18 @@ def check(answer: dict, capture, won: dict[str, float], base: Path) -> tuple[lis
         )
         passed.append({**f, "chain_us": round(us, 1), "share": round(us / total, 6)})
     passed.sort(key=lambda f: -f["chain_us"])
-    return problems, passed
+    # An op one kernel replaces is not also replaced by another: the first ranked keeps it.
+    claimed: dict[str, str] = {}
+    kept = []
+    for f in passed:
+        taken = [i for i in f["ops"] if i in claimed]
+        if taken:
+            problems.append(f"{f['name']}: {', '.join(taken)} already in "
+                            f"{claimed[taken[0]]}, a fusion ranked before it")  # fmt: skip
+            continue
+        claimed.update(dict.fromkeys(f["ops"], f["name"]))
+        kept.append(f)
+    return problems, kept
 
 
 def run(args) -> int:

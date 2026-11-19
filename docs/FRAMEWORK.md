@@ -161,7 +161,7 @@ An **image, video or action** patch is compared with the same `generate.sh` run 
 
 A is the native run, B the patched one. Byte-identical outputs pass. With a float32 reference
 in the patch directory's `reference/<stage>.npy` (or `.png`), B passes when its worst run is
-within `--margin` (10%; for PSNR, 0.1 dB) of A's worst against it, fails when every B run is further from it
+within `--margin` (10% in squared error; for PSNR the same, 10·log10(1 + margin) = 0.41 dB) of A's worst against it, fails when every B run is further from it
 than A's worst, and is otherwise inconclusive. Without a reference, A against B passes within A's
 own run-to-run spread or the warn limit, warns past it, and fails past the hard limit; these
 limits are a convention, and the verdict says so. NaN or a different shape fails. The worst gate

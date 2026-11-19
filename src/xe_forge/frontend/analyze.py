@@ -186,13 +186,15 @@ def cost_bound(
 
 
 def measured_sol(
-    w: Workload, calib: dict | None, ctx: dict | None = None
+    w: Workload, calib: dict | None, ctx: dict | None = None, whole: bool = True
 ) -> tuple[float, float] | None:
-    """(recoverable us, efficiency) from the run's hardware counters."""
-    parts = _sol_parts(w, calib, ctx)
-    if parts is None:
+    """(recoverable us, efficiency) from the run's hardware counters. ``whole``: over all of
+    the workload's kernel time, a kernel without usable counters at 0, so what was not
+    measured is not claimed to be at its bound; else over the measured kernels' time."""
+    sums = _sol_sums(w, calib, ctx)
+    if sums is None:
         return None
-    eff = parts[0]
+    eff = sums[0] / (sums[4] if whole else sums[3])
     return w.device_us * (1 - eff), eff
 
 
@@ -203,15 +205,16 @@ def _measured(measured: dict, name: str) -> dict | None:
     return combine([v for k, v in measured.items() if k.startswith(name)])
 
 
-# Each rate and the time it was measured over (a capture without the time: all of ``us``).
+# Each rate and the time it was measured over.
 RATES = {"gb_per_s": "gb_us", "util_pct": "util_us"}
 
 
 def _rate_us(k: dict, rate: str) -> float:
-    """The time ``k``'s ``rate`` was measured over; 0 when it was not measured."""
+    """The time ``k``'s ``rate`` was measured over; 0 when it was not measured, or when the
+    capture does not say over how long (then it may be a few launches' rate)."""
     if k.get(rate) is None:
         return 0.0
-    return k.get(RATES[rate], k.get("us")) or 0.0
+    return k.get(RATES[rate]) or 0.0
 
 
 def combine(hits: list[dict]) -> dict | None:
@@ -232,34 +235,52 @@ def _covered(k: dict) -> float:
     return min(_rate_us(k, f) for f in RATES)
 
 
-def _sol_parts(w: Workload, calib: dict | None, ctx: dict | None) -> tuple | None:
-    """(SOL, memory SOL, compute SOL); None when most of the time is unmeasured."""
+def _usable(name: str, us: float, calib: dict | None, ctx: dict | None) -> dict | None:
+    """The counters of kernel ``name`` (``us`` of it in the workload) that can bound it, or
+    None. What the measured bound uses and what "counters cover" reports."""
     measured = (ctx or {}).get("counters") or {}
     ran = (ctx or {}).get("unitrace_kernels") or {}
-    shared = (ctx or {}).get("shared") or set()
+    # Counters are per kernel name, over every launch the process made: a name several
+    # workloads run (one library GEMM for every matmul, prefill and decode of one norm)
+    # averages their shapes, so it bounds none of them.
+    if not us or not calib_peaks(calib)[0] or name in ((ctx or {}).get("shared") or set()):
+        return None
+    k = _measured(measured, name)
+    # Metric sampling misses short launches: counters that sampled under half of the
+    # kernel's measured time describe a few launches, not the kernel. Judge that against
+    # unitrace's own total for the kernel in the pass the counters came from; without it
+    # nothing says how much of the kernel they saw. Each rate on its own, and an unknown
+    # side is not 0% of peak: SOL is the max of both sides.
+    ceiling = (_measured(ran, name) or {}).get("us")
+    return k if k and ceiling and _covered(k) >= 0.5 * ceiling else None
+
+
+def _sol_sums(w: Workload, calib: dict | None, ctx: dict | None) -> tuple | None:
+    """(SOL, memory, compute) summed over the measured kernels' time, that time, and all of
+    the workload's kernel time; None when most of the time is unmeasured."""
     bw = calib_peaks(calib)[0]
     kernels = w.framework_meta.get("kernels") or {}
     weight = sol = mem = comp = 0.0
     for name, us in kernels.items():
-        # Counters are per kernel name, over every launch the process made: a name several
-        # workloads run (one library GEMM for every matmul, prefill and decode of one norm)
-        # averages their shapes, so it bounds none of them.
-        k = None if name in shared else _measured(measured, name)
-        # Metric sampling misses short launches: counters that sampled under half of the
-        # kernel's measured time describe a few launches, not the kernel. Judge that against
-        # unitrace's own total for the kernel in the pass the counters came from -- `us` is
-        # the trace's, from the timed pass, which --trace-steps makes the longer of the two.
-        ceiling = ((_measured(ran, name) or {}).get("us") if ran else None) or us
-        # Each rate on its own: a rate measured over a few of the launches says no more than
-        # counters that sampled a few. An unknown side (or no bandwidth peak) is not 0% of
-        # peak, so such a kernel counts as unmeasured: SOL is the max of both sides.
-        if not k or not us or _covered(k) < 0.5 * ceiling or not bw:
+        k = _usable(name, us, calib, ctx)
+        if k is None:
             continue
         memory, compute = k["gb_per_s"] / bw, k["util_pct"] / 100
         sol += min(1.0, max(memory, compute)) * us
         mem, comp, weight = mem + memory * us, comp + compute * us, weight + us
-    if not weight or weight < 0.5 * sum(kernels.values()):
+    total = sum(kernels.values())
+    if not weight or weight < 0.5 * total:
         return None
+    return sol, mem, comp, weight, total
+
+
+def _sol_parts(w: Workload, calib: dict | None, ctx: dict | None) -> tuple | None:
+    """(SOL, memory SOL, compute SOL) of the measured kernels; None when most of the time is
+    unmeasured."""
+    sums = _sol_sums(w, calib, ctx)
+    if sums is None:
+        return None
+    sol, mem, comp, weight, _ = sums
     return sol / weight, mem / weight, comp / weight
 
 
@@ -287,7 +308,10 @@ def bound(w: Workload, calib: dict | None, ctx: dict | None = None) -> tuple[flo
     else:
         bounder = BOUNDERS.get(w.family)
         theory = bounder(w, calib, ctx) if bounder else None
-    known = [b for b in (theory, measured_sol(w, calib, ctx)) if b is not None]
+    # Beside a bound on the whole workload, the counters say how near its measured part is;
+    # alone, they bound the whole, the unmeasured part counted as far from its bound.
+    known = [b for b in (theory, measured_sol(w, calib, ctx, whole=theory is None))
+             if b is not None]  # fmt: skip
     return min(known, key=lambda b: b[1]) if known else None
 
 
@@ -335,14 +359,9 @@ def _decide(
     return d
 
 
-def _counted(workloads: list[Workload], measured: dict, shared: set = frozenset()) -> float:
-    """% of device time whose kernels have counters that bound them (a name of one workload)."""
-
-    def bounds(name, us):
-        k = None if name in shared else _measured(measured, name)
-        return bool(k) and _covered(k) >= 0.5 * us
-
-    times = [(us, bounds(k, us))
+def _counted(workloads: list[Workload], calib: dict | None, ctx: dict) -> float:
+    """% of device time whose kernels have counters that bound them."""
+    times = [(us, _usable(k, us, calib, ctx) is not None)
              for w in workloads for k, us in (w.framework_meta.get("kernels") or {}).items()]  # fmt: skip
     total = sum(us for us, _ in times)
     return round(100 * sum(us for us, hit in times if hit) / total, 1) if total else 0.0
@@ -446,7 +465,7 @@ def analyze(
             "top": top,
             "min_gain": min_gain,
             "bound": "calibrated" if calibration else "unknown (no calibration)",
-            "counters_pct": _counted(capture.workloads, ctx["counters"], ctx["shared"]),
+            "counters_pct": _counted(capture.workloads, calibration, ctx),
             "unpeaked": sorted(ctx.get("unpeaked", ())),
         },
     )

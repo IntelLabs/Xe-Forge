@@ -76,7 +76,7 @@ def build_spec(
                   # The kernel's own time per call, in the model: a baseline far slower is
                   # not that kernel, and a speedup over it is not one over the kernel.
                   "captured_us": {r[0]: round(r[4] / r[7], 3) for r in rows
-                                  if r[0] in chosen and r[7]}}  # fmt: skip
+                                  if r[0] in chosen and r[7] and r[4] > 0}}  # fmt: skip
     record: dict[str, str] = {}
     smallest = min(rows, key=lambda r: r[3] if r[3] is not None else 0)
     for name, w, _axis, value, _, with_, ref, _calls in [("ci", *smallest[1:]), *rows]:

@@ -13,6 +13,11 @@ from xe_forge.external import DEFAULT_TIMEOUT
 from xe_forge.models import OptimizationStage
 
 
+def noise_band() -> float:
+    """The smallest speed change reported as one (``BENCHMARK_MIN_EFFECT``)."""
+    return float(os.environ.get("BENCHMARK_MIN_EFFECT", "0.02"))
+
+
 @dataclass
 class LLMConfig:
     """LLM configuration"""
