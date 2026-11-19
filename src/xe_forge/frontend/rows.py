@@ -55,7 +55,7 @@ def merge(caps: list[ir.CaptureRun], rows: list[dict]) -> ir.CaptureRun:
     scaled by w_r x T / T_r (T the anchor's total device time), which keeps each op's time
     per call; op ids prefixed ``rNN:``; each kernel's counters those of every row, by time,
     and its unitrace time the sum of every row's, scaled the same."""
-    from xe_forge.frontend.analyze import combine
+    from xe_forge.frontend.analyze import RATES, combine
 
     total = caps[0].run["total_device_us"]
     ops: list[ir.CapturedOp] = []
@@ -66,7 +66,9 @@ def merge(caps: list[ir.CaptureRun], rows: list[dict]) -> ir.CaptureRun:
         scale = row["weight"] * total / (cap.run["total_device_us"] or 1.0)
         attributed += scale * cap.run.get("attributed_device_us", 0.0)
         for name, c in (cap.run.get("counters") or {}).items():
-            counters.setdefault(name, []).append({**c, "us": c["us"] * scale})
+            counters.setdefault(name, []).append(
+                {**c, **{t: c[t] * scale for t in ("us", *RATES.values()) if c.get(t) is not None}}
+            )
         for name, k in (cap.run.get("unitrace_kernels") or {}).items():
             seen = traced.setdefault(name, {**k, "us": 0.0})
             seen["us"] += k["us"] * scale

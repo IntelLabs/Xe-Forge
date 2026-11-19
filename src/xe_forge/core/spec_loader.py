@@ -483,8 +483,11 @@ def parse_spec(data: dict) -> KernelSpec:
 
 
 def _numbers(data: dict, key: str) -> dict[str, float]:
-    """``data[key]`` as {name: number}; ValueError unless it is a mapping of numbers."""
-    got = data.get(key) or {}
+    """``data[key]`` as {name: number}, {} when absent or null; ValueError unless it is a
+    mapping of numbers."""
+    got = data.get(key)
+    if got is None:
+        return {}
     if not isinstance(got, dict):
         raise ValueError(f"spec {key} must map variant names to numbers, not {got!r}")
     bad = {k: v for k, v in got.items() if isinstance(v, bool) or not isinstance(v, int | float)}

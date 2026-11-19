@@ -8,6 +8,7 @@ measured against the optimized parts and its patch applies on top of theirs.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -16,8 +17,10 @@ from pathlib import Path
 from xe_forge.frontend.analyze import Analysis, Entry
 
 
-def _git(*args: str) -> str:
-    return subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout
+def _git(*args: str, env: dict | None = None) -> str:
+    full = None if env is None else {**os.environ, **env}
+    return subprocess.run(["git", *args], capture_output=True, text=True, check=True,
+                          env=full).stdout  # fmt: skip
 
 
 def origin(patch: Path) -> tuple[str, str]:
@@ -52,8 +55,14 @@ def stack(patches: list[Path], out: Path) -> dict[str, str]:
             )
         clone = made[repo]["clone"]
         _git("-C", clone, "apply", "--index", str(p))
-        _git("-C", clone, "-c", "user.name=xe-forge", "-c", "user.email=xe-forge@localhost",
-             "commit", "--quiet", "-m", f"xe-forge: {p}")  # fmt: skip
+        # Who and when fixed by the base: the same base and patches rebuild the same commit,
+        # so a clone that borrowed it from an earlier build still finds it.
+        when = _git("-C", clone, "show", "-s", "--format=%cI", base).strip()
+        who = {"GIT_AUTHOR_NAME": "xe-forge", "GIT_AUTHOR_EMAIL": "xe-forge@localhost",
+               "GIT_COMMITTER_NAME": "xe-forge", "GIT_COMMITTER_EMAIL": "xe-forge@localhost",
+               "GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when}  # fmt: skip
+        _git("-C", clone, "-c", "commit.gpgsign=false", "commit", "--quiet", "--no-verify",
+             "-m", f"xe-forge: {p}", env=who)  # fmt: skip
         made[repo]["patches"].append(str(p))
     for m in made.values():
         m["commit"] = _git("-C", m["clone"], "rev-parse", "HEAD").strip()

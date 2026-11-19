@@ -114,6 +114,21 @@ def test_malformed_weights_fail_the_trial_without_a_traceback(tmp_path, capsys, 
     assert code == 1 and out["correctness"] == "fail" and says in text
 
 
+@pytest.mark.parametrize("weights", [[], False, 0, ""])
+def test_a_falsy_weights_that_is_not_a_mapping_is_refused(tmp_path, weights):
+    spec = tmp_path / "s.yaml"
+    spec.write_text(yaml.safe_dump({"weights": weights, "dec": [{"dims": {"N": 1}}]}))
+    with pytest.raises(ValueError, match="must map variant names"):
+        load_spec(spec)
+
+
+@pytest.mark.parametrize("data", [{"weights": None}, {}, {"weights": {}}])
+def test_absent_null_or_empty_weights_load_as_none(tmp_path, data):
+    spec = tmp_path / "s.yaml"
+    spec.write_text(yaml.safe_dump({**data, "dec": [{"dims": {"N": 1}}]}))
+    assert load_spec(spec).weights == {}
+
+
 def test_a_shape_that_fails_correctness_ends_the_trial(tmp_path, capsys):
     code, text, out, _ = _gate(tmp_path, capsys, {"dec": (True, 10, 5, None),
                                                   "pre": (False, 0, 0, None)})  # fmt: skip

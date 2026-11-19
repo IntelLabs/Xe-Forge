@@ -140,7 +140,38 @@ def _record(kernel, time_ns, read, write, util):
 
 def test_counters_keep_unknown_as_none():
     out = _counters({"records": [_record("k", 1000, None, None, None)]})
-    assert out["k"] == {"gb_per_s": None, "util_pct": None, "us": 1.0}
+    assert out["k"] == {"gb_per_s": None, "util_pct": None, "us": 1.0, "gb_us": 0.0,
+                        "util_us": 0.0}  # fmt: skip
+
+
+def _sol(counters: dict):
+    return analyze._sol_parts(_workload({"k": 100.0}), {"bandwidth_gbs": 100.0},
+                              {"counters": {"k": counters}})  # fmt: skip
+
+
+@pytest.mark.parametrize("known, unknown, measured", [(1, 99, False), (60, 40, True)])
+def test_a_rate_measured_over_too_little_of_a_kernel_does_not_bound_it(known, unknown, measured):
+    from xe_forge.frontend import rows
+
+    hit = {"us": float(known), "gb_per_s": 95.0, "util_pct": 90.0}
+    miss = {"us": float(unknown), "gb_per_s": None, "util_pct": None}
+    records = [_record("k", known * 1000, 95_000 * known, 0, 90.0),
+               _record("k", unknown * 1000, None, None, None)]  # fmt: skip
+    # one capture's records; launches under a cut name; rows merged by their weights
+    caps = [_row_capture({"batch": b, "input_len": 64, "output_len": 4, "weight": w},
+                         [90.0, 10.0]) for b, w in ((8, known / 100), (1, unknown / 100))]  # fmt: skip
+    caps[0].run["counters"] = {"k": {**hit, "us": 100.0}}
+    caps[1].run["counters"] = {"k": {**miss, "us": 100.0}}
+    merged = rows.merge(caps, [{**c.run["runtime"], "weight": w} for c, w in
+                               zip(caps, (known / 100, unknown / 100), strict=True)])  # fmt: skip
+    for got in (_counters({"records": records})["k"], analyze.combine([hit, miss]),
+                merged.run["counters"]["k"]):  # fmt: skip
+        assert got["us"] == pytest.approx(100.0)
+        sol = _sol(got)
+        if measured:
+            assert sol == (pytest.approx(0.95), pytest.approx(0.95), pytest.approx(0.9)), got
+        else:
+            assert sol is None, got
 
 
 def test_counters_average_only_measured_records():
@@ -318,7 +349,8 @@ def test_rows_merge_each_kernels_counters_by_its_scaled_time():
     caps[1].run["counters"] = {"gelu": {"us": 50.0, "gb_per_s": 100.0, "util_pct": None}}
     got = rows.merge(caps, [anchor, other]).run["counters"]["gelu"]
     # the second row counts as much time as the first (weight 0.5 of 100 us each)
-    assert got == {"us": 100.0, "gb_per_s": 250.0, "util_pct": 10.0}
+    assert got == {"us": 100.0, "gb_per_s": 250.0, "util_pct": 10.0, "gb_us": 100.0,
+                   "util_us": 50.0}  # fmt: skip
 
 
 def test_rows_merge_scales_each_kernels_unitrace_time_like_its_counters():
@@ -1891,6 +1923,35 @@ def test_fusions_build_on_the_kernels_winning_patches_applied_in_order(tmp_path)
     made = json.loads((tmp_path / "stacked" / "STACK.json").read_text())
     assert made[0]["base"] == base and made[0]["patches"] == [str(p1), str(p2)]
     assert (tmp_path / "origin" / "a.txt").read_text() == "a\n"  # the origin is untouched
+
+
+def test_a_rebuilt_stack_keeps_the_commit_clones_of_it_borrow(tmp_path):
+    from xe_forge.frontend import fuse
+
+    def git(*a):
+        return subprocess.run(["git", *a], capture_output=True, text=True)
+
+    base = _git_repo(tmp_path / "origin")
+    p1 = _winning_patch(tmp_path / "results", "k1", tmp_path / "origin", base, "a", "b")
+    p2 = _winning_patch(tmp_path / "results", "k2", tmp_path / "origin", base, "a", "c")
+    out = tmp_path / "stacked"
+
+    def commit(patches):
+        fuse.stack(patches, out)
+        return json.loads((out / "STACK.json").read_text())[0]["commit"]
+
+    first = commit([p1])
+    clone = Path(fuse.stack([p1], out)[str(tmp_path / "origin")])
+    dep = tmp_path / "dep"
+    assert git("clone", "--quiet", "--shared", str(clone), str(dep)).returncode == 0
+    (dep / "b.txt").write_text("b\n")
+    git("-C", str(dep), "add", "b.txt")
+    git("-C", str(dep), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x")
+    time.sleep(1.1)  # a commit dated now would differ by the second
+    assert commit([p1]) == first
+    assert git("-C", str(dep), "diff", f"{first}..HEAD").returncode == 0  # its base is there
+    assert git("-C", str(dep), "fsck").returncode == 0
+    assert commit([p2]) != first
 
 
 def test_fusions_stack_repositories_with_spaced_paths_and_shared_basenames(tmp_path):

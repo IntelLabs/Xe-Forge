@@ -725,10 +725,13 @@ def _usable(records: list) -> list:
 
 
 def _counters(summary: dict) -> dict:
-    """unitrace ComputeBasic records -> {kernel: {gb_per_s, util_pct, us}}, time-weighted.
+    """unitrace ComputeBasic records -> {kernel: {gb_per_s, util_pct, us, gb_us, util_us}},
+    time-weighted.
 
     compute_metrics reports an incomplete counter as None (unknown); a rate is averaged over
-    the records that measured it, and stays None when none did -- never 0.
+    the records that measured it, and stays None when none did -- never 0. ``gb_us`` and
+    ``util_us`` are the time each rate was measured over, so a rate a few records measured
+    is not read as the kernel's.
     """
     acc: dict = {}
     for r in summary.get("records") or []:
@@ -752,7 +755,8 @@ def _counters(summary: dict) -> dict:
     return {
         k: {"gb_per_s": round(a["bytes"] / a["bytes_ns"], 3) if a["bytes_ns"] else None,
             "util_pct": round(a["util"] / a["util_ns"], 2) if a["util_ns"] else None,
-            "us": round(a["ns"] / 1e3, 3)}
+            "us": round(a["ns"] / 1e3, 3), "gb_us": round(a["bytes_ns"] / 1e3, 3),
+            "util_us": round(a["util_ns"] / 1e3, 3)}
         for k, a in acc.items()
     }  # fmt: skip
 

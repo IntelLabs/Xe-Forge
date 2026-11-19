@@ -203,16 +203,33 @@ def _measured(measured: dict, name: str) -> dict | None:
     return combine([v for k, v in measured.items() if k.startswith(name)])
 
 
+# Each rate and the time it was measured over (a capture without the time: all of ``us``).
+RATES = {"gb_per_s": "gb_us", "util_pct": "util_us"}
+
+
+def _rate_us(k: dict, rate: str) -> float:
+    """The time ``k``'s ``rate`` was measured over; 0 when it was not measured."""
+    if k.get(rate) is None:
+        return 0.0
+    return k.get(RATES[rate], k.get("us")) or 0.0
+
+
 def combine(hits: list[dict]) -> dict | None:
-    """Counters of several launches of one kernel as one, rates weighted by time."""
+    """Counters of several launches of one kernel as one, each rate weighted by the time it
+    was measured over, and that time kept beside it."""
     if not sum(v["us"] for v in hits):
         return None
     out = {"us": sum(v["us"] for v in hits)}
-    for f in ("gb_per_s", "util_pct"):  # None = not measured, averaged over those that were
-        known = [v for v in hits if v.get(f) is not None]
-        ns = sum(v["us"] for v in known)
-        out[f] = sum(v[f] * v["us"] for v in known) / ns if ns else None
+    for f, t in RATES.items():  # None = not measured, averaged over those that were
+        ns = sum(_rate_us(v, f) for v in hits)
+        out[f] = sum(v[f] * _rate_us(v, f) for v in hits if _rate_us(v, f)) / ns if ns else None
+        out[t] = ns
     return out
+
+
+def _covered(k: dict) -> float:
+    """The time over which both of ``k``'s rates were measured, at most."""
+    return min(_rate_us(k, f) for f in RATES)
 
 
 def _sol_parts(w: Workload, calib: dict | None, ctx: dict | None) -> tuple | None:
@@ -233,11 +250,10 @@ def _sol_parts(w: Workload, calib: dict | None, ctx: dict | None) -> tuple | Non
         # unitrace's own total for the kernel in the pass the counters came from -- `us` is
         # the trace's, from the timed pass, which --trace-steps makes the longer of the two.
         ceiling = ((_measured(ran, name) or {}).get("us") if ran else None) or us
-        if not k or not us or (k.get("us") or 0.0) < 0.5 * ceiling:
-            continue
-        # SOL is the max of both sides; an unknown side (or no bandwidth peak) is not 0% of
-        # peak, so such a kernel counts as unmeasured.
-        if not bw or k.get("gb_per_s") is None or k.get("util_pct") is None:
+        # Each rate on its own: a rate measured over a few of the launches says no more than
+        # counters that sampled a few. An unknown side (or no bandwidth peak) is not 0% of
+        # peak, so such a kernel counts as unmeasured: SOL is the max of both sides.
+        if not k or not us or _covered(k) < 0.5 * ceiling or not bw:
             continue
         memory, compute = k["gb_per_s"] / bw, k["util_pct"] / 100
         sol += min(1.0, max(memory, compute)) * us
@@ -322,13 +338,9 @@ def _decide(
 def _counted(workloads: list[Workload], measured: dict, shared: set = frozenset()) -> float:
     """% of device time whose kernels have counters that bound them (a name of one workload)."""
 
-    def hit(name):
-        k = None if name in shared else _measured(measured, name)
-        return bool(k) and k["gb_per_s"] is not None and k["util_pct"] is not None
-
     def bounds(name, us):
         k = None if name in shared else _measured(measured, name)
-        return hit(name) and (k.get("us") or 0.0) >= 0.5 * us
+        return bool(k) and _covered(k) >= 0.5 * us
 
     times = [(us, bounds(k, us))
              for w in workloads for k, us in (w.framework_meta.get("kernels") or {}).items()]  # fmt: skip
