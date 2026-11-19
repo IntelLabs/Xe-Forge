@@ -21,7 +21,7 @@ from ai_bench.harness.runner.benchmark_compare import (
 )
 from ai_bench.utils import count_torch_flop, import_from_path
 
-from xe_forge.config import noise_band
+from xe_forge.config import checked_band, noise_band
 from xe_forge.core.dtype_utils import make_rand_tensor
 from xe_forge.core.reference_workload import ReferenceWorkload
 from xe_forge.models import ExecutionResult
@@ -94,9 +94,7 @@ class KernelBenchExecutor:
         # The smallest speedup reported as one. Identical builds can still differ by a
         # small consistent margin even with interleaving and slot swapping; anything inside
         # this band is reported as indistinguishable, not a result.
-        if min_effect is None:
-            min_effect = noise_band()
-        self.min_effect = min_effect
+        self.min_effect = noise_band() if min_effect is None else checked_band(min_effect)
         self.require_correctness = require_correctness
         self.rtol = rtol
         self.atol = atol
@@ -829,7 +827,7 @@ class KernelBenchExecutor:
 
     def __del__(self):
         """Cleanup temp directory."""
-        if self._temp_dir is not None:
+        if getattr(self, "_temp_dir", None) is not None:  # unset when __init__ raised
             import shutil
 
             try:

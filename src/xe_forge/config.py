@@ -2,6 +2,7 @@
 Configuration Manager for Xe-Forge kernel optimization pipeline
 """
 
+import math
 import os
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -15,7 +16,16 @@ from xe_forge.models import OptimizationStage
 
 def noise_band() -> float:
     """The smallest speed change reported as one (``BENCHMARK_MIN_EFFECT``)."""
-    return float(os.environ.get("BENCHMARK_MIN_EFFECT", "0.02"))
+    return checked_band(float(os.environ.get("BENCHMARK_MIN_EFFECT", "0.02")))
+
+
+def checked_band(band: float) -> float:
+    """``band``, if a noise band can be it: with none, both of its inclusive edges are 1.0,
+    so an unchanged time would be a slowdown and a win at once."""
+    if not (math.isfinite(band) and band > 0):
+        raise ValueError(f"the noise band (BENCHMARK_MIN_EFFECT) must be finite and above 0, "
+                         f"not {band}")  # fmt: skip
+    return band
 
 
 @dataclass

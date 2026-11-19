@@ -12,21 +12,17 @@ def _number(value):
         return None
 
 
-def _is_number(value) -> bool:
-    try:
-        float(value)
-        return True
-    except ValueError:
-        return False
-
-
 def metric_rows(lines):
     """Yield ``(device, row)`` for each data row of a unitrace metrics table.
 
     Reads both layouts unitrace writes: one header with the kernel on every
     row, and per-launch blocks where a unit-less ``Kernel, ...`` header and
-    one identity row precede the block's own header and samples. A row with
-    no numeric field is a header. Unknown layouts yield nothing.
+    one identity row precede the block's own header and samples. Headers are
+    known by position, not content: the first row after a device banner or an
+    identity row is the header, and every later row is a sample, whatever its
+    values (a missing one may be empty or text). A row of a different length
+    than the header is a sample with the values it cannot place unknown: a
+    longer one has every value unknown, a shorter one its last value too.
     """
     device, header, identity, pending = "unknown", None, {}, None
     for line in lines:
@@ -38,13 +34,16 @@ def metric_rows(lines):
             continue
         values = [v.strip() for v in next(csv.reader([stripped], skipinitialspace=True))]
         if pending is not None:
-            identity, pending = dict(zip(pending, values, strict=False)), None
-        elif not any(_is_number(v) for v in values):
-            if "Kernel" in values and not any("[" in v for v in values):
-                pending = values
-            else:
-                header = values
-        elif header is not None and len(values) == len(header):
+            identity, pending, header = dict(zip(pending, values, strict=False)), None, None
+        elif "Kernel" in values and not any("[" in v for v in values):
+            pending = values  # a launch block's unit-less identity header
+        elif header is None:
+            header = values
+        elif values != header:  # a repeated header is not a sample
+            if len(values) > len(header):  # which value is which column is unknown
+                values = [""] * len(header)
+            elif len(values) < len(header):  # cut short: its last value may be cut too
+                values = values[:-1] + [""] * (len(header) - len(values) + 1)
             yield device, {**identity, **dict(zip(header, values, strict=True))}
 
 

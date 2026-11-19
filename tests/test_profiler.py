@@ -116,6 +116,57 @@ Source,Offset,Instruction,Dependency,Active[Events],DistStall[Events],OtherStall
 """
 
 
+FLAT_HEAD = ("Kernel, GlobalInstanceId, GpuTime[ns], GPU_MEMORY_BYTE_READ[bytes], "
+             "GPU_MEMORY_BYTE_WRITE[bytes], XVE_ACTIVE[%]\n")  # fmt: skip
+BLOCK_HEAD = (
+    "GpuTime[ns], GPU_MEMORY_BYTE_READ[bytes], GPU_MEMORY_BYTE_WRITE[bytes], XVE_ACTIVE[%]\n"
+)
+
+
+@pytest.mark.parametrize("missing", ["empty", "text", "short"])
+@pytest.mark.parametrize("layout", ["flat", "block"])
+def test_a_sample_with_every_value_missing_is_a_sample_not_a_header(layout, missing):
+    from xe_forge.core.compute_metrics import summarize_compute_metrics
+
+    if layout == "flat":
+        bad = {"empty": "gemm_kernel, , , , ,", "text": "gemm_kernel, , unknown, -, -, -",
+               "short": "gemm_kernel, 1, 300, 6"}[missing]  # fmt: skip
+        report = (FLAT_HEAD + "gemm_kernel, 1, 100, 200, 10, 20\n" + bad + "\n"
+                  + "other_kernel, 2, 50, 100, 5, 40\n")  # fmt: skip
+    else:
+        bad = {"empty": ", , ,", "text": "-, -, -, -", "short": "300, 6"}[missing]
+        report = ("Kernel, GlobalInstanceId\ngemm_kernel, 1\n" + BLOCK_HEAD + "100, 200, 10, 20\n"
+                  + bad + "\n" + "300, 600, 30, 60\n")  # fmt: skip
+    records = {r["kernel"]: r for r in summarize_compute_metrics(report.splitlines())["records"]}
+    gemm = records["gemm_kernel"]
+    assert gemm["samples"] == (2 if layout == "flat" else 3)
+    # A short row's time is before its cut, so known; the values from the cut on are not.
+    short_time = 400.0 if layout == "flat" else 700.0
+    assert gemm["time_ns"] == (short_time if missing == "short" else None)
+    assert set(gemm["counters"].values()) == {None}
+    if layout == "flat":
+        if missing != "short":
+            assert gemm["launches"] is None  # one sample has no launch id
+        # The rows after it are still read against the real header.
+        assert records["other_kernel"]["time_ns"] == 50.0
+        assert records["other_kernel"]["counters"]["GPU_MEMORY_BYTE_READ[bytes]"] == 100.0
+
+
+def test_metric_rows_reads_headers_by_position():
+    from xe_forge.core.compute_metrics import metric_rows, summarize_compute_metrics
+
+    # A repeated header is not a sample; a row longer than the header has no placeable value.
+    flat = FLAT_HEAD + "a, 1, 10, 1, 1, 1\n" + FLAT_HEAD + "a, 2, 10, 1, 1, 1, 9\n"
+    rows = [r for _, r in metric_rows(flat.splitlines())]
+    assert len(rows) == 2 and set(rows[1].values()) == {""}
+    # Each launch block's identity header starts a new block, a trailing comma or not.
+    blocks = ("Kernel, GlobalInstanceId,\nfirst, 1,\n" + BLOCK_HEAD + "100, 200, 10, 20\n"
+              "Kernel, GlobalInstanceId,\nsecond, 2,\n" + BLOCK_HEAD + "300, 600, 30, 60\n")  # fmt: skip
+    records = summarize_compute_metrics(blocks.splitlines())["records"]
+    assert sorted((r["kernel"], r["samples"], r["time_ns"]) for r in records) == [
+        ("first", 1, 100.0), ("second", 1, 300.0)]  # fmt: skip
+
+
 def test_both_unitrace_layouts_give_the_same_metrics():
     from xe_forge.core.compute_metrics import summarize_compute_metrics
 

@@ -287,6 +287,18 @@ def test_the_noise_band_edges_are_changes(monkeypatch, original_ms, slower, insi
     assert got.is_slower is slower and (got.verdict == "INDISTINGUISHABLE") is inside
 
 
+@pytest.mark.parametrize("band", ["0", "-0.01", "nan", "inf"])
+def test_a_noise_band_that_is_not_finite_and_positive_is_refused(monkeypatch, band):
+    from xe_forge.config import noise_band
+    from xe_forge.core.executor import KernelBenchExecutor
+
+    monkeypatch.setenv("BENCHMARK_MIN_EFFECT", band)
+    with pytest.raises(ValueError, match="finite and above 0"):
+        noise_band()
+    with pytest.raises(ValueError, match="finite and above 0"):
+        KernelBenchExecutor(device="cpu", min_effect=float(band))
+
+
 def test_the_builtin_skill_prints_no_ratio_inside_the_noise_band(tmp_path, monkeypatch, capsys):
     from xe_forge.core.executor import KernelBenchExecutor
     from xe_forge.models import ExecutionResult

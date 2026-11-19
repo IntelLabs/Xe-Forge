@@ -971,6 +971,11 @@ def test_bound_tool_lists_workloads_by_share(tmp_path):
                       "--ops", str(listing), "--repos", str(tmp_path))  # fmt: skip
     assert code == 0 and "bound: INVALID 'toy::RMS': repo None" in out, out
     assert "rms_v2" not in out.partition("bound:")[0]  # applied as the run keeps it: unnamed
+    # A draft over a capture already named would keep the old names where it says nothing.
+    named = tmp_path / "named.json"
+    _tool("capture", "parse", str(tmp_path / "raw"), "-o", str(named), "--names", str(names))
+    code, out = _tool("bound", str(named), "--json", "--names", str(names))
+    assert code == 2 and "is already named" in out, out
 
 
 def test_bound_with_draft_names_bounds_with_their_model_facts(tmp_path, monkeypatch, capsys):

@@ -23,6 +23,12 @@ def run(args) -> int:
     if args.names and Path(args.names).is_file():  # none yet: the capture as it is
         from xe_forge.skills.capture import _precision_problems, apply_names, precision_record
 
+        # A draft applied over earlier names would keep them on every op it leaves out, and
+        # their kernel-group splits cannot be undone here.
+        if any("named" in o.framework_meta for o in cap.ops):
+            print(f"bound: {args.capture} is already named; --names needs a capture parsed "
+                  "without --names", file=sys.stderr)  # fmt: skip
+            return 2
         names = json.loads(Path(args.names).read_text())
         if args.ops and args.repos:  # what the run keeps of the answer, applied as it will be
             listing = json.loads(Path(args.ops).read_text())
