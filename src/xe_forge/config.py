@@ -16,7 +16,12 @@ from xe_forge.models import OptimizationStage
 
 def noise_band() -> float:
     """The smallest speed change reported as one (``BENCHMARK_MIN_EFFECT``)."""
-    return checked_band(float(os.environ.get("BENCHMARK_MIN_EFFECT", "0.02")))
+    raw = os.environ.get("BENCHMARK_MIN_EFFECT", "0.02")
+    try:
+        band = float(raw)
+    except ValueError:
+        raise ValueError(f"BENCHMARK_MIN_EFFECT must be a number, not {raw!r}") from None
+    return checked_band(band)
 
 
 def checked_band(band: float) -> float:

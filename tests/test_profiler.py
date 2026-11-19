@@ -167,6 +167,36 @@ def test_metric_rows_reads_headers_by_position():
         ("first", 1, 100.0), ("second", 1, 300.0)]  # fmt: skip
 
 
+def test_a_kernel_named_kernel_under_a_flat_header_is_a_sample():
+    from xe_forge.core.compute_metrics import summarize_compute_metrics
+
+    report = FLAT_HEAD + "Kernel, 1, 100, 200, 10, 20\nb, 2, 50, 100, 5, 10\nc, 3, 50, 100, 5, 10\n"
+    records = summarize_compute_metrics(report.splitlines())["records"]
+    assert sorted((r["kernel"], r["samples"], r["time_ns"]) for r in records) == [
+        ("Kernel", 1, 100.0), ("b", 1, 50.0), ("c", 1, 50.0)]  # fmt: skip
+
+
+def test_a_stall_sample_missing_an_event_count_is_left_out_and_counted():
+    head = "Kernel, Offset, Active[Events], DistStall[Events], OtherStall[Events]\n"
+    report = head + '"gemm_kernel", 0xc0, 2, 1, 0\n"gemm_kernel", 0xd0, 5, \n'
+    stalls = UnitraceXPUProfiler()._parse_stall_csv(report)["gemm_kernel"]
+    assert stalls["total_events"] == 3.0 and stalls["incomplete_samples"] == 1
+    assert [s["ip"] for s in stalls["ip_samples"]] == ["0xc0"]
+    result = ProfileResult(source="Unitrace", primary_kernel="gemm_kernel",
+                           raw_counters={"stall_metrics": {"gemm_kernel": stalls}})  # fmt: skip
+    assert "1 more records missing an event count" in result.format_for_llm()
+
+
+def test_a_launch_block_whose_header_names_the_kernel_keeps_its_identity_rows():
+    from xe_forge.core.compute_metrics import summarize_compute_metrics
+
+    report = ("Kernel, GlobalInstanceId\nb, 1\nKernel, GpuTime[ns]\nb, 30\n"
+              "Kernel, GlobalInstanceId\nc, 2\nKernel, GpuTime[ns]\nc, 40\n")  # fmt: skip
+    records = summarize_compute_metrics(report.splitlines())["records"]
+    assert sorted((r["kernel"], r["samples"], r["time_ns"]) for r in records) == [
+        ("b", 1, 30.0), ("c", 1, 40.0)]  # fmt: skip
+
+
 def test_both_unitrace_layouts_give_the_same_metrics():
     from xe_forge.core.compute_metrics import summarize_compute_metrics
 

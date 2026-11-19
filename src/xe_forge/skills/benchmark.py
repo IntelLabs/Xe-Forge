@@ -553,6 +553,15 @@ def _weighted(args, single) -> int:
 
 
 def run(args):
+    from xe_forge.config import noise_band
+
+    try:  # read before any shape is timed, not after
+        noise_band()
+    except ValueError as exc:
+        print("Correctness: FAILED")
+        print("VERDICT: BAD_CONFIGURATION")
+        print(f"Error: {exc}")
+        sys.exit(2)
     if not args.device:
         from xe_forge.frontend.profile import device_type
 

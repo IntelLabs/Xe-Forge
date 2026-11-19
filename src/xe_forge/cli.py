@@ -354,6 +354,13 @@ def main():
         return frontend_main(sys.argv[1:])
 
     parser, args = _parse_args()
+    from xe_forge.config import noise_band
+
+    try:  # refused before any kernel is timed
+        noise_band()
+    except ValueError as exc:
+        print(f"xe-forge: {exc}", file=sys.stderr)
+        return 2
 
     # ── Shared setup: config + LLM ──────────────────────────────
     config = _load_config(args)

@@ -254,7 +254,7 @@ Each workload's efficiency against its bound.
 | `--calibration` | none | `xe-forge calibrate` output |
 | `--min-share` | 0.005 | Smallest share of device time listed |
 | `--json` | off | Rows as JSON |
-| `--names` | none | A draft `names.json` to apply first |
+| `--names` | none | A draft `names.json` to apply first, to a capture parsed without `--names` (exit 2 otherwise) |
 | `--ops` | none | The namer's `ops.json`, to validate `--names` |
 | `--repos` | none | The kernel repositories `--names` refers to |
 
@@ -329,7 +329,7 @@ Bedrock credentials (`AWS_BEARER_TOKEN_BEDROCK`, or `AWS_ACCESS_KEY_ID` +
 | `TRIALS_ENABLED` | true | false = `--no-trials` | `xe-forge` |
 | `TRIALS_DIR` | `./trials` | `--trials-dir` | `xe-forge` |
 | `MAX_TRIALS` | 10 | `--max-trials` | `xe-forge` |
-| `BENCHMARK_MIN_EFFECT` | 0.02 | Relative difference below which two timings count as equal | `xe-forge`, `benchmark` |
+| `BENCHMARK_MIN_EFFECT` | 0.02 | Relative difference below which two timings count as equal; a finite number above 0 | `xe-forge`, `benchmark` |
 | `XE_FORGE_BUILTIN_BENCHMARK` | off | `1`/`true`/`yes`/`on` = `benchmark --builtin-benchmark` | `benchmark` |
 | `XE_FORGE_BASELINE_SLACK` | 1.5 | How much slower than the captured kernel a baseline may run before it is not that kernel | `benchmark` |
 | `XE_FORGE_BENCHMARK_TIMEOUT` | `EXTERNAL_TIMEOUT` | Seconds per shape before `benchmark` gives up on a hang | `benchmark` |

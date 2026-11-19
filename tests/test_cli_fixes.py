@@ -299,6 +299,40 @@ def test_a_noise_band_that_is_not_finite_and_positive_is_refused(monkeypatch, ba
         KernelBenchExecutor(device="cpu", min_effect=float(band))
 
 
+@pytest.mark.parametrize("band, says", [("0", "finite and above 0"), ("abc", "must be a number")])
+def test_a_bad_noise_band_is_refused_before_anything_is_timed(monkeypatch, capsys, band, says):
+    import argparse
+
+    from xe_forge.core.sycl_executor import SyclExecutor
+    from xe_forge.frontend import cli
+    from xe_forge.skills import benchmark
+
+    monkeypatch.setenv("BENCHMARK_MIN_EFFECT", band)
+    assert cli.main(["run", "launcher.sh"]) == 2
+    assert says in capsys.readouterr().err
+    monkeypatch.setattr(benchmark, "_trial_target", lambda a: pytest.fail("a trial was set up"))
+    with pytest.raises(SystemExit) as exit_info:
+        benchmark.run(argparse.Namespace(device=None))
+    out = capsys.readouterr().out
+    assert exit_info.value.code == 2 and "VERDICT: BAD_CONFIGURATION" in out and says in out
+    with pytest.raises(ValueError, match=says):
+        SyclExecutor(device_target="any")
+
+
+def test_the_profile_tool_and_the_dspy_cli_refuse_a_bad_noise_band(monkeypatch, capsys):
+    import sys
+
+    from xe_forge import cli, skills
+
+    monkeypatch.setenv("BENCHMARK_MIN_EFFECT", "0")
+    monkeypatch.setattr(sys, "argv", ["xe-forge-skill", "profile", "kernel.py"])
+    assert skills.main() == 2
+    monkeypatch.setattr(sys, "argv", ["xe-forge"])
+    monkeypatch.setattr(cli, "_parse_args", lambda: (None, argparse.Namespace()))
+    assert cli.main() == 2
+    assert capsys.readouterr().err.count("finite and above 0") == 2
+
+
 def test_the_builtin_skill_prints_no_ratio_inside_the_noise_band(tmp_path, monkeypatch, capsys):
     from xe_forge.core.executor import KernelBenchExecutor
     from xe_forge.models import ExecutionResult

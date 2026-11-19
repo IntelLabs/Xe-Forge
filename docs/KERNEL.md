@@ -282,6 +282,7 @@ Each stage sees only its own patterns, constraints and examples. The file format
 | `Model.__init__() missing required positional argument` | The spec has no `inits`, or an `inits` value names no dim of the variant |
 | `spec dim X is not a parameter of the reference's get_inputs/get_init_inputs` | The variant's dims and the reference's functions disagree |
 | `VERDICT: NO_BENCHMARK_CONFIGURED` | `benchmark` was run with neither a host command nor `--builtin-benchmark` |
+| `VERDICT: BAD_CONFIGURATION` | `BENCHMARK_MIN_EFFECT` is not a finite number above 0 |
 | `VERDICT: BASELINE_NOT_CAPTURED_KERNEL` | The baseline is not the kernel the model ran (see the benchmark gate) |
 | `'claude' CLI not found in PATH; auto-launch requested` | The agent CLI is not installed; the workspace was only generated |
 | `session completed but recorded no correct trial at or above baseline` | No trial was correct and at least as fast as the baseline; the session log says why |

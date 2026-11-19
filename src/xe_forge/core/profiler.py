@@ -197,6 +197,11 @@ class ProfileResult:
             parts.append(
                 f"EU stall sampling: {len(stalls['ip_samples'])} instruction-address records"
             )
+            if stalls.get("incomplete_samples"):
+                parts.append(
+                    f"  {stalls['incomplete_samples']} more records missing an event count: "
+                    "left out of every count below, their events unknown"
+                )
             parts.append(f"  Active events: {stalls['active_events']:.0f}")
             for cause, events in sorted(
                 stalls["stall_events"].items(), key=lambda item: item[1], reverse=True
@@ -1170,7 +1175,7 @@ class UnitraceXPUProfiler:
         Rows carry ``Active[Events]`` and one ``<Cause>Stall[Events]`` column
         per cause; this sums across every IP and instance of a kernel.
         """
-        from xe_forge.core.compute_metrics import metric_rows
+        from xe_forge.core.compute_metrics import _number, metric_rows
 
         per_kernel: dict[str, dict] = {}
         for _, row in metric_rows(text.splitlines()):
@@ -1183,8 +1188,15 @@ class UnitraceXPUProfiler:
                     "active_events": 0.0,
                     "stall_events": dict.fromkeys(_EU_STALL_CAUSES, 0.0),
                     "ip_samples": [],
+                    "incomplete_samples": 0,
                 },
             )
+            # A sample missing an event count it has a column for is not one of 0 events:
+            # it is left out of every share, and counted.
+            columns = ["Active[Events]", *(f"{c}[Events]" for c in _EU_STALL_CAUSES)]
+            if any(_number(row[c]) is None for c in columns if c in row):
+                agg["incomplete_samples"] += 1
+                continue
             agg["ip_samples"].append(
                 {
                     "ip": row.get("IP[Address]") or row.get("Offset") or "",

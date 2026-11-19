@@ -5,7 +5,7 @@ roofline from shapes and the calibrated peaks, the counters' speed-of-light, and
 names.json states. ``--names`` applies a draft names.json first (its costs and config_args), so
 the naming agent sees what its answer makes of the capture before it answers; with ``--ops``
 and ``--repos`` it is validated first as the run validates it, each part it drops printed as INVALID.
-Exit 1 when the capture has no workloads.
+Exit 1 when the capture has no workloads, 2 when ``--names`` is given a capture already named.
 """
 
 from __future__ import annotations

@@ -1094,6 +1094,14 @@ def main(argv: list[str]) -> int:
     if not argv or argv[0] not in COMMANDS:
         raise SystemExit(f"usage: xe-forge {{{','.join(COMMANDS)}}} ...")
     command, rest = argv[0], argv[1:]
+    if command != "calibrate":  # read before any trial is timed, not after the run
+        from xe_forge.config import noise_band
+
+        try:
+            noise_band()
+        except ValueError as exc:
+            print(f"xe-forge: {exc}", file=sys.stderr)
+            return 2
     passthrough: list[str] = []
     if "--" in rest:
         i = rest.index("--")

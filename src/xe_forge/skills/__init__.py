@@ -335,6 +335,15 @@ def main():
     elif args.skill == "trial":
         from xe_forge.skills.trial import run
     elif args.skill == "profile":
+        import sys
+
+        from xe_forge.config import noise_band
+
+        try:  # its executor reads the band: refused here, with the variable named
+            noise_band()
+        except ValueError as exc:
+            print(f"profile: {exc}", file=sys.stderr)
+            return 2
         from xe_forge.skills.profile import run
     elif args.skill == "upstream":
         from xe_forge.skills.upstream import run

@@ -457,6 +457,9 @@ For each trial:
      compiler diagnostic or the mismatch that says what to fix.
    - Speedup improved → continue on this branch.
    - Speedup regressed → branch back to the best trial and try a different strategy.
+   - `VERDICT: BAD_CONFIGURATION` or `VERDICT: NO_BENCHMARK_CONFIGURED` → STOP and report
+     its `Error:` line. The benchmark is not configured to measure anything; the kernel is
+     not at fault.
    - Plateau (several trials on a branch with no improvement) → try a fundamentally
      different approach, not another variation of the same one.
 {%- if dataset %} Re-read `{{ dataset.profile_path }}` first: a plateau usually means the

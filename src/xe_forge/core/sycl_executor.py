@@ -138,6 +138,7 @@ class SyclExecutor:
         dependencies: tuple[str, ...] = (),
         device: str = "xpu",
     ):
+        noise_band()  # refused here, before both kernels are built and run
         if isinstance(kernel_type, str):
             kernel_type = KernelType(kernel_type)
         self.kernel_type = kernel_type
@@ -768,13 +769,13 @@ class SyclExecutor:
             verdict="INDISTINGUISHABLE" if opt_correct and inside_band else None,
         )
 
-    def __del__(self):
-        if self._build_dir is not None:
+    def __del__(self):  # attributes are unset when __init__ raised
+        if getattr(self, "_build_dir", None) is not None:
             try:
                 shutil.rmtree(self._build_dir)
             except Exception:
                 pass
-        if self._cached_input_dir is not None:
+        if getattr(self, "_cached_input_dir", None) is not None:
             try:
                 shutil.rmtree(self._cached_input_dir)
             except Exception:

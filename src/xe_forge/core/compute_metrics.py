@@ -20,7 +20,9 @@ def metric_rows(lines):
     one identity row precede the block's own header and samples. Headers are
     known by position, not content: the first row after a device banner or an
     identity row is the header, and every later row is a sample, whatever its
-    values (a missing one may be empty or text). A row of a different length
+    values (a missing one may be empty or text); under a flat table's header,
+    a row naming a kernel ``Kernel`` is a sample too. A section changes layout
+    only at a device banner. A row of a different length
     than the header is a sample with the values it cannot place unknown: a
     longer one has every value unknown, a shorter one its last value too.
     """
@@ -35,7 +37,12 @@ def metric_rows(lines):
         values = [v.strip() for v in next(csv.reader([stripped], skipinitialspace=True))]
         if pending is not None:
             identity, pending, header = dict(zip(pending, values, strict=False)), None, None
-        elif "Kernel" in values and not any("[" in v for v in values):
+        elif (
+            # Under a flat table's header, which names the kernel itself, it is a sample.
+            (header is None or identity or "Kernel" not in header)
+            and "Kernel" in values
+            and not any("[" in v for v in values)
+        ):
             pending = values  # a launch block's unit-less identity header
         elif header is None:
             header = values
