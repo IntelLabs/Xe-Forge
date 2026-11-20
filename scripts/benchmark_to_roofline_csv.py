@@ -45,7 +45,7 @@ compute-bound position; real kernels with imperfect reuse sit further left.
 Usage
 ------------------------------------------------------------------------------
   uv run scripts/benchmark_to_roofline_csv.py benchmark.csv -o roofline_input.csv
-  uv run scripts/roofline.py roofline_input.csv --hardware arc-pro-b70 \
+  uv run scripts/roofline.py roofline_input.csv --calibration calibration.json \
       --connect --key --title "Roofline (baseline vs Triton)" \
       -o plots/roofline.png
 """

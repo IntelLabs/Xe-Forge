@@ -25,30 +25,16 @@ from ai_bench.harness.runner.benchmark_compare import set_all_seeds
 from ai_bench.sycl.compiler import SYCLCompiler, SYCLRunResult
 
 from xe_forge.core.build_backend import BuildError, BuildSpec, resolve_build_backend
+from xe_forge.core.executor import no_change_message, noise_band
 from xe_forge.models import ExecutionResult
 
 logger = logging.getLogger(__name__)
 
 SYCL_TLA_DIR = os.environ.get("SYCL_TLA_DIR", "")
 
-MKL_INCLUDE = os.environ.get("MKL_INCLUDE", "/swtools/intel/mkl/latest/include")
-
-_DEVICE_NAME_TO_TARGET: dict[str, str] = {
-    "b580": "bmg-g31",
-    "b570": "bmg-g31",
-    "battlemage": "bmg-g31",
-    "bmg": "bmg-g31",
-    "a770": "acm-g10",
-    "a750": "acm-g10",
-    "a580": "acm-g11",
-    "a380": "acm-g11",
-    "a310": "acm-g12",
-    "max 1550": "pvc",
-    "max 1100": "pvc",
-    "ponte vecchio": "pvc",
-    "data center gpu max": "pvc",
-    "lunar lake": "lnl-m",
-}
+MKL_INCLUDE = os.environ.get("MKL_INCLUDE") or (
+    f"{os.environ['MKLROOT']}/include" if os.environ.get("MKLROOT") else ""
+)
 
 
 class KernelType(Enum):
@@ -60,21 +46,18 @@ class KernelType(Enum):
 
 
 def _detect_device_target() -> str:
-    """Auto-detect the icpx AOT device target from torch.xpu."""
+    """The icpx AOT device target for the XPU torch sees: its PCI device id, which ocloc
+    takes as ``-device 0x...``."""
     try:
         import torch
 
         if not hasattr(torch, "xpu") or not torch.xpu.is_available():
             return ""
-        name = torch.xpu.get_device_name(torch.xpu.current_device()).lower()
-        for key, target in _DEVICE_NAME_TO_TARGET.items():
-            if key in name:
-                logger.info("Auto-detected SYCL device target: %s (from '%s')", target, name)
-                return target
-        logger.warning("Unknown XPU device '%s', skipping AOT target", name)
-        return ""
+        target = hex(torch.xpu.get_device_properties().device_id)
+        logger.info("SYCL device target: %s", target)
+        return target
     except Exception as e:
-        logger.debug("Could not auto-detect SYCL device target: %s", e)
+        logger.debug("Could not detect the SYCL device target: %s", e)
         return ""
 
 
@@ -91,7 +74,7 @@ def _include_dirs(sycl_tla_dir: str, kernel_type: KernelType = KernelType.GEMM) 
         dirs.append(f"{sycl_tla_dir}/benchmarks/flash_attention")
     if kernel_type == KernelType.MOE_GEMM:
         dirs.append(f"{sycl_tla_dir}/examples/12_xe20_moe_gemm_cute_interface")
-    if Path(MKL_INCLUDE).exists():
+    if MKL_INCLUDE and Path(MKL_INCLUDE).exists():
         dirs.append(MKL_INCLUDE)
     return dirs
 
@@ -123,6 +106,7 @@ class SyclComparisonResult:
     optimized_correct: bool = True
     is_slower: bool = False
     feedback_message: str = ""
+    verdict: str | None = None  # the gate that decided, when no ratio is a result
 
     @property
     def original_time_us(self) -> float:
@@ -154,6 +138,7 @@ class SyclExecutor:
         dependencies: tuple[str, ...] = (),
         device: str = "xpu",
     ):
+        noise_band()  # refused here, before both kernels are built and run
         if isinstance(kernel_type, str):
             kernel_type = KernelType(kernel_type)
         self.kernel_type = kernel_type
@@ -684,7 +669,8 @@ class SyclExecutor:
             )
         speedup = orig_ms / opt_ms
 
-        is_slower = speedup < 1.0
+        band = noise_band()
+        is_slower = speedup <= 1.0 - band
         orig_tflops = orig_result.tflops
         opt_tflops = opt_result.tflops
 
@@ -739,6 +725,8 @@ class SyclExecutor:
                 f"Original: {orig_ms:.4f}ms, Optimized: {opt_ms:.4f}ms. "
                 "Fix numerical correctness before optimizing for speed."
             )
+        elif speedup < 1.0 + band and not is_slower:
+            msg = no_change_message(speedup, band, orig_ms * 1e3, opt_ms * 1e3) + correctness_msg
         elif is_slower:
             slowdown = 1.0 / speedup if speedup > 0 else float("inf")
             msg = (
@@ -767,6 +755,7 @@ class SyclExecutor:
                 f"{correctness_msg.strip()} Try more aggressive optimizations."
             )
 
+        inside_band = not is_slower and speedup < 1.0 + band
         return SyclComparisonResult(
             original_time_ms=orig_ms,
             optimized_time_ms=opt_ms,
@@ -777,15 +766,16 @@ class SyclExecutor:
             optimized_correct=opt_correct,
             is_slower=is_slower,
             feedback_message=msg,
+            verdict="INDISTINGUISHABLE" if opt_correct and inside_band else None,
         )
 
-    def __del__(self):
-        if self._build_dir is not None:
+    def __del__(self):  # attributes are unset when __init__ raised
+        if getattr(self, "_build_dir", None) is not None:
             try:
                 shutil.rmtree(self._build_dir)
             except Exception:
                 pass
-        if self._cached_input_dir is not None:
+        if getattr(self, "_cached_input_dir", None) is not None:
             try:
                 shutil.rmtree(self._cached_input_dir)
             except Exception:

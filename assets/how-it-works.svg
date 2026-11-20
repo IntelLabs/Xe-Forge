@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="650" viewBox="0 0 960 650" font-family="Helvetica, Arial, sans-serif">
+  <!-- Same diagram as how-it-works.tex. -->
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#555"/>
+    </marker>
+    <style>
+      .agent { fill:#DCE9F7; stroke:#3A6EA5; stroke-width:1.4 }
+      .code  { fill:#E4F2DF; stroke:#4A7F3A; stroke-width:1.4 }
+      .io    { fill:#F2F2F2; stroke:#777777; stroke-width:1.4 }
+      .lane  { fill:none; stroke:#BBBBBB; stroke-width:1.2 }
+      .t     { font-size:14px; fill:#1A1A1A; text-anchor:middle }
+      .s     { font-size:11px; fill:#444444; text-anchor:middle }
+      .h     { font-size:15px; font-weight:bold; fill:#1A1A1A }
+      .n     { font-size:11px; fill:#555555 }
+      .f     { stroke:#555; stroke-width:1.4; fill:none; marker-end:url(#a) }
+      .d     { stroke:#555; stroke-width:1.4; fill:none; marker-end:url(#a); stroke-dasharray:5 4 }
+    </style>
+  </defs>
+  <rect width="960" height="650" fill="#FFFFFF"/>
+
+  <!-- xe-forge run -->
+  <rect class="lane" x="12" y="14" width="790" height="372" rx="10"/>
+  <text class="h" x="26" y="38">xe-forge run: a model in its framework</text>
+
+  <rect class="agent" x="315" y="50" width="160" height="46" rx="5"/>
+  <text class="t" x="395" y="70">patch</text><text class="s" x="395" y="86">adds a missing op</text>
+
+  <rect class="io"    x="30"  y="120" width="130" height="56" rx="5"/>
+  <text class="t" x="95" y="144">model in its</text><text class="t" x="95" y="162">framework</text>
+  <rect class="agent" x="180" y="120" width="130" height="56" rx="5"/>
+  <text class="t" x="245" y="144">setup</text><text class="s" x="245" y="162">builds the venv</text>
+  <rect class="agent" x="330" y="120" width="130" height="56" rx="5"/>
+  <text class="t" x="395" y="144">capture</text><text class="s" x="395" y="162">writes a launcher</text>
+  <rect class="code"  x="480" y="120" width="130" height="56" rx="5"/>
+  <text class="t" x="545" y="144">profile</text><text class="s" x="545" y="162">unitrace, parse</text>
+  <rect class="agent" x="630" y="120" width="150" height="56" rx="5"/>
+  <text class="t" x="705" y="144">name</text><text class="s" x="705" y="162">kernel source or call</text>
+
+  <rect class="code"  x="630" y="220" width="150" height="56" rx="5"/>
+  <text class="t" x="705" y="244">analyze</text><text class="s" x="705" y="262">bound, rank</text>
+  <rect class="agent" x="480" y="220" width="130" height="56" rx="5"/>
+  <text class="t" x="545" y="244">inputs</text><text class="s" x="545" y="262">shapes, weights</text>
+  <rect class="code"  x="330" y="220" width="130" height="56" rx="5"/>
+  <text class="t" x="395" y="244">optimize</text><text class="s" x="395" y="262">each kernel and call</text>
+  <rect class="agent" x="180" y="220" width="130" height="56" rx="5"/>
+  <text class="t" x="245" y="244">fuse</text><text class="s" x="245" y="262">chains of ops</text>
+  <rect class="code"  x="30"  y="220" width="130" height="56" rx="5"/>
+  <text class="t" x="95" y="244">prove</text><text class="s" x="95" y="262">patches in the model</text>
+  <rect class="io"    x="30"  y="310" width="130" height="56" rx="5"/>
+  <text class="t" x="95" y="334">SUMMARY.md</text><text class="t" x="95" y="352">and patches</text>
+
+  <path class="f" d="M160,148 H178"/>
+  <path class="f" d="M310,148 H328"/>
+  <path class="f" d="M460,148 H478"/>
+  <path class="f" d="M610,148 H628"/>
+  <path class="f" d="M705,176 V218"/>
+  <path class="f" d="M630,248 H612"/>
+  <path class="f" d="M480,248 H462"/>
+  <path class="f" d="M330,248 H312"/>
+  <path class="f" d="M180,248 H162"/>
+  <path class="f" d="M95,276 V308"/>
+  <path class="d" d="M395,120 V98"/>
+
+  <!-- xe-forge: one kernel -->
+  <rect class="lane" x="12" y="410" width="936" height="150" rx="10"/>
+  <text class="h" x="26" y="434">xe-forge: one kernel</text>
+
+  <rect class="io"    x="30"  y="450" width="130" height="56" rx="5"/>
+  <text class="t" x="95" y="474">kernel, spec,</text><text class="t" x="95" y="492">reference</text>
+  <rect class="agent" x="180" y="450" width="130" height="56" rx="5"/>
+  <text class="t" x="245" y="474">trial</text><text class="s" x="245" y="492">an agent writes it</text>
+  <rect class="code"  x="330" y="450" width="130" height="56" rx="5"/>
+  <text class="t" x="395" y="474">validate</text><text class="s" x="395" y="492">static checks</text>
+  <rect class="code"  x="480" y="450" width="130" height="56" rx="5"/>
+  <text class="t" x="545" y="474">benchmark</text><text class="s" x="545" y="492">correct, then timed</text>
+  <rect class="code"  x="630" y="450" width="130" height="56" rx="5"/>
+  <text class="t" x="695" y="474">profile</text><text class="s" x="695" y="492">counters, stalls</text>
+  <rect class="io"    x="790" y="450" width="140" height="56" rx="5"/>
+  <text class="t" x="860" y="474">best trial,</text><text class="t" x="860" y="492">upstream patch</text>
+
+  <path class="f" d="M160,478 H178"/>
+  <path class="f" d="M310,478 H328"/>
+  <path class="f" d="M460,478 H478"/>
+  <path class="f" d="M610,478 H628"/>
+  <path class="f" d="M760,478 H788"/>
+  <path class="d" d="M695,506 V538 H245 V508"/>
+  <text class="n" x="470" y="552" text-anchor="middle">next trial, from what was measured</text>
+
+  <path class="d" d="M395,276 V398 H245 V448"/>
+  <text class="n" x="402" y="300">for each kernel</text>
+
+  <!-- legend -->
+  <rect class="agent" x="30" y="586" width="70" height="26" rx="4"/>
+  <text class="s" x="65" y="603">agent</text>
+  <rect class="code" x="112" y="586" width="70" height="26" rx="4"/>
+  <text class="s" x="147" y="603">code</text>
+  <text class="n" x="198" y="597">Agents do the framework-, model- and hardware-specific work;</text>
+  <text class="n" x="198" y="612">code measures and checks every step before its result is kept.</text>
+</svg>

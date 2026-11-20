@@ -13,9 +13,13 @@ Usage:
 """
 
 import argparse
+import os
 
 
 def main():
+    from xe_forge import load_env
+
+    load_env()  # before the parser defaults and the tools read the environment
     parser = argparse.ArgumentParser(
         prog="xe-forge-skill",
         description="Xe-Forge skill tools (used by Claude Code and standalone)",
@@ -31,7 +35,9 @@ def main():
     p_validate.add_argument(
         "kernel_file", help="Path to the kernel: one source file, or a directory of them"
     )
-    p_validate.add_argument("--dsl", default="triton", choices=["triton", "sycl", "gluon", "cuda"])
+    p_validate.add_argument(
+        "--dsl", default="triton", choices=["triton", "sycl", "gluon", "cuda", "opencl"]
+    )
     p_validate.add_argument("--stage", default=None, help="Current optimization stage")
     p_validate.add_argument(
         "--external-validate",
@@ -53,8 +59,13 @@ def main():
         "--variant", default=None, help="Spec variant (defaults to the spec's default_variant)"
     )
     p_bench.add_argument("--baseline-us", type=float, default=None, help="Cached baseline time")
-    p_bench.add_argument("--device", default="xpu", help="Target device")
-    p_bench.add_argument("--dsl", default="triton", choices=["triton", "sycl", "gluon", "cuda"])
+    p_bench.add_argument(
+        "--device",
+        help="Target device (default: $XE_FORGE_DEVICE, else the first device torch sees)",
+    )
+    p_bench.add_argument(
+        "--dsl", default="triton", choices=["triton", "sycl", "gluon", "cuda", "opencl"]
+    )
     p_bench.add_argument("--triton-baseline", action="store_true", help="Baseline is Triton kernel")
     p_bench.add_argument(
         "--external-benchmark",
@@ -164,7 +175,7 @@ def main():
         help="Profiler backend; auto tries unitrace ComputeBasic first, then VTune. "
         "Hardware counters require device/driver support and permissions.",
     )
-    p_profile.add_argument("--unitrace-bin", default="unitrace")
+    p_profile.add_argument("--unitrace-bin", default=os.environ.get("UNITRACE_BIN", "unitrace"))
     p_profile.add_argument(
         "--metric-group",
         choices=["ComputeBasic", "EuStallSampling", "all"],
@@ -174,8 +185,12 @@ def main():
     p_profile.add_argument(
         "--sampling-interval-us",
         type=int,
-        default=None,
-        help="Unitrace sampling interval in microseconds (default: installed tool's default)",
+        default=int(os.environ.get("XE_FORGE_SAMPLING_INTERVAL_US", 25)),
+        help="Unitrace sampling interval in microseconds. The tool's own default of 50 is "
+        "longer than most kernels here, so most launches are never sampled and the "
+        "utilization reads near zero with a [partial_samples] warning; below about 25 "
+        "unitrace stops partway and returns no records at all, with exit 0. 25 is what "
+        "`capture run` uses (env XE_FORGE_SAMPLING_INTERVAL_US)",
     )
     p_profile.add_argument(
         "--assembly",
@@ -205,7 +220,109 @@ def main():
     u_patch.add_argument("kernel_name")
     u_patch.add_argument("--kind", choices=["upstream", "serving-only"], default="upstream")
     u_patch.add_argument("--notes", default="", help="What the patch changes and why")
+    u_patch.add_argument(
+        "--stack", default="", help='your stack check verdict: "PASS|FAIL <evidence>"'
+    )
     u_patch.add_argument("--trials-dir", default="./trials")
+
+    # -- capture --
+    p_cap = subparsers.add_parser("capture", help="Run a launcher under the instruments; check it")
+    cap_sub = p_cap.add_subparsers(dest="capture_command", required=True)
+    c_run = cap_sub.add_parser(
+        "run", help="Launcher -> raw/ (its trace, unitrace kernels, counters)"
+    )
+    c_run.add_argument("launcher", help="executable that runs one profiled batch into $RAW_DIR")
+    c_run.add_argument("-o", "--raw", required=True, help="raw/ directory to write")
+    c_run.add_argument("--unitrace", default=os.environ.get("UNITRACE_BIN", "unitrace"))
+    c_run.add_argument("--sampling-interval", type=int,
+                       default=int(os.environ.get("XE_FORGE_SAMPLING_INTERVAL_US", 25)),
+                       help="unitrace metric sampling interval in us (default 25, env "
+                       "XE_FORGE_SAMPLING_INTERVAL_US). Too coarse and every kernel shorter "
+                       "than a tick goes unsampled; too fine and unitrace stops partway and "
+                       "returns no records at all with exit 0")  # fmt: skip
+    c_run.add_argument("--trace-steps", type=int,
+                       default=int(os.environ.get("XE_FORGE_TRACE_STEPS", 2)),
+                       help="how many of whatever the workload repeats -- denoising steps, "
+                       "decode steps -- the unitrace pass runs in place of the full count; 0 "
+                       "runs the same work as the timed pass. The timed pass is never "
+                       "shortened: it keeps the whole workload, its trace and its output, and "
+                       "it is the measurement. The shortened pass only names kernels and "
+                       "reads counters, and two repetitions name every kernel the full run "
+                       "has, because the run is still complete end to end -- a 2-step "
+                       "generation still encodes the prompt and decodes the image. unitrace "
+                       "puts a timing event on every launch and the driver's supply of them "
+                       "is finite, so a long workload can exhaust it mid-run and lose the "
+                       "whole pass. A launcher that does not read "
+                       "the variable keeps running the full workload, and `capture run` says "
+                       "so (env XE_FORGE_TRACE_STEPS)")  # fmt: skip
+    c_parse = cap_sub.add_parser("parse", help="raw/ -> capture.json, checked against unitrace")
+    c_parse.add_argument("raw", help="raw/ directory capture run wrote")
+    c_parse.add_argument("-o", "--output", required=True, help="capture.json to write")
+    c_parse.add_argument("--names", default=None, help="names.json to apply")
+    c_parse.add_argument("--min-known", type=float, default=90.0,
+                         help="least %% of op time that must be in kernels unitrace saw")  # fmt: skip
+
+    # -- patch --
+    p_patch = subparsers.add_parser("patch", help="Gate a patch that makes a framework run a model")
+    patch_sub = p_patch.add_subparsers(dest="patch_command", required=True)
+    pc = patch_sub.add_parser(
+        "check", help="git diff, fresh apply, import, tokens scored by transformers"
+    )
+    pc.add_argument("dir", help="holds patch.json and generate.sh")
+    pc.add_argument("--margin", type=float, default=0.1,
+                    help="non-text output: how much worse than the native run's worst the "
+                    "patched run's worst may be against a float32 reference, as a relative "
+                    "squared error (for PSNR, 10*log10(1 + margin) dB)")  # fmt: skip
+    pc.add_argument("--repos", required=True, help="the clones' directory (--kernel-repos)")
+    pc.add_argument(
+        "--framework-python", required=True, help="the unpatched framework's interpreter"
+    )
+    pc.add_argument(
+        "--reference-python", default=None, help="GPU torch + transformers, if not that"
+    )
+    pc.add_argument("--model", required=True)
+    pc.add_argument("--batch", type=int, required=True)
+    pc.add_argument(
+        "--input-len", type=int, help="prompt tokens; a model that returns tokens needs it"
+    )
+    pc.add_argument("--min-match", type=int, default=32, help="tokens scored per sequence")
+    pc.add_argument("--tolerance", type=float, default=0.3,
+                    help="nat a token may fall below transformers' best")  # fmt: skip
+    pc.add_argument("--trust-remote-code", action="store_true")
+    pc.add_argument("--prompt-file", help="the run's prompt text (xe-forge run --prompt-file)")
+    pc.add_argument("--precision", default="bfloat16",
+                    help="the float dtype scored first: the run's declared compute")  # fmt: skip
+    pc.add_argument("--no-reference", action="store_true",
+                    help="skip only the transformers comparison, keeping every other check: "
+                    "the patch is a real diff that applies to a fresh clone, the patched "
+                    "package imports from the patch, and the model runs to completion under "
+                    "it. For a workload with no tokens to score -- an image or a video -- "
+                    "where whether the output is right is a human judgement")  # fmt: skip
+
+    # -- bound --
+    p_bound = subparsers.add_parser("bound", help="Each workload's efficiency against its bound")
+    p_bound.add_argument("capture", help="capture.json")
+    p_bound.add_argument("--calibration", default=None, help="xe-forge calibrate output")
+    p_bound.add_argument("--min-share", type=float, default=0.005, help="smallest share listed")
+    p_bound.add_argument("--json", action="store_true", help="rows as JSON")
+    p_bound.add_argument("--names", default=None, help="a draft names.json to apply first")
+    p_bound.add_argument("--ops", default=None, help="the namer's ops.json: validate --names")
+    p_bound.add_argument("--repos", default=None, help="the kernel repos --names refers to")
+
+    # -- inputs --
+    p_inputs = subparsers.add_parser("inputs", help="Gate the shapes and weights trials use")
+    inputs_sub = p_inputs.add_subparsers(dest="inputs_command", required=True)
+    ic = inputs_sub.add_parser("check", help="each chosen shape captured, weights sum to 1")
+    ic.add_argument("inputs", help="inputs.json: {kernel: {shapes, why}}")
+    ic.add_argument("--manifest", required=True, help="kernels.yaml")
+
+    # -- fuse --
+    p_fuse = subparsers.add_parser("fuse", help="Gate the fusions proposed after optimizing")
+    fuse_sub = p_fuse.add_subparsers(dest="fuse_command", required=True)
+    fc = fuse_sub.add_parser("check", help="ops captured, reference fits the anchor, ranked")
+    fc.add_argument("fusions", help="fusions.json: {fusions: [{name, repo, dsl, ops, ...}]}")
+    fc.add_argument("--capture", required=True, help="capture.json")
+    fc.add_argument("--results", help="results/summary.json of the kernels optimized before")
 
     args = parser.parse_args()
 
@@ -218,11 +335,31 @@ def main():
     elif args.skill == "trial":
         from xe_forge.skills.trial import run
     elif args.skill == "profile":
+        import sys
+
+        from xe_forge.config import noise_band
+
+        try:  # its executor reads the band: refused here, with the variable named
+            noise_band()
+        except ValueError as exc:
+            print(f"profile: {exc}", file=sys.stderr)
+            return 2
         from xe_forge.skills.profile import run
     elif args.skill == "upstream":
         from xe_forge.skills.upstream import run
+    elif args.skill == "capture":
+        from xe_forge.skills.capture import run
+    elif args.skill == "bound":
+        from xe_forge.skills.bound import run
+    elif args.skill == "patch":
+        from xe_forge.skills.patch import run
+    elif args.skill == "inputs":
+        from xe_forge.skills.inputs import run
+    elif args.skill == "fuse":
+        from xe_forge.skills.fuse import run
 
-    run(args)
+    # A tool's verdict is its exit code: a failed check must not exit 0.
+    return run(args)
 
 
 if __name__ == "__main__":

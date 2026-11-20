@@ -6,9 +6,9 @@ equivalent outputs. You may change template parameters, dispatch policies,
 data types, and memory layouts.
 
 === SYCL/CUTLASS OPTIMIZATION KNOBS ===
-- TileShape: Shape<_M, _N, _K> — try 256x256x32, 128x128x64, 128x256x32
+- TileShape: Shape<_M, _N, _K> — sized for the shapes and this device's SLM and registers
 - PipelineStages: 2, 3, or 4 — more prefetching vs register pressure
-- MMA Atom: XE_DPAS_TT<SubgroupSize, AccumType, InputType> — SubgroupSize 4 or 8
+- MMA Atom: XE_DPAS_TT<SubgroupSize, AccumType, InputType> — a sub-group size the device supports
 - Dispatch Policy: MainloopXeL1Staged (L1 cached), MainloopXeL0Staged (uncached)
 - Data types: bfloat16_t/half_t inputs, float/bfloat16_t accumulators
 - Memory layout: RowMajor vs ColumnMajor for A, B, C, D
@@ -22,8 +22,8 @@ DTYPE_FIX: use bfloat16_t/half_t inputs, float accumulators, avoid double.
 FUSION: fuse into CUTLASS epilogue callbacks — LinearCombination, bias, activation.
 MEMORY_ACCESS: fix layout mismatch (RowMajor vs ColumnMajor), increase PipelineStages
   for better prefetching, reduce register pressure.
-DEVICE_SPECIFIC: TileShape 256x256x32 or 128x128x64, PipelineStages=2-3,
-  XE_DPAS_TT<8, float, bfloat16_t>, MainloopXeL1Staged dispatch policy.
+DEVICE_SPECIFIC: TileShape, PipelineStages, MMA Atom and dispatch policy, chosen by
+  measuring them on this device.
 DISCOVERY: apply the open-ended optimization described in the issues field.
 
 === CODE REQUIREMENTS ===

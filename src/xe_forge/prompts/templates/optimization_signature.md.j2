@@ -12,37 +12,50 @@ DTYPE_FIX: float64->float32, proper accumulator precision, remove
 FUSION: fuse kernel launches, elementwise chains, reduction+elementwise.
 MEMORY_ACCESS: fix uncoalesced access, remove transposes from inner loops,
   add boundary checks, reduce register pressure.
+{% if "tensor_descriptors" in stages %}
 TENSOR_DESCRIPTORS: use tl.make_tensor_descriptor() created once outside the loop,
   desc.load([off0, off1]) / desc.store([...]) with explicit offsets (no boundary_check;
   out-of-bounds is zero-filled on load and dropped on store). The last stride must be 1:
   for a transposed operand, describe the memory as laid out and .T the loaded tile.
   tl.make_block_ptr() and tl.advance() are deprecated -- convert them.
-{% if device_type == "xpu" %}
-XPU_SPECIFIC: BLOCK_M={{ defaults.BLOCK_M }}, BLOCK_N={{ defaults.BLOCK_N }}, BLOCK_K={{ defaults.BLOCK_K }}, num_warps={{ defaults.num_warps }},
-  GROUP_SIZE_M swizzling.
+{% endif %}
+{% if generic_python %}
+DEVICE_SPECIFIC: launch and tile sizes measured on this device.
+{% elif device_type == "xpu" %}
+XPU_SPECIFIC: tile sizes and num_warps autotuned on this device, GROUP_SIZE_M swizzling.
   GRF MODE: grf_mode is a compiler option, NOT a triton.Config() kwarg.
   Declare it as tl.constexpr in the kernel signature:
     grf_mode: tl.constexpr  (values: "default", "128", "256", "auto")
   Use "auto" — it automatically selects 256-GRF when register spill > 1000 bytes.
   256-GRF requires num_warps <= 32 (halved thread occupancy).
 {% elif device_type == "cuda" %}
-DEVICE_SPECIFIC (CUDA): BLOCK_M={{ defaults.BLOCK_M }}, BLOCK_N={{ defaults.BLOCK_N }}, BLOCK_K={{ defaults.BLOCK_K }}, num_warps={{ defaults.num_warps }}.
+DEVICE_SPECIFIC (CUDA): tile sizes and num_warps autotuned on this device.
   Use shared memory for reductions. Consider warp-level primitives.
   Do NOT use tl.extra.intel.libdevice.
 {% else %}
-DEVICE_SPECIFIC: BLOCK_M={{ defaults.BLOCK_M }}, BLOCK_N={{ defaults.BLOCK_N }}, BLOCK_K={{ defaults.BLOCK_K }}, num_warps={{ defaults.num_warps }}.
+DEVICE_SPECIFIC: tile sizes and num_warps autotuned on this device.
 {% endif %}
+{% if "persistent_kernel" in stages %}
 PERSISTENT_KERNEL: persistent kernel pattern, tune NUM_PROGS.
+{% endif %}
 DISCOVERY: apply the open-ended optimization described in the issues field.
   This is a novel optimization not covered by standard stages. Follow the
   proposal exactly, preserving all numerical equivalences.
 
 === CODE REQUIREMENTS ===
+{% if generic_python %}
+- Include ALL imports, the {{ dsl_name }} kernel source and its launch, Model class
+- NEVER replace the kernels with torch.matmul, torch.mm, torch.bmm,
+  or any vendor library (oneDNN, cuBLAS, MKL). Keep all original kernels.
+{% else %}
 - Include ALL imports, @triton.jit decorator, kernel function, Model class
 - num_warps must be power of 2; block sizes must be powers of 2
 - NEVER replace @triton.jit kernels with torch.matmul, torch.mm, torch.bmm,
   or any vendor library (oneDNN, cuBLAS, MKL). Keep all original Triton kernels.
+{% endif %}
 {% if device_type == "xpu" %}
+{% if not generic_python %}
 - Use tl.extra.intel.libdevice for exp2/sigmoid operations
+{% endif %}
 - Avoid .cpu() returns — output must stay on XPU
 {% endif %}

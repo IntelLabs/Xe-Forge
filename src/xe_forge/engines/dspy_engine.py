@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 
 from xe_forge.config import Config
-from xe_forge.core.profiler import XPUProfiler
+from xe_forge.core.profiler import UnitraceXPUProfiler, XPUProfiler
 from xe_forge.core.trial_manager import TrialManager
 from xe_forge.engines.base import BaseEngine
 from xe_forge.models import OptimizationResult, OptimizationStage
@@ -25,14 +25,16 @@ class DSPyEngine(BaseEngine):
         if config.trial.enabled:
             self.trial_manager = TrialManager(config.trial.trials_dir)
 
-        self.profiler: XPUProfiler | None = None
-        if config.profiler.vtune_enabled:
-            self.profiler = XPUProfiler(config.profiler.vtune_bin)
-            if not self.profiler.available():
-                logger.warning(
-                    "VTune not found at '%s', profiling disabled.", config.profiler.vtune_bin
-                )
-                self.profiler = None
+        # unitrace when asked for, else VTune: the same profile() the pipeline calls.
+        self.profiler: XPUProfiler | UnitraceXPUProfiler | None = None
+        p = config.profiler
+        if p.unitrace_enabled:
+            self.profiler, binary = UnitraceXPUProfiler(p.unitrace_bin), p.unitrace_bin
+        elif p.vtune_enabled:
+            self.profiler, binary = XPUProfiler(p.vtune_bin), p.vtune_bin
+        if self.profiler is not None and not self.profiler.available():
+            logger.warning("%s not found, profiling disabled.", binary)
+            self.profiler = None
 
     def optimize(
         self,

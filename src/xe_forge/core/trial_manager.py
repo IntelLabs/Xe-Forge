@@ -16,6 +16,16 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+PROFILE_ATTEMPTS = 2
+
+
+def profile_final(profile: dict) -> bool:
+    """Collected, or failed on every allowed attempt."""
+    return profile.get("status") == "collected" or (
+        profile.get("status") == "failed" and profile.get("attempts", 1) >= PROFILE_ATTEMPTS
+    )
+
+
 def _digest(path: Path) -> str | None:
     """sha256 of a trial's sources: one file, or every file under a trial directory."""
     if path.is_file():
@@ -227,9 +237,14 @@ class TrialManager:
     def recorded_profile(
         self, kernel_name: str, trial_id: str, group: str, source_hash: str
     ) -> dict | None:
-        """The attempt already recorded for *group* on this exact source, if any."""
+        """The attempt already recorded for *group* on this exact source, if any.
+
+        A failure is final only after ``PROFILE_ATTEMPTS``; until then it is re-collected.
+        """
         profile = self._load_state(kernel_name)["trials"][trial_id].get("profiles", {}).get(group)
-        return profile if profile and profile.get("source_sha256") == source_hash else None
+        if profile and profile.get("source_sha256") == source_hash and profile_final(profile):
+            return profile
+        return None
 
     def record_profile(
         self,
@@ -246,9 +261,12 @@ class TrialManager:
         trial = state["trials"][trial_id]
         if _digest(self._trial_dir(kernel_name) / trial["file"]) != source_hash:
             raise ValueError("Saved trial changed during profiling")
-        trial.setdefault("profiles", {})[group] = {
+        previous = trial.setdefault("profiles", {}).get(group) or {}
+        same = previous.get("source_sha256") == source_hash and previous.get("status") == "failed"
+        trial["profiles"][group] = {
             "source_sha256": source_hash,
             "status": "failed" if error else "collected",
+            "attempts": previous.get("attempts", 1) + 1 if same else 1,
             "artifacts_dir": artifacts_dir,
             "error": error,
             "warnings": warnings,
@@ -272,7 +290,7 @@ class TrialManager:
                 if (
                     digest is None
                     or profile.get("source_sha256") != digest
-                    or profile.get("status") not in ("collected", "failed")
+                    or not profile_final(profile)
                 ):
                     missing.append(f"{trial_id}:{group}")
         if missing:
@@ -280,7 +298,8 @@ class TrialManager:
                 "Required profiling attempts missing or stale: "
                 + ", ".join(missing)
                 + ". Run xe-forge-skill profile <trial_file> --kernel-name <name> --trial-id <id>"
-                " on the saved trial; a failed attempt is recorded and counts, do not fabricate results."
+                " on the saved trial; a failed collection is re-run once, then it is recorded as final. "
+                "Do not fabricate results."
             )
 
     def record_result(

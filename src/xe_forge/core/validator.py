@@ -266,7 +266,7 @@ class KernelValidator:
                     ValidationIssue(
                         "float64_usage",
                         "warning",
-                        "float64 detected — 5-10x slower on XPU. Use float32 unless required.",
+                        "float64 detected — far slower than float32 on GPUs. Use float32 unless required.",
                         line=i + 1,
                     )
                 )

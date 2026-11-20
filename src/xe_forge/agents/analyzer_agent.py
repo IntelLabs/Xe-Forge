@@ -16,10 +16,11 @@ _DSL_NAMES: dict[str, str] = {
     "gluon": "Gluon",
     "sycl": "SYCL/Sycl-tla",
     "cuda": "CUDA C++",
+    "opencl": "OpenCL C",
 }
 
 _DEVICE_DESCS: dict[str, str] = {
-    "xpu": "Intel XPU (Data Center GPU Max / Ponte Vecchio)",
+    "xpu": "Intel XPU",
     "cuda": "NVIDIA CUDA GPU",
     "cpu": "CPU",
 }
@@ -32,8 +33,8 @@ _DEVICE_DESCS: dict[str, str] = {
 
 
 _SYCL_DESCRIPTIONS: dict[IssueType, str] = {
-    IssueType.SUBOPTIMAL_TILE_SIZE: "TileShape dimensions suboptimal for Intel BMG — try Shape<_256,_256,_32> or Shape<_128,_128,_64>",
-    IssueType.SUBOPTIMAL_WARPS: "SubgroupSize in MMA Atom suboptimal — try XE_DPAS_TT<8, float, bfloat16_t>",
+    IssueType.SUBOPTIMAL_TILE_SIZE: "TileShape dimensions suboptimal for this device and these shapes",
+    IssueType.SUBOPTIMAL_WARPS: "SubgroupSize in MMA Atom suboptimal for this device",
     IssueType.HIGH_REGISTER_PRESSURE: "Too many PipelineStages or large TileShape causing register spill",
     IssueType.CACHE_EVICTION_RISK: "PipelineStages too high or TileShape too large for L1/L2",
     IssueType.UNCOALESCED_ACCESS: "Memory layout mismatch (RowMajor vs ColumnMajor) causing non-coalesced access",
@@ -77,6 +78,32 @@ _SYCL_SKIP_ISSUES: set[IssueType] = {
     IssueType.DEVICE_HOST_SYNC,
     IssueType.NON_CONTIGUOUS_INPUT,
     IssueType.TRANSPOSE_IN_LOOP,
+}
+
+_OPENCL_DESCRIPTIONS: dict[IssueType, str] = {
+    IssueType.MISSING_BOUNDARY_CHECK: "global loads/stores not guarded for sizes that are not a multiple of the work-group tile",
+    IssueType.UNCOALESCED_ACCESS: "adjacent work-items do not read adjacent addresses — kills bandwidth",
+    IssueType.SUBOPTIMAL_TILE_SIZE: "work-group tile too small or too large for these shapes on this device",
+    IssueType.SUBOPTIMAL_WARPS: "local work size or sub-group size suboptimal for this device",
+    IssueType.NO_SWIZZLING: "work-group order gives poor L2 reuse across neighbouring tiles",
+    IssueType.SIGMOID_SLOW_EXP: "sigmoid uses exp — exp2 or native_exp may be faster",
+    IssueType.HIGH_REGISTER_PRESSURE: "too many live values per work-item — reduces occupancy",
+    IssueType.CACHE_EVICTION_RISK: "local memory or tile size too large for the caches",
+}
+
+# Triton language APIs and Triton launch options with no OpenCL C counterpart.
+_OPENCL_SKIP_ISSUES: set[IssueType] = {
+    IssueType.MULTIPLE_OF_MISUSE,
+    IssueType.MANUAL_POINTER_ARITHMETIC,
+    IssueType.DEPRECATED_BLOCK_POINTERS,
+    IssueType.MISSING_TENSOR_DESCRIPTORS,
+    IssueType.MISSING_TMA,
+    IssueType.MISSING_GRF_MODE,
+    IssueType.MISSING_AUTOTUNE,
+    IssueType.SUBOPTIMAL_AUTOTUNE_CONFIGS,
+    IssueType.AUTOTUNE_KEY_MISSING,
+    IssueType.AUTOTUNE_DUPLICATE_PARAMS,
+    IssueType.PERSISTENT_NUM_PROGS_HARDCODED,
 }
 
 
@@ -123,7 +150,7 @@ def _build_issue_categories(dsl: DSL = DSL.TRITON) -> str:
         IssueType.GEMM_SIMPLIFICATION: "GEMM has exploitable structure (symmetric, triangular, etc.)",
         IssueType.REDUCTION_TREE_SUBOPTIMAL: "naive serial reduction vs tree reduction",
         # DTYPE
-        IssueType.DTYPE_FLOAT64: "float64 accumulator or I/O — 16-32x slower than float32 on XPU",
+        IssueType.DTYPE_FLOAT64: "float64 accumulator or I/O — far slower than float32 on GPUs",
         IssueType.DTYPE_PRECISION: "unnecessary precision (e.g. float32 where float16 suffices)",
         IssueType.DTYPE_INPUT_CONVERSION: "redundant or wrong dtype conversion in hot path",
         # FUSION
@@ -188,9 +215,17 @@ def _build_issue_categories(dsl: DSL = DSL.TRITON) -> str:
     if dsl == DSL.SYCL:
         skip = _SYCL_SKIP_ISSUES
         desc_overrides = _SYCL_DESCRIPTIONS
+    elif dsl == DSL.OPENCL:
+        skip = _OPENCL_SKIP_ISSUES
+        desc_overrides = _OPENCL_DESCRIPTIONS
     else:
         skip = set()
         desc_overrides = {}
+
+    from xe_forge.dsl_registry import get_stages_for_dsl
+
+    supported = set(get_stages_for_dsl(dsl))
+    stage_order = [s for s in stage_order if s in supported]
 
     # Group by stage
     by_stage: dict[OptimizationStage, list[IssueType]] = {s: [] for s in stage_order}
@@ -218,20 +253,15 @@ def _build_issue_categories(dsl: DSL = DSL.TRITON) -> str:
     return "\n".join(lines)
 
 
-# Build once at import time — cheap, just string formatting
-_ISSUE_CATEGORIES_BLOCK = _build_issue_categories(DSL.TRITON)
-_SYCL_ISSUE_CATEGORIES_BLOCK = _build_issue_categories(DSL.SYCL)
-
-
 # ---------------------------------------------------------------------------
 # DSPy Signature
 # ---------------------------------------------------------------------------
 
 
 class AnalysisSignature(dspy.Signature):
-    """Analyze a Triton kernel for optimization opportunities across all categories."""
+    """Analyze a kernel for optimization opportunities across all categories."""
 
-    kernel_code: dspy.Code["python"] = dspy.InputField(desc="Triton kernel source code to analyze.")
+    kernel_code: dspy.Code["python"] = dspy.InputField(desc="Kernel source code to analyze.")
     reference_code: str = dspy.InputField(
         desc="Original PyTorch implementation. May be empty if not available."
     )
@@ -241,7 +271,7 @@ class AnalysisSignature(dspy.Signature):
 
     knowledge_base_context: str = dspy.InputField(
         desc="Critical constraints from the knowledge base that commonly manifest "
-        "as bugs in Triton/XPU kernels. Use these to guide detection: if a "
+        "as bugs in kernels on this device. Use these to guide detection: if a "
         "constraint is violated in the code, flag the corresponding issue. "
         "Empty string if KB is disabled."
     )
@@ -292,9 +322,7 @@ class AnalyzerAgent:
 
         try:
             cfg = get_config()
-            issue_block = (
-                _SYCL_ISSUE_CATEGORIES_BLOCK if self.dsl == DSL.SYCL else _ISSUE_CATEGORIES_BLOCK
-            )
+            issue_block = _build_issue_categories(self.dsl)
             template_instructions = render_signature_instructions(
                 "analysis_signature",
                 dsl=cfg.device_config.dsl,
@@ -303,7 +331,6 @@ class AnalyzerAgent:
                 ),
                 device_type=cfg.device_config.device,
                 device_description=_DEVICE_DESCS.get(cfg.device_config.device, "Intel XPU"),
-                defaults={},
                 issue_categories_block=issue_block,
             )
             sig = sig.append_instructions(template_instructions)

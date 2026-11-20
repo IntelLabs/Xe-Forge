@@ -8,6 +8,7 @@ Parses YAML spec files to get:
 - Per-variant correctness tolerances (rtol, atol)
 """
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
@@ -88,6 +89,14 @@ class KernelSpec:
     # Optional default variant declared in the YAML spec.
     default_variant: str | None = None
 
+    # Optional {variant: weight}, summing to 1: the shapes a trial is scored on together,
+    # each by the share of the kernel's time it stands for (see skills/benchmark.py).
+    weights: dict[str, float] = field(default_factory=dict)
+
+    # Optional {variant: us}: the kernel's own device time per call at that shape, as the
+    # model ran it (the frontend's capture); the baseline is checked against it.
+    captured_us: dict[str, float] = field(default_factory=dict)
+
     # Base-prefix → attribute name for the four standard families.
     _VARIANT_MAP_KEYS: ClassVar[dict[str, str]] = {
         "ci": "ci",
@@ -116,19 +125,19 @@ class KernelSpec:
 
         return []
 
-    def resolve_variant(self, cli_variant: str | None = None) -> str:
+    def resolve_variant(self, cli_variant: str | None = None, fallback: str = "bench-gpu") -> str:
         """Resolve which variant to use.
 
         Priority order:
           1. Explicit CLI ``--variant`` value (when not None).
           2. ``default_variant`` declared in the YAML spec.
-          3. Falls back to ``bench-gpu``.
+          3. ``fallback``: ``bench-gpu``, or the DSL's own family (``bench-xpu`` for sycl).
         """
         if cli_variant is not None:
             return cli_variant
         if self.default_variant is not None:
             return self.default_variant
-        return "bench-gpu"
+        return fallback
 
     def get_variant(self, variant_type: str = "bench-gpu") -> VariantSpec | None:
         """Get first variant of specified type."""
@@ -420,7 +429,7 @@ def parse_spec(data: dict) -> KernelSpec:
     }
 
     # Non-variant scalar/dict keys that should never be treated as variants.
-    NON_VARIANT_KEYS = {SpecKey.INS, SpecKey.INITS, "default_variant"}
+    NON_VARIANT_KEYS = {SpecKey.INS, SpecKey.INITS, "default_variant", "weights", "captured_us"}
 
     ci: list[VariantSpec] = []
     bench_cpu: list[VariantSpec] = []
@@ -435,6 +444,11 @@ def parse_spec(data: dict) -> KernelSpec:
             continue  # skip scalar keys
 
         parsed = [_parse_variant_entry(vd) for vd in value]
+        if len(parsed) > 1:
+            # Every tool reads entry 0; the rest would be silently untimed.
+            logging.getLogger(__name__).warning(
+                "spec variant %r has %d entries and only the first is used; give each its "
+                "own variant key (%s-1, %s-2, ...)", key, len(parsed), key, key)  # fmt: skip
 
         if key in BASE_FAMILY_KEYS:
             # Standard family key — populate both the attribute and named_variants
@@ -463,7 +477,29 @@ def parse_spec(data: dict) -> KernelSpec:
         bench_xpu=bench_xpu,
         _named_variants=named_variants,
         default_variant=default_variant,
+        weights=_numbers(data, "weights"),
+        captured_us=_numbers(data, "captured_us"),
     )
+
+
+def _numbers(data: dict, key: str) -> dict[str, float]:
+    """``data[key]`` as {name: number}, {} when absent or null; ValueError unless it is a
+    mapping of numbers; ``captured_us`` times must also be finite and above 0 (weights are
+    checked where they are scored)."""
+    import math
+
+    got = data.get(key)
+    if got is None:
+        return {}
+    if not isinstance(got, dict):
+        raise ValueError(f"spec {key} must map variant names to numbers, not {got!r}")
+    bad = {k: v for k, v in got.items()
+           if isinstance(v, bool) or not isinstance(v, int | float)
+           or (key == "captured_us" and not (math.isfinite(v) and v > 0))}  # fmt: skip
+    if bad:
+        what = "finite and above 0" if key == "captured_us" else "numbers"
+        raise ValueError(f"spec {key} must be {what}: {bad}")
+    return {str(k): float(v) for k, v in got.items()}
 
 
 def get_test_config_from_spec(

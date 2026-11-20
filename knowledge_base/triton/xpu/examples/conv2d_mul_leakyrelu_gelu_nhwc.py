@@ -1,5 +1,5 @@
 """
-Conv2d(64->64, 3x3) + multiply + LeakyReLU + GELU on Intel Arc B580 (XPU)
+Conv2d(64->64, 3x3) + multiply + LeakyReLU + GELU on Intel XPU
 
 Optimization patterns applied (cumulative):
   1. CHANNELS-LAST (NHWC) layout — model and input converted once at setup.
@@ -42,6 +42,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import triton
 import triton.language as tl
+
+_EUS = torch.xpu.get_device_properties().gpu_eu_count
 
 
 # ============================================================
@@ -318,22 +320,22 @@ def _fused_conv_spatial_tiled(
 @triton.autotune(
     configs=[
         # C_out=64 -> BLOCK_N=64 always.
-        # 160 EUs — try 1x and 2x occupancy
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 160}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 4, 'NUM_SMS': 160}, num_warps=8, num_stages=3),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 160}, num_warps=4, num_stages=4),
-        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 160}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 4, 'NUM_SMS': 160}, num_warps=8, num_stages=3),
-        triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 160}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 160}, num_warps=4, num_stages=4),
+        # one, two and four work-groups per EU
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': _EUS}, num_warps=8, num_stages=2),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 4, 'NUM_SMS': _EUS}, num_warps=8, num_stages=3),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': _EUS}, num_warps=4, num_stages=4),
+        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': _EUS}, num_warps=8, num_stages=2),
+        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 4, 'NUM_SMS': _EUS}, num_warps=8, num_stages=3),
+        triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': _EUS}, num_warps=4, num_stages=2),
+        triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': _EUS}, num_warps=4, num_stages=4),
         # 2x occupancy — smaller WGs, more concurrent to hide mem latency
-        triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 320}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 320}, num_warps=4, num_stages=3),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 320}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 320}, num_warps=4, num_stages=3),
+        triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 2 * _EUS}, num_warps=4, num_stages=2),
+        triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 2 * _EUS}, num_warps=4, num_stages=3),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 2 * _EUS}, num_warps=4, num_stages=2),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 2 * _EUS}, num_warps=4, num_stages=3),
         # 4x occupancy
-        triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 640}, num_warps=2, num_stages=2),
-        triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 640}, num_warps=4, num_stages=2),
+        triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 4 * _EUS}, num_warps=2, num_stages=2),
+        triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 4 * _EUS}, num_warps=4, num_stages=2),
         # Non-persistent: NUM_SMS >= num_tiles (1 tile per WG, HW schedules everything)
         triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 65536}, num_warps=8, num_stages=2),
         triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 65536}, num_warps=4, num_stages=3),
@@ -522,16 +524,16 @@ def _im2col_nhwc_kernel(
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 160}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 160}, num_warps=8, num_stages=3),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 4, 'NUM_SMS': 160}, num_warps=8, num_stages=4),
-        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 160}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 4, 'NUM_SMS': 160}, num_warps=8, num_stages=3),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 128, 'GROUP_M': 8, 'NUM_SMS': 160}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 128, 'GROUP_M': 8, 'NUM_SMS': 160}, num_warps=8, num_stages=3),
-        triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 160}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64, 'BLOCK_K': 128, 'GROUP_M': 8, 'NUM_SMS': 160}, num_warps=4, num_stages=3),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 320}, num_warps=4, num_stages=2),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': _EUS}, num_warps=8, num_stages=2),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': _EUS}, num_warps=8, num_stages=3),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 4, 'NUM_SMS': _EUS}, num_warps=8, num_stages=4),
+        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': _EUS}, num_warps=8, num_stages=2),
+        triton.Config({'BLOCK_M': 256, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 4, 'NUM_SMS': _EUS}, num_warps=8, num_stages=3),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 128, 'GROUP_M': 8, 'NUM_SMS': _EUS}, num_warps=8, num_stages=2),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 128, 'GROUP_M': 8, 'NUM_SMS': _EUS}, num_warps=8, num_stages=3),
+        triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': _EUS}, num_warps=4, num_stages=2),
+        triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64, 'BLOCK_K': 128, 'GROUP_M': 8, 'NUM_SMS': _EUS}, num_warps=4, num_stages=3),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64, 'GROUP_M': 8, 'NUM_SMS': 2 * _EUS}, num_warps=4, num_stages=2),
     ],
     key=['M_total', 'K_TOTAL', 'C_out'],
 )
@@ -979,7 +981,7 @@ def main():
     ]
 
     print(f"\n{'='*80}")
-    print(f"  Roofline Analysis -- Intel Arc B580 (110 TF/s fp16 peak, 456 GB/s)")
+    print(f"  Roofline Analysis -- {torch.xpu.get_device_name()}")
     print(f"{'='*80}")
     print(f"  FLOPs:        {flops/1e9:.2f} GFLOP")
     print(f"  Data moved:   {data_bytes/1e6:.1f} MB")

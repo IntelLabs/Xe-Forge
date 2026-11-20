@@ -118,7 +118,6 @@ class CoordinatorAgent(dspy.Module):
             from xe_forge.prompts import render_signature_instructions
             from xe_forge.prompts.device_prompts import (
                 _DEVICE_DESCRIPTIONS,
-                _DEVICE_TUNING_DEFAULTS,
                 _DSL_NAMES,
             )
 
@@ -131,7 +130,6 @@ class CoordinatorAgent(dspy.Module):
                 ),
                 device_type=cfg.device_config.device,
                 device_description=_DEVICE_DESCRIPTIONS.get(cfg.device_config.device, "Intel XPU"),
-                defaults=_DEVICE_TUNING_DEFAULTS.get(cfg.device_config.device, {}),
             )
             sig = sig.append_instructions(template_text)
         except Exception as e:

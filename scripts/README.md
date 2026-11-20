@@ -67,46 +67,35 @@ Example (`sample_roofline.csv`) — paired baseline/optimized points linked by `
 | Original | A=32 S=4k | fa-32-4k | 1500 | 18 |
 | Optimized | A=32 S=4k | fa-32-4k | 1500 | 71 |
 
-### Hardware presets
+### The roof
 
-The roof is set by a preset (or overridden with `--peak-tflops` /
-`--peak-bandwidth`). Run `--list-hardware` to print the table:
-
-| Preset | Device | Peak TFLOPS (FP16/BF16) | Peak BW (GB/s) |
-|--------|--------|-------------------------|----------------|
-| `arc-pro-b70` | Intel Arc Pro B70 | 160 | 608 |
-| `arc-b580` | Intel Arc B580 | 117 | 456 |
-| `max-1550` | Intel Data Center GPU Max 1550 (PVC) | 839 | 3276 |
-| `max-1100` | Intel Data Center GPU Max 1100 (PVC) | 362 | 1228 |
-| `flex-170` | Intel Data Center GPU Flex 170 | 137 | 576 |
+The roof is the device's peak half-precision throughput and DRAM bandwidth as
+`xe-forge calibrate` measured them (`--calibration calibration.json`), or given
+with `--peak-tflops` / `--peak-bandwidth` (which also override the calibration).
 
 ### Options
 
 | Flag | Effect |
 |------|--------|
-| `--hardware <preset>` | use a built-in roof (see table above) |
-| `--peak-tflops` / `--peak-bandwidth` | override the roof explicitly (or partially override a preset) |
+| `--calibration <file>` | the roof `xe-forge calibrate` measured on the device |
+| `--peak-tflops` / `--peak-bandwidth` | give the roof explicitly (or override part of the calibration) |
 | `--connect` | draw a baseline → optimized arrow between points sharing a `pair` id |
 | `--annotate` | label each point inline (best for a handful of points) |
 | `--key` | number each point and list labels in a side key (best for many points) |
 | `--series-order a,b,c` | fix the legend/color order |
 | `--dpi N` | output resolution (default 200) |
-| `--list-hardware` | print the preset table and exit |
 
 ### Usage
 
 ```bash
-# plot with the Arc Pro B70 preset roof
+# plot under the roof measured on this device
 uv run scripts/roofline.py scripts/sample_roofline.csv \
-    --hardware arc-pro-b70 --connect --annotate \
+    --calibration calibration.json --connect --annotate \
     --title "Roofline — FlashAttention Fwd" -o plots/fa.png
 
-# list the built-in hardware presets
-uv run scripts/roofline.py --list-hardware
-
-# override the roof explicitly (skips the preset table)
+# give the roof explicitly
 uv run scripts/roofline.py results.csv \
-    --peak-tflops 160 --peak-bandwidth 608 -o plots/gemm.png
+    --peak-tflops <TFLOPS> --peak-bandwidth <GB/s> -o plots/gemm.png
 ```
 
 ---
@@ -166,7 +155,7 @@ read from the example spec YAMLs.
 
 ```bash
 uv run scripts/benchmark_to_roofline_csv.py benchmark.csv -o roofline_input.csv
-uv run scripts/roofline.py roofline_input.csv --hardware arc-pro-b70 \
+uv run scripts/roofline.py roofline_input.csv --calibration calibration.json \
     --connect --key --title "Roofline (baseline vs Triton)" \
     -o plots/roofline.png
 ```
@@ -208,6 +197,6 @@ Output CSV:
 
 ```bash
 uv run scripts/spec_to_roofline_csv.py examples/vllm/2_FusedMoE.yaml -o moe.csv
-uv run scripts/roofline.py moe.csv --hardware arc-pro-b70 --annotate \
+uv run scripts/roofline.py moe.csv --calibration calibration.json --annotate \
     --title "Roofline — Fused MoE (theoretical ceilings)" -o plots/moe.png
 ```

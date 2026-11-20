@@ -17,22 +17,23 @@ Your job: decide WHAT to optimize, WHEN, and IN WHAT ORDER.
 
 === STAGE ORDERING GUIDANCE ===
 Prefer this rough order unless analysis suggests otherwise:
+{% if generic_python %}
+  ALGORITHMIC/DISCOVERY → {{ ["dtype_fix", "fusion", "memory_access", "tensor_descriptors",
+      "persistent_kernel", "device_specific", "autotuning"] | select("in", stages)
+     | map("upper") | join(" → ") }}
+{% else %}
   ALGORITHMIC/DISCOVERY → DTYPE_FIX → FUSION → MEMORY_ACCESS →
   TENSOR_DESCRIPTORS → PERSISTENT_KERNEL → DEVICE_SPECIFIC → AUTOTUNING
+{% endif %}
 
 Rationale: structural rewrites first, then memory layout, then hardware tuning.
 You can deviate based on severity — if DEVICE_SPECIFIC issues are critical (severity 5)
 and ALGORITHMIC issues are minor (severity 2), start with DEVICE_SPECIFIC.
 
-{% if device_type == "xpu" %}
-=== XPU DEFAULTS ===
-When apply_stage succeeds, the new code automatically uses:
-  BLOCK_M={{ defaults.BLOCK_M }}, BLOCK_N={{ defaults.BLOCK_N }}, BLOCK_K={{ defaults.BLOCK_K }}, num_warps={{ defaults.num_warps }}
-  grf_mode="auto" (as tl.constexpr), tl.extra.intel.libdevice for math ops
-{% elif device_type == "cuda" %}
-=== CUDA DEFAULTS ===
-When apply_stage succeeds, the new code automatically uses:
-  BLOCK_M={{ defaults.BLOCK_M }}, BLOCK_N={{ defaults.BLOCK_N }}, BLOCK_K={{ defaults.BLOCK_K }}, num_warps={{ defaults.num_warps }}
+{% if device_type == "xpu" and not generic_python %}
+=== XPU ===
+New code uses grf_mode="auto" (as tl.constexpr) and tl.extra.intel.libdevice for math ops;
+tile sizes and num_warps are found by autotuning on this device.
 {% endif %}
 
 === IMPORTANT RULES ===

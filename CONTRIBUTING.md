@@ -2,7 +2,7 @@
 
 ### License
 
-<PROJECT NAME> is licensed under the terms in [LICENSE]<link to license file in repo>. By contributing to the project, you agree to the license and copyright terms therein and release your contribution under these terms.
+Xe-Forge is licensed under the terms in [LICENSE](LICENSE) (Apache License 2.0). By contributing to the project, you agree to the license and copyright terms therein and release your contribution under these terms.
 
 ### Sign your work
 
@@ -56,6 +56,15 @@ Use your real name (sorry, no pseudonyms or anonymous contributions.)
 If you set your `user.name` and `user.email` git configs, you can sign your
 commit automatically with `git commit -s`.
 
+### Run the tests
+
+The tests need torch, so sync with an extra (`intel` or `nvidia`):
+
+```bash
+uv sync --extra intel
+uv run pytest -q tests/
+```
+
 ### Run pre-commit locally
 
 This repository uses pre-commit to run Ruff checks before commits.
@@ -77,3 +86,10 @@ Current hooks:
 
 - `ruff check --fix`
 - `ruff format`
+
+To run Ruff without pre-commit:
+
+```bash
+uv run ruff check .
+uv run ruff format --check .
+```

@@ -1,6 +1,7 @@
 """Tests for profiler workload preparation and unitrace report parsing."""
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,6 +9,28 @@ import pytest
 import torch
 
 from xe_forge.core.profiler import ProfileMetrics, ProfileResult, UnitraceXPUProfiler, XPUProfiler
+from xe_forge.core.profiler import _run_tree as real_run_tree  # before the fixture swaps it
+
+
+@pytest.fixture(autouse=True)
+def _collection_via_run(monkeypatch):
+    """Route the collector's process-group runner through subprocess.run, which tests fake."""
+    import subprocess
+
+    from xe_forge.core import profiler
+
+    def run_tree(command, *, stdout, stderr, env, timeout):
+        try:
+            proc = subprocess.run(command, capture_output=True, text=True, env=env, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            stderr.write_text((exc.stderr or b"").decode(errors="replace"))
+            raise
+        stdout.write_text(proc.stdout or "")
+        stderr.write_text(proc.stderr or "")
+        return proc
+
+    monkeypatch.setattr(profiler, "_run_tree", run_tree)
+
 
 # unitrace right-aligns the "Kernel" column to the width of the longest name
 # in the table by padding with spaces *before* the first comma (no comma
@@ -69,6 +92,208 @@ COMPUTE_REPORT = """\
  "gemm_kernel", 1, 100, 200, 10, 20
  "gemm_kernel", 1, 300, 600, 30, 60
 """
+
+
+# unitrace 2.4.x writes each launch as a block: a unit-less identity header and row,
+# then the block's own metric header and samples.
+BLOCK_COMPUTE_REPORT = """\
+=== Device #0 Metrics ===
+
+Kernel, GlobalInstanceId
+"gemm_kernel", 1
+GpuTime[ns], GPU_MEMORY_BYTE_READ[bytes], GPU_MEMORY_BYTE_WRITE[bytes], XVE_ACTIVE[%]
+100, 200, 10, 20
+300, 600, 30, 60
+"""
+
+BLOCK_STALL_REPORT = """\
+=== Device #0 Metrics ===
+
+Kernel,Pid,KernelId
+"gemm_kernel",7,1
+Source,Offset,Instruction,Dependency,Active[Events],DistStall[Events],OtherStall[Events]
+"NA",0x000000c0,"add (1|M0) r1 r2 0x0:ud {I@1,$2}","NA",2,1,0
+"""
+
+
+FLAT_HEAD = ("Kernel, GlobalInstanceId, GpuTime[ns], GPU_MEMORY_BYTE_READ[bytes], "
+             "GPU_MEMORY_BYTE_WRITE[bytes], XVE_ACTIVE[%]\n")  # fmt: skip
+BLOCK_HEAD = (
+    "GpuTime[ns], GPU_MEMORY_BYTE_READ[bytes], GPU_MEMORY_BYTE_WRITE[bytes], XVE_ACTIVE[%]\n"
+)
+
+
+@pytest.mark.parametrize("missing", ["empty", "text", "short"])
+@pytest.mark.parametrize("layout", ["flat", "block"])
+def test_a_sample_with_every_value_missing_is_a_sample_not_a_header(layout, missing):
+    from xe_forge.core.compute_metrics import summarize_compute_metrics
+
+    if layout == "flat":
+        bad = {"empty": "gemm_kernel, , , , ,", "text": "gemm_kernel, , unknown, -, -, -",
+               "short": "gemm_kernel, 1, 300, 6"}[missing]  # fmt: skip
+        report = (FLAT_HEAD + "gemm_kernel, 1, 100, 200, 10, 20\n" + bad + "\n"
+                  + "other_kernel, 2, 50, 100, 5, 40\n")  # fmt: skip
+    else:
+        bad = {"empty": ", , ,", "text": "-, -, -, -", "short": "300, 6"}[missing]
+        report = ("Kernel, GlobalInstanceId\ngemm_kernel, 1\n" + BLOCK_HEAD + "100, 200, 10, 20\n"
+                  + bad + "\n" + "300, 600, 30, 60\n")  # fmt: skip
+    records = {r["kernel"]: r for r in summarize_compute_metrics(report.splitlines())["records"]}
+    gemm = records["gemm_kernel"]
+    assert gemm["samples"] == (2 if layout == "flat" else 3)
+    # A short row's time is before its cut, so known; the values from the cut on are not.
+    short_time = 400.0 if layout == "flat" else 700.0
+    assert gemm["time_ns"] == (short_time if missing == "short" else None)
+    assert set(gemm["counters"].values()) == {None}
+    if layout == "flat":
+        if missing != "short":
+            assert gemm["launches"] is None  # one sample has no launch id
+        # The rows after it are still read against the real header.
+        assert records["other_kernel"]["time_ns"] == 50.0
+        assert records["other_kernel"]["counters"]["GPU_MEMORY_BYTE_READ[bytes]"] == 100.0
+
+
+def test_metric_rows_reads_headers_by_position():
+    from xe_forge.core.compute_metrics import metric_rows, summarize_compute_metrics
+
+    # A repeated header is not a sample; a row longer than the header has no placeable value.
+    flat = FLAT_HEAD + "a, 1, 10, 1, 1, 1\n" + FLAT_HEAD + "a, 2, 10, 1, 1, 1, 9\n"
+    rows = [r for _, r in metric_rows(flat.splitlines())]
+    assert len(rows) == 2 and set(rows[1].values()) == {""}
+    # Each launch block's identity header starts a new block, a trailing comma or not.
+    blocks = ("Kernel, GlobalInstanceId,\nfirst, 1,\n" + BLOCK_HEAD + "100, 200, 10, 20\n"
+              "Kernel, GlobalInstanceId,\nsecond, 2,\n" + BLOCK_HEAD + "300, 600, 30, 60\n")  # fmt: skip
+    records = summarize_compute_metrics(blocks.splitlines())["records"]
+    assert sorted((r["kernel"], r["samples"], r["time_ns"]) for r in records) == [
+        ("first", 1, 100.0), ("second", 1, 300.0)]  # fmt: skip
+
+
+def test_a_kernel_named_kernel_under_a_flat_header_is_a_sample():
+    from xe_forge.core.compute_metrics import summarize_compute_metrics
+
+    report = FLAT_HEAD + "Kernel, 1, 100, 200, 10, 20\nb, 2, 50, 100, 5, 10\nc, 3, 50, 100, 5, 10\n"
+    records = summarize_compute_metrics(report.splitlines())["records"]
+    assert sorted((r["kernel"], r["samples"], r["time_ns"]) for r in records) == [
+        ("Kernel", 1, 100.0), ("b", 1, 50.0), ("c", 1, 50.0)]  # fmt: skip
+
+
+def test_a_stall_sample_missing_an_event_count_is_left_out_and_counted():
+    head = "Kernel, Offset, Active[Events], DistStall[Events], OtherStall[Events]\n"
+    report = head + '"gemm_kernel", 0xc0, 2, 1, 0\n"gemm_kernel", 0xd0, 5, \n'
+    stalls = UnitraceXPUProfiler()._parse_stall_csv(report)["gemm_kernel"]
+    assert stalls["total_events"] == 3.0 and stalls["incomplete_samples"] == 1
+    assert [s["ip"] for s in stalls["ip_samples"]] == ["0xc0"]
+    result = ProfileResult(source="Unitrace", primary_kernel="gemm_kernel",
+                           raw_counters={"stall_metrics": {"gemm_kernel": stalls}})  # fmt: skip
+    assert "1 more records missing an event count" in result.format_for_llm()
+
+
+def test_a_launch_block_whose_header_names_the_kernel_keeps_its_identity_rows():
+    from xe_forge.core.compute_metrics import summarize_compute_metrics
+
+    report = ("Kernel, GlobalInstanceId\nb, 1\nKernel, GpuTime[ns]\nb, 30\n"
+              "Kernel, GlobalInstanceId\nc, 2\nKernel, GpuTime[ns]\nc, 40\n")  # fmt: skip
+    records = summarize_compute_metrics(report.splitlines())["records"]
+    assert sorted((r["kernel"], r["samples"], r["time_ns"]) for r in records) == [
+        ("b", 1, 30.0), ("c", 1, 40.0)]  # fmt: skip
+
+
+def test_both_unitrace_layouts_give_the_same_metrics():
+    from xe_forge.core.compute_metrics import summarize_compute_metrics
+
+    flat, block = (summarize_compute_metrics(r.splitlines())["records"]
+                   for r in (COMPUTE_REPORT, BLOCK_COMPUTE_REPORT))  # fmt: skip
+    assert [(r["kernel"], r["launches"], r["counters"]) for r in flat] == [
+        (r["kernel"], r["launches"], r["counters"]) for r in block]  # fmt: skip
+    profiler = UnitraceXPUProfiler()
+    stalls = profiler._parse_stall_csv(BLOCK_STALL_REPORT)
+    assert list(stalls) == ["gemm_kernel"]
+    assert stalls["gemm_kernel"]["total_events"] == 3.0
+    assert stalls["gemm_kernel"]["ip_samples"][0]["ip"] == "0x000000c0"
+    assert profiler._parse_stall_csv("Something, else\n1, 2\n") == {}  # unknown: nothing
+
+
+@pytest.mark.parametrize("second_has_data", [False, True])
+def test_unitrace_rejects_and_retries_an_empty_metric_stream(
+    tmp_path, monkeypatch, second_has_data
+):
+    import subprocess
+
+    profiler = UnitraceXPUProfiler(artifacts_dir=tmp_path / "p")
+    kernel_file = tmp_path / "kernel.cpp"
+    kernel_file.write_text("source")
+    monkeypatch.setattr(profiler, "available", lambda: True)
+    monkeypatch.setattr(profiler, "_generate_runner_script", lambda *args, **kwargs: "runner")
+    collections = []
+
+    def collect(command, **kwargs):
+        if "--metric-list" in command:
+            return subprocess.CompletedProcess(command, 0, stdout="ComputeBasic", stderr="")
+        if "-o" in command:
+            collections.append(command)
+            report = Path(command[command.index("-o") + 1])
+            report.with_name(f"{report.stem}.1.txt").write_text(TIMING_REPORT)
+            header_only = COMPUTE_REPORT.splitlines()[:3]
+            data = second_has_data and len(collections) == 2
+            report.with_name(f"{report.stem}.metrics.1.txt").write_text(
+                COMPUTE_REPORT if data else "\n".join(header_only)
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", collect)
+    result = profiler.profile(kernel_file)
+    assert len(collections) == 2
+    assert len(list((tmp_path / "p").iterdir())) == 2  # each attempt keeps its artifacts
+    if second_has_data:
+        assert result.error is None
+    else:
+        assert "No ComputeBasic counters" in result.error
+
+
+def test_unitrace_library_dir_is_found_beside_the_binary(tmp_path, monkeypatch):
+    binary = tmp_path / "unitrace"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/caller")
+    profiler = UnitraceXPUProfiler(unitrace_bin=str(binary))
+    assert profiler._environment()["LD_LIBRARY_PATH"] == "/caller"
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib/libigdml.so.1").write_text("")
+    assert profiler._environment()["LD_LIBRARY_PATH"].split(":") == [
+        str(tmp_path / "lib"),
+        "/caller",
+    ]
+
+
+@pytest.mark.parametrize("rc", [0, 255])
+def test_run_tree_waits_for_a_clean_session_and_kills_a_failed_one(tmp_path, rc):
+    """A forked helper that writes after the leader exits keeps its output on rc 0; on a
+    failure, what is left is killed at once."""
+    import os
+    import time
+
+    script = f"(sleep 1; echo late > {tmp_path}/late) & echo $! > {tmp_path}/pid; exit {rc}"
+    start = time.monotonic()
+    proc = real_run_tree(["sh", "-c", script], stdout=tmp_path / "o", stderr=tmp_path / "e",
+                         env=dict(os.environ), timeout=30)  # fmt: skip
+    assert proc.returncode == rc
+    assert time.monotonic() - start < 10
+    assert (tmp_path / "late").exists() == (rc == 0)
+    time.sleep(0.2)
+    with pytest.raises(ProcessLookupError):
+        os.kill(int((tmp_path / "pid").read_text()), 0)
+
+
+def test_run_tree_kills_a_session_still_running_at_the_deadline(tmp_path):
+    import os
+    import time
+
+    script = f"sleep 60 & echo $! > {tmp_path}/pid; exit 0"
+    proc = real_run_tree(["sh", "-c", script], stdout=tmp_path / "o", stderr=tmp_path / "e",
+                         env=dict(os.environ), timeout=2)  # fmt: skip
+    assert proc.returncode == 0
+    time.sleep(0.5)  # let init reap the killed orphan
+    with pytest.raises(ProcessLookupError):
+        os.kill(int((tmp_path / "pid").read_text()), 0)
 
 
 @pytest.mark.parametrize("separator", ["\n", "\n\n"])
@@ -349,7 +574,11 @@ def test_profile_cli_forwards_parent_profile(monkeypatch, interval, metric_group
             "unitrace_bin": "unitrace",
             "parent_profile": "parent-artifacts",
             "capture_assembly": False,
-            "sampling_interval_us": interval,
+            # Omitting the flag no longer means "unset": the default is 25 us, or
+            # XE_FORGE_SAMPLING_INTERVAL_US.
+            "sampling_interval_us": interval
+            if interval is not None
+            else int(os.environ.get("XE_FORGE_SAMPLING_INTERVAL_US", 25)),
             "metric_group": metric_group,
         }
     ]
@@ -446,7 +675,6 @@ def test_resource_knowledge_base_reaches_generated_workspace(tmp_path):
         text = path.read_text()
         assert "resource_feedback.yaml" in text
         assert "compute_basic.yaml" in text
-        assert "--metric-group EuStallSampling" in text
         assert "--metric-group all" in text
         assert "--parent-profile" in text
     optimizer = (workspace / "CLAUDE.md").read_text()
@@ -503,13 +731,19 @@ def test_profile_all_records_trial_attempts_once(tmp_path, monkeypatch, availabl
         trial_id=trial,
         trials_dir=str(tmp_path / "trials"),
     )
-    for _ in range(2):
+    with pytest.raises(SystemExit):
+        run(args)
+    with pytest.raises(ValueError, match="missing or stale"):  # one failure does not satisfy it
+        manager.save_trial("k", source, strategy="kernel metric value (t1)")
+    for _ in range(2):  # the failure is re-collected once, then final
         with pytest.raises(SystemExit) as error:
             run(args)
         assert error.value.code == 1
-    assert collected == (["ComputeBasic", "EuStallSampling"] if available else [])
+    groups = ["ComputeBasic", "EuStallSampling", "EuStallSampling"]
+    assert collected == (groups if available else [])
     profiles = manager._load_state("k")["trials"][trial]["profiles"]
     assert profiles["EuStallSampling"]["status"] == "failed"
+    assert profiles["EuStallSampling"]["attempts"] == 2
     assert profiles["ComputeBasic"]["status"] == ("collected" if available else "failed")
     if available:
         assert profiles["ComputeBasic"]["artifacts_dir"] == "art-ComputeBasic"
@@ -687,7 +921,7 @@ def test_unitrace_retains_failed_collection_artifacts(tmp_path, monkeypatch, fai
     if failure == "preflight":
         assert len(commands) == 1
     elif failure == "timeout":
-        assert (artifacts / "timeout.stderr.txt").read_text() == "timeout details"
+        assert (artifacts / "unitrace.stderr.txt").read_text() == "timeout details"
         assert (artifacts / "unitrace_report.123.txt").exists()
     elif failure == "ambiguous":
         assert "Ambiguous" in result.error

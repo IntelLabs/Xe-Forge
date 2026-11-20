@@ -6,13 +6,19 @@ from __future__ import annotations
 
 import ast
 import logging
-import re
 from collections.abc import Callable
 
 import dspy
 
 from xe_forge.agents.base import Optimizer
-from xe_forge.agents.utils import SUCCESS_MESSAGE, extract_gemm_dims, verify_sycl
+from xe_forge.agents.utils import (
+    SUCCESS_MESSAGE,
+    extract_gemm_dims,
+    missing_python_kernel_part,
+    not_power_of_two,
+    verify_sycl,
+)
+from xe_forge.dsl_registry import TRITON_FAMILY
 from xe_forge.knowledge.patterns import get_stage_for_issue
 
 try:
@@ -31,13 +37,13 @@ logger = logging.getLogger(__name__)
 
 
 class OptimizationReActSignature(dspy.Signature):
-    """Apply an optimization transformation to a Triton kernel; a verification tool checks correctness."""
+    """Apply an optimization transformation to a kernel; a verification tool checks correctness."""
 
     original_code: dspy.Code["python"] = dspy.InputField(  # noqa: UP037
-        desc="Original Triton kernel code for reference"
+        desc="Original kernel code for reference"
     )
     current_code: dspy.Code["python"] = dspy.InputField(  # noqa: UP037
-        desc="Current Triton kernel code to optimize"
+        desc="Current kernel code to optimize"
     )
     stage: str = dspy.InputField(
         desc="Optimization stage to apply (e.g., dtype_fix, tensor_descriptors, device_specific)"
@@ -49,7 +55,7 @@ class OptimizationReActSignature(dspy.Signature):
     xpu_config: str = dspy.InputField(desc="Intel XPU configuration parameters")
 
     optimized_code: dspy.Code["python"] = dspy.OutputField(  # noqa: UP037
-        desc="Complete optimized Triton kernel code. Must include all imports, decorators, kernel function, and Model class."
+        desc="Complete optimized kernel code. Must include all imports, decorators, kernel function, and Model class."
     )
 
 
@@ -72,7 +78,7 @@ class SyclOptimizationReActSignature(dspy.Signature):
 
 class OptimizerReActAgent(Optimizer):
     """
-    Agent that applies optimization transformations to Triton kernels using ReAct.
+    Agent that applies optimization transformations to kernels using ReAct.
 
     We use existing dspy.ReAct implementation.
     """
@@ -128,7 +134,7 @@ class OptimizerReActAgent(Optimizer):
                     spec_dims,
                 )
 
-            # --- Triton path (unchanged) ---
+            # --- Python DSL path ---
             try:
                 ast.parse(code)
             except SyntaxError as e:
@@ -137,37 +143,11 @@ class OptimizerReActAgent(Optimizer):
                     f"Problematic line: {e.text.strip() if e.text else 'unknown'}"
                 )
 
-            for check, msg in [
-                ("import triton" in code or "from triton" in code, "MISSING: import triton"),
-                (
-                    "triton.language" in code or "import triton.language" in code,
-                    "MISSING: import triton.language",
-                ),
-                ("@triton.jit" in code, "MISSING: @triton.jit decorator"),
-                ("class Model" in code, "MISSING: class Model"),
-            ]:
-                if not check:
-                    return msg
-
-            warps_match = re.search(r"num_warps\s*=\s*(\d+)", code)
-            if warps_match:
-                num_warps = int(warps_match.group(1))
-                if num_warps <= 0 or (num_warps & (num_warps - 1)) != 0:
-                    return f"INVALID num_warps={num_warps}: Must be a power of 2."
-
-            for block_name in [
-                "BLOCK_M",
-                "BLOCK_N",
-                "BLOCK_K",
-                "BLOCK_SIZE_M",
-                "BLOCK_SIZE_N",
-                "BLOCK_SIZE_K",
-            ]:
-                block_match = re.search(rf"{block_name}\s*[=:]\s*(\d+)", code)
-                if block_match:
-                    block_size = int(block_match.group(1))
-                    if block_size <= 0 or (block_size & (block_size - 1)) != 0:
-                        return f"INVALID {block_name}={block_size}: Must be a power of 2."
+            missing = missing_python_kernel_part(code, dsl)
+            if missing:
+                return missing
+            if dsl in TRITON_FAMILY and (bad := not_power_of_two(code)):
+                return f"INVALID {bad[0]}={bad[1]}: Must be a power of 2."
 
             if executor and input_shapes:
                 try:
@@ -502,6 +482,8 @@ class OptimizerReActAgent(Optimizer):
         """Check if code looks like a valid kernel for the current DSL."""
         if self.dsl == DSL.SYCL:
             return "#include" in code and ("sycl" in code.lower() or "cutlass" in code.lower())
+        if self.dsl not in TRITON_FAMILY:
+            return missing_python_kernel_part(code, self.dsl) is None
         has_triton_import = "import triton" in code or "from triton" in code
         has_kernel = "@triton.jit" in code or "class Model" in code
         return has_triton_import and has_kernel

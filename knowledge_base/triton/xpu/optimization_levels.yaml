@@ -3,11 +3,6 @@
 # Use this framework when optimizing a kernel. Don't stop at Level 1 —
 # check the "try harder" decision tree to decide whether deeper optimization
 # is warranted. Most production kernels should reach at least Level 2.
-#
-# Case study: kernel #39 (Gemm_Scale_BatchNorm)
-#   Level 1 alone: 2.69x speedup (tensor descriptors, tile swizzling, fused epilogue)
-#   Level 2 + 3:   5.28x speedup (bf16 pre-pack, BN folded into weights)
-#   See: test_kernels/39_Gemm_Scale_BatchNorm_triton.py
 
 levels:
   - id: level_1_baseline_xpu
@@ -87,9 +82,9 @@ levels:
     example:
       file: test_kernels/39_Gemm_Scale_BatchNorm_triton.py
       description: |
-        Kernel #39 folds Linear + Scale + BatchNorm into a pure GEMM.
-        Before (Level 1): 6 vector loads + arithmetic in epilogue → 2.69x
-        After  (Level 3): zero epilogue, pure GEMM + bias → 5.28x
+        Folds Linear + Scale + BatchNorm into a pure GEMM.
+        Before (Level 1): 6 vector loads + arithmetic in the epilogue.
+        After  (Level 3): no epilogue, a pure GEMM + bias.
 
   - id: level_4_expert
     name: "Level 4: Expert Techniques"

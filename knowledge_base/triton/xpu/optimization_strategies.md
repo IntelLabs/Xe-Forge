@@ -15,7 +15,7 @@
 - Speedup 3-5x -> good for most workloads; Level 4 only for critical-path kernels
 - Speedup > 5x -> diminishing returns, stop
 
-**Case study**: Kernel #39 (Gemm_Scale_BatchNorm) went from 2.69x (Level 1) to 5.28x (Level 2+3) by pre-packing to bf16 and folding BN into GEMM weights.
+Example: Gemm_Scale_BatchNorm reaches Level 3 by pre-packing to bf16 and folding BN into the GEMM weights.
 
 ## GEMM Kernels
 1. Use tensor descriptors (`tl.make_tensor_descriptor`), not manual pointer arithmetic; `tl.make_block_ptr` is deprecated

@@ -7,6 +7,38 @@ logger = logging.getLogger(__name__)
 SUCCESS_MESSAGE = "Success! Optimization verified and kernel is faster."
 
 
+def missing_python_kernel_part(code: str, dsl) -> str | None:
+    """What a Python kernel file in ``dsl`` lacks, as feedback, or None. The Triton family
+    imports triton; Triton alone is held to ``triton.language`` and its decorator; every
+    Python DSL needs ``class Model``."""
+    from xe_forge.dsl_registry import TRITON_FAMILY
+    from xe_forge.models import DSL
+
+    checks = []
+    if dsl in TRITON_FAMILY:
+        checks.append(("import triton" in code or "from triton" in code, "MISSING: import triton"))
+    if dsl == DSL.TRITON:
+        checks.append(("triton.language" in code, "MISSING: import triton.language"))
+        checks.append(("@triton.jit" in code, "MISSING: @triton.jit decorator"))
+    checks.append(("class Model" in code, "MISSING: class Model"))
+    return next((msg for ok, msg in checks if not ok), None)
+
+
+def not_power_of_two(code: str) -> tuple[str, int] | None:
+    """(name, value) of a Triton launch or tile parameter that is not a power of 2, or None."""
+    import re
+
+    for name in ["num_warps", "BLOCK_M", "BLOCK_N", "BLOCK_K", "BLOCK_SIZE_M", "BLOCK_SIZE_N",
+                 "BLOCK_SIZE_K"]:  # fmt: skip
+        sep = r"\s*=\s*" if name == "num_warps" else r"\s*[=:]\s*"
+        m = re.search(rf"{name}{sep}(\d+)", code)
+        if m:
+            v = int(m.group(1))
+            if v <= 0 or (v & (v - 1)) != 0:
+                return name, v
+    return None
+
+
 def extract_gemm_dims(
     input_shapes: list[tuple[int, ...]] | None,
 ) -> tuple[int, int, int]:

@@ -4,12 +4,9 @@ CLI for Xe-Forge kernel optimization pipeline
 
 Usage:
     python -m xe_forge.cli --input kernel.py --name my_kernel
-    python -m xe_forge.cli --dsl sycl --tune-config tune_gemm_shapes.yaml
-    python -m xe_forge.cli --dsl sycl --tile-tune --m 4096 --gemm-n 4096 --k 4096
 """
 
 import argparse
-import json
 import logging
 import os
 import sys
@@ -45,15 +42,10 @@ Examples:
   python -m xe_forge.cli --input kernel.py --name kernel \\
       --device cuda --dsl triton
 
-  # Tile tuning (single GEMM shape)
-  python -m xe_forge.cli --dsl sycl --tile-tune --m 8192 --gemm-n 4096 --k 4096
-
-  # Tile tuning (YAML config with multiple workloads)
-  python -m xe_forge.cli --dsl sycl --tune-config tune_gemm_shapes.yaml
         """,
     )
 
-    # Input (required for optimization pipeline, not for tile tuning)
+    # Input
     parser.add_argument("--input", "-i", type=str, help="Input kernel file")
     parser.add_argument(
         "--reference",
@@ -84,7 +76,7 @@ Examples:
     parser.add_argument(
         "--stages",
         type=str,
-        help="Comma-separated stages to apply (e.g., dtype_fix,fusion,xpu_specific)",
+        help="Comma-separated stages to apply (e.g., dtype_fix,fusion,device_specific)",
     )
 
     # LLM configuration
@@ -103,7 +95,7 @@ Examples:
     parser.add_argument(
         "--dsl",
         type=str,
-        choices=["triton", "gluon", "sycl", "cuda"],
+        choices=["triton", "gluon", "sycl", "cuda", "opencl"],
         default=None,
         help="Kernel DSL (default: triton)",
     )
@@ -144,10 +136,17 @@ Examples:
     parser.add_argument(
         "--engine",
         type=str,
-        choices=["dspy", "claude", "dspy-agent"],
+        choices=["dspy", "claude", "codex", "dspy-agent"],
         default=None,
-        help="Optimization engine (default: dspy). dspy-agent runs a DSPy tool-calling "
-        "agent in the Claude workspace",
+        help="Optimization engine (default: dspy). claude and codex drive the agent "
+        "workspace with that CLI; dspy-agent runs a DSPy tool-calling agent in it",
+    )
+    parser.add_argument(
+        "--target",
+        choices=["kernel", "library"],
+        default=None,
+        help="Workspace engines: optimize a kernel (default) or tune how the repository "
+        "calls a library such as oneDNN",
     )
 
     # Trial management
@@ -155,8 +154,8 @@ Examples:
     parser.add_argument("--trials-dir", type=str, help="Directory for trial state")
     parser.add_argument("--no-trials", action="store_true", help="Disable trial tracking")
 
-    # GPU profiling: unitrace (Level Zero EU stall sampling, no GPU OA counter
-    # permissions needed) and/or VTune (gpu-offload, needs /dev/dri/card0 access)
+    # GPU profiling: unitrace (device timing, ComputeBasic counters and EU stall
+    # sampling) and/or VTune (gpu-offload, needs /dev/dri/card0 access)
     parser.add_argument(
         "--unitrace", action="store_true", default=None, help="Enable unitrace profiling"
     )
@@ -167,8 +166,14 @@ Examples:
     parser.add_argument("--vtune-bin", type=str, help="Path to VTune binary")
 
     # Claude Code specific
-    parser.add_argument("--workspace", type=str, help="Workspace dir for Claude Code engine")
-    parser.add_argument("--auto-launch", action="store_true", help="Auto-launch claude CLI")
+    parser.add_argument(
+        "--workspace", type=str, help="Workspace dir of the claude, codex and dspy-agent engines"
+    )
+    parser.add_argument(
+        "--auto-launch",
+        action="store_true",
+        help="Run the agent in the workspace headless (claude, codex; dspy-agent always does)",
+    )
     parser.add_argument(
         "--max-turns", type=int, help="Turn limit for one headless claude session (default: 80)"
     )
@@ -202,6 +207,12 @@ Examples:
         type=str,
         help="Command template run instead of the built-in validator; placeholders: "
         "{kernel} {trial} {dsl} {stage} {workspace}",
+    )
+    host_group.add_argument(
+        "--stack-python",
+        type=str,
+        help="Interpreter of the stack the kernel serves; the port-back agent then builds its "
+        "port into that stack (beside it, never into it), tests it there and records the verdict",
     )
     host_group.add_argument(
         "--dataset-record",
@@ -239,36 +250,6 @@ Examples:
     # Other options
     parser.add_argument("--debug", action="store_true", help="Enable debug output")
 
-    # Tile tuning options
-    tune_group = parser.add_argument_group("tile tuning", "Tile search / auto-tuning options")
-    tune_group.add_argument(
-        "--tile-tune",
-        action="store_true",
-        help="Run tile tuning for a single GEMM shape (requires --m, --gemm-n, --k)",
-    )
-    tune_group.add_argument(
-        "--tune-config",
-        type=str,
-        help="YAML config file for multi-workload tile tuning (see docs/TILE.md)",
-    )
-    tune_group.add_argument("--m", type=int, default=4096, help="GEMM M dimension")
-    tune_group.add_argument("--gemm-n", type=int, default=4096, help="GEMM N dimension")
-    tune_group.add_argument("--k", type=int, default=4096, help="GEMM K dimension")
-    tune_group.add_argument("--max-rounds", type=int, default=5, help="Max LLM proposal rounds")
-    tune_group.add_argument(
-        "--gemm-dtype",
-        type=str,
-        default="bf16",
-        choices=["bf16", "f16", "tf32", "f32", "int8"],
-        help="Data type for tile tuning (default: bf16)",
-    )
-    tune_group.add_argument(
-        "--tune-output",
-        type=str,
-        default="tile_tuning_results.json",
-        help="Output JSON file for tuning results",
-    )
-
     return parser, parser.parse_args()
 
 
@@ -304,6 +285,8 @@ def _load_config(args) -> Config:
     # Engine/trial/profiler env var overrides
     if args.engine:
         os.environ["ENGINE"] = args.engine
+    if getattr(args, "target", None):
+        os.environ["TARGET"] = args.target
     if args.max_trials is not None:
         os.environ["MAX_TRIALS"] = str(args.max_trials)
     if args.trials_dir:
@@ -337,6 +320,8 @@ def _load_config(args) -> Config:
         os.environ["EXTERNAL_BENCHMARK"] = args.external_benchmark
     if getattr(args, "external_validate", None):
         os.environ["EXTERNAL_VALIDATE"] = args.external_validate
+    if getattr(args, "stack_python", None):
+        os.environ["STACK_PYTHON"] = args.stack_python
     if getattr(args, "dataset_record", None):
         os.environ["DATASET_RECORD"] = args.dataset_record
     if getattr(args, "lessons", None):
@@ -357,8 +342,25 @@ def _load_config(args) -> Config:
 
 def main():
     sys.stdout.reconfigure(line_buffering=True)
+    from xe_forge import load_env
+
+    load_env()  # before the modules that read the environment when imported
+
+    from xe_forge.frontend.cli import COMMANDS
+
+    if len(sys.argv) > 1 and sys.argv[1] in COMMANDS:
+        from xe_forge.frontend.cli import main as frontend_main
+
+        return frontend_main(sys.argv[1:])
 
     parser, args = _parse_args()
+    from xe_forge.config import noise_band
+
+    try:  # refused before any kernel is timed
+        noise_band()
+    except ValueError as exc:
+        print(f"xe-forge: {exc}", file=sys.stderr)
+        return 2
 
     # ── Shared setup: config + LLM ──────────────────────────────
     config = _load_config(args)
@@ -368,179 +370,23 @@ def main():
     else:
         logging.basicConfig(level=logging.INFO)
 
-    # ── Route: tile tuning or optimization pipeline ─────────────
-    if args.tune_config:
-        return _run_tune_config(args, config)
-    if args.tile_tune:
-        return _run_tile_tune(args, config)
     return _run_optimize(parser, args, config)
-
-
-def _run_tile_tune(args, config: Config) -> int:
-    """Run tile tuning for a single GEMM shape."""
-    from xe_forge.core.sycl_executor import KernelType, SyclExecutor
-    from xe_forge.core.tile_search import GEMMStrategy, TileTuningAgent, export_results_json
-
-    _setup_dspy(config)
-
-    print("=" * 60)
-    print("XE-FORGE TILE TUNING")
-    print("=" * 60)
-    print("Mode: GEMM single shape")
-    print(f"Shape: M={args.m}, N={args.gemm_n}, K={args.k}")
-    print(f"Dtype: {args.gemm_dtype}")
-    print(f"Model: {config.llm.model}")
-    print(f"Max rounds: {args.max_rounds}")
-    print(f"Output: {args.tune_output}")
-    print("=" * 60)
-
-    executor = SyclExecutor(kernel_type=KernelType.GEMM, verify=False)
-    strategy = GEMMStrategy()
-    agent = TileTuningAgent(executor, strategy, dtype=args.gemm_dtype)
-
-    workload = {"M": args.m, "N": args.gemm_n, "K": args.k}
-    result = agent.tune(workload, max_rounds=args.max_rounds)
-
-    output_data = {
-        "workloads": [json.loads(result.model_dump_json())],
-        "tile_shapes": json.loads(export_results_json([result])),
-    }
-    with open(args.tune_output, "w") as f:
-        json.dump(output_data, f, indent=2)
-    print(f"\nResults saved to {args.tune_output}")
-
-    if result.best_tflops:
-        print(
-            f"Best: {result.best_config.wg} -> {result.best_tflops:.2f} TFLOPS ({result.best_time_ms:.4f} ms)"
-        )
-    else:
-        print("No successful configuration found.")
-
-    return 0
-
-
-def _run_tune_config(args, config: Config) -> int:
-    """Run tile tuning from a YAML config file."""
-    from xe_forge.core.sycl_executor import KernelType, SyclExecutor
-    from xe_forge.core.tile_search import (
-        FAStrategy,
-        GEMMStrategy,
-        GroupedGEMMStrategy,
-        MoEGEMMStrategy,
-        TileTuningAgent,
-        export_results_json,
-        load_tune_config,
-    )
-
-    _setup_dspy(config)
-
-    cfg = load_tune_config(args.tune_config)
-
-    print("=" * 60)
-    print("XE-FORGE TILE TUNING")
-    print("=" * 60)
-    print(f"Config: {args.tune_config}")
-    print(f"Mode: {cfg.mode}")
-    print(f"Dtype: {cfg.dtype}")
-    print(f"Model: {config.llm.model}")
-    print(f"Max rounds: {cfg.max_rounds}")
-    print(f"Output: {cfg.output}")
-    if cfg.mode == "fa":
-        print(f"FA mode: {cfg.fa_mode}, causal: {cfg.causal}, persistent: {cfg.persistent}")
-    print(f"Workloads: {len(cfg.workloads)}")
-    for w in cfg.workloads:
-        print(f"  - {w.get('name', '?')}: {w}")
-    print("=" * 60)
-
-    mode_to_kernel_type = {
-        "fa": KernelType.FA,
-        "gemm": KernelType.GEMM,
-        "grouped_gemm": KernelType.GROUPED_GEMM,
-        "moe": KernelType.MOE_GEMM,
-    }
-    mode_to_strategy = {
-        "fa": FAStrategy,
-        "gemm": GEMMStrategy,
-        "grouped_gemm": GroupedGEMMStrategy,
-        "moe": MoEGEMMStrategy,
-    }
-    kernel_type = mode_to_kernel_type.get(cfg.mode, KernelType.GEMM)
-    executor = SyclExecutor(kernel_type=kernel_type, verify=False)
-    if cfg.mode == "fa":
-        strategy = FAStrategy(causal=cfg.causal, mode=cfg.fa_mode, persistent=cfg.persistent)
-    else:
-        strategy = mode_to_strategy.get(cfg.mode, GEMMStrategy)()
-
-    agent = TileTuningAgent(executor, strategy, dtype=cfg.dtype)
-    all_results = []
-
-    for i, wl in enumerate(cfg.workloads):
-        wl = dict(wl)  # copy so pop doesn't mutate config
-        name = wl.pop("name", f"workload_{i}")
-        print(f"\n{'─' * 40}")
-        print(f"Tuning: {name} ({i + 1}/{len(cfg.workloads)})")
-        print(f"{'─' * 40}")
-        result = agent.tune(wl, max_rounds=cfg.max_rounds)
-        all_results.append(result)
-        if result.best_tflops:
-            print(f"  Best: {result.best_config.wg} -> {result.best_tflops:.2f} TFLOPS")
-        else:
-            print("  No successful configuration found.")
-
-    output_data = {
-        "workloads": [json.loads(r.model_dump_json()) for r in all_results],
-        "tile_shapes": json.loads(export_results_json(all_results)),
-    }
-    output_path = cfg.output
-    with open(output_path, "w") as f:
-        json.dump(output_data, f, indent=2)
-
-    print(f"\n{'=' * 60}")
-    print(f"Results saved to {output_path}")
-    print(f"{'=' * 60}")
-
-    return 0
-
-
-def _copy_winner_dir(src: Path, out: Path) -> str | None:
-    """Replace *out* with a copy of the directory winner *src*; return an error or None."""
-    import shutil
-
-    dst = out.parent.resolve() / out.name
-    cwd = Path.cwd().resolve()
-    if dst == cwd or dst in cwd.parents:
-        return f"refusing to replace {out}: it contains the working directory"
-    # out is removed before the copy, so it must not overlap the winner.
-    src = src.resolve()
-    if src == dst or dst in src.parents or src in dst.parents:
-        return f"refusing to replace {out}: it is, holds or is inside the winner {src}"
-    if out.is_dir() and not out.is_symlink():
-        shutil.rmtree(out)
-    elif out.exists() or out.is_symlink():
-        out.unlink()
-    shutil.copytree(src, out)
-    return None
 
 
 def _run_optimize(parser, args, config: Config) -> int:
     """Run the optimization pipeline (original path)."""
     # Validate input. Only the workspace engines can locate a kernel in --kernel-repo
     # at runtime; the pipeline would be handed an empty kernel.
-    workspace_engine = config.engine.engine in ("claude", "dspy-agent")
+    workspace_engine = config.engine.engine in ("claude", "codex", "dspy-agent")
     if not args.input and not (args.kernel_repo and workspace_engine):
         parser.error(
-            "--input is required (or use --kernel-repo with --engine claude|dspy-agent, "
-            "--tile-tune / --tune-config)"
+            "--input is required (or use --kernel-repo with --engine claude|codex|dspy-agent)"
         )
     if args.input and not Path(args.input).exists():
         print(f"Error: Input file '{args.input}' not found", file=sys.stderr)
         sys.exit(1)
 
     dsl = config.device_config.dsl
-
-    # Default to bench-xpu variant for SYCL
-    if args.variant is None and dsl in ("sycl",):
-        args.variant = "bench-xpu"
 
     # Parse stages
     stages = None
@@ -596,7 +442,10 @@ def _run_optimize(parser, args, config: Config) -> int:
         from xe_forge.core import load_spec
 
         spec = load_spec(args.spec)
-        args.variant = spec.resolve_variant(args.variant)
+        # SYCL's family default is bench-xpu, after the spec's own default_variant.
+        args.variant = spec.resolve_variant(
+            args.variant, "bench-xpu" if dsl == "sycl" else "bench-gpu"
+        )
         input_shapes = spec.get_input_shapes(args.variant)
         flop = spec.get_flop(args.variant)
         spec_rtol = spec.get_rtol(args.variant)

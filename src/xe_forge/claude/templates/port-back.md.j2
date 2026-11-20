@@ -30,9 +30,16 @@ If `output/` holds no winner, stop: there is nothing to port.
 2. **Change what the winner changed, nowhere else.** Map each hunk of the baseline-to-winner
    diff onto the original file and region the profile names. Add a file only when the kernel
    cannot be expressed without one. Add no fallback, flag or environment switch.
-3. **Keep the repository's conventions**: its formatting, its launch-configuration style,
-   its build files. If the winner needs a compile flag the build does not pass, change the
-   build target the profile names, and only that.
+3. **Deliver it as its maintainers would accept it.** Read the repository's contribution
+   guide, its recent `git log` and its lint, format and pre-commit configuration, and follow
+   them: formatting, launch-configuration style, build files, commit split, subject and body,
+   tests, and the docs or changelog entry a change of this kind needs there. Run the linters
+   and formatters it configures on the files you touched. If the winner needs a compile flag
+   the build does not pass, change the build target the profile names, and only that.
+   Commit in the clone and leave nothing uncommitted: the patch is the commits over the base.
+   Nothing in the commits names Xe-Forge, trials, this workspace or its paths. Add no
+   `Signed-off-by` or other trailer in anyone's name; if the repository requires one, say so
+   in PR.md as its owner's step.
 4. **Every win ports. Try, in this order, and stop at the first that applies:**
    1. **upstream** -- the winner keeps the op's schema, signature, bindings and every call
       site, and needs no dispatch by shape. A different algorithm, or fused or eliminated
@@ -56,16 +63,56 @@ If `output/` holds no winner, stop: there is nothing to port.
    3. **none** -- only when neither applies: write no patch, and name the part of the op's
       interface the winner changes and why no repository given here can carry it.
 
+{%- if stack_python %}
+5. **Check the port in its stack yourself, then record the verdict.** The stack runs under
+   `{{ stack_python }}`; its venv must not change -- install nothing into it, never use uv.
+   - Run every build and test with the `ANTHROPIC_*` and `OPENAI_*` variables unset
+     (`env -u ...`), so no log you keep can carry them.
+   - Never build inside a clone: its tree is the patch, and build output would land in it.
+     Build from a copy of its working tree (e.g. `cp -a <clone> stack/src-<name>`).
+   - Build the clone's changes the way the repository builds, into a new venv under
+     `stack/` in the workspace (not `output/`, which is collected), holding only what you
+     rebuilt, everything else from the stack's venv (e.g. a `.pth` calling
+     `site.addsitedir` on its site-packages, after the venv's own).
+     Check the rebuilt package imports from there.
+   - Run the repository's own tests for the op against an unpatched build and the patched
+     one, the same way: no test that passes unpatched may fail patched.
+   - Run the model briefly under the patched build (the stack's own entry point, a few
+     tokens) and confirm the op still runs.
+   - Record it: `upstream patch {{ kernel_name }} --kind ... --stack "PASS <what ran>"`, or
+     `--stack "FAIL <what broke>"`. Logs go in `output/`.
+   - A port is done only on PASS. On FAIL the port is what is wrong, not the measurement:
+     read the log, fix the port in the clone, and run `upstream patch` again. A port that
+     cannot pass is kind **none**, with the failure in its notes.
+   - A dispatch through the repository's own selection mechanism -- a kernel selector's
+     validation and priority, an implementation's applicability check -- is **upstream**,
+     not serving-only. A hand-written shape branch in a caller is not.
+   - **upstream must break no shape the op accepts.** Either the new code is correct for the
+     op's whole domain, or the repository's selection admits it only where it is valid and
+     the original kernel's code is left unchanged for every other shape. Before porting,
+     run the winner standalone on shapes beyond the spec's variants -- tails, odd sizes, the
+     other dtypes the op's validation allows -- against the baseline at its tolerance. The
+     stack check then runs the repository's own tests for the op.
+   - **serving-only** stays available for a winner valid only at the served shapes; the stack
+     check then only proves the stack runs with it.
+{%- endif %}
+
 ## Output
 
+- `output/PR.md`, written before `upstream patch` -- the pull-request description, in the
+  repository's own template if it has one: what changes, why, how it was tested, what is
+  left to its owner. Write no timing or speedup yourself: `upstream patch` appends the
+  measured ones, and refuses without the file.
 - `output/upstream.patch` (and `output/upstream-<name>.patch` for each further clone) --
-  `git -C <clone> diff`, paths relative to that repository's root, applicable with
-  `git apply` / `patch -p1` at its recorded commit. `upstream patch` writes them.
+  the diff of the clone's commits over its base, paths relative to that repository's root,
+  applicable with `git apply` / `patch -p1` at its recorded commit -- and beside each its
+  `.mbox`, the commits as `git format-patch` writes them. `upstream patch` writes them.
 - `output/PORT.txt` -- `kind: upstream|serving-only`, then per repository: base commit, touched
   files; the best trial and its measured speedup; and what was verified:
   - a Python or Triton file: `python -m py_compile` of every touched file, and, when an
     interpreter that imports the repository's package is available, the repository's own
     test for this op (the profile names it) run against the patched sources;
-  - C++/SYCL: say `unbuilt` -- rebuilding the provider is the owner's action, not yours.
+  - C++/SYCL: say `unbuilt` -- rebuilding the provider is the owner's action, not yours{% if stack_python %} --
+    unless the stack check built and tested it, which `PORT.txt` then records{% endif %}.
 
 Report back the paths written and one line saying what was and was not verified.

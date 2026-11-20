@@ -1,0 +1,397 @@
+"""A kernel's trials are scored on the shapes and weights an agent chose: the spec's
+``weights``, checked by ``inputs check``, enforced by ``benchmark`` over every shape."""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import io
+import re
+
+import pytest
+import yaml
+
+from xe_forge.core.spec_loader import load_spec
+from xe_forge.skills import benchmark, inputs
+
+SPEC = {"default_variant": "dec", "weights": {"dec": 0.75, "pre": 0.25},
+        "ci": [{"dims": {"ROWS": 1}}], "dec": [{"dims": {"ROWS": 4}}],
+        "pre": [{"dims": {"ROWS": 2048}}]}  # fmt: skip
+
+
+def _args(tmp_path, **kw):
+    spec = tmp_path / "spec.yaml"
+    spec.write_text(yaml.safe_dump(SPEC))
+    return argparse.Namespace(spec=str(spec), variant=None, baseline_us=None, **kw)
+
+
+def _shape(results):
+    """One shape's benchmark, as the single-shape path prints it."""
+
+    def single(args):
+        ok, base, kern, verdict = results[args.variant]
+        print(f"Variant: {args.variant}\nCorrectness: {'PASSED' if ok else 'FAILED'}")
+        if not ok:
+            print("Error: mismatch")
+            return 1
+        print("TIMER: t")
+        ratio = "none" if verdict else f"{base / kern:.2f}x"
+        print(f"Performance: baseline_us={base:.2f}, kernel_us={kern:.2f}, speedup={ratio}")
+        if verdict:
+            print(f"VERDICT: {verdict}")
+        return 0
+
+    return single
+
+
+def _gate(tmp_path, capsys, results):
+    args = _args(tmp_path)
+    code = benchmark._weighted(args, lambda: _shape(results)(args))
+    text = capsys.readouterr().out
+    return code, text, benchmark.parse_outcome(text), args
+
+
+def test_the_spec_carries_weights_and_old_specs_none(tmp_path):
+    assert load_spec(_args(tmp_path).spec).weights == {"dec": 0.75, "pre": 0.25}
+    (tmp_path / "old.yaml").write_text(yaml.safe_dump({"ci": [{"dims": {"ROWS": 1}}]}))
+    assert load_spec(tmp_path / "old.yaml").weights == {}
+
+
+def test_the_score_is_the_time_weighted_total(tmp_path, capsys):
+    code, text, out, args = _gate(tmp_path, capsys, {"dec": (True, 10, 5, None),
+                                                     "pre": (True, 100, 80, None)})  # fmt: skip
+    assert code == 0 and out["correctness"] == "pass"
+    assert out["speedup"] == pytest.approx(1 / (0.75 / 2 + 0.25 / 1.25), abs=0.01)
+    assert "verdict" not in out and args.variant is None  # pinned to the set, not one shape
+    assert len(re.findall(r"^Performance:", text, re.M)) == 1  # per-shape lines are indented
+
+
+def test_a_shape_slower_only_inside_the_noise_band_is_no_regression(tmp_path, capsys,
+                                                                    monkeypatch):  # fmt: skip
+    monkeypatch.delenv("BENCHMARK_MIN_EFFECT", raising=False)
+    _, _, out, _ = _gate(tmp_path, capsys, {"dec": (True, 10, 5, None),
+                                            "pre": (True, 100, 101, None)})  # fmt: skip
+    assert out.get("verdict") != "SLOWER_ON" and out["speedup"] > 1.0
+
+
+def test_the_weighted_times_print_what_every_shape_measured(tmp_path, capsys):
+    results = {"dec": (True, 10, 5, None), "pre": (True, 100, 80, None)}
+    single = _shape(results)
+    args = _args(tmp_path)
+
+    def no_kernel_time():
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = single(args)
+        text = buf.getvalue()
+        if args.variant == "pre":  # a host that timed only the baseline here
+            text = re.sub(r"kernel_us=\S+, ", "", text)
+        print(text, end="")
+        return code
+
+    benchmark._weighted(args, no_kernel_time)
+    out = benchmark.parse_outcome(capsys.readouterr().out)
+    assert out["baseline_us"] == pytest.approx(0.75 * 10 + 0.25 * 100) and "triton_us" not in out
+
+
+@pytest.mark.parametrize("dec, pre, verdict, speedup", [
+    ((10, 5), (98, 100), "SLOWER_ON", 0.98),  # at the band's edge: slower
+    ((102, 100), (102, 100), None, 1.02),     # at the band's edge: a change
+    ((101, 100), (101, 100), "INDISTINGUISHABLE", None),
+])  # fmt: skip
+def test_the_weighted_score_counts_the_band_edges_as_changes(tmp_path, capsys, monkeypatch, dec,
+                                                             pre, verdict, speedup):  # fmt: skip
+    monkeypatch.setenv("BENCHMARK_MIN_EFFECT", "0.02")
+    _, _, out, _ = _gate(tmp_path, capsys, {"dec": (True, *dec, None), "pre": (True, *pre, None)})
+    assert out.get("verdict") == verdict and out.get("speedup") == speedup
+
+
+def test_a_shape_measured_slower_is_a_regression_whatever_the_others_gain(tmp_path, capsys):
+    _, text, out, _ = _gate(tmp_path, capsys, {"dec": (True, 10, 2, None),
+                                               "pre": (True, 100, 125, None)})  # fmt: skip
+    assert out["speedup"] == pytest.approx(0.8) and out["verdict"] == "SLOWER_ON"
+    assert "Slower on: pre" in text
+
+
+def test_a_gated_shape_counts_as_parity(tmp_path, capsys):
+    _, _, out, _ = _gate(tmp_path, capsys, {"dec": (True, 10, 10, "INDISTINGUISHABLE"),
+                                            "pre": (True, 100, 100, "BELOW_FLOOR")})  # fmt: skip
+    assert "speedup" not in out and out["verdict"] == "INDISTINGUISHABLE"
+    _, _, out, _ = _gate(tmp_path, capsys, {"dec": (True, 10, 5, None),
+                                            "pre": (True, 100, 100, "INDISTINGUISHABLE")})  # fmt: skip
+    assert out["speedup"] == pytest.approx(1 / (0.75 / 2 + 0.25), abs=0.01)
+
+
+def test_weights_are_normalised_to_their_sum(tmp_path, capsys, monkeypatch):
+    monkeypatch.setitem(SPEC, "weights", {"dec": 0.5})
+    _, _, out, _ = _gate(tmp_path, capsys, {"dec": (True, 10, 10, None)})
+    assert "speedup" not in out and out["verdict"] == "INDISTINGUISHABLE"  # parity, not 2x
+    results = {"dec": (True, 10, 5, None), "pre": (True, 100, 80, None)}
+    monkeypatch.setitem(SPEC, "weights", {"dec": 2, "pre": 2})
+    _, _, big, _ = _gate(tmp_path, capsys, results)
+    monkeypatch.setitem(SPEC, "weights", {"dec": 0.5, "pre": 0.5})
+    _, _, small, _ = _gate(tmp_path, capsys, results)
+    assert big["speedup"] == small["speedup"] == pytest.approx(1 / (0.5 / 2 + 0.5 / 1.25), abs=0.01)
+
+
+@pytest.mark.parametrize("weights", [{"dec": float("nan"), "pre": 1.0}, {"dec": -0.5, "pre": 1.5},
+                                     {"dec": 0.0, "pre": 0.0}, {"dec": float("inf")}])  # fmt: skip
+def test_weights_that_are_not_finite_non_negative_shares_are_refused(tmp_path, capsys,
+                                                                     monkeypatch, weights):  # fmt: skip
+    monkeypatch.setitem(SPEC, "weights", weights)
+    code, text, out, _ = _gate(tmp_path, capsys, {"dec": (True, 10, 5, None),
+                                                  "pre": (True, 100, 80, None)})  # fmt: skip
+    assert code == 1 and out["correctness"] == "fail" and "must be finite" in text
+
+
+@pytest.mark.parametrize("weights, says", [({"dec": 0.5, "ghost": 0.5}, "lacks: ghost"),
+                                           ({"dec": None, "pre": 1.0}, "must be numbers"),
+                                           ({"dec": True, "pre": 1.0}, "must be numbers"),
+                                           (["dec"], "must map variant names")])  # fmt: skip
+def test_malformed_weights_fail_the_trial_without_a_traceback(tmp_path, capsys, monkeypatch,
+                                                              weights, says):  # fmt: skip
+    monkeypatch.setitem(SPEC, "weights", weights)
+    code, text, out, _ = _gate(tmp_path, capsys, {"dec": (True, 10, 5, None),
+                                                  "pre": (True, 100, 80, None)})  # fmt: skip
+    assert code == 1 and out["correctness"] == "fail" and says in text
+
+
+@pytest.mark.parametrize("us", [float("nan"), float("inf"), 0, -1.0])
+def test_a_captured_time_that_is_not_a_positive_finite_number_is_refused(tmp_path, us):
+    spec = tmp_path / "s.yaml"
+    spec.write_text(yaml.safe_dump({"captured_us": {"dec": us}, "dec": [{"dims": {"N": 1}}]}))
+    with pytest.raises(ValueError, match="must be finite and above 0"):
+        load_spec(str(spec))
+
+
+@pytest.mark.parametrize("weights", [[], False, 0, ""])
+def test_a_falsy_weights_that_is_not_a_mapping_is_refused(tmp_path, weights):
+    spec = tmp_path / "s.yaml"
+    spec.write_text(yaml.safe_dump({"weights": weights, "dec": [{"dims": {"N": 1}}]}))
+    with pytest.raises(ValueError, match="must map variant names"):
+        load_spec(spec)
+
+
+@pytest.mark.parametrize("data", [{"weights": None}, {}, {"weights": {}}])
+def test_absent_null_or_empty_weights_load_as_none(tmp_path, data):
+    spec = tmp_path / "s.yaml"
+    spec.write_text(yaml.safe_dump({**data, "dec": [{"dims": {"N": 1}}]}))
+    assert load_spec(spec).weights == {}
+
+
+def test_a_shape_that_fails_correctness_ends_the_trial(tmp_path, capsys):
+    code, text, out, _ = _gate(tmp_path, capsys, {"dec": (True, 10, 5, None),
+                                                  "pre": (False, 0, 0, None)})  # fmt: skip
+    assert code == 1 and out["correctness"] == "fail" and "Variant: pre" in text
+
+
+@pytest.mark.parametrize("dec_us, refused", [(14.0, False), (16.0, True)])
+def test_a_baseline_far_slower_than_the_captured_kernel_is_refused(tmp_path, capsys, monkeypatch,
+                                                                   dec_us, refused):  # fmt: skip
+    monkeypatch.setitem(SPEC, "captured_us", {"dec": 10.0, "pre": 100.0})
+    code, text, out, _ = _gate(tmp_path, capsys, {"dec": (True, dec_us, 2, None),
+                                                  "pre": (True, 100, 50, None)})  # fmt: skip
+    if refused:
+        assert code == 1 and out["correctness"] == "fail"
+        assert out["verdict"] == "BASELINE_NOT_CAPTURED_KERNEL" and "1.6x slower" in text
+    else:
+        assert code == 0 and out["correctness"] == "pass" and "verdict" not in out
+
+
+def test_one_variant_asked_for_is_one_shape(tmp_path, capsys):
+    args = _args(tmp_path)
+    args.variant = "pre"
+    benchmark._weighted(args, lambda: _shape({"pre": (True, 100, 50, None)})(args))
+    assert benchmark.parse_outcome(capsys.readouterr().out)["speedup"] == 2.0
+
+
+def _manifest(tmp_path):
+    """One kernel serving two configurations (N=896 and N=4864), each at 4 and 2048 rows."""
+    from types import SimpleNamespace
+
+    from xe_forge.frontend import ir, manifest
+    from xe_forge.frontend.analyze import Entry
+    from xe_forge.frontend.ir import CaptureRun, Naming, Workload
+
+    def w(wid, n, dec, pre):
+        return Workload(workload_id=wid, family="gemm", dims={"M": "var", "N": n, "K": 896},
+                        dtypes=["float16"], layout=[], attrs={}, calls=20, device_us=dec + pre,
+                        share=0.5, var_axes={"M": {"4": {"calls": 19, "device_us": dec},
+                                                   "2048": {"calls": 1, "device_us": pre}}},
+                        ops=[], naming=Naming(route="kernel", tolerance={"rtol": 0.02, "atol": 0.01}))  # fmt: skip
+
+    ws = [w("gemm/a", 896, 30.0, 20.0), w("gemm/b", 4864, 30.0, 20.0)]
+    e = Entry(name="mm", repo="r", dsl="sycl", workloads=ws, decisions=[], enabled=True)
+    cap = CaptureRun(run={"model": {"name": "m"}}, ops=[], workloads=ws)
+    ir.dump(cap, tmp_path / "capture.json")
+    return manifest, SimpleNamespace(entries=[e], run_id="r1"), cap
+
+
+def test_every_captured_shape_is_a_variant_weighted_by_its_time_or_the_agents(tmp_path):
+    manifest, analysis, cap = _manifest(tmp_path)
+    path = manifest.emit(analysis, cap, tmp_path / "capture.json", tmp_path / "out")
+    spec = load_spec(tmp_path / "out" / "specs" / "mm.yaml")
+    assert spec.weights == {"bench-t4-w0": 0.3, "bench-t4-w1": 0.3, "bench-t2048-w0": 0.2,
+                            "bench-t2048-w1": 0.2}  # fmt: skip
+    # each shape's own time per call in the model: 30 us over 19 calls, 20 us in one
+    assert spec.captured_us == {"bench-t4-w0": 1.579, "bench-t4-w1": 1.579,
+                                "bench-t2048-w0": 20.0, "bench-t2048-w1": 20.0}  # fmt: skip
+    chosen = {"mm": {"bench-t2048-w0": 0.5, "bench-t2048-w1": 0.5}}
+    manifest.emit(analysis, cap, tmp_path / "capture.json", tmp_path / "out", chosen)
+    assert load_spec(tmp_path / "out" / "specs" / "mm.yaml").weights == chosen["mm"]
+    assert yaml.safe_load(path.read_text())["kernels"][0]["variants"] == list(chosen["mm"])
+    manifest.emit(analysis, cap, tmp_path / "capture.json", tmp_path / "out", {})
+    entry = yaml.safe_load(path.read_text())["kernels"][0]
+    assert not entry["enabled"] and "no checked trial shapes" in entry["reason"]
+
+
+def test_a_shape_that_took_no_time_has_no_captured_time(tmp_path):
+    manifest, analysis, cap = _manifest(tmp_path)
+    cap.workloads[1].var_axes["M"]["2048"]["device_us"] = 0.0
+    chosen = {"mm": {"bench-t4-w1": 0.5, "bench-t2048-w1": 0.5}}
+    manifest.emit(analysis, cap, tmp_path / "capture.json", tmp_path / "out", chosen)
+    assert load_spec(tmp_path / "out" / "specs" / "mm.yaml").captured_us == {"bench-t4-w1": 1.579}
+
+
+def test_a_fusion_spec_carries_no_captured_time(tmp_path):
+    manifest, analysis, cap = _manifest(tmp_path)
+    analysis.entries[0].extra = {"ops": ["op-0", "op-1"]}
+    manifest.emit(analysis, cap, tmp_path / "capture.json", tmp_path / "out")
+    assert load_spec(tmp_path / "out" / "specs" / "mm.yaml").captured_us == {}
+
+
+def test_entries_sharing_a_name_are_keyed_by_their_spec_stem(tmp_path):
+    from types import SimpleNamespace
+
+    from xe_forge.frontend import ir, manifest
+    from xe_forge.frontend.analyze import Entry
+    from xe_forge.frontend.ir import CaptureRun, Naming, Workload
+
+    def w(wid, small, big):
+        return Workload(workload_id=wid, family="gemm", dims={"M": "var", "N": 64, "K": 64},
+                        dtypes=["float16"], layout=[], attrs={}, calls=2, device_us=20.0,
+                        share=0.5, var_axes={"M": {small: {"calls": 1, "device_us": 5.0},
+                                                   big: {"calls": 1, "device_us": 15.0}}},
+                        ops=[], naming=Naming(route="kernel", tolerance={"rtol": 0.02, "atol": 0.01}))  # fmt: skip
+
+    ws = [w("gemm/a", "4", "2048"), w("gemm/b", "8", "1024")]
+    lib = Entry(name="mm", repo="r", dsl="sycl", workloads=ws[:1], decisions=[], enabled=True,
+                target="library")  # fmt: skip
+    kern = Entry(name="mm", repo="r", dsl="sycl", workloads=ws[1:], decisions=[], enabled=True)
+    cap = CaptureRun(run={"model": {"name": "m"}}, ops=[], workloads=ws)
+    ir.dump(cap, tmp_path / "capture.json")
+    analysis = SimpleNamespace(entries=[lib, kern], run_id="r1")
+    path = manifest.emit(analysis, cap, tmp_path / "capture.json", tmp_path / "out")
+    keys = [manifest.key(e) for e in manifest.load(path)["kernels"]]
+    assert keys == ["mm", "mm__r"]
+    answer = {"mm": {"shapes": {"bench-t2048": _g("bench-t2048", "bench-t4", w=1.0)}, "why": "x"},
+              "mm__r": {"shapes": {"bench-t1024": _g("bench-t1024", "bench-t8", w=1.0)},
+                        "why": "x"}}  # fmt: skip
+    problems, _ = inputs.check(answer, manifest.load(path))
+    assert not problems, problems
+    assert inputs.weights(answer, keys) == {
+        "mm": {"bench-t2048": 1.0},
+        "mm__r": {"bench-t1024": 1.0},
+    }
+    # the library entry loses its shapes and its spec; the kernel entry keeps its own stem
+    manifest.emit(analysis, cap, tmp_path / "capture.json", tmp_path / "out",
+                  {"mm__r": {"bench-t1024": 1.0}})  # fmt: skip
+    entries = manifest.load(path)["kernels"]
+    assert not entries[0]["enabled"] and "spec" not in entries[0]
+    assert manifest.key(entries[1]) == "mm__r"
+    assert load_spec(entries[1]["spec"]).weights == {"bench-t1024": 1.0}
+
+
+def _g(*vs, w):
+    return {"stands_for": list(vs), "weight": w}
+
+
+GOOD = {"bench-t4-w0": _g("bench-t4-w0", "bench-t2048-w0", w=0.5),
+        "bench-t4-w1": _g("bench-t4-w1", "bench-t2048-w1", w=0.5)}  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    "shapes, problem",
+    [(GOOD, None),
+     ({"bench-t4-w0": _g("bench-t4-w0", "bench-t2048-w0", "bench-t4-w1", "bench-t2048-w1",
+                         w=1.0)}, "different configurations"),
+     ({"bench-t4-w0": _g("bench-t4-w0", "bench-t2048-w0", w=1.0)},
+      "no shape stands for bench-t4-w1, bench-t2048-w1"),
+     ({**GOOD, "bench-t2048-w1": _g("bench-t2048-w1", w=0.1)}, "stands with both"),
+     ({"bench-t4-w0": _g("bench-t2048-w0", w=0.5), "bench-t4-w1": GOOD["bench-t4-w1"]},
+      "must be in its own stands_for"),
+     ({"bench-t9-w0": _g("bench-t9-w0", w=1.0)}, "not a shape the capture ran"),
+     ({**GOOD, "bench-t4-w0": _g("bench-t4-w0", "bench-t2048-w0", {"a": 1}, ["b"], w=0.5)},
+      "must be shape names"),
+     ({k: {**g, "weight": 0.4} for k, g in GOOD.items()}, "sum to 0.8000")],
+)  # fmt: skip
+def test_inputs_check_holds_every_configuration(tmp_path, shapes, problem):
+    from xe_forge.frontend import manifest as m
+
+    manifest, analysis, cap = _manifest(tmp_path)
+    path = manifest.emit(analysis, cap, tmp_path / "capture.json", tmp_path / "out")
+    problems, lines = inputs.check({"mm": {"shapes": shapes, "why": "x"}}, m.load(path))
+    if problem is None:
+        assert not problems and "2 shapes stand for its 4 captured" in lines[0], problems
+    else:
+        assert any(problem in p for p in problems.get("mm", [])), problems
+
+
+@pytest.mark.parametrize("good", [True, False])
+def test_run_optimizes_a_kernel_only_on_shapes_that_pass(tmp_path, monkeypatch, good):
+    from types import SimpleNamespace
+
+    from xe_forge.frontend import cli
+
+    manifest, analysis, cap = _manifest(tmp_path)
+    path = manifest.emit(analysis, cap, tmp_path / "capture.json", tmp_path / "out")
+    shapes = GOOD if good else {"bench-t4-w0": GOOD["bench-t4-w0"]}
+    answer = {"mm": {"shapes": shapes, "why": "decode and prefill share a path"}}
+    monkeypatch.setattr(cli, "_agent", lambda *a, **k: answer)
+    got = cli.inputs(path, tmp_path / "out", SimpleNamespace(model="m", framework="fw"), "py",
+                     5, tmp_path)  # fmt: skip
+    assert got == ({"mm": {"bench-t4-w0": 0.5, "bench-t4-w1": 0.5}} if good else {})
+
+
+@pytest.mark.parametrize("weighted", [True, False])
+def test_a_weighted_spec_benchmarks_every_shape_without_a_variant(tmp_path, weighted):
+    from xe_forge.claude.generator import generate_workspace
+    from xe_forge.config import Config
+
+    spec = dict(SPEC) if weighted else {k: v for k, v in SPEC.items() if k != "weights"}
+    (tmp_path / "spec.yaml").write_text(yaml.safe_dump(spec))
+    config = Config()
+    config.external.benchmark = "host-bench {trial}"
+    ws = tmp_path / "ws"
+    generate_workspace(ws, config, "rms", "// kernel\n", reference_code="x = 1\n",
+                       spec_path=str(tmp_path / "spec.yaml"), variant_type="dec")  # fmt: skip
+    text = (ws / "CLAUDE.md").read_text()
+    assert ("--variant dec" not in text.split("| **Benchmark**")[1].split("\n")[0]) is weighted
+    assert ("`dec` (weight 0.75), `pre` (weight 0.25)" in text) is weighted
+
+
+HOST = """\
+import sys
+variant, factor = sys.argv[1], float(sys.argv[2])
+base = {"dec": 10.0, "pre": 100.0}[variant]
+print(f"CORRECTNESS: pass\\nBASELINE_US: {base}\\nTRIAL_US: {base * factor}")
+print(f"SPEEDUP: {1 / factor}\\nVERDICT: MEASURED\\nDONE")
+"""
+
+
+@pytest.mark.parametrize("factor, verdict, speedup", [(2.0, "SLOWER_ON", 0.5), (0.5, None, 2.0)])
+def test_a_host_verdict_beside_its_ratio_still_counts(tmp_path, capsys, factor, verdict, speedup):
+    import sys
+
+    host = tmp_path / "host.py"
+    host.write_text(HOST)
+    (tmp_path / "opt.py").write_text("x = 1\n")
+    args = _args(tmp_path, optimized=str(tmp_path / "opt.py"), baseline=None, device="cpu",
+                 dsl="triton")  # fmt: skip
+    template = f"{sys.executable} {host} {{variant}} {factor}"
+    code = benchmark._weighted(args, lambda: benchmark._run_external(args, template))
+    out = benchmark.parse_outcome(capsys.readouterr().out)
+    assert code == 0 and out.get("verdict") == verdict
+    assert out["speedup"] == pytest.approx(speedup)
+    # what the host measured, weighted: 0.75 x dec + 0.25 x pre
+    assert out["triton_us"] == pytest.approx((0.75 * 10 + 0.25 * 100) * factor)

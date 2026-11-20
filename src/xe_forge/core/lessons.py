@@ -9,7 +9,7 @@ experiments that have already been paid for in GPU time.
 The knowledge base is not that ledger and must not become one. Its entries are
 patterns recorded on the machines the vendor ran, which is why the workspace
 template tells a session not to read their ``expected_speedup``. What is missing is
-the other half: what *this* part returned, from ``benchmark``, in a run we did.
+the other half: what *this* part returned, from ``benchmark``.
 
 So a host that wants its sessions to accumulate names a directory. Every session
 reads every file in it and writes only its own. That is what makes a shared ledger

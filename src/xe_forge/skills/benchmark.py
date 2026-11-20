@@ -28,6 +28,7 @@ import io
 import os
 import re
 import sys
+from pathlib import Path
 
 BUILTIN_ENV = "XE_FORGE_BUILTIN_BENCHMARK"
 
@@ -257,11 +258,14 @@ def _run_builtin(args) -> int:
             baseline_ms = sum(baseline_us) / len(baseline_us) / 1000.0
             opt_ms = optimized_result.execution_time_ms
             speedup = baseline_ms / opt_ms if opt_ms > 0 else 0
+            within_noise = abs(speedup - 1.0) < executor.min_effect
             print("Correctness: PASSED")
             print(
-                f"Performance: baseline_us={baseline_ms * 1000:.2f}, "
-                f"kernel_us={opt_ms * 1000:.2f}, speedup={speedup:.2f}x"
+                f"Performance: baseline_us={baseline_ms * 1000:.2f}, kernel_us={opt_ms * 1000:.2f}, "
+                f"speedup={'none' if within_noise else f'{speedup:.2f}x'}"
             )
+            if within_noise:
+                print("VERDICT: INDISTINGUISHABLE")
         else:
             print("Correctness: FAILED")
             print(f"Error: {optimized_result.error_message}")
@@ -283,10 +287,13 @@ def _run_builtin(args) -> int:
                 print(f"Feedback: {result.feedback_message}")
             return 1
         if result.original_time_us and result.optimized_time_us:
+            ratio = "none" if result.verdict else f"{result.speedup:.2f}x"
             print(
                 f"Performance: baseline_us={result.original_time_us:.2f}, "
-                f"kernel_us={result.optimized_time_us:.2f}, speedup={result.speedup:.2f}x"
+                f"kernel_us={result.optimized_time_us:.2f}, speedup={ratio}"
             )
+            if result.verdict:
+                print(f"VERDICT: {result.verdict}")
         if result.feedback_message:
             print(f"Feedback: {result.feedback_message}")
     return 0
@@ -406,11 +413,165 @@ def _recording(target, args, produce) -> int:
     return code
 
 
+def _weights(args) -> dict[str, float]:
+    """The spec's weighted shapes, each weight divided by their sum, unless one ``--variant``
+    was asked for. ValueError when the spec's weights are malformed, a weight is negative or
+    not finite, they sum to 0, or one names a variant the spec lacks."""
+    # A --variant run still loads the spec, so malformed weights fail here, not later.
+    if not args.spec or (args.variant and not Path(args.spec).is_file()):
+        return {}
+    import math
+
+    from xe_forge.core.spec_loader import load_spec
+
+    spec = load_spec(args.spec)
+    weights = spec.weights
+    if args.variant or not weights:
+        return {}
+    total = sum(weights.values())
+    if any(not math.isfinite(w) or w < 0 for w in weights.values()) or not total > 0:
+        raise ValueError(f"the spec's weights {weights} must be finite, non-negative and "
+                         "sum above 0")  # fmt: skip
+    unknown = [name for name in weights if spec.get_variant(name) is None]
+    if unknown:
+        raise ValueError(f"the spec's weights name variants it lacks: {', '.join(unknown)}")
+    return {name: w / total for name, w in weights.items()}
+
+
+# How much slower than the captured kernel a baseline may run before it is not that kernel.
+BASELINE_SLACK = float(os.environ.get("XE_FORGE_BASELINE_SLACK", "1.5"))
+
+
+def _not_the_captured_kernel(args, name: str, baseline_us) -> str | None:
+    """Why the baseline measured at ``name`` is not the kernel the capture timed, or None."""
+    from xe_forge.core.spec_loader import load_spec
+
+    captured = load_spec(args.spec).captured_us.get(name)
+    if not captured or baseline_us is None or baseline_us <= BASELINE_SLACK * captured:
+        return None
+    return (f"the baseline ran {baseline_us:.2f} us at {name}; the kernel it copies ran "
+            f"{captured:.2f} us per call there in the model (captured_us), "
+            f"{baseline_us / captured:.1f}x slower, over the {BASELINE_SLACK}x allowed. A trial "
+            "would be scored against this copy, not the kernel: make the baseline run the "
+            "kernel the model ran -- where part of it cannot be built from source, through "
+            "the library's own call")  # fmt: skip
+
+
+def _one_shape(args, single) -> int:
+    """One shape's run, refused like a weighted one when its baseline is not the captured
+    kernel (the spec's ``captured_us`` at that shape)."""
+    from xe_forge.core.spec_loader import load_spec
+
+    spec = load_spec(args.spec) if args.spec and Path(args.spec).is_file() else None
+    name = args.variant or (spec.default_variant if spec else None)
+    if not (spec and spec.captured_us.get(name)):
+        return single()
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = single()
+    out = parse_outcome(buf.getvalue()) or {}
+    why = out.get("correctness") == "pass" and _not_the_captured_kernel(
+        args, name, out.get("baseline_us"))  # fmt: skip
+    if why:
+        print(f"Correctness: FAILED\nVERDICT: BASELINE_NOT_CAPTURED_KERNEL\nError: {why}")
+        return 1
+    print(buf.getvalue(), end="")
+    return code
+
+
+def _weighted(args, single) -> int:
+    """Every weighted shape of the spec, one ``single`` run each, scored as one result.
+
+    The kernel replaces the baseline at all of them, so: every shape must be correct; a
+    shape measured slower is a regression at its own ratio (``VERDICT: SLOWER_ON``),
+    whatever the others gain; otherwise the speedup is the time-weighted total,
+    1 / sum(w / s) -- a shape whose comparison was gated (too close to call) counts as 1.
+    """
+    try:
+        weights = _weights(args)
+    except ValueError as exc:
+        print(f"Correctness: FAILED\nError: {exc}")
+        return 1
+    if not weights:
+        return _one_shape(args, single)
+    if args.baseline_us is not None:
+        print("Correctness: FAILED\nError: --baseline-us is one shape's; a weighted spec "
+              "times every shape's baseline afresh")  # fmt: skip
+        return 1
+    print(f"Variants: {', '.join(f'{n} (w={w:.3f})' for n, w in weights.items())}")
+    rows = []
+    try:
+        for name, w in weights.items():
+            args.variant = name
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = single()
+            text, out = buf.getvalue(), parse_outcome(buf.getvalue()) or {"correctness": "fail"}
+            if out["correctness"] != "pass":
+                print(f"Variant: {name}\n{text.rstrip()}")
+                return code or 1
+            why = _not_the_captured_kernel(args, name, out.get("baseline_us"))
+            if why:
+                print(f"Correctness: FAILED\nVERDICT: BASELINE_NOT_CAPTURED_KERNEL\nError: {why}")
+                return 1
+            timer = re.search(r"^TIMER: .*$", text, re.M)
+            if timer and not rows:
+                print(timer.group(0))
+            # Gated: no ratio came back. A host's verdict beside a ratio does not erase it.
+            gated = "speedup" not in out
+            rows.append((name, w, 1.0 if gated else out["speedup"], gated, out))
+            shown = f"none {out.get('verdict')}" if gated else f"{out['speedup']:.2f}x"
+            # Indented: these are not the lines the trial loop reads.
+            print(f"  {name} (w={w:.3f}): baseline_us={out.get('baseline_us')}, "
+                  f"kernel_us={out.get('triton_us')}, speedup={shown}")  # fmt: skip
+    finally:
+        args.variant = None  # what the tree is pinned to: the weighted set
+    from xe_forge.config import noise_band
+
+    noise = noise_band()
+    total = 1.0 / sum(w / s for _, w, s, _, _ in rows)
+
+    def weighted(field):
+        got = [(w, r.get(field)) for _, w, _, _, r in rows]
+        return sum(w * v for w, v in got) if all(v is not None for _, v in got) else None
+
+    base, kernel = weighted("baseline_us"), weighted("triton_us")
+    # The executors' band: at its edge or past it is a change, strictly inside it none.
+    slower = min((r for r in rows if not r[3] and r[2] <= 1.0 - noise), key=lambda r: r[2],
+                 default=None)  # fmt: skip
+    print("Correctness: PASSED")
+    print(f"Weighted: speedup={total:.3f}x over {len(rows)} shapes")
+    ratio = slower[2] if slower else (None if abs(total - 1) < noise else total)
+    times_ = "".join(f"{k}={v:.2f}, " for k, v in (("baseline_us", base), ("kernel_us", kernel))
+                     if v is not None)  # fmt: skip
+    print(f"Performance: {times_}speedup={f'{ratio:.2f}x' if ratio else 'none'}")
+    if slower:
+        print(f"VERDICT: SLOWER_ON\nSlower on: {slower[0]} ({slower[2]:.2f}x)")
+    elif ratio is None:
+        print("VERDICT: INDISTINGUISHABLE")
+    return 0
+
+
 def run(args):
+    from xe_forge.config import noise_band
+
+    try:  # read before any shape is timed, not after
+        noise_band()
+    except ValueError as exc:
+        print("Correctness: FAILED")
+        print("VERDICT: BAD_CONFIGURATION")
+        print(f"Error: {exc}")
+        sys.exit(2)
+    if not args.device:
+        from xe_forge.frontend.profile import device_type
+
+        args.device = device_type()
     target = _trial_target(args)
     template = _external_template(args)
     if template:
-        sys.exit(_recording(target, args, lambda: _run_external(args, template)))
+        sys.exit(
+            _recording(target, args, lambda: _weighted(args, lambda: _run_external(args, template)))
+        )
     if not _builtin_opted_in(args):
         print("Correctness: FAILED")
         print("VERDICT: NO_BENCHMARK_CONFIGURED")
@@ -423,15 +584,15 @@ def run(args):
         )
         sys.exit(1)
     if os.getenv(_CHILD_ENV):
-        sys.exit(_recording(target, args, lambda: _run_builtin(args)))
+        sys.exit(_recording(target, args, lambda: _weighted(args, lambda: _run_builtin(args))))
     # The child measures and records; this process only records a timeout.
-    sys.exit(_recording(target, args, _run_builtin_watched))
+    sys.exit(_recording(target, args, lambda: _run_builtin_watched(args)))
 
 
 _CHILD_ENV = "XE_FORGE_BENCHMARK_CHILD"
 
 
-def _run_builtin_watched() -> int:
+def _run_builtin_watched(args=None) -> int:
     """Run the built-in benchmark in a child that is killed after the benchmark timeout.
 
     A kernel that never completes leaves the process blocked inside the driver, where no
@@ -442,7 +603,13 @@ def _run_builtin_watched() -> int:
 
     from xe_forge.config import get_config
 
-    timeout = get_config().external.timeout
+    # Per shape; XE_FORGE_BENCHMARK_TIMEOUT lets a caller give up on a hang sooner than a build.
+    per_shape = int(os.environ.get("XE_FORGE_BENCHMARK_TIMEOUT", get_config().external.timeout))
+    try:
+        shapes = len(_weights(args)) if args else 1
+    except ValueError:
+        shapes = 1  # the child refuses them
+    timeout = per_shape * max(1, shapes)
     child = subprocess.Popen(
         [sys.executable, "-c", "from xe_forge.skills import main; main()", *sys.argv[1:]],
         env={**os.environ, _CHILD_ENV: "1"},
@@ -456,7 +623,7 @@ def _run_builtin_watched() -> int:
         print("Correctness: FAILED")
         print("VERDICT: TIMEOUT")
         print(
-            f"Error: the benchmark did not finish within {timeout}s (EXTERNAL_TIMEOUT) and was "
+            f"Error: the benchmark did not finish within {timeout}s (XE_FORGE_BENCHMARK_TIMEOUT or EXTERNAL_TIMEOUT, per shape) and was "
             "killed; a kernel that never completes -- a missing barrier, a deadlock, an "
             "out-of-bounds loop -- hangs the device this way."
         )

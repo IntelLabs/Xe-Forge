@@ -2,8 +2,9 @@
 Configuration Manager for Xe-Forge kernel optimization pipeline
 """
 
+import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,25 @@ from dotenv import load_dotenv
 
 from xe_forge.external import DEFAULT_TIMEOUT
 from xe_forge.models import OptimizationStage
+
+
+def noise_band() -> float:
+    """The smallest speed change reported as one (``BENCHMARK_MIN_EFFECT``)."""
+    raw = os.environ.get("BENCHMARK_MIN_EFFECT", "0.02")
+    try:
+        band = float(raw)
+    except ValueError:
+        raise ValueError(f"BENCHMARK_MIN_EFFECT must be a number, not {raw!r}") from None
+    return checked_band(band)
+
+
+def checked_band(band: float) -> float:
+    """``band``, if a noise band can be it: with none, both of its inclusive edges are 1.0,
+    so an unchanged time would be a slowdown and a win at once."""
+    if not (math.isfinite(band) and band > 0):
+        raise ValueError(f"the noise band (BENCHMARK_MIN_EFFECT) must be finite and above 0, "
+                         f"not {band}")  # fmt: skip
+    return band
 
 
 @dataclass
@@ -131,11 +151,13 @@ class LoggingConfig:
 class EngineConfig:
     """Engine selection configuration"""
 
-    engine: str = "dspy"  # "dspy", "claude" or "dspy-agent"
+    engine: str = "dspy"  # "dspy", "claude", "codex" or "dspy-agent"
     auto_launch: bool = False  # Claude engine: auto-launch claude CLI
     workspace: str = "./"  # Claude engine: workspace directory
     git_init: bool = False  # Claude engine: initialize workspace as git repo
     max_turns: int = 80  # Claude engine: turn limit for one headless session
+    # "kernel" or "library" (tune how the repository calls a library such as oneDNN).
+    target: str = "kernel"
     # Name, ``module:attr`` reference, or entry point of a build backend
     # (see xe_forge.core.build_backend). None keeps the default ai_bench path.
     build_backend: str | None = None
@@ -179,6 +201,8 @@ class ExternalConfig:
     # Repositories a kernel from kernel_repo is wired into (e.g. vLLM). With one, a winner
     # may change the op's interface and call sites: the port patches those repos too.
     integration_repos: list[str] = field(default_factory=list)
+    # The stack's interpreter; set, the port-back agent builds and tests the port there.
+    stack_python: str | None = None
     timeout: int = DEFAULT_TIMEOUT
 
 
@@ -199,7 +223,7 @@ class ProfilerConfig:
     vtune_bin: str = "vtune"
     unitrace_enabled: bool = False
     unitrace_bin: str = "unitrace"
-    unitrace_metric_group: str = "ComputeBasic"
+    unitrace_metric_group: str = "all"
     warmup_iters: int = 5
     profile_iters: int = 20
 
@@ -305,6 +329,7 @@ class ConfigManager:
             workspace=self._get_env("WORKSPACE", "./"),
             git_init=self._get_env("WORKSPACE_GIT_INIT", False, bool),
             max_turns=self._get_env("MAX_TURNS", 80, int),
+            target=self._get_env("TARGET", "kernel"),
             build_backend=self._get_env("BUILD_BACKEND", None),
             compiler_flags=self._get_env("COMPILER_FLAGS", None),
         )
@@ -313,6 +338,7 @@ class ConfigManager:
         external_cfg = ExternalConfig(
             benchmark=self._get_env("EXTERNAL_BENCHMARK", None),
             validate=self._get_env("EXTERNAL_VALIDATE", None),
+            stack_python=self._get_env("STACK_PYTHON", None),
             dataset_record=self._get_env("DATASET_RECORD", None),
             lessons=self._get_env("LESSONS_DIR", None),
             kernel_repo=self._get_env("KERNEL_REPO", None),
@@ -335,7 +361,7 @@ class ConfigManager:
             vtune_bin=self._get_env("VTUNE_BIN", "vtune"),
             unitrace_enabled=self._get_env("UNITRACE_ENABLED", False, bool),
             unitrace_bin=self._get_env("UNITRACE_BIN", "unitrace"),
-            unitrace_metric_group=self._get_env("UNITRACE_METRIC_GROUP", "ComputeBasic"),
+            unitrace_metric_group=self._get_env("UNITRACE_METRIC_GROUP", "all"),
             warmup_iters=self._get_env("VTUNE_WARMUP", 5, int),
             profile_iters=self._get_env("VTUNE_ITERS", 20, int),
         )
@@ -381,15 +407,18 @@ class ConfigManager:
         """Override configuration values programmatically"""
         # Map legacy "xpu_*" keys to device_config
         _section_aliases = {"xpu": "device_config"}
+        sections = sorted((f.name for f in fields(self.config)), key=len, reverse=True)
         for key, value in kwargs.items():
-            parts = key.split("_", 1)
-            if len(parts) == 2:
-                section, attr = parts
-                section = _section_aliases.get(section, section)
-                if hasattr(self.config, section):
-                    section_obj = getattr(self.config, section)
-                    if hasattr(section_obj, attr):
-                        setattr(section_obj, attr, value)
+            # A section name may itself hold "_" (device_config): match the longest prefix.
+            section = next((s for s in sections if key.startswith(s + "_")), None)
+            if section is None:
+                alias, _, attr = key.partition("_")
+                section = _section_aliases.get(alias)
+            else:
+                attr = key[len(section) + 1 :]
+            section_obj = getattr(self.config, section, None) if section else None
+            if section_obj is not None and hasattr(section_obj, attr):
+                setattr(section_obj, attr, value)
         return self
 
     def get(self) -> Config:

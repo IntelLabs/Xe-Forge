@@ -6,7 +6,6 @@ and set_all_seeds utilities (shared with the benchmark harness).
 """
 
 import logging
-import os
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -22,6 +21,7 @@ from ai_bench.harness.runner.benchmark_compare import (
 )
 from ai_bench.utils import count_torch_flop, import_from_path
 
+from xe_forge.config import checked_band, noise_band
 from xe_forge.core.dtype_utils import make_rand_tensor
 from xe_forge.core.reference_workload import ReferenceWorkload
 from xe_forge.models import ExecutionResult
@@ -49,6 +49,13 @@ class ComparisonResult:
     feedback_message: str = ""
     # Set when the arms could not be told apart: ``speedup`` is then not a result.
     verdict: str | None = None
+
+
+def no_change_message(speedup: float, band: float, original_us: float, optimized_us: float) -> str:
+    """Feedback for a ratio inside the noise band: not a regression, not a win."""
+    return (f"NO MEASURABLE CHANGE: {speedup:.3f}x, within {band:.0%} of the original "
+            f"(Original: {original_us:.2f}μs, Optimized: {optimized_us:.2f}μs). Not a "
+            "regression and not a win: try a change that moves the bottleneck.")  # fmt: skip
 
 
 class KernelBenchExecutor:
@@ -84,12 +91,10 @@ class KernelBenchExecutor:
         self.warmup_iters = warmup_iters
         self.benchmark_iters = benchmark_iters
         self.rounds = rounds
-        # The smallest speedup reported as one. Interleaving and slot swapping leave a
-        # consistent ~1% between identical builds on this part (an A/A check measured
-        # it); anything inside this band is reported as indistinguishable, not a result.
-        if min_effect is None:
-            min_effect = float(os.environ.get("BENCHMARK_MIN_EFFECT", "0.02"))
-        self.min_effect = min_effect
+        # The smallest speedup reported as one. Identical builds can still differ by a
+        # small consistent margin even with interleaving and slot swapping; anything inside
+        # this band is reported as indistinguishable, not a result.
+        self.min_effect = noise_band() if min_effect is None else checked_band(min_effect)
         self.require_correctness = require_correctness
         self.rtol = rtol
         self.atol = atol
@@ -544,13 +549,18 @@ class KernelBenchExecutor:
         # Check correctness
         original_correct = original_result.output_correct is not False
 
-        # Determine if optimization made things worse
-        is_slower = speedup < 1.0
+        # Slower only at the noise band's edge or past it: strictly inside it, neither a
+        # regression nor a win.
+        is_slower = speedup <= 1.0 - self.min_effect
+        within_noise = not is_slower and speedup < 1.0 + self.min_effect
 
         # Generate feedback message for CoVeR agent
         feedback_parts = []
 
-        if is_slower:
+        if within_noise:
+            feedback_parts.append(no_change_message(speedup, self.min_effect,
+                                                    original_time_us, optimized_time_us))  # fmt: skip
+        elif is_slower:
             slowdown = 1.0 / speedup if speedup > 0 else float("inf")
             feedback_parts.append(
                 f"PERFORMANCE REGRESSION: Optimized kernel is {slowdown:.2f}x SLOWER than original. "
@@ -592,6 +602,7 @@ class KernelBenchExecutor:
             original_correct=original_correct,
             optimized_correct=True,
             is_slower=is_slower,
+            verdict="INDISTINGUISHABLE" if within_noise else None,
             feedback_message=feedback_message,
         )
 
@@ -644,13 +655,15 @@ class KernelBenchExecutor:
                         original_time = workload.measure(workload.original, self.time_forward)
                     optimized_time = workload.measure(workload.optimized, self.time_forward)
                     speedup = original_time / optimized_time if optimized_time > 0 else 0.0
+                    if abs(speedup - 1.0) < self.min_effect:
+                        verdict = "INDISTINGUISHABLE"
                 if original_time <= 0 or optimized_time <= 0:
                     raise ValueError("Benchmark timings must be positive")
                 return ComparisonResult(
                     original_time_us=original_time,
                     optimized_time_us=optimized_time,
                     speedup=speedup,
-                    is_slower=optimized_time > original_time,
+                    is_slower=verdict is None and speedup <= 1.0 - self.min_effect,
                     verdict=verdict,
                     feedback_message=(
                         "Reference outputs and updated buffers verified for two calls "
@@ -814,7 +827,7 @@ class KernelBenchExecutor:
 
     def __del__(self):
         """Cleanup temp directory."""
-        if self._temp_dir is not None:
+        if getattr(self, "_temp_dir", None) is not None:  # unset when __init__ raised
             import shutil
 
             try:

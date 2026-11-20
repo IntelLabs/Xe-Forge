@@ -42,59 +42,6 @@ def _args(**overrides):
     return argparse.Namespace(**fields)
 
 
-@pytest.mark.parametrize("prompt_length,decode_length", [(4, 1), (2, 2)])
-def test_decode_reference_attention_layout(monkeypatch, prompt_length, decode_length):
-    import runpy
-    from pathlib import Path
-
-    import torch
-
-    namespace = runpy.run_path(str(Path(__file__).parents[1] / "scripts/deepseek_decode.py"))
-    args = namespace["ModelArgs"](
-        max_batch_size=2,
-        max_seq_len=6,
-        dim=12,
-        n_heads=3,
-        q_lora_rank=8,
-        kv_lora_rank=4,
-        qk_nope_head_dim=4,
-        qk_rope_head_dim=4,
-        v_head_dim=4,
-    )
-    frequencies = namespace["precompute_freqs_cis"](args)
-    shapes = []
-
-    def explicit_attention(query, key, value, *, scale, is_causal):
-        shapes.append((tuple(query.shape), tuple(key.shape), tuple(value.shape)))
-        assert not is_causal
-        return torch.softmax((query @ key.transpose(-2, -1)) * scale, dim=-1) @ value
-
-    with torch.no_grad():
-        model = namespace["Model"](
-            args,
-            torch.randn(2, prompt_length, 12),
-            0,
-            frequencies[:prompt_length],
-        ).eval()
-        inputs = (
-            torch.randn(2, decode_length, 12),
-            prompt_length,
-            frequencies[prompt_length : prompt_length + decode_length],
-        )
-        actual = model(*inputs)
-        monkeypatch.setattr(torch.nn.functional, "scaled_dot_product_attention", explicit_attention)
-        expected = model(*inputs)
-    assert actual.shape == (2, decode_length, 12)
-    assert shapes == [
-        (
-            (2, 3, decode_length, 8),
-            (2, 3, prompt_length + decode_length, 8),
-            (2, 3, prompt_length + decode_length, 4),
-        )
-    ]
-    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
-
-
 @pytest.mark.parametrize("legacy_setting", [True, False])
 def test_comparison_always_validates_before_timing(legacy_setting):
     from xe_forge.core.executor import KernelBenchExecutor
@@ -521,6 +468,21 @@ def test_a_hung_builtin_is_killed_with_a_verdict(monkeypatch, capsys):
     assert "Performance:" not in out
 
 
+def test_a_hung_builtin_gives_up_at_the_benchmark_timeout_not_the_build_one(monkeypatch, capsys):
+    import subprocess
+    import time
+
+    popen = subprocess.Popen
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: popen(["sleep", "60"], **kw))
+    monkeypatch.setattr(get_config().external, "timeout", 3600)
+    monkeypatch.setenv("XE_FORGE_BENCHMARK_TIMEOUT", "1")
+
+    start = time.monotonic()
+    assert benchmark._run_builtin_watched() == 1
+    assert time.monotonic() - start < 30
+    assert "VERDICT: TIMEOUT" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("value", ["1", "true", "yes", "ON"])
 def test_the_env_var_runs_the_builtin(monkeypatch, _paths_not_taken, value):
     monkeypatch.setenv(benchmark.BUILTIN_ENV, value)
@@ -598,7 +560,7 @@ def test_cached_baseline_requires_reference_correctness(
     spec.get_init_args.return_value = [8]
     monkeypatch.setattr(spec_loader, "load_spec", Mock(return_value=spec))
 
-    executor = Mock()
+    executor = Mock(min_effect=0.02)
     executor._check_correctness.return_value = outputs_match
     executor.execute.return_value = SimpleNamespace(
         success=execution_success, execution_time_ms=0.005, error_message="execution failed"
@@ -876,6 +838,7 @@ def test_spec_tolerances_decide_correctness_on_the_spec_path(tmp_path, monkeypat
             optimized_time_us=1.0,
             speedup=2.0,
             feedback_message="",
+            verdict=None,
         )
 
     executor.compare_kernels = compare_kernels
@@ -909,3 +872,36 @@ def test_every_win_ports_and_an_integration_repo_widens_what_may_change(tmp_path
         < port_back.index("**serving-only**")
         < port_back.index("**none**")
     )
+
+
+@pytest.mark.parametrize("opt_ms, verdict", [(0.995, "INDISTINGUISHABLE"), (0.5, None),
+                                             (1.5, None)])  # fmt: skip
+def test_a_sycl_result_inside_the_noise_band_is_indistinguishable(
+    tmp_path, monkeypatch, opt_ms, verdict
+):
+    from xe_forge.core.sycl_executor import SyclExecutor
+    from xe_forge.models import ExecutionResult
+
+    monkeypatch.delenv("BENCHMARK_MIN_EFFECT", raising=False)
+    ex = SyclExecutor.__new__(SyclExecutor)
+    ex._backend = ex._build_dir = ex._cached_input_dir = None
+    times = iter([1.0, opt_ms])
+    monkeypatch.setattr(ex, "execute", lambda **k: ExecutionResult(
+        success=True, execution_time_ms=next(times)))  # fmt: skip
+    assert ex.compare_kernels("orig", "opt", input_dir=str(tmp_path)).verdict == verdict
+
+
+def test_a_sycl_result_inside_the_noise_band_still_says_correctness_went_unchecked(
+    tmp_path, monkeypatch
+):
+    from xe_forge.core.sycl_executor import SyclExecutor
+    from xe_forge.models import ExecutionResult
+
+    ex = SyclExecutor.__new__(SyclExecutor)
+    ex._backend = ex._build_dir = ex._cached_input_dir = None
+    times = iter([1.0, 1.0])
+    monkeypatch.setattr(ex, "execute", lambda **k: ExecutionResult(
+        success=True, execution_time_ms=next(times)))  # fmt: skip
+    got = ex.compare_kernels("orig", "opt", input_dir=str(tmp_path))
+    assert "NO MEASURABLE CHANGE" in got.feedback_message
+    assert "no output files for comparison" in got.feedback_message

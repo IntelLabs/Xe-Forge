@@ -1,0 +1,41 @@
+Build the Python environment {{ framework }} runs in on this machine's {{ device }}, so that
+{{ model }} can be captured in it next. Nothing here knows {{ framework }}: read its own docs
+and code for how it is installed.
+
+The source: {% if source %}{{ source }}{% if ref %}, at {{ ref }}{% endif %}{% else %}{{ framework }}'s upstream repository, at its latest release (find the repository
+from the project's own pages or its package metadata){% endif %}. Clone it into {{ venv }}/src.
+
+ 1. Read how the project says to install it **on this device**: its install docs, its
+    per-device requirement files and build options, its CI for this device. Many projects
+    have exactly such a page, and it overrides everything below. Say in "notes" which you
+    followed.
+ 2. Create the venv at {{ venv }} with the Python version the project requires (uv may make it
+    and install into it; this venv is yours, nothing outside it changes).
+ 3. Where the project gives no recipe for this device: install the {{ device }} build of torch
+    (and torchvision, torchaudio when it needs them) from PyTorch's own index for this device,
+    at the version the project pins, **before** anything else; then the project itself without
+    its dependencies; then those dependencies, except packages that build or run only on
+    another vendor's device or serve only training -- list each one you leave out in
+    "dropped" with why. Check afterwards that the resolver kept the {{ device }} build of torch.
+ 4. Change no source here. A switch the project itself offers for this device (an env
+    variable, a backend option) goes in "env"; anything that needs a code change is the patch
+    step's, which runs later on what the capture finds missing.
+ 5. What the build needs from the environment is an addition to it, never a copy: the run
+    may start on another node, where this one's paths are wrong. "env" holds only variables
+    this environment leaves unset; a path variable is extended with "prepend", directories
+    inside {{ venv }} that go before its own value (a library the venv ships ahead of the
+    system's). Never record a whole path variable as you found it.
+ 6. Check, under {{ venv }}/bin/python with "env" and "prepend" applied: {{ framework }}
+    imports, and torch sees the {{ device }}. Do not load {{ model }}; the capture does that.
+{% if redo | default(none) %}
+{{ venv }} already holds this build, and its record was refused:
+{% for p in redo %}  - {{ p }}
+{% endfor %}Keep what is built, rebuild only what these require, and write the record again.
+{% endif %}
+Write {{ answer }}: {"python": "{{ venv }}/bin/python", "source": "<repository URL>", "ref":
+"<tag or branch>", "commit": "<sha of what was built>", "version": "<{{ framework }}'s version
+as it reports it>", "torch": "<torch.__version__>", "env": {<variable>: <value>}, "prepend":
+{<path variable>: [<directory inside {{ venv }}>, ...]}, "dropped":
+[{"package", "why"}], "notes": ["<what the capture should know about this build, one line
+each>"]}, or {"error": "<why it cannot be built here>", "next_step": "<what a person would
+do>"}.

@@ -58,7 +58,7 @@ unitrace_enabled, vtune_enabled). Follow the CLAUDE.md workflow exactly — ever
 {% if measurement == "host" %}
 A benchmark that comes back with `speedup=none` and `VERDICT: BELOW_FLOOR` or
 `INDISTINGUISHABLE` is not a regression — it is no measurement at all. Do not branch away
-from a kernel on one. The tree is pinned to its variant, so a larger shape is a new run.
+from a kernel on one.{% if weights %} A weighted shape too close to call counts as parity in the total.{% else %} The tree is pinned to its variant, so a larger shape is a new run.{% endif %}
 A trial may be split across sources. When it is, put them in a directory and pass that
 directory to `validate`, `trial save` and `benchmark` alike — naming one file of a split
 kernel builds it against the baseline's other sources and times a mixture nobody wrote.
