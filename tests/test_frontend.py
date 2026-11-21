@@ -1259,6 +1259,26 @@ def test_patch_check_passes_a_patch_that_generates_the_reference(tmp_path):
     assert (work / "PR.md").read_text() == pr  # a re-check replaces its numbers, never adds more
 
 
+def test_patch_check_reports_the_declared_quantization_without_gating_on_it(tmp_path):
+    # bf16 gaps of the first sequence are far over the tolerance for the quantized run's
+    # tokens too: the stub scores every token file alike. The port passes; the quantized
+    # run is a reported fact.
+    work, repos, fw, ref = _patch_dir(tmp_path, [[1, 2, 3, 4], [5, 6, 7, 8]])
+    (work / "generate.sh").write_text(
+        "if [ -n \"$XE_FORGE_QUANTIZATION\" ]; then echo '[[1, 2, 9, 9], [5, 6, 7, 8]]' "
+        '> "$OUT/tokens.json"; else echo \'[[1, 2, 3, 4], [5, 6, 7, 8]]\' > "$OUT/tokens.json"; fi\n'
+    )
+    code, out = _tool("patch", "check", str(work), "--repos", str(repos), "--framework-python",
+                      str(fw), "--reference-python", str(ref), "--model", "toy", "--batch", "2",
+                      "--input-len", "4", "--min-match", "4", "--quantization", "Q2:uint8")  # fmt: skip
+    assert code == 0, out
+    q = json.loads((work / "check.json").read_text())["quantized"]
+    assert q["quantization"] == "Q2:uint8" and q["tokens"][0] == [1, 2, 9, 9]
+    assert q["worst"] == [0, 0.2] and q["best_share"] == 0.875
+    assert "reported, not gated" in out
+    assert "| Q2:uint8: worst gap per sequence (nat) | [0, 0.2] |" in (work / "PR.md").read_text()
+
+
 @pytest.mark.parametrize("spoil, problem", [
     (lambda work, repo: (work / "PR.md").unlink(), "no PR.md"),
     (lambda work, repo: (repo / "model.py").write_text("ARCHS = ['Toy', 'Uncommitted']\n"),

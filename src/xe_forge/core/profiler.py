@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -131,11 +132,10 @@ class ProfileResult:
         if not self.primary_kernel:
             return "No profiling data available." + artifacts
 
-        parts = [
-            f"== {self.source} Profile: {self.primary_kernel} ==",
-            "",
-            "Metrics:",
-        ]
+        parts = [f"== {self.source} Profile: {self.primary_kernel} ==", ""]
+        if "host" in self.raw_counters:
+            return "\n".join(parts + format_host(self.raw_counters["host"])) + artifacts
+        parts.append("Metrics:")
         m = self.metrics
         if self.source == "Unitrace" and not self.raw_counters.get("compute_metrics"):
             parts.append("  EU event shares are not elapsed-time utilization or occupancy.")
@@ -618,6 +618,399 @@ _EU_STALL_CAUSES = [
     "InstrFetchStall",
     "OtherStall",
 ]
+
+
+def parse_vtune_summary(text: str) -> list[dict]:
+    """``vtune -report summary`` as tab-separated text, row by row: a metric row keeps its
+    hierarchy level, name and value as VTune printed them; any other row (a table VTune
+    nests in the summary) keeps its cells."""
+    rows = []
+    for line in text.splitlines():
+        cells = line.split("\t")
+        if not line.strip() or cells[:3] == ["Hierarchy Level", "Metric Name", "Metric Value"]:
+            continue
+        if len(cells) == 3 and cells[0].strip().isdigit():
+            rows.append({"level": int(cells[0]), "metric": cells[1], "value": cells[2]})
+        else:
+            rows.append({"cells": cells})
+    return rows
+
+
+def parse_vtune_table(text: str) -> list[dict]:
+    """A ``vtune -report <name> -format csv -csv-delimiter tab`` table, one dict per row."""
+    lines = [line for line in text.splitlines() if "\t" in line]
+    return list(csv.DictReader(lines, delimiter="\t"))
+
+
+def format_host(host: dict) -> list[str]:
+    """A host profile as lines: the placement and collection window it was measured under,
+    then each section as the tool named it, and what could not be measured, with why."""
+    p = host.get("placement") or {}
+    lines = [
+        f"  Placement: CPUs {p.get('cpus')} on sockets {p.get('sockets')}, memory nodes "
+        f"{p.get('memory_nodes')}, memory policy {p.get('memory_policy') or 'unknown'}, "
+        f"{p.get('threads', 'unknown')} torch threads, threading variables "
+        f"{p.get('thread_env') or 'none set'}"
+    ]
+    w = host.get("window") or {}
+    if {"iters", "forward_s", "window_s", "window_max_s"} <= w.keys():
+        span = (
+            f"each of the {w['iters']} timed forwards in its own window (buffer resets, "
+            "setup, validation and warmup excluded)"
+            if w.get("window") == "each"
+            else f"one window over {w['iters']} timed calls (their buffer resets included; "
+            "setup, validation and warmup excluded)"
+        )
+        lines.append(
+            f"  Collection window: {span}. The forwards took {w['forward_s']:.4g} s; the "
+            f"collection held between {w['window_s']:.4g} s and {w['window_max_s']:.4g} s "
+            "(the outer figure includes the collector's start and stop commands). Whatever "
+            "else ran in it is counted too: buffer resets, a thread pool spinning between "
+            "calls"
+            + (", and other processes (system-wide collection)." if host.get("system_wide")
+               else ".")
+        )  # fmt: skip
+    else:
+        lines.append("  Collection window: unknown (the runner wrote no complete window record).")
+    lines.append(
+        "  No cache flush runs between profiled calls, unlike `benchmark`: data that fits in "
+        f"the last-level cache ({p.get('llc_bytes') or 'unknown'} bytes) is read from it here."
+    )
+    for section in host.get("sections", []):
+        total = section.get("total")
+        rows = section.get("rows")
+        count = f" (top {len(rows)} of {total})" if total is not None and rows is not None else ""
+        lines.append(f"{section['title']}{count}:")
+        if section.get("error"):
+            lines.append(f"  unknown: {section['error']}")
+            continue
+        if not rows:
+            lines.append(f"  {section.get('empty', 'none reported')}")
+        for row in rows or []:
+            if "metric" in row and "level" in row:
+                lines.append(f"  {'  ' * row['level']}{row['metric']}: {row['value'] or 'unknown'}")
+            elif "cells" in row:
+                lines.append("  | " + " | ".join(row["cells"]))
+            else:
+                lines.append(
+                    "  " + "; ".join(f"{k}={v}" for k, v in row.items() if v not in ("", None))
+                )
+    for name, reason in (host.get("unmeasured") or {}).items():
+        lines.append(f"  {name}: unknown ({reason})")
+    lines.extend(f"  {note}" for note in host.get("notes", []))
+    lines.append("Guidance: knowledge_base/common/cpu/")
+    return lines
+
+
+class _HostProfiler:
+    """What every host collector shares: the artifacts directory, the runner script, the
+    collector run in its own session, and the report sections. A subclass gives the tool
+    and its command and reads its output."""
+
+    tool = ""
+
+    # One window over all timed calls by default: while a collector handles a start or
+    # stop command, a thread pool that just finished a call spins and is counted, which a
+    # window per forward pays twice per call.
+    def __init__(self, binary, analysis, artifacts_dir=None, top=15, timeout=1800,
+                 window="all", collector_args=()):  # fmt: skip
+        self.binary = binary
+        self.analysis = analysis
+        self.metric_group = f"{self.tool} {analysis}"  # the trial record's collection name
+        self.artifacts_dir = Path(artifacts_dir) if artifacts_dir is not None else None
+        self.top = top
+        self.timeout = timeout
+        self.window = window
+        self.collector_args = list(collector_args)
+
+    def available(self) -> bool:
+        return shutil.which(self.binary) is not None
+
+    def profile(self, kernel_file, spec_path=None, variant=None, warmup=5, iters=20,
+                reference_path=None) -> ProfileResult:  # fmt: skip
+        source = self.metric_group
+        if not self.available():
+            return ProfileResult(error=f"{self.tool} not found ({self.binary}).", source=source)
+        kernel_file = Path(kernel_file)
+        if not kernel_file.exists():
+            return ProfileResult(error=f"Kernel file not found: {kernel_file}", source=source)
+        root = self.artifacts_dir or kernel_file.parent / "profiles"
+        root.mkdir(parents=True, exist_ok=True)
+        stem = f"{kernel_file.stem}_{self.tool.lower()}_{self.analysis}_"
+        artifacts = Path(tempfile.mkdtemp(prefix=stem, dir=root)).resolve()
+        options = {"warmup": warmup, "iters": iters, "spec_path": spec_path, "variant": variant,
+                   "reference_path": reference_path}  # fmt: skip
+        try:
+            result = self._collect(artifacts, kernel_file, options)
+        except subprocess.TimeoutExpired:
+            result = ProfileResult(error=f"{source} did not finish in {self.timeout}s")
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            result = ProfileResult(error=f"{source} failed: {exc}")
+        result.source, result.artifacts_dir = source, str(artifacts)
+        if not result.error:
+            result.primary_kernel = kernel_file.stem  # the hottest function may be a runtime's
+        return result
+
+    def _runner(self, artifacts, kernel_file, options, **tool_options) -> Path:
+        module_path = artifacts / "kernel_mod.py"
+        module_path.write_text(Path(kernel_file).read_text())
+        runner = artifacts / "runner.py"
+        runner.write_text(
+            _runner_script(module_path, tool=self.tool.lower(), device="cpu", window=self.window,
+                           window_file=artifacts / "window.json", **options, **tool_options)
+        )  # fmt: skip
+        return runner
+
+    def _run(self, artifacts, command, name="collect", pass_fds=()):
+        proc = _run_tree(command, stdout=artifacts / f"{name}.stdout",
+                         stderr=artifacts / f"{name}.stderr", env=dict(os.environ),
+                         timeout=self.timeout, pass_fds=pass_fds)  # fmt: skip
+        (artifacts / f"{name}.log").write_text(
+            f"$ {shlex.join(command)}\n--- stdout\n{proc.stdout}\n--- stderr\n{proc.stderr}"
+        )
+        return proc
+
+    def _result(self, artifacts, sections, unmeasured=None, notes=(), system_wide=False):
+        from xe_forge.frontend.profile import host_placement
+
+        try:
+            window = json.loads((artifacts / "window.json").read_text())
+        except (OSError, ValueError):
+            window = None
+        placement = host_placement()
+        if window and "threads" in window:  # what the collected process ran with
+            placement["threads"] = window["threads"]
+        host = {"tool": self.tool, "analysis": self.analysis, "placement": placement,
+                "window": window, "system_wide": system_wide, "sections": sections,
+                "unmeasured": dict(unmeasured or {}), "notes": list(notes)}  # fmt: skip
+        return ProfileResult(
+            raw_counters={"host": host, "collection_scope": f"window_{self.window}"}
+        )
+
+
+def _read_text(path) -> str | None:
+    try:
+        return Path(path).read_text().strip()
+    except OSError:
+        return None
+
+
+def _tail(text: str, n: int = 800) -> str:
+    return " ".join(text.strip().split())[-n:] or "no output"
+
+
+class VTuneCPUProfiler(_HostProfiler):
+    """VTune on the host: one analysis, reported as VTune named its metrics -- the summary
+    and the hotspots by function -- with no threshold."""
+
+    tool = "VTune"
+
+    def __init__(self, vtune_bin="vtune", analysis="hotspots", **kw):
+        super().__init__(vtune_bin, analysis, **kw)
+        self.vtune_bin = vtune_bin
+
+    def _report(self, artifacts, result_dir, name, *report):
+        return self._run(artifacts, [self.binary, "-report", *report, "-result-dir",
+                                     str(result_dir), "-format", "csv", "-csv-delimiter", "tab"],
+                         name=name)  # fmt: skip
+
+    def _collect(self, artifacts, kernel_file, options) -> ProfileResult:
+        result_dir = artifacts / "result"
+        runner = self._runner(artifacts, kernel_file, options, vtune_bin=self.binary,
+                              result_dir=result_dir)  # fmt: skip
+        command = [self.binary, "-collect", self.analysis, "-start-paused", "-result-dir",
+                   str(result_dir), *self.collector_args, "--", sys.executable, str(runner)]  # fmt: skip
+        proc = self._run(artifacts, command)
+        if proc.returncode != 0:
+            return ProfileResult(error=f"VTune {self.analysis} collection failed "
+                                       f"(exit {proc.returncode}): {_tail(proc.stderr)}")  # fmt: skip
+        summary = self._report(artifacts, result_dir, "summary", "summary")
+        if summary.returncode != 0:
+            return ProfileResult(error=f"VTune summary report failed: {_tail(summary.stderr)}")
+        hotspots = self._report(artifacts, result_dir, "hotspots", "hotspots", "-group-by",
+                                "function")  # fmt: skip
+        section = {"title": "Hotspots by function"}
+        if hotspots.returncode != 0:
+            section["error"] = f"the hotspots report failed: {_tail(hotspots.stderr)}"
+        else:
+            functions = parse_vtune_table(hotspots.stdout)
+            section.update(rows=functions[: self.top], total=len(functions))
+        return self._result(artifacts, [
+            {"title": f"VTune {self.analysis} summary, as VTune reported it",
+             "rows": parse_vtune_summary(summary.stdout)},
+            section,
+        ])  # fmt: skip
+
+
+def parse_perf_stat(text: str) -> tuple[list[dict], dict[str, str]]:
+    """``perf stat -j`` output, one JSON object per line, as rows keyed as perf named them.
+    perf's own good/bad verdict on a metric is dropped; a counter perf could not read is
+    returned in the second value with perf's wording."""
+    rows, unmeasured = [], {}
+    for line in text.splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        row.pop("metric-threshold", None)
+        value = row.get("counter-value")
+        if isinstance(value, str) and value.startswith("<"):
+            unmeasured[str(row.get("event"))] = value
+            continue
+        rows.append(row)
+    return rows, unmeasured
+
+
+def parse_perf_report(text: str) -> list[dict]:
+    """``perf report --stdio -t '|'`` output: one section per sampled event, with its sample
+    count and its rows (columns as perf headed them), highest overhead first."""
+    sections, current, header = [], None, None
+    for line in text.splitlines():
+        m = re.match(r"# Samples: (\S+)\s+of event '(.*)'", line)
+        if m:
+            current = {"event": m[2], "samples": m[1], "rows": []}
+            sections.append(current)
+            header = None
+        elif line.startswith("#") and "|" in line and current is not None:
+            header = [cell.strip() for cell in line.lstrip("#").split("|")]
+        elif header and current is not None and "|" in line and not line.startswith("#"):
+            cells = [cell.strip() for cell in line.split("|")]
+            row = {k: v for k, v in zip(header, cells, strict=False) if k}
+            if str(row.get("Overhead", "")).endswith("%"):  # not a call-chain line
+                current["rows"].append(row)
+    for section in sections:
+        section["rows"].sort(key=lambda r: -_safe_float(str(r.get("Overhead", "")).rstrip("%")))
+    return sections
+
+
+PERF_SCRIPT_FIELDS = "tid,time,period,ip,sym,dso"
+# The dso is the last parenthesized group: a C++ symbol may hold parentheses of its own.
+_PERF_SAMPLE = re.compile(
+    r"^\s*(\d+)\s+(\d+)\.(\d{9}):\s+(\d+)\s+[0-9a-f]+\s+(.*)\s+\(([^()]*(?: \(deleted\))?)\)\s*$"
+)
+
+
+def parse_perf_line(line: str) -> tuple[int, int, int, str] | None:
+    """One line of ``perf script -F tid,time,period,ip,sym,dso --ns``: (tid, time_ns, period,
+    "symbol [dso]"), or None for a line of another shape (a call chain, a header). perf's
+    own ``[unknown]`` names are kept as it wrote them."""
+    m = _PERF_SAMPLE.match(line)
+    if not m:
+        return None
+    sym, dso = m[5], m[6]
+    dso = Path(dso).name if dso.startswith("/") else dso
+    where = dso if dso.startswith("[") else f"[{dso}]"
+    return int(m[1]), int(m[2]) * 1_000_000_000 + int(m[3]), int(m[4]), f"{sym} {where}"
+
+
+def parse_perf_script(text: str) -> list[tuple[int, int, int, str]]:
+    """Every sample line of a ``perf script`` output (:func:`parse_perf_line`)."""
+    return [s for s in map(parse_perf_line, text.splitlines()) if s]
+
+
+class PerfCPUProfiler(_HostProfiler):
+    """Linux perf on the host. ``stat`` counts events and perf's metrics over the window;
+    ``record`` samples and reports the hottest shared objects and symbols. The window is
+    bounded through perf's control descriptor (``-D -1 --control fd:``). No event name is
+    chosen here: without ``events`` or ``metrics`` perf counts or samples its own default
+    set."""
+
+    tool = "perf"
+
+    def __init__(self, perf_bin="perf", analysis="stat", events=(), metrics=(),
+                 system_wide=False, **kw):  # fmt: skip
+        if analysis not in ("stat", "record"):
+            raise ValueError(f"Unknown perf analysis: {analysis}")
+        super().__init__(perf_bin, analysis, **kw)
+        self.events, self.metrics = list(events), list(metrics)
+        if analysis == "record" and self.metrics:
+            raise ValueError("perf record samples events; metrics are counted by perf stat")
+        self.system_wide = system_wide
+
+    def _probe(self, artifacts) -> tuple[list[str], list[str], dict[str, str]]:
+        """Each requested event and metric, tried once: an unknown name fails a whole perf
+        run, so those perf refuses are reported as unmeasured and the rest are collected."""
+        events, metrics, refused = [], [], {}
+        tried = 0
+        for flag, names, kept in (("-e", self.events, events), ("-M", self.metrics, metrics)):
+            for name in names:
+                # The analysis's own command: an event can be countable and not sampleable.
+                command = [self.binary, self.analysis, "--quiet",
+                           *(["-o", os.devnull] if self.analysis == "record" else []),
+                           *(["-a"] if self.system_wide else []), flag, name, "--", "true"]  # fmt: skip
+                tried += 1
+                proc = self._run(artifacts, command, name=f"probe_{tried}")
+                if proc.returncode == 0:
+                    kept.append(name)
+                else:
+                    lines = [s for s in proc.stderr.splitlines() if s.strip()]
+                    refused[name] = f"perf refused it: {_tail(lines[0] if lines else '', 300)}"
+        return events, metrics, refused
+
+    def _collect(self, artifacts, kernel_file, options) -> ProfileResult:
+        events, metrics, refused = self._probe(artifacts)
+        if (self.events or self.metrics) and not (events or metrics):
+            return ProfileResult(error="perf refused every requested event and metric: "
+                                       + "; ".join(f"{k}: {v}" for k, v in refused.items()))  # fmt: skip
+        control_r, control_w = os.pipe()
+        ack_r, ack_w = os.pipe()
+        fds = (control_r, control_w, ack_r, ack_w)
+        try:
+            runner = self._runner(artifacts, kernel_file, options,
+                                  control_fds=(control_w, ack_r, control_r, ack_w))  # fmt: skip
+            command = [self.binary, self.analysis]
+            if self.analysis == "stat":
+                command += ["-j", "-o", str(artifacts / "stat.json"), "--metric-no-threshold"]
+            else:
+                command += ["-o", str(artifacts / "perf.data")]
+            command += ["-D", "-1", "--control", f"fd:{control_r},{ack_w}"]
+            command += ["-e", ",".join(events)] if events else []
+            command += ["-M", ",".join(metrics)] if metrics else []
+            command += ["-a"] if self.system_wide else []
+            command += [*self.collector_args, "--", sys.executable, str(runner)]
+            proc = self._run(artifacts, command, pass_fds=fds)
+        finally:
+            for fd in fds:
+                os.close(fd)
+        if proc.returncode != 0:
+            together = (" (each requested name passed its own probe; together they may not be "
+                        "collectable)" if events or metrics else "")  # fmt: skip
+            return ProfileResult(error=f"perf {self.analysis} failed (exit {proc.returncode})"
+                                       f"{together}: {_tail(proc.stderr)}")  # fmt: skip
+        notes = []
+        restrict = _read_text("/proc/sys/kernel/kptr_restrict")
+        if restrict not in (None, "0") or "kptr_restrict" in proc.stderr:
+            notes.append(f"kernel.kptr_restrict is {restrict or 'unknown'}: perf could not "
+                         "resolve kernel symbols, so samples in the kernel show without one.")  # fmt: skip
+        if self.analysis == "stat":
+            try:
+                rows, unmeasured = parse_perf_stat((artifacts / "stat.json").read_text())
+            except OSError as exc:
+                return ProfileResult(error=f"perf stat wrote no output: {exc}")
+            sections = [{"title": "perf stat counters and metrics, as perf named them "
+                                  "(all rows: stat.json)", "rows": rows[: self.top],
+                         "total": len(rows)}]  # fmt: skip
+            return self._result(artifacts, sections, {**refused, **unmeasured}, notes,
+                                self.system_wide)  # fmt: skip
+        report = self._run(artifacts, [self.binary, "report", "-i", str(artifacts / "perf.data"),
+                                       "--stdio", "--no-children", "-g", "none",
+                                       "--sort", "dso,symbol",
+                                       "-F", "overhead,sample,period,dso,sym", "-t", "|"],
+                           name="report")  # fmt: skip
+        if report.returncode != 0:
+            sections = [{"title": "perf record hotspots",
+                         "error": f"perf report failed: {_tail(report.stderr)}"}]  # fmt: skip
+        else:
+            sections = [
+                {"title": f"Samples of {s['event']} by shared object and symbol "
+                          f"({s['samples']} samples)", "rows": s["rows"][: self.top],
+                 "total": len(s["rows"])}
+                for s in parse_perf_report(report.stdout)
+            ] or [{"title": "perf record hotspots", "rows": [],
+                   "empty": "no samples in the collection window"}]  # fmt: skip
+        return self._result(artifacts, sections, refused, notes, self.system_wide)
 
 
 class UnitraceXPUProfiler:
@@ -1244,7 +1637,7 @@ class UnitraceXPUProfiler:
         ]
 
 
-def _run_tree(command, *, stdout: Path, stderr: Path, env: dict, timeout: float):
+def _run_tree(command, *, stdout: Path, stderr: Path, env: dict, timeout: float, pass_fds=()):
     """Run *command* in its own session with output on disk; kill what it leaves behind.
 
     The collector may fork (unitrace 2.4 writes its reports from a forked helper after
@@ -1254,7 +1647,9 @@ def _run_tree(command, *, stdout: Path, stderr: Path, env: dict, timeout: float)
     """
     deadline = time.monotonic() + timeout
     with stdout.open("w") as out, stderr.open("w") as err:
-        proc = subprocess.Popen(command, stdout=out, stderr=err, env=env, start_new_session=True)
+        proc = subprocess.Popen(
+            command, stdout=out, stderr=err, env=env, start_new_session=True, pass_fds=pass_fds
+        )
         try:
             returncode = proc.wait(timeout=timeout)
             while returncode == 0 and time.monotonic() < deadline:

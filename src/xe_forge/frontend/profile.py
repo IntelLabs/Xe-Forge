@@ -1,14 +1,18 @@
 """What a capture launcher imports: the model's input token ids (the same work for every
 framework and run: fixed synthetic ids, or slices of the run's prompt file -- not an LLM
 prompt for an agent; those are claude/templates/*.j2), the device torch
-sees, and one torch.profiler region written as ``trace.json.gz`` for ``capture parse``.
+sees, one torch.profiler region written as ``trace.json.gz`` for ``capture parse``, and, for
+a framework on the host that is not torch, :class:`HostTimeline`.
 """
 
 from __future__ import annotations
 
 import gzip
+import json
 import shutil
-from collections.abc import Callable, Sequence
+import time
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,10 +22,10 @@ def device() -> str:
     ``--device``), else the first one torch sees."""
     import os
 
-    import torch
-
     if os.environ.get("XE_FORGE_DEVICE"):
         return os.environ["XE_FORGE_DEVICE"]
+    import torch
+
     if hasattr(torch, "xpu") and torch.xpu.is_available():
         return "xpu"
     if torch.cuda.is_available():
@@ -34,14 +38,37 @@ def device_type() -> str:
     return device().split(":")[0]
 
 
-def device_info() -> dict:
-    import torch
-
+def device_info(threads: int | None = None) -> dict:
+    """The device record of meta.json. On a host, ``threads`` is the team the framework runs
+    with, which the launcher knows; without it, torch's, or None when torch is not there."""
+    try:
+        import torch
+    except ImportError:  # a host framework that is not torch
+        torch = None
     dev = device_type()
-    info = {"type": dev, "torch": torch.__version__}
+    info = {"type": dev, "torch": torch.__version__ if torch else None}
     if dev in ("xpu", "cuda"):
         info["name"] = getattr(torch, dev).get_device_name(torch.device(device()).index or 0)
+    elif dev == "cpu":
+        from xe_forge.core.topology import cpu_flags, model_name, placement
+
+        info["name"] = model_name()
+        info["flags"] = cpu_flags()
+        info["placement"] = placement()  # the launcher's binding, as this process got it
+        if threads is None and torch is not None:
+            threads = torch.get_num_threads()
+        info["threads"] = threads
     return info
+
+
+def host_placement() -> dict:
+    """The launcher's placement of this host process and torch's thread count: what a host
+    timing or profile was measured under."""
+    import torch
+
+    from xe_forge.core.topology import placement
+
+    return {**placement(), "threads": torch.get_num_threads()}
 
 
 def profile_region(fn, raw_dir: Path, with_stack: bool = True) -> Path:
@@ -69,6 +96,48 @@ def profile_region(fn, raw_dir: Path, with_stack: bool = True) -> Path:
         shutil.copyfileobj(src, dst)
     plain.unlink()
     return out
+
+
+class HostTimeline:
+    """Wall times of a host framework's graph nodes, for ``capture run`` on a host.
+
+    The launcher brackets each repeat of the workload with :meth:`window` and reports every
+    node it ran with :meth:`node`; where it hooks the framework and what it calls a node are
+    its choice. A window opened with ``timed=False`` runs the same work with the hook off:
+    its wall time is what the hook's own cost is judged against. :meth:`write` saves
+    ``$RAW_DIR/host_timeline.json``. The clock is CLOCK_MONOTONIC, the one perf records with
+    ``-k CLOCK_MONOTONIC``, so its samples can be joined to the nodes.
+    """
+
+    def __init__(self, raw_dir: Path | str, threads: int | None = None) -> None:
+        self.path = Path(raw_dir) / "host_timeline.json"
+        self.threads = threads
+        self.windows: list[dict] = []
+
+    @staticmethod
+    def now() -> int:
+        return time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+
+    @contextmanager
+    def window(self, timed: bool = True) -> Iterator[dict]:
+        w = {"timed": timed, "start_ns": self.now(), "end_ns": None, "nodes": []}
+        self.windows.append(w)
+        try:
+            yield w
+        finally:
+            w["end_ns"] = self.now()
+
+    def node(self, name: str, start_ns: int, end_ns: int) -> None:
+        """One node of the open window, between two :meth:`now` readings."""
+        self.windows[-1]["nodes"].append([name, int(start_ns), int(end_ns)])
+
+    def write(self) -> Path:
+        from xe_forge.core.topology import placement
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps({"placement": placement(), "threads": self.threads,
+                                         "windows": self.windows}) + "\n")  # fmt: skip
+        return self.path
 
 
 @dataclass

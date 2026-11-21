@@ -38,7 +38,7 @@ unitrace_enabled, vtune_enabled). Follow the CLAUDE.md workflow exactly — ever
 3. Read relevant `knowledge_base/` files. Ignore their `expected_speedup` fields; `benchmark`
    on this part is what settles whether a pattern is worth anything.
 4. Complete the baseline correctness gate in CLAUDE.md Step 2 before initializing:
-   `xe-forge-skill trial init <kernel_name> <baseline_file>{% if require_profiles %} --require-profiles ComputeBasic EuStallSampling{% endif %}`.
+   `xe-forge-skill trial init <kernel_name> <baseline_file>{% if require_profiles %} --require-profiles {{ required_groups }}{% endif %}`.
 5. Run trials. For EACH trial you MUST:
    - Validate with `xe-forge-skill validate --dsl {{ dsl }}`
    - Save with `xe-forge-skill trial save`

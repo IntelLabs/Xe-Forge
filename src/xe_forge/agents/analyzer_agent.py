@@ -17,6 +17,7 @@ _DSL_NAMES: dict[str, str] = {
     "sycl": "SYCL/Sycl-tla",
     "cuda": "CUDA C++",
     "opencl": "OpenCL C",
+    "cpp": "C++ (torch extension)",
 }
 
 _DEVICE_DESCS: dict[str, str] = {
@@ -104,6 +105,16 @@ _OPENCL_SKIP_ISSUES: set[IssueType] = {
     IssueType.AUTOTUNE_KEY_MISSING,
     IssueType.AUTOTUNE_DUPLICATE_PARAMS,
     IssueType.PERSISTENT_NUM_PROGS_HARDCODED,
+}
+
+
+_CPP_DESCRIPTIONS: dict[IssueType, str] = {
+    IssueType.MISSING_BOUNDARY_CHECK: "loop tails not handled for sizes that are not a multiple of the vector or block width",
+    IssueType.UNCOALESCED_ACCESS: "the inner loop does not walk memory with unit stride — defeats vectorization and prefetch",
+    IssueType.SUBOPTIMAL_TILE_SIZE: "loop blocking not sized to the caches of the CPUs this run uses",
+    IssueType.SUBOPTIMAL_WARPS: "thread count or the split of work across threads suboptimal",
+    IssueType.HIGH_REGISTER_PRESSURE: "too many live values in the inner loop — spills to the stack",
+    IssueType.CACHE_EVICTION_RISK: "working set per thread larger than its share of the caches",
 }
 
 
@@ -218,6 +229,9 @@ def _build_issue_categories(dsl: DSL = DSL.TRITON) -> str:
     elif dsl == DSL.OPENCL:
         skip = _OPENCL_SKIP_ISSUES
         desc_overrides = _OPENCL_DESCRIPTIONS
+    elif dsl == DSL.CPP:
+        skip = _OPENCL_SKIP_ISSUES | {IssueType.NO_SWIZZLING}  # Triton launch APIs and GPU tiling
+        desc_overrides = _CPP_DESCRIPTIONS
     else:
         skip = set()
         desc_overrides = {}

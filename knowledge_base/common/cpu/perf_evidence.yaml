@@ -1,0 +1,105 @@
+patterns:
+  - id: perf_evidence_contract
+    name: Read perf's counts and samples as what they measure
+    stage: analysis
+    applies_to: [cpu, perf, profiling]
+    description: |
+      `profile` on a host runs Linux perf by default. `--analysis stat` counts events and
+      perf's derived metrics over the collection window; `--analysis record` samples one or
+      more events and reports the shared objects and symbols the samples fell in;
+      `--analysis all` runs both, as two collections of the same source. Every row is
+      printed as perf named it, with no threshold: perf's own good/bad verdict on a metric
+      is dropped. An event perf refuses, or a counter it could not read
+      (`<not supported>`, `<not counted>`), is listed as unknown with perf's words.
+    rationale: |
+      A count is over the window only: perf starts disabled (`-D -1`) and the runner
+      enables it once around all timed calls (`--window all`, the default; buffer resets
+      inside) or around each forward (`--window each`). While perf handles an enable or
+      disable, a thread pool that just finished a call can spin and be counted, once per
+      window. The window line gives the forwards' time and the collection's inner and outer
+      span; forwards much shorter than the span mean the totals describe something else
+      too: raise `--iters`, or compare the two spans before reading a count as the
+      kernel's. Without `--system-wide`, perf counts this process and its threads; with it,
+      every process on the CPUs is counted.
+      `--top` caps every printed table, stat rows included; the artifacts (stat.json,
+      perf.data, report.stdout) hold all rows. `--window each` keeps resets out of the
+      count and is worth it only when a forward is long beside perf's start/stop round trip
+      (well under a millisecond for stat, longer for record); otherwise raise `--iters`
+      until the inner window is close to the forwards' time.
+    field_semantics:
+      counter-value: "The event's count over the window(s), for this process unless system-wide."
+      pcnt-running: "Share of the window the counter was on a hardware counter; below 100 perf scaled a multiplexed count."
+      metric-value: "A metric perf derived from counts; metric-unit names it (for example a tma_* top-down share)."
+      Overhead: "Share of the event's samples in this row, not a share of time unless the event counts time."
+      Samples: "Samples in this row; a row with few samples is a rough estimate."
+    prerequisites:
+      - Compare counts only under the same placement, window, event set and workload.
+      - A pcnt-running below 100 means the count was scaled: ask for fewer events at once.
+      - Profiled calls run with no cache flush between them; see the window line.
+    pattern_before: "instructions is high, so the kernel is compute bound."
+    pattern_after: |
+      Name the counts that carry the claim (for example instructions and cycles, or a
+      top-down share and its child), state the change they suggest, and let `benchmark`
+      decide.
+
+  - id: perf_events_for_a_kernel
+    name: Which perf events and metrics to ask for
+    stage: analysis
+    applies_to: [cpu, perf, profiling, numa, vectorization]
+    description: |
+      `perf list` on the run's host is the source of truth for names: they differ by CPU
+      and kernel version, and `profile` passes them through as given (`--events`,
+      `--metrics`, each value one perf spec: repeat the flag so perf tries each separately,
+      and a name it refuses costs only that spec; `--collector-arg` for any other option). Useful
+      starting points on recent Intel Xeon processors:
+        - Top-down: `--metrics TopdownL1` (then `TopdownL2`, or `--collector-arg=--td-level=2`)
+          gives the tma_* shares of pipeline slots.
+        - Cache and memory: `cache-references,cache-misses`, `LLC-loads,LLC-load-misses`,
+          `mem_load_retired.l3_miss`.
+        - Local vs remote memory (a placement across NUMA nodes):
+          `mem_load_l3_miss_retired.local_dram,mem_load_l3_miss_retired.remote_dram,
+          mem_load_l3_miss_retired.remote_hitm`, or the generic `node-loads,node-load-misses`.
+        - Vector width actually executed: `fp_arith_inst_retired.*` (scalar, 128b, 256b,
+          512b packed single/double) and, where present, `fp_arith_inst_retired2.*`.
+        - Memory traffic per socket: memory-controller reads and writes
+          (`uncore_imc/cas_count_read/` and `uncore_imc/cas_count_write/`, which perf scales
+          to MiB, or the raw `unc_m_cas_count.rd`) and socket-link data
+          (`unc_upi_txl_flits.all_data`) need `--system-wide`; add
+          `--collector-arg=--per-socket` (or `--per-node`) to split them. Divide by the
+          window's span for a rate, and remember they count every process on the socket.
+        - Hotspots: `--analysis record` with no `--events` samples perf's default cycles
+          event. Samples are attributed to the function the instruction is in: a kernel
+          inlined into a library's parallel loop shows under that loop's symbol.
+          `--collector-arg=--call-graph=lbr` (or `dwarf`) records call chains into
+          perf.data (the printed table stays flat); read them with `perf report -g`.
+      `perf c2c` (false sharing) and `perf mem` (load latency by address) are separate perf
+      commands, run by hand: copy the profile's `runner.py`, set its `'tool'` to `'none'`
+      and drop `control_fds`, then run `perf c2c record -- python runner.py`. That collects
+      the whole run, setup included.
+    rationale: |
+      A name that is not on this host fails only that event: it is reported as unknown and
+      the rest are collected. Uncore counters are per socket, not per process, so they
+      include every process on that socket.
+    prerequisites:
+      - Check `perf list` for the exact spelling on this host before naming an event.
+
+  - id: idle_thread_pools_after_a_parallel_region
+    name: A thread pool can stay awake after its last call
+    stage: analysis
+    applies_to: [cpu, threads, openmp, benchmark, profiling]
+    description: |
+      After a parallel region, an OpenMP runtime's threads spin for a while before they
+      sleep: GOMP_SPINCOUNT and OMP_WAIT_POLICY for GNU OpenMP, KMP_BLOCKTIME for Intel's.
+      The benchmark's cache flush runs on torch's pool right before each timed call, so
+      that pool may still be spinning when the call starts. An arm on the same pool reuses
+      those threads; an arm on another runtime (a second OpenMP copy, TBB under SYCL, its
+      own threads) shares the CPUs with them. In a profile, spinning shows as time in the
+      runtime's library (libgomp, libiomp5) between calls.
+    rationale: |
+      Which runtime an arm uses decides whether the flush's threads help or compete. The
+      wait policy is the launcher's: read `thread_env` in the placement, and compare arms
+      on different runtimes under a stated policy.
+    pattern_before: "A trial on its own OpenMP runtime is slower than the reference; conclude the kernel is slower."
+    pattern_after: |
+      Benchmark it again with the launcher setting a passive wait policy (for example
+      OMP_WAIT_POLICY=passive) for both arms, and report both results with their placement.

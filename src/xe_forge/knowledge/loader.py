@@ -319,7 +319,7 @@ def load_knowledge_base(
 
 
 def _collect_yaml_files(kp: Path, dsl: str, device_type: str) -> list[Path]:
-    """Collect YAML files in priority order: common → dsl-common → dsl/device.
+    """Collect YAML files in priority order: common → common/device → dsl-common → dsl/device.
 
     Falls back to flat *.yaml in the root if no subdirectory structure is found.
     """
@@ -335,6 +335,9 @@ def _collect_yaml_files(kp: Path, dsl: str, device_type: str) -> list[Path]:
     files: list[Path] = []
     if common_dir.is_dir():
         files.extend(sorted(common_dir.glob("*.yaml")) + sorted(common_dir.glob("*.yml")))
+    common_device = common_dir / device_type
+    if common_device.is_dir():
+        files.extend(sorted(common_device.glob("*.yaml")) + sorted(common_device.glob("*.yml")))
     dsl_common = dsl_dir / "common"
     if dsl_common.is_dir():
         files.extend(sorted(dsl_common.glob("*.yaml")) + sorted(dsl_common.glob("*.yml")))

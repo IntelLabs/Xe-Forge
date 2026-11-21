@@ -13,6 +13,9 @@ import logging
 import shutil
 from pathlib import Path
 
+# The collections a trial tree can require: unitrace's groups and VTune on a GPU, perf's on
+# a host (each profiler's ``metric_group``).
+PROFILE_GROUPS = ("ComputeBasic", "EuStallSampling", "VTune", "perf stat", "perf record")
 logger = logging.getLogger(__name__)
 
 
@@ -127,7 +130,7 @@ class TrialManager:
     ) -> None:
         """Initialize a new trial tree for *kernel_name*."""
         trial_dir = self._trial_dir(kernel_name)
-        if set(required_profile_groups) - {"ComputeBasic", "EuStallSampling", "VTune"}:
+        if set(required_profile_groups) - set(PROFILE_GROUPS):
             raise ValueError("Unsupported required profile group")
         if self._state_path(kernel_name).exists():
             logger.warning("Trial tree for '%s' already exists. Reusing.", kernel_name)

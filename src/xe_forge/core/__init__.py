@@ -11,64 +11,62 @@ Provides KernelBench-style testing with accurate GPU timing including:
 - Configurable correctness validation (via REQUIRE_CORRECTNESS, CORRECTNESS_RTOL, CORRECTNESS_ATOL)
 """
 
-from xe_forge.core.device_query import (
-    CUDADeviceInfo,
-    DeviceInfo,
-    format_device_config_for_llm,
-    get_device_config_for_pipeline,
-    query_cuda_via_torch,
-    query_device,
-)
-from xe_forge.core.executor import (
-    ComparisonResult,
-    KernelBenchExecutor,
-    KernelExecutor,
-    create_executor_tool,
-)
-from xe_forge.core.kernel_analyzer import (
-    AnalysisResult,
-    KernelAnalyzer,
-    format_analysis,
-)
-from xe_forge.core.profiler import (
-    ProfileMetrics,
-    ProfileResult,
-    Recommendation,
-    XPUProfiler,
-)
-from xe_forge.core.spec_loader import (
-    InputSpec,
-    KernelSpec,
-    VariantSpec,
-    get_test_config_from_spec,
-    load_spec,
-    load_spec_from_string,
-    parse_spec,
-)
-from xe_forge.core.sycl_executor import (
-    KernelType,
-    SyclComparisonResult,
-    SyclExecutor,
-)
-from xe_forge.core.trial_manager import TrialManager
-from xe_forge.core.validator import (
-    KernelValidator,
-    ValidationIssue,
-    format_issues,
-)
+from __future__ import annotations
 
-# Backward-compatible XPU-specific exports
-from xe_forge.core.xpu_query import (
-    XPUDeviceInfo,
-    extract_mnk_from_shapes,
-    format_xpu_config_for_llm,
-    get_autotune_configs,
-    get_optimal_params,
-    get_xpu_config,
-    get_xpu_config_dict,
-    get_xpu_config_for_pipeline,
-    print_xpu_info,
-)
+import importlib
+
+# name -> the submodule that defines it, imported when the name is first read.
+_EXPORTS = {
+    "CUDADeviceInfo": "device_query",
+    "DeviceInfo": "device_query",
+    "format_device_config_for_llm": "device_query",
+    "get_device_config_for_pipeline": "device_query",
+    "query_cuda_via_torch": "device_query",
+    "query_device": "device_query",
+    "ComparisonResult": "executor",
+    "KernelBenchExecutor": "executor",
+    "KernelExecutor": "executor",
+    "create_executor_tool": "executor",
+    "AnalysisResult": "kernel_analyzer",
+    "KernelAnalyzer": "kernel_analyzer",
+    "format_analysis": "kernel_analyzer",
+    "ProfileMetrics": "profiler",
+    "ProfileResult": "profiler",
+    "Recommendation": "profiler",
+    "XPUProfiler": "profiler",
+    "InputSpec": "spec_loader",
+    "KernelSpec": "spec_loader",
+    "VariantSpec": "spec_loader",
+    "get_test_config_from_spec": "spec_loader",
+    "load_spec": "spec_loader",
+    "load_spec_from_string": "spec_loader",
+    "parse_spec": "spec_loader",
+    "KernelType": "sycl_executor",
+    "SyclComparisonResult": "sycl_executor",
+    "SyclExecutor": "sycl_executor",
+    "TrialManager": "trial_manager",
+    "KernelValidator": "validator",
+    "ValidationIssue": "validator",
+    "format_issues": "validator",
+    "XPUDeviceInfo": "xpu_query",
+    "extract_mnk_from_shapes": "xpu_query",
+    "format_xpu_config_for_llm": "xpu_query",
+    "get_autotune_configs": "xpu_query",
+    "get_optimal_params": "xpu_query",
+    "get_xpu_config": "xpu_query",
+    "get_xpu_config_dict": "xpu_query",
+    "get_xpu_config_for_pipeline": "xpu_query",
+    "print_xpu_info": "xpu_query",
+}
+
+
+def __getattr__(name: str):
+    if name in _EXPORTS:
+        value = getattr(importlib.import_module(f"xe_forge.core.{_EXPORTS[name]}"), name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module 'xe_forge.core' has no attribute {name!r}")
+
 
 __all__ = [
     "AnalysisResult",
@@ -117,14 +115,19 @@ __all__ = [
 
 def create_executor_from_config(
     config,
-    kernel_type: KernelType | str = KernelType.GEMM,
+    kernel_type: KernelType | str | None = None,
 ) -> KernelBenchExecutor | SyclExecutor:
     """
     Create an executor with settings from Config.
 
-    Returns SyclExecutor when dsl=sycl, KernelBenchExecutor otherwise.
+    Returns SyclExecutor when dsl=sycl, KernelBenchExecutor otherwise; ``kernel_type``
+    defaults to GEMM.
     """
+    from xe_forge.core.executor import KernelBenchExecutor
+    from xe_forge.core.sycl_executor import KernelType, SyclExecutor
     from xe_forge.models import DSL
+
+    kernel_type = KernelType.GEMM if kernel_type is None else kernel_type
 
     if config.device_config.dsl == DSL.SYCL:
         return SyclExecutor(

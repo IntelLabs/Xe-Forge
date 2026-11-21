@@ -19,6 +19,7 @@ _DSL_NAMES: dict[str, str] = {
     "sycl": "SYCL/Sycl-tla",
     "cuda": "CUDA C++",
     "opencl": "OpenCL C",
+    "cpp": "C++ (torch extension)",
 }
 
 
@@ -112,6 +113,10 @@ class PromptLibrary:
         if self.dsl == "opencl":
             return [
                 "Must be a Python file holding the OpenCL C source and its launch",
+            ]
+        if self.dsl == "cpp":
+            return [
+                "Must be a Python file holding the C++ source, built with load_inline",
             ]
         return []
 

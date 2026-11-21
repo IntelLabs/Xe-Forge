@@ -4,7 +4,11 @@ run by {{ framework }}; its config is config.json here. ops.json lists the ops t
 and calls, every kernel it launched with their device time, its arguments (name, shape and
 dtype, or value), its dims (the names a cost formula uses), every captured shape with its
 measured time per call ("shapes"), and its call site. The kernel
-repositories on this machine are in {{ repos }}.
+repositories on this machine are in {{ repos }}. On a host its "kernels" are the graph nodes the
+launcher timed, and "host" holds what perf sampled while each ran: CPU time per symbol and
+shared object, summed over every thread and every node of that name -- one symbol can serve
+several shapes, and its "us" and "calls" are the sampled pass's, which can be shorter than
+the measured run. The symbol, not the node name, is what to find in the source.
 
 For each key, find where the op is implemented -- the registration of its namespace, the
 kernels it launches, the source behind them -- by reading the framework and the
@@ -52,7 +56,7 @@ detached or modified checkout was put there on purpose: leave it. Then write nam
            "dims" in ops.json, scalar arguments included, with numbers from the config and
            the kernel; + - * / // ** and parentheses, min(...), max(...) and `a if X < 0 else
            b` (a scalar may be -1 for "none"). It must hold at every shape
-           under "shapes" in ops.json: on this card
+           under "shapes" in ops.json: on this device
            {%- if calibration %} ({{ calibration.bandwidth_gbs }} GB/s, matmul TFLOP/s
            {{ calibration.matmul_tflops }}){% endif %}, bytes / bandwidth and flops / peak
            may not exceed that shape's us_per_call (a kernel group: its kernels_per_call); a

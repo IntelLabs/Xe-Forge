@@ -232,11 +232,194 @@ def _has_group(unitrace: str, group: str, env: dict) -> bool:
     return False
 
 
+def on_host(args=None) -> bool:
+    """Whether the run's device is the host CPU (``--device``, else XE_FORGE_DEVICE)."""
+    dev = getattr(args, "device", None) or os.environ.get("XE_FORGE_DEVICE") or ""
+    return dev.split(":")[0] == "cpu"
+
+
+def _timed_windows(timeline: dict) -> list[list]:
+    """[[node, us], ...] per timed window of a HostTimeline, in the launcher's order."""
+    return [[[n, round((e - s) / 1e3, 3)] for n, s, e in w.get("nodes") or []]
+            for w in timeline.get("windows") or [] if w.get("timed")]  # fmt: skip
+
+
+def _still_open(timeline: dict) -> str | None:
+    """Why a timeline cannot be read, when a window was never closed."""
+    open_ = [i for i, w in enumerate(timeline.get("windows") or []) if w.get("end_ns") is None]
+    if open_:
+        return (f"window {open_[0]} of host_timeline.json was still open when it was written: "
+                "call write() after the last `with tl.window():` block ends")  # fmt: skip
+    return None
+
+
+def join_samples(timeline: dict, samples) -> dict:
+    """perf's samples (tid, time_ns, period_ns, symbol) joined to the timed windows' nodes
+    by time, over every thread: {"nodes": {node: {us, calls, cpu_us, symbols}},
+    "unattributed": {cpu_us, symbols}, "samples"}. A sample inside a timed window but in no
+    node -- a pool waiting between nodes, the hook itself -- is unattributed; one outside
+    every timed window (load, warm-up) is not counted."""
+    import bisect
+
+    nodes, spans = {}, []
+    windows = [w for w in timeline.get("windows") or [] if w.get("timed")]
+    for w in windows:
+        for name, s, e in w.get("nodes") or []:
+            n = nodes.setdefault(name, {"us": 0.0, "calls": 0, "cpu_us": 0.0, "symbols": {}})
+            n["us"] += (e - s) / 1e3
+            n["calls"] += 1
+            spans.append((s, e, name))
+    spans.sort()
+    starts = [s for s, _, _ in spans]
+    loose = {"cpu_us": 0.0, "symbols": {}}
+    counted = 0
+    for _tid, t, period, sym in samples:
+        if not any(w["start_ns"] <= t <= w["end_ns"] for w in windows):
+            continue
+        counted += 1
+        i = bisect.bisect_right(starts, t) - 1
+        into = nodes[spans[i][2]] if i >= 0 and t <= spans[i][1] else loose
+        into["cpu_us"] += period / 1e3
+        into["symbols"][sym] = into["symbols"].get(sym, 0.0) + period / 1e3
+
+    def tidy(d: dict) -> dict:
+        syms = sorted(d["symbols"].items(), key=lambda kv: -kv[1])
+        return {**d, "cpu_us": round(d["cpu_us"], 3), "symbols": {k: round(v, 3) for k, v in syms}}
+
+    return {"nodes": {k: tidy({**v, "us": round(v["us"], 3)}) for k, v in nodes.items()},
+            "unattributed": tidy(loose), "samples": counted, "windows": len(windows)}  # fmt: skip
+
+
+def _run_host(args, launcher: Path, raw: Path) -> int:
+    """``capture run`` on a host: the launcher's HostTimeline times every node of the plain
+    pass; a second pass under ``perf record`` names the code each node ran."""
+    from xe_forge.core.profiler import PERF_SCRIPT_FIELDS, parse_perf_line
+
+    perf = args.perf_bin
+    if shutil.which(perf) is None and not Path(perf).is_file():
+        print(f"capture run: no perf at {perf!r} (set --perf-bin or PERF_BIN)")
+        return 1
+    if raw.exists():
+        shutil.rmtree(raw)
+    raw.mkdir(parents=True)
+    scratch = raw.parent / f".{raw.name}-perf"
+    shutil.rmtree(scratch, ignore_errors=True)
+    (scratch / "raw").mkdir(parents=True)
+    log = raw.parent / "launcher.log"
+    try:
+        # Pass 1, plain: the launcher's own timeline, the measurement.
+        code = _launch(launcher, raw, [], log)
+        if code != 0:
+            print(f"capture run: the launcher failed (exit {code}):\n{_tail(log)}")
+            return 1
+        if not (raw / "meta.json").is_file():
+            print("capture run: the launcher wrote no $RAW_DIR/meta.json")
+            return 1
+        if not (raw / "host_timeline.json").is_file():
+            torch = " (a torch.profiler trace is not read on a host)" if list(
+                raw.glob("trace*.json*")) else ""  # fmt: skip
+            print(f"capture run: the launcher wrote no $RAW_DIR/host_timeline.json{torch}: on a "
+                  "host, xe_forge.frontend.profile.HostTimeline times the nodes")  # fmt: skip
+            return 1
+        timeline = json.loads((raw / "host_timeline.json").read_text())
+        if why := _still_open(timeline):
+            print(f"capture run: {why}")
+            return 1
+        ws = timeline.get("windows") or []
+        timed_ws = [w for w in ws if w.get("timed") and w.get("nodes")]
+        timed = [w for w in _timed_windows(timeline) if w]
+        if not timed:
+            print("capture run: the host timeline has no timed window with a node in it")
+            return 2
+        window = timed[-1]
+        prev = timed[-2] if len(timed) > 1 else []
+        last = max(i for i, w in enumerate(ws) if w.get("timed") and w.get("nodes"))
+        # The hook-off repeat that follows the timed ones: one before them may be a warm-up.
+        plain = [(w["end_ns"] - w["start_ns"]) / 1e3 for w in ws[last + 1 :] if not w.get("timed")]
+        host = {
+            "window_us": round((timed_ws[-1]["end_ns"] - timed_ws[-1]["start_ns"]) / 1e3, 3),
+            "node_us": round(sum(us for _, us in window), 3),
+            "plain_us": round(plain[-1], 3) if plain else None,
+            "plain_us_why": None if plain else
+            "the launcher ran no window with the hook off after the timed ones",
+            "threads": timeline.get("threads"), "placement": timeline.get("placement"),
+            "windows": len(ws),
+        }  # fmt: skip
+        (raw / "host_launches.json").write_text(json.dumps({
+            "repeats": len(timed), "total": sum(len(w) for w in timed), "stray": 0,
+            "match": round(_same_work(window, prev), 4) if prev else None,
+            "trace_steps": None, "launches": window,
+        }) + "\n")  # fmt: skip
+
+        # Pass 2, under perf: what code each node ran, sampled on every thread. It may run
+        # fewer steps (--trace-steps); the join is by node name, not by position.
+        data = scratch / "perf.data"
+        cmd = [perf, "record", "-q", "-e", "task-clock", "-k", "CLOCK_MONOTONIC",
+               *(args.collector_args or []), "-o", str(data), "--"]  # fmt: skip
+        env = _env()
+        if args.trace_steps:
+            env["XE_FORGE_TRACE_STEPS"] = str(args.trace_steps)
+        code = _launch(launcher, scratch / "raw", cmd, raw.parent / "perf.log", env, scratch)
+        sampled = scratch / "raw" / "host_timeline.json"
+        if code != 0 or not sampled.is_file() or not data.is_file():
+            print(f"capture run: the launcher under perf failed (exit {code}):\n"
+                  f"{_tail(raw.parent / 'perf.log')}")  # fmt: skip
+            return 1
+        short = False
+        if args.trace_steps and (scratch / "raw" / "meta.json").is_file():
+            before = json.loads((raw / "meta.json").read_text()).get("runtime")
+            short = json.loads((scratch / "raw" / "meta.json").read_text()).get("runtime") != before
+        second = json.loads(sampled.read_text())
+        if why := _still_open(second):
+            print(f"capture run: under perf, {why}")
+            return 1
+        # Streamed: every thread's samples, model load included, can be far larger than memory.
+        err = raw.parent / "perf-script.log"
+        with open(err, "w") as ef:
+            proc = subprocess.Popen([perf, "script", "-i", str(data), "-F", PERF_SCRIPT_FIELDS,
+                                     "--ns"], stdout=subprocess.PIPE, stderr=ef, text=True)  # fmt: skip
+            assert proc.stdout is not None
+            joined = join_samples(second, (s for s in map(parse_perf_line, proc.stdout) if s))
+            proc.stdout.close()
+            script_code = proc.wait()
+        if script_code != 0:
+            print(f"capture run: perf script failed (exit {script_code}):\n{_tail(err)}")
+            return 1
+        attributed = sum(n["cpu_us"] for n in joined["nodes"].values())
+        if not attributed:
+            print(f"capture run: PROBLEM no perf sample fell in a node of a timed window "
+                  f"({joined['samples']} in the windows):\n{_tail(err)}")  # fmt: skip
+            return 1
+        joined.update(event="task-clock", trace_steps=args.trace_steps if short else None)
+        (raw / "host_kernels.json").write_text(json.dumps(joined, indent=1) + "\n")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+    run = json.loads((raw / "meta.json").read_text())
+    run.update(launcher=str(launcher), launcher_sha256=_sha256(launcher), trace_steps=None,
+               host=host)  # fmt: skip
+    (raw / "run.json").write_text(json.dumps(run, indent=1) + "\n")
+    (raw / "MANIFEST.json").write_text(json.dumps(_manifest(raw), indent=1) + "\n")
+    names = {n for n, _ in window}
+    print(f"capture run: {len(names)} node types, {host['node_us'] / 1e3:.1f} ms in nodes of a "
+          f"{host['window_us'] / 1e3:.1f} ms window (host timeline); perf: "
+          f"{attributed / 1e3:.1f} ms CPU in nodes, "
+          f"{joined['unattributed']['cpu_us'] / 1e3:.1f} ms between them -> {raw}")  # fmt: skip
+    plain = (f"{host['plain_us'] / 1e3:.1f} ms" if host["plain_us"] is not None
+             else f"unknown ({host['plain_us_why']})")  # fmt: skip
+    print(f"capture run: the same repeat with the node hook off took {plain}, against "
+          f"{host['window_us'] / 1e3:.1f} ms with it: every node time includes what the hook "
+          f"costs")  # fmt: skip
+    return 0
+
+
 def run_capture(args) -> int:
     launcher, raw = Path(args.launcher).resolve(), Path(args.raw).resolve()
     if not os.access(launcher, os.X_OK):
         print(f"capture run: {launcher} is not an executable file")
         return 1
+    if on_host(args):
+        return _run_host(args, launcher, raw)
     if shutil.which(args.unitrace) is None and not Path(args.unitrace).is_file():
         print(f"capture run: no unitrace at {args.unitrace!r} (set --unitrace or UNITRACE_BIN)")
         return 1
@@ -386,7 +569,7 @@ def run_capture(args) -> int:
     return 0
 
 
-def _ops_summary(ops_map: dict, window: list, by_launch: bool):
+def _ops_summary(ops_map: dict, window: list, by_launch: bool, who: str = "unitrace"):
     """An agent's op map over ``window`` ([kernel, us, calls] per launch, or per kernel name
     without a timeline), timed by unitrace; problems where it does not hold.
 
@@ -408,9 +591,7 @@ def _ops_summary(ops_map: dict, window: list, by_launch: bool):
         matches = {i for i, item in enumerate(window) if any(r.search(item[0]) for r in regs)}
         for r in regs:
             if not any(r.search(item[0]) for item in window):
-                problems.append(
-                    f"{key}: kernel pattern {r.pattern!r} matches no kernel unitrace saw"
-                )
+                problems.append(f"{key}: kernel pattern {r.pattern!r} matches no kernel {who} saw")
         # Bounds size tensors by dtype: a name they do not know leaves the op unbounded.
         for a in e.get("args") or []:
             if isinstance(a, dict) and a.get("dtype") and a["dtype"] not in STORAGE_BYTES:
@@ -419,7 +600,7 @@ def _ops_summary(ops_map: dict, window: list, by_launch: bool):
         if ranges is None:
             idx = matches
         elif not by_launch:
-            problems.append(f"{key}: launches need unitrace's per-launch timeline; none recorded")
+            problems.append(f"{key}: launches need a per-launch timeline; none recorded")
             idx = set()
         else:
             idx = set()
@@ -492,8 +673,11 @@ def parse_capture(args) -> int:
         return 1
     problems = []
     # unitrace times the whole process; a launcher that ran the identical workload N times
-    # (its warm-up included) says so, and one run is the last 1/N of the timeline.
-    timeline = raw / "unitrace_launches.json"
+    # (its warm-up included) says so, and one run is the last 1/N of the timeline. On a host
+    # the launcher's own timeline is already per run: its last timed window.
+    host = (raw / "host_launches.json").is_file()
+    timeline = raw / ("host_launches.json" if host else "unitrace_launches.json")
+    who = "the host timeline" if host else "unitrace"
     if timeline.is_file():
         t = json.loads(timeline.read_text())
         match = t.get("match")
@@ -520,11 +704,17 @@ def parse_capture(args) -> int:
     for name, us, _ in window:
         kernels[name] = kernels.get(name, 0.0) + us
     truth = sum(kernels.values())
+    if host and (raw / "host_kernels.json").is_file():
+        sampled = json.loads((raw / "host_kernels.json").read_text())["nodes"]
+        unseen = sorted({n for n, _, _ in window} - set(sampled))
+        if unseen:
+            problems.append(f"node(s) {unseen[:5]} of the timed pass are not in the perf pass's "
+                            "timeline: the launcher names its nodes alike in both passes")  # fmt: skip
     names = json.loads(Path(args.names).read_text()) if args.names else None
     summary = None
     if (raw / "ops.json").is_file():
         ops_map = json.loads((raw / "ops.json").read_text())
-        summary, more = _ops_summary(ops_map, window, by_launch)
+        summary, more = _ops_summary(ops_map, window, by_launch, who)
         problems += more
     elif not list(raw.glob("trace*.json*")):
         print("capture parse: raw/ has neither a torch trace nor ops.json")
@@ -541,11 +731,11 @@ def parse_capture(args) -> int:
     # unitrace's total is this run's only when both passes did the same work; with
     # --trace-steps it is a shorter run of the same model, so say so rather than invite the
     # two numbers to be compared.
-    saw = (f"unitrace saw {truth / 1e3:.1f} ms over {r['trace_steps']} step(s)"
-           if r.get("trace_steps") else f"unitrace saw {truth / 1e3:.1f} ms")  # fmt: skip
+    saw = (f"{who} saw {truth / 1e3:.1f} ms over {r['trace_steps']} step(s)"
+           if r.get("trace_steps") else f"{who} saw {truth / 1e3:.1f} ms")  # fmt: skip
     print(f"capture parse: {len(capture.ops)} ops, {len(capture.workloads)} workloads, "
           f"{r['total_device_us'] / 1e3:.1f} ms device time, {r['attributed_pct']}% attributed; "
-          f"{saw}; {known_pct:.1f}% of op time is in kernels unitrace "
+          f"{saw}; {known_pct:.1f}% of op time is in kernels {who} "
           f"names -> {out}")  # fmt: skip
     # The inputs the launcher says it ran on (runtime.inputs: name -> {"file", "sha256"}) are
     # the ones it was given: each file still hashes to its recorded sha256.
@@ -558,7 +748,7 @@ def parse_capture(args) -> int:
         problems.append("no ops")
     least = getattr(args, "min_known", 90.0)
     if known_pct < least:
-        problems.append(f"only {known_pct:.1f}% of op time is in kernels unitrace saw "
+        problems.append(f"only {known_pct:.1f}% of op time is in kernels {who} saw "
                         f"(--min-known {least:g})")  # fmt: skip
     for p in problems:
         print(f"capture parse: PROBLEM {p}")
@@ -685,6 +875,14 @@ def build(raw_dir: Path, out: Path, names: dict | None = None, summary=None) -> 
     # a longer run, so the two are not comparable.
     if (raw_dir / "unitrace_kernels.json").is_file():
         run["unitrace_kernels"] = json.loads((raw_dir / "unitrace_kernels.json").read_text())
+    # On a host: what perf saw each node run, by node name, for the namer and the analysis.
+    if (raw_dir / "host_kernels.json").is_file():
+        hk = json.loads((raw_dir / "host_kernels.json").read_text())
+        run["host_kernels"] = {k: v for k, v in hk.items() if k != "nodes"}
+        for op in summary.ops:
+            seen = {k: hk["nodes"][k] for k in op.kernel_symbols if k in hk["nodes"]}
+            if seen:
+                op.framework_meta["host"] = seen
     capture = ir.CaptureRun(run=run, ops=summary.ops)
     capture.workloads = canonical.workloads(capture.ops, summary.total_us, naming.name_op)
     run["precision"] = precision_record(capture)

@@ -9,7 +9,7 @@ Usage:
     xe-forge-skill benchmark <baseline> <optimized> --spec <spec.yaml> [--builtin-benchmark] [--baseline-us N] [--kernel-name K --trial-id T]
     xe-forge-skill trial {init|save|result|status|best|baseline-us|finalize} [args]
     xe-forge-skill upstream {clone <repo> [--name N]|patch <kernel_name> [--kind K] [--notes TEXT]}
-    xe-forge-skill profile <kernel_file> --spec <spec.yaml> [--tool auto|unitrace|vtune] [--warmup 5] [--iters 20]
+    xe-forge-skill profile <kernel_file> --spec <spec.yaml> [--tool auto|unitrace|vtune|perf] [--warmup 5] [--iters 20]
 """
 
 import argparse
@@ -36,7 +36,7 @@ def main():
         "kernel_file", help="Path to the kernel: one source file, or a directory of them"
     )
     p_validate.add_argument(
-        "--dsl", default="triton", choices=["triton", "sycl", "gluon", "cuda", "opencl"]
+        "--dsl", default="triton", choices=["triton", "sycl", "gluon", "cuda", "opencl", "cpp"]
     )
     p_validate.add_argument("--stage", default=None, help="Current optimization stage")
     p_validate.add_argument(
@@ -64,7 +64,7 @@ def main():
         help="Target device (default: $XE_FORGE_DEVICE, else the first device torch sees)",
     )
     p_bench.add_argument(
-        "--dsl", default="triton", choices=["triton", "sycl", "gluon", "cuda", "opencl"]
+        "--dsl", default="triton", choices=["triton", "sycl", "gluon", "cuda", "opencl", "cpp"]
     )
     p_bench.add_argument("--triton-baseline", action="store_true", help="Baseline is Triton kernel")
     p_bench.add_argument(
@@ -98,7 +98,7 @@ def main():
     t_init.add_argument(
         "--require-profiles",
         nargs="+",
-        choices=["ComputeBasic", "EuStallSampling", "VTune"],
+        choices=["ComputeBasic", "EuStallSampling", "VTune", "perf stat", "perf record"],
         help="Profile groups every correct trial must attempt before the next save or finalize",
     )
     t_init.add_argument("--trials-dir", default="./trials")
@@ -152,7 +152,7 @@ def main():
     t_finalize.add_argument("--trials-dir", default="./trials")
 
     # -- profile --
-    p_profile = subparsers.add_parser("profile", help="GPU hardware counter profiling")
+    p_profile = subparsers.add_parser("profile", help="Hardware counter profiling (GPU or host)")
     p_profile.add_argument("kernel_file", help="Path to kernel file")
     p_profile.add_argument(
         "--spec",
@@ -170,10 +170,11 @@ def main():
     p_profile.add_argument("--iters", type=int, default=20)
     p_profile.add_argument(
         "--tool",
-        choices=["auto", "unitrace", "vtune"],
+        choices=["auto", "unitrace", "vtune", "perf"],
         default="auto",
-        help="Profiler backend; auto tries unitrace ComputeBasic first, then VTune. "
-        "Hardware counters require device/driver support and permissions.",
+        help="Profiler backend. On a GPU, auto tries unitrace ComputeBasic first, then VTune; "
+        "on the host, perf if found, else VTune. Hardware counters require device/driver "
+        "support and permissions.",
     )
     p_profile.add_argument("--unitrace-bin", default=os.environ.get("UNITRACE_BIN", "unitrace"))
     p_profile.add_argument(
@@ -203,6 +204,53 @@ def main():
         help="Retained unitrace artifact directory to compare kernel resources against",
     )
     p_profile.add_argument("--vtune-bin", default="vtune")
+    p_profile.add_argument(
+        "--device",
+        help="Target device (default: $XE_FORGE_DEVICE, else the first device torch sees)",
+    )
+    p_profile.add_argument(
+        "--analysis",
+        default=None,
+        help="On the host: for perf, stat (default), record or all; for VTune, the analysis "
+        "to collect (vtune -help collect lists them; default hotspots)",
+    )
+    p_profile.add_argument("--perf-bin", default=os.environ.get("PERF_BIN", "perf"))
+    p_profile.add_argument(
+        "--events",
+        action="append",
+        help="Host, perf: an event spec to count or sample, passed to perf -e as given "
+        "(perf list names them; default: perf's own set). Repeat the flag for specs perf "
+        "should try separately: one it refuses is reported as unmeasured, the rest collected",
+    )
+    p_profile.add_argument(
+        "--metrics",
+        action="append",
+        help="Host, perf stat: a metric or metric-group spec passed to perf -M as given "
+        "(perf list metric); repeat the flag as for --events",
+    )
+    p_profile.add_argument(
+        "--system-wide",
+        action="store_true",
+        help="Host, perf: count every process on the CPUs (perf -a); needed for uncore events",
+    )
+    p_profile.add_argument(
+        "--collector-arg",
+        dest="collector_args",
+        action="append",
+        help="Host: one more argument passed to the collector as given (repeatable), e.g. "
+        "--collector-arg=--per-node for perf, --collector-arg=-knob for VTune",
+    )
+    p_profile.add_argument(
+        "--window",
+        choices=["each", "all"],
+        default=None,
+        help="Host: one window over all timed calls (default), or each timed forward in its "
+        "own window; while the collector handles a start or stop, an idle thread pool may "
+        "spin and be counted, and the report gives both spans",
+    )
+    p_profile.add_argument(
+        "--top", type=int, default=15, help="Host: rows of each hotspot table to print"
+    )
     p_profile.add_argument(
         "--kernel-name", default=None, help="Trial tree to record the attempt in"
     )
@@ -234,6 +282,13 @@ def main():
     c_run.add_argument("launcher", help="executable that runs one profiled batch into $RAW_DIR")
     c_run.add_argument("-o", "--raw", required=True, help="raw/ directory to write")
     c_run.add_argument("--unitrace", default=os.environ.get("UNITRACE_BIN", "unitrace"))
+    c_run.add_argument("--device", default=os.environ.get("XE_FORGE_DEVICE"),
+                       help="the run's device (default $XE_FORGE_DEVICE); cpu: the launcher's "
+                       "HostTimeline times the nodes and perf names their code")  # fmt: skip
+    c_run.add_argument("--perf-bin", default=os.environ.get("PERF_BIN", "perf"),
+                       help="perf on a host (env PERF_BIN)")  # fmt: skip
+    c_run.add_argument("--collector-arg", dest="collector_args", action="append", default=[],
+                       help="one more option for `perf record` on a host, as perf spells it")  # fmt: skip
     c_run.add_argument("--sampling-interval", type=int,
                        default=int(os.environ.get("XE_FORGE_SAMPLING_INTERVAL_US", 25)),
                        help="unitrace metric sampling interval in us (default 25, env "
@@ -292,6 +347,10 @@ def main():
     pc.add_argument("--prompt-file", help="the run's prompt text (xe-forge run --prompt-file)")
     pc.add_argument("--precision", default="bfloat16",
                     help="the float dtype scored first: the run's declared compute")  # fmt: skip
+    pc.add_argument("--quantization", default=None,
+                    help="the run's declared quantization: generate.sh runs again with "
+                    "XE_FORGE_QUANTIZATION set, and its tokens are scored and reported, "
+                    "never gated")  # fmt: skip
     pc.add_argument("--no-reference", action="store_true",
                     help="skip only the transformers comparison, keeping every other check: "
                     "the patch is a real diff that applies to a fresh clone, the patched "

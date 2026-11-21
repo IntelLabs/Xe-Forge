@@ -8,7 +8,7 @@ fusion removes is its call, which is made where the framework calls it.
 What the run established, all under {{ run_dir }}:
  - {{ capture }}: every op the model ran, with its shapes, `call_site` (the module that
    called it) and device time, grouped into workloads. Ops are aggregated per shape and call
-   site, not in order: `raw/unitrace_launches.json` is the measured run's kernel launches in
+   site, not in order: `raw/unitrace_launches.json` (on a host, `raw/host_launches.json`) is the measured run's kernel launches in
    device order, and the model's source shows which op feeds which.
  - names.json: each op's kernel and the repository it lives in (its model.weights_widened_by,
    when set, is an op that widens the stored weights on every forward for the GEMMs that
