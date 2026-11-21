@@ -218,13 +218,15 @@ def main():
     p_profile.add_argument(
         "--events",
         action="append",
-        help="Host, perf: events to count or sample, comma-separated (perf list names them; "
-        "default: perf's own set). A name perf refuses is reported as unmeasured",
+        help="Host, perf: an event spec to count or sample, passed to perf -e as given "
+        "(perf list names them; default: perf's own set). Repeat the flag for specs perf "
+        "should try separately: one it refuses is reported as unmeasured, the rest collected",
     )
     p_profile.add_argument(
         "--metrics",
         action="append",
-        help="Host, perf stat: metrics or metric groups, comma-separated (perf list metric)",
+        help="Host, perf stat: a metric or metric-group spec passed to perf -M as given "
+        "(perf list metric); repeat the flag as for --events",
     )
     p_profile.add_argument(
         "--system-wide",

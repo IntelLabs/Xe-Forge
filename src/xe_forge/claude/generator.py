@@ -138,10 +138,11 @@ def generate_workspace(
         profile_args.extend(["--kernel-name", kernel_name])
     if config.profiler.vtune_enabled:
         profile_args.extend(["--vtune-bin", config.profiler.vtune_bin])
-    if host and config.profiler.perf_enabled:
-        profile_args.extend(["--tool", "perf", "--perf-bin", config.profiler.perf_bin])
-    elif host and config.profiler.vtune_enabled:
-        profile_args.extend(["--tool", "vtune"])
+    perf, vtune = config.profiler.perf_enabled, config.profiler.vtune_enabled
+    if host and perf:
+        profile_args.extend(["--perf-bin", config.profiler.perf_bin])
+    if host and perf != vtune:  # one host tool enabled; with both, auto picks perf if present
+        profile_args.extend(["--tool", "perf" if perf else "vtune"])
     elif not host and unitrace != config.profiler.vtune_enabled:
         profile_args.extend(["--tool", "unitrace" if unitrace else "vtune"])
     profile_options = shlex.join(profile_args)
@@ -176,7 +177,13 @@ def generate_workspace(
             dsl=dsl,
             device=device,
             on_host=host,
-            host_tool="perf" if config.profiler.perf_enabled else "VTune",
+            host_tool=(
+                "perf"
+                if config.profiler.perf_enabled
+                else "VTune"
+                if config.profiler.vtune_enabled
+                else "profiler's"
+            ),
             kernel_name=kernel_name,
             ext=ext,
             measurement=measurement,

@@ -47,7 +47,9 @@ def _host_profilers(args):
 
 
 def _names(args, name):
-    return [n for part in (getattr(args, name, None) or []) for n in part.split(",") if n]
+    """Each ``--events``/``--metrics`` value as given: one perf spec, which may itself hold
+    commas (a list, a ``{group}``, or a raw ``cpu/event=..,umask=../`` event)."""
+    return [n for n in (getattr(args, name, None) or []) if n]
 
 
 def _gpu_profilers(args, metric_group):

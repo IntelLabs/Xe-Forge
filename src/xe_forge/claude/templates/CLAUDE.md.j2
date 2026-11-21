@@ -146,7 +146,7 @@ Do not leave a benchmark or diagnostic running in the background when returning 
 | **Best trial** | `xe-forge-skill trial best <kernel_name>` |
 | **Baseline time** | `xe-forge-skill trial baseline-us <kernel_name>` |
 | **Finalize** | `xe-forge-skill trial finalize <kernel_name> <output_file> --require-measured` |
-| **Profile** (only when `unitrace_enabled: true` or `vtune_enabled: true`) | `xe-forge-skill profile <kernel_file> {{ profile_options }}{% if require_profiles %} --trial-id <trial_id>{% endif %}{% if has_spec %} [--variant <name>]{% endif %}` |
+| **Profile** (only when {% if on_host %}`perf_enabled: true` or `vtune_enabled: true`{% else %}`unitrace_enabled: true` or `vtune_enabled: true`{% endif %}) | `xe-forge-skill profile <kernel_file> {{ profile_options }}{% if require_profiles %} --trial-id <trial_id>{% endif %}{% if has_spec %} [--variant <name>]{% endif %}` |
 {% if baseline_oracle %}
 There is no PyTorch reference. `--reference` names the baseline
 `test_kernels/{{ kernel_name }}{{ ext }}` -- the copy of the repository's kernel -- and it is
@@ -455,7 +455,7 @@ For each trial:
    named instead. That is not a half-recorded trial: a trial with both times and no ratio
    ranks **at parity**, above every measured regression.
 {%- endif %}
-6. **Profile** — if `unitrace_enabled: true` or `vtune_enabled: true` in `config.yaml`,
+6. **Profile** — if {% if on_host %}`perf_enabled: true` or `vtune_enabled: true`{% else %}`unitrace_enabled: true` or `vtune_enabled: true`{% endif %} in `config.yaml`,
   run `xe-forge-skill profile <kernel_file> {{ profile_options }}{% if require_profiles %} --trial-id <trial_id>{% endif %}`
   and use the output to guide the next trial.{% if has_spec %} Use the same `--variant` as the benchmark.{% endif %}
 {%- if require_profiles %}

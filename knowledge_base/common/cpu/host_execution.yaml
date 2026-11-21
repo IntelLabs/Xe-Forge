@@ -23,6 +23,10 @@ patterns:
       bandwidth-bound kernel against the calibration measured under the same placement.
     prerequisites:
       - The calibration's placement equals the benchmark's; otherwise re-run calibrate under it.
+      - >-
+        The calibration's `read_bytes` is well above the placement's `llc_bytes` (per-core
+        caches add to it); when the two are close, part of the read came from cache, so
+        re-run calibrate with a larger `--read-bytes`.
 
   - id: first_touch_places_pages
     name: Pages live on the node of the thread that first wrote them

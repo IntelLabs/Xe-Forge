@@ -243,6 +243,17 @@ def test_perf_collection_is_switched_over_its_control_descriptors():
     assert seen == [b"enable\n", b"disable\n"]
     for fd in (control_r, control_w, ack_r, ack_w):
         os.close(fd)
+
+    # The runner closes perf's ends, so perf exiting is an end of file, not a hang.
+    control_r, control_w = os.pipe()
+    ack_r, ack_w = os.pipe()
+    dead = Collection("perf", control_fds=(control_w, ack_r, control_r, ack_w))
+    with pytest.raises(OSError):
+        os.fstat(ack_w)  # closed by the runner
+    with pytest.raises((RuntimeError, BrokenPipeError)):
+        dead.set(True)
+    os.close(control_w)
+    os.close(ack_r)
     with pytest.raises(ValueError, match="descriptors"):
         Collection("perf")
 
@@ -261,6 +272,9 @@ PERF_REPORT = """\
 #
 # Overhead|     Samples|      Period|Shared Object       |Symbol                      |IPC
  2.10%  | 8          | 11898781   |ld.so               |[.] small                   |-
+            |
+            ---small
+               |
  26.75% | 101        | 151906451  |ext.so              |[.] my_kernel               |-
 # Samples: 0  of event 'instructions'
 """
@@ -277,6 +291,7 @@ def test_perf_output_is_read_as_perf_printed_it():
     assert [s["event"] for s in sections] == ["cycles:P", "instructions"]
     assert sections[0]["samples"] == "380" and sections[1]["rows"] == []
     assert sections[0]["rows"][0]["Symbol"] == "[.] my_kernel"  # highest overhead first
+    assert len(sections[0]["rows"]) == 2  # call-chain lines are not rows
 
 
 def test_perf_runs_bounded_and_drops_only_the_events_it_refuses(tmp_path, monkeypatch):
@@ -288,7 +303,7 @@ def test_perf_runs_bounded_and_drops_only_the_events_it_refuses(tmp_path, monkey
 
     def run(self, artifacts, command, name="collect", pass_fds=()):
         commands.append((name, command, pass_fds))
-        if name == "probe":
+        if name.startswith("probe"):
             ok = "bogus" not in command
             return profiler.subprocess.CompletedProcess(
                 command, 0 if ok else 129, "", "" if ok else "Bad event name\nmore"
@@ -308,6 +323,8 @@ def test_perf_runs_bounded_and_drops_only_the_events_it_refuses(tmp_path, monkey
     assert command[:2] == ["perf", "stat"] and "--metric-no-threshold" in command
     assert command[command.index("-D") + 1] == "-1" and len(fds) == 4
     assert command[command.index("-e") + 1] == "cycles"  # the refused one is dropped
+    probes = [c for n, c, _ in commands if n.startswith("probe")]
+    assert [c[:2] for c in probes] == [["perf", "stat"]] * 2  # probed as it will be collected
     host = result.raw_counters["host"]
     assert host["unmeasured"]["bogus"].startswith("perf refused it: Bad event name")
     runner = next((tmp_path / "p").glob("k_perf_stat_*/runner.py")).read_text()
@@ -461,8 +478,8 @@ def test_a_host_workspace_profiles_the_host(tmp_path):
             if "xe-forge-skill profile" in line
         )  # fmt: skip
 
-    line = profile_line("perf")
-    assert "--device cpu" in line and "--tool perf" in line
+    line = profile_line("both")  # perf and VTune: auto picks perf when it is there
+    assert "--device cpu" in line and "--tool" not in line and "--perf-bin perf" in line
     assert "--metric-group" not in line and "--unitrace-bin" not in line
     config.profiler.perf_enabled = False
     assert "--tool vtune" in profile_line("vtune")
@@ -533,3 +550,68 @@ def test_an_arm_that_writes_its_inputs_is_refused_even_within_tolerance():
         reference, reference, nudges
     )
     assert not result.optimized_correct and "Mutating inputs" in result.feedback_message
+
+
+def test_perf_record_reports_its_samples_and_says_when_there_are_none(tmp_path, monkeypatch):
+    from xe_forge.core import profiler
+
+    kernel = tmp_path / "k.py"
+    kernel.write_text("x = 1\n")
+    report = {"text": PERF_REPORT}
+    commands = []
+
+    def run(self, artifacts, command, name="collect", pass_fds=()):
+        commands.append((name, command))
+        return profiler.subprocess.CompletedProcess(
+            command, 0, report["text"] if name == "report" else "", ""
+        )
+
+    monkeypatch.setattr(profiler._HostProfiler, "_run", run)
+    monkeypatch.setattr(profiler.shutil, "which", lambda b: "/usr/bin/perf")
+    perf = profiler.PerfCPUProfiler(analysis="record", artifacts_dir=tmp_path / "p")
+    text = perf.profile(kernel).format_for_llm()
+    assert "Samples of cycles:P by shared object and symbol (380 samples) (top 2 of 2)" in text
+    assert "Symbol=[.] my_kernel" in text
+    report_cmd = next(c for n, c in commands if n == "report")
+    assert report_cmd[report_cmd.index("-g") + 1] == "none"
+    report["text"] = ""
+    assert "no samples in the collection window" in perf.profile(kernel).format_for_llm()
+    with pytest.raises(ValueError, match="metrics are counted by perf stat"):
+        profiler.PerfCPUProfiler(analysis="record", metrics=["TopdownL1"])
+
+
+def test_an_event_spec_with_commas_is_passed_whole(monkeypatch):
+    from xe_forge.core import profiler
+    from xe_forge.skills import profile
+
+    seen = []
+
+    def fake(self, kernel_file, **kw):
+        seen.append(self.events)
+        return profiler.ProfileResult(primary_kernel="k", source=self.metric_group)
+
+    monkeypatch.setattr(profiler.PerfCPUProfiler, "available", lambda self: True)
+    monkeypatch.setattr(profiler.PerfCPUProfiler, "profile", fake)
+    specs = ["{cycles,instructions}", "cpu/event=0xc0,umask=0x0/"]
+    profile.run(_profile_args(tool="perf", events=specs))
+    assert seen == [specs]
+
+
+def test_a_perf_only_host_workspace_is_told_to_profile(tmp_path):
+    from xe_forge.claude.generator import generate_workspace
+    from xe_forge.config import Config
+
+    config = Config()
+    config.device_config.dsl, config.device_config.device = "cpp", "cpu"
+    config.profiler.unitrace_enabled = config.profiler.vtune_enabled = False
+    generate_workspace(tmp_path / "ws", config, "scale", "", reference_code="x = 1\n")
+    text = (tmp_path / "ws" / "CLAUDE.md").read_text()
+    assert "`perf_enabled: true` or `vtune_enabled: true`" in text
+    assert "`unitrace_enabled: true` or" not in text
+    line = next(x for x in text.splitlines() if "xe-forge-skill profile" in x)
+    assert "--tool perf" in line
+    config.profiler.vtune_enabled = True  # both: auto picks perf when it is there
+    generate_workspace(tmp_path / "both", config, "scale", "", reference_code="x = 1\n")
+    both = next(x for x in (tmp_path / "both" / "CLAUDE.md").read_text().splitlines()
+                if "xe-forge-skill profile" in x)  # fmt: skip
+    assert "--tool" not in both and "--perf-bin" in both

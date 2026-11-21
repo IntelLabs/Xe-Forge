@@ -64,18 +64,30 @@ def prepare_call(kernel_file, spec_path=None, variant=None, reference_path=None,
     return PreparedCall(model if model is not None else fn, inputs)
 
 
+# How long the runner waits for perf to acknowledge a start or stop before giving up: a
+# liveness bound (perf has exited or stopped reading), not a measurement.
+PERF_ACK_TIMEOUT_S = 60
+
+
 class Collection:
     """Starts and stops one collector around the timed calls. unitrace reads an environment
     variable; VTune takes a command against its result; perf reads ``enable``/``disable``
-    from a control descriptor and acknowledges each on another."""
+    from a control descriptor and acknowledges each on another. ``none`` controls nothing,
+    for a collector started around the whole run by hand (perf c2c, perf mem)."""
 
     def __init__(self, tool, vtune_bin="vtune", result_dir=None, control_fds=None):
-        if tool not in ("unitrace", "vtune", "perf"):
+        if tool not in ("unitrace", "vtune", "perf", "none"):
             raise ValueError(f"Unknown profiler: {tool}")
         if tool == "perf" and not control_fds:
             raise ValueError("perf collection needs its control and ack descriptors")
         self.tool, self.vtune_bin, self.result_dir = tool, vtune_bin, result_dir
-        self.control_fds = control_fds
+        self.control_fds = tuple(control_fds or ())[:2]
+        # perf's own ends came along through perf; holding them would hide its exit.
+        for fd in tuple(control_fds or ())[2:]:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
     def set(self, enabled: bool) -> None:
         if self.tool == "unitrace":
@@ -88,10 +100,13 @@ class Collection:
                 timeout=30,
                 check=True,
             )  # fmt: skip
-        else:
+        elif self.tool == "perf":
+            import select
+
             control, ack = self.control_fds
             os.write(control, b"enable\n" if enabled else b"disable\n")
-            if not os.read(ack, 16).startswith(b"ack"):
+            ready, _, _ = select.select([ack], [], [], PERF_ACK_TIMEOUT_S)
+            if not ready or not os.read(ack, 16).startswith(b"ack"):
                 raise RuntimeError("perf did not acknowledge a collection command")
 
 
@@ -180,16 +195,19 @@ def _timed_calls(call, iters, window, collect, synchronize) -> dict:
             call.reset()
             synchronize()
             each = start() if window == "each" else None
+            t = time.perf_counter_ns()
             try:
-                t = time.perf_counter_ns()
                 call.forward(*call.inputs)
-                synchronize()
-                forward += time.perf_counter_ns() - t
             finally:
-                if each is not None:
-                    stop(*each)
+                try:
+                    synchronize()
+                finally:
+                    forward += time.perf_counter_ns() - t
+                    if each is not None:
+                        stop(*each)
     finally:
         if opened is not None:
             stop(*opened)
     return {"window": window, "iters": iters, "forward_s": forward / 1e9,
-            "window_s": inner / 1e9, "window_max_s": outer / 1e9}  # fmt: skip
+            "window_s": inner / 1e9, "window_max_s": outer / 1e9,
+            "threads": torch.get_num_threads()}  # fmt: skip

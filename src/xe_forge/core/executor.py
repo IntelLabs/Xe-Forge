@@ -193,7 +193,8 @@ class KernelBenchExecutor:
             llc = placement().get("llc_bytes")
             if llc is None:
                 self.flush_note = (
-                    " The last-level cache size of these CPUs is unknown (no cache in sysfs): "
+                    " The last-level cache size of these CPUs is unknown (not every cache "
+                    "slice's size is in sysfs): "
                     "no cache flush ran before the timed calls, so inputs may be timed from cache."
                 )
                 self._host_flush = None

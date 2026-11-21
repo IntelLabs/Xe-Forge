@@ -777,12 +777,22 @@ class _HostProfiler:
             window = json.loads((artifacts / "window.json").read_text())
         except (OSError, ValueError):
             window = None
-        host = {"tool": self.tool, "analysis": self.analysis, "placement": host_placement(),
+        placement = host_placement()
+        if window and "threads" in window:  # what the collected process ran with
+            placement["threads"] = window["threads"]
+        host = {"tool": self.tool, "analysis": self.analysis, "placement": placement,
                 "window": window, "system_wide": system_wide, "sections": sections,
                 "unmeasured": dict(unmeasured or {}), "notes": list(notes)}  # fmt: skip
         return ProfileResult(
             raw_counters={"host": host, "collection_scope": f"window_{self.window}"}
         )
+
+
+def _read_text(path) -> str | None:
+    try:
+        return Path(path).read_text().strip()
+    except OSError:
+        return None
 
 
 def _tail(text: str, n: int = 800) -> str:
@@ -867,7 +877,9 @@ def parse_perf_report(text: str) -> list[dict]:
             header = [cell.strip() for cell in line.lstrip("#").split("|")]
         elif header and current is not None and "|" in line and not line.startswith("#"):
             cells = [cell.strip() for cell in line.split("|")]
-            current["rows"].append({k: v for k, v in zip(header, cells, strict=False) if k})
+            row = {k: v for k, v in zip(header, cells, strict=False) if k}
+            if str(row.get("Overhead", "")).endswith("%"):  # not a call-chain line
+                current["rows"].append(row)
     for section in sections:
         section["rows"].sort(key=lambda r: -_safe_float(str(r.get("Overhead", "")).rstrip("%")))
     return sections
@@ -896,11 +908,15 @@ class PerfCPUProfiler(_HostProfiler):
         """Each requested event and metric, tried once: an unknown name fails a whole perf
         run, so those perf refuses are reported as unmeasured and the rest are collected."""
         events, metrics, refused = [], [], {}
+        tried = 0
         for flag, names, kept in (("-e", self.events, events), ("-M", self.metrics, metrics)):
             for name in names:
-                command = [self.binary, "stat", *(["-a"] if self.system_wide else []), flag,
-                           name, "--", "true"]  # fmt: skip
-                proc = self._run(artifacts, command, name="probe")
+                # The analysis's own command: an event can be countable and not sampleable.
+                command = [self.binary, self.analysis, "--quiet",
+                           *(["-o", os.devnull] if self.analysis == "record" else []),
+                           *(["-a"] if self.system_wide else []), flag, name, "--", "true"]  # fmt: skip
+                tried += 1
+                proc = self._run(artifacts, command, name=f"probe_{tried}")
                 if proc.returncode == 0:
                     kept.append(name)
                 else:
@@ -918,7 +934,7 @@ class PerfCPUProfiler(_HostProfiler):
         fds = (control_r, control_w, ack_r, ack_w)
         try:
             runner = self._runner(artifacts, kernel_file, options,
-                                  control_fds=(control_w, ack_r))  # fmt: skip
+                                  control_fds=(control_w, ack_r, control_r, ack_w))  # fmt: skip
             command = [self.binary, self.analysis]
             if self.analysis == "stat":
                 command += ["-j", "-o", str(artifacts / "stat.json"), "--metric-no-threshold"]
@@ -934,23 +950,28 @@ class PerfCPUProfiler(_HostProfiler):
             for fd in fds:
                 os.close(fd)
         if proc.returncode != 0:
-            return ProfileResult(error=f"perf {self.analysis} failed (exit {proc.returncode}): "
-                                       f"{_tail(proc.stderr)}")  # fmt: skip
+            together = (" (each requested name passed its own probe; together they may not be "
+                        "collectable)" if events or metrics else "")  # fmt: skip
+            return ProfileResult(error=f"perf {self.analysis} failed (exit {proc.returncode})"
+                                       f"{together}: {_tail(proc.stderr)}")  # fmt: skip
         notes = []
-        if "kptr_restrict" in proc.stderr:
-            notes.append("Kernel symbols are unresolved: the kernel's address maps are "
-                         "restricted, so samples in the kernel show without a symbol.")  # fmt: skip
+        restrict = _read_text("/proc/sys/kernel/kptr_restrict")
+        if restrict not in (None, "0") or "kptr_restrict" in proc.stderr:
+            notes.append(f"kernel.kptr_restrict is {restrict or 'unknown'}: perf could not "
+                         "resolve kernel symbols, so samples in the kernel show without one.")  # fmt: skip
         if self.analysis == "stat":
             try:
                 rows, unmeasured = parse_perf_stat((artifacts / "stat.json").read_text())
             except OSError as exc:
                 return ProfileResult(error=f"perf stat wrote no output: {exc}")
-            sections = [{"title": "perf stat counters and metrics, as perf named them",
-                         "rows": rows}]  # fmt: skip
+            sections = [{"title": "perf stat counters and metrics, as perf named them "
+                                  "(all rows: stat.json)", "rows": rows[: self.top],
+                         "total": len(rows)}]  # fmt: skip
             return self._result(artifacts, sections, {**refused, **unmeasured}, notes,
                                 self.system_wide)  # fmt: skip
         report = self._run(artifacts, [self.binary, "report", "-i", str(artifacts / "perf.data"),
-                                       "--stdio", "--no-children", "--sort", "dso,symbol",
+                                       "--stdio", "--no-children", "-g", "none",
+                                       "--sort", "dso,symbol",
                                        "-F", "overhead,sample,period,dso,sym", "-t", "|"],
                            name="report")  # fmt: skip
         if report.returncode != 0:

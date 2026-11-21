@@ -18,8 +18,14 @@ patterns:
       disable, a thread pool that just finished a call can spin and be counted, once per
       window. The window line gives the forwards' time and the collection's inner and outer
       span; forwards much shorter than the span mean the totals describe something else
-      too: raise `--iters`, or compare the two spans before reading a count as the kernel's. Without `--system-wide`, perf counts this
-      process and its threads; with it, every process on the CPUs is counted.
+      too: raise `--iters`, or compare the two spans before reading a count as the
+      kernel's. Without `--system-wide`, perf counts this process and its threads; with it,
+      every process on the CPUs is counted.
+      `--top` caps every printed table, stat rows included; the artifacts (stat.json,
+      perf.data, report.stdout) hold all rows. `--window each` keeps resets out of the
+      count and is worth it only when a forward is long beside perf's start/stop round trip
+      (well under a millisecond for stat, longer for record); otherwise raise `--iters`
+      until the inner window is close to the forwards' time.
     field_semantics:
       counter-value: "The event's count over the window(s), for this process unless system-wide."
       pcnt-running: "Share of the window the counter was on a hardware counter; below 100 perf scaled a multiplexed count."
@@ -43,7 +49,8 @@ patterns:
     description: |
       `perf list` on the run's host is the source of truth for names: they differ by CPU
       and kernel version, and `profile` passes them through as given (`--events`,
-      `--metrics`, comma-separated; `--collector-arg` for any other perf option). Useful
+      `--metrics`, each value one perf spec: repeat the flag so perf tries each separately,
+      and a name it refuses costs only that spec; `--collector-arg` for any other option). Useful
       starting points on recent Intel Xeon processors:
         - Top-down: `--metrics TopdownL1` (then `TopdownL2`, or `--collector-arg=--td-level=2`)
           gives the tma_* shares of pipeline slots.
@@ -58,9 +65,14 @@ patterns:
           `unc_m_cas_count*`) and socket-link events (`uncore_upi*`) need `--system-wide`;
           add `--collector-arg=--per-socket` or `--collector-arg=--per-node` to split them.
         - Hotspots: `--analysis record` with no `--events` samples perf's default cycles
-          event; `--collector-arg=--call-graph=lbr` (or `dwarf`) adds call chains.
+          event. Samples are attributed to the function the instruction is in: a kernel
+          inlined into a library's parallel loop shows under that loop's symbol.
+          `--collector-arg=--call-graph=lbr` (or `dwarf`) records call chains into
+          perf.data (the printed table stays flat); read them with `perf report -g`.
       `perf c2c` (false sharing) and `perf mem` (load latency by address) are separate perf
-      commands: run them yourself on the profile's `runner.py` when the counts point there.
+      commands, run by hand: copy the profile's `runner.py`, set its `'tool'` to `'none'`
+      and drop `control_fds`, then run `perf c2c record -- python runner.py`. That collects
+      the whole run, setup included.
     rationale: |
       A name that is not on this host fails only that event: it is reported as unknown and
       the rest are collected. Uncore counters are per socket, not per process, so they
