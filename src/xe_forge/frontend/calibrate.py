@@ -15,6 +15,9 @@ from xe_forge import frontend
 
 CACHE = frontend.CACHE / "calibration"
 DTYPES = ("bfloat16", "float16", "float32")
+# Measured on a host only when asked for (``--dtypes``): timing one there can take longer
+# than the rest of the calibration together.
+HOST_ON_REQUEST = ("float8_e4m3fn",)
 # Float formats whose every value is exactly a value of these: a matmul in them is never bound
 # to be slower than one in those (convert, then multiply), whatever the card's own kernel does.
 # Not int8: its int32 result is not one a 16-bit float matmul computes.
@@ -276,6 +279,12 @@ def measure(
                **special}  # fmt: skip
     for name, make in kernels.items():
         if dtypes and name not in dtypes:
+            continue
+        if not dtypes and dev == "cpu" and name in HOST_ON_REQUEST:
+            # Not a value: left out, so a run that needs it measures it (``--dtypes``).
+            rec.setdefault("not_requested", {})[f"matmul_tflops.{name}"] = (
+                f"not measured by default on a host; pass --dtypes {name} to measure it"
+            )
             continue
         if not measurable(name):
             rec["matmul_tflops"][name] = None

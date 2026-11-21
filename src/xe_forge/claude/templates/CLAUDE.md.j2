@@ -139,7 +139,7 @@ Do not leave a benchmark or diagnostic running in the background when returning 
 | **Analyze** (PyTorch sources only) | `xe-forge-skill analyze {{ analyze_file }}` |
 | **Validate** | `xe-forge-skill validate <kernel{% if measurement == "host" %}_file\|dir{% else %}_file{% endif %}> --dsl {{ dsl }}` |
 | **Benchmark** | `xe-forge-skill benchmark <baseline> <optimized> {{ benchmark_options }}{% if has_spec %} [--variant <name>]{% endif %} [--baseline-us <cached>] --kernel-name <kernel_name> --trial-id <trial_id>` (records the result) |
-| **Init trials** | `xe-forge-skill trial init <kernel_name> <baseline_file>{% if require_profiles %} --require-profiles ComputeBasic EuStallSampling{% endif %}` |
+| **Init trials** | `xe-forge-skill trial init <kernel_name> <baseline_file>{% if require_profiles %} --require-profiles {{ required_groups }}{% endif %}` |
 | **Save trial** | `xe-forge-skill trial save <kernel_name> <file{% if measurement == "host" %}\|dir{% endif %}> [--parent <id>] {% if require_profiles %}--strategy "<kernel metric value (trial)>"{% else %}[--strategy "..."]{% endif %}` |
 | **Record a validation failure** | `xe-forge-skill trial result <kernel_name> <trial_id> --validation fail` (only for a trial never benchmarked) |
 | **Check status** | `xe-forge-skill trial status <kernel_name>` |
@@ -430,7 +430,7 @@ does not establish numerical correctness. Do not create optimized trials before 
 The self-comparison is a baseline check, not an optimization or a speedup result.
 {% endif %}
 ```bash
-xe-forge-skill trial init {{ kernel_name }} test_kernels/{{ kernel_name }}{{ ext }}{% if require_profiles %} --require-profiles ComputeBasic EuStallSampling{% endif %}
+xe-forge-skill trial init {{ kernel_name }} test_kernels/{{ kernel_name }}{{ ext }}{% if require_profiles %} --require-profiles {{ required_groups }}{% endif %}
 ```
 
 ### Step 3: Trial Loop
@@ -458,7 +458,16 @@ For each trial:
 6. **Profile** — if {% if on_host %}`perf_enabled: true` or `vtune_enabled: true`{% else %}`unitrace_enabled: true` or `vtune_enabled: true`{% endif %} in `config.yaml`,
   run `xe-forge-skill profile <kernel_file> {{ profile_options }}{% if require_profiles %} --trial-id <trial_id>{% endif %}`
   and use the output to guide the next trial.{% if has_spec %} Use the same `--variant` as the benchmark.{% endif %}
-{%- if require_profiles %}
+{%- if require_profiles and on_host %}
+  Pass the saved trial file. Every correct trial that differs from the baseline, including
+  the last before finalize, needs its perf counts (`--analysis stat`, the default; add
+  `--events`/`--metrics` as you choose, and run `record` beside it when you need the hot
+  symbols); `trial save` and `finalize` refuse otherwise. Re-run a failed collection once
+  with the same command; if it fails again it is final: report it as failed with its
+  artifacts. Each next trial's `--strategy` cites the profiled measurement it targets
+  (counter or metric, value, trial). After profiling, state the counts the trial meant to
+  move beside its parent's, under the same placement and window.
+{%- elif require_profiles %}
   Pass the saved trial file. Every correct trial that differs from the baseline, including
   the last before finalize, needs both collections; `trial save` and `finalize` refuse otherwise. Re-run a
   failed collection once with the same command; if it fails again it is final: report it as

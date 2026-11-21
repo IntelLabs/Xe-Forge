@@ -133,16 +133,24 @@ def generate_workspace(
     if unitrace:
         profile_args.extend(["--unitrace-bin", config.profiler.unitrace_bin])
         profile_args.extend(["--metric-group", config.profiler.unitrace_metric_group])
-    require_profiles = unitrace and config.profiler.unitrace_metric_group == "all"
+    perf, vtune = config.profiler.perf_enabled, config.profiler.vtune_enabled
+    # The collections every saved trial must have: unitrace's two groups on a GPU, and on a
+    # host perf's counts, the host's default profile.
+    if host and perf:
+        required_groups = ["perf stat"]
+    elif unitrace and config.profiler.unitrace_metric_group == "all":
+        required_groups = ["ComputeBasic", "EuStallSampling"]
+    else:
+        required_groups = []
+    require_profiles = bool(required_groups)
     if require_profiles:
         profile_args.extend(["--kernel-name", kernel_name])
     if config.profiler.vtune_enabled:
         profile_args.extend(["--vtune-bin", config.profiler.vtune_bin])
-    perf, vtune = config.profiler.perf_enabled, config.profiler.vtune_enabled
-    if host and perf:
-        profile_args.extend(["--perf-bin", config.profiler.perf_bin])
-    if host and perf != vtune:  # one host tool enabled; with both, auto picks perf if present
-        profile_args.extend(["--tool", "perf" if perf else "vtune"])
+    if host and perf:  # the required collection is perf's, so perf is named, not auto
+        profile_args.extend(["--tool", "perf", "--perf-bin", config.profiler.perf_bin])
+    elif host and vtune:
+        profile_args.extend(["--tool", "vtune"])
     elif not host and unitrace != config.profiler.vtune_enabled:
         profile_args.extend(["--tool", "unitrace" if unitrace else "vtune"])
     profile_options = shlex.join(profile_args)
@@ -190,6 +198,7 @@ def generate_workspace(
             benchmark_options=benchmark_options,
             profile_options=profile_options,
             require_profiles=require_profiles,
+            required_groups=shlex.join(required_groups),
             reference_workload=reference_workload,
             has_spec=bool(spec_path),
             variant=variant_type,
@@ -228,6 +237,7 @@ def generate_workspace(
             dsl=dsl,
             weights=weights,
             require_profiles=require_profiles,
+            required_groups=shlex.join(required_groups),
             measurement=measurement,
             benchmark_options=benchmark_options,
             dataset=dataset,

@@ -61,9 +61,12 @@ patterns:
           mem_load_l3_miss_retired.remote_hitm`, or the generic `node-loads,node-load-misses`.
         - Vector width actually executed: `fp_arith_inst_retired.*` (scalar, 128b, 256b,
           512b packed single/double) and, where present, `fp_arith_inst_retired2.*`.
-        - Memory bandwidth per socket: the uncore memory-controller events (`uncore_imc*`,
-          `unc_m_cas_count*`) and socket-link events (`uncore_upi*`) need `--system-wide`;
-          add `--collector-arg=--per-socket` or `--collector-arg=--per-node` to split them.
+        - Memory traffic per socket: memory-controller reads and writes
+          (`uncore_imc/cas_count_read/` and `uncore_imc/cas_count_write/`, which perf scales
+          to MiB, or the raw `unc_m_cas_count.rd`) and socket-link data
+          (`unc_upi_txl_flits.all_data`) need `--system-wide`; add
+          `--collector-arg=--per-socket` (or `--per-node`) to split them. Divide by the
+          window's span for a rate, and remember they count every process on the socket.
         - Hotspots: `--analysis record` with no `--events` samples perf's default cycles
           event. Samples are attributed to the function the instruction is in: a kernel
           inlined into a library's parallel loop shows under that loop's symbol.

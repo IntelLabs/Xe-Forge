@@ -98,7 +98,7 @@ def main():
     t_init.add_argument(
         "--require-profiles",
         nargs="+",
-        choices=["ComputeBasic", "EuStallSampling", "VTune"],
+        choices=["ComputeBasic", "EuStallSampling", "VTune", "perf stat", "perf record"],
         help="Profile groups every correct trial must attempt before the next save or finalize",
     )
     t_init.add_argument("--trials-dir", default="./trials")

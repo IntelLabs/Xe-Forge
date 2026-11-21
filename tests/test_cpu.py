@@ -478,8 +478,8 @@ def test_a_host_workspace_profiles_the_host(tmp_path):
             if "xe-forge-skill profile" in line
         )  # fmt: skip
 
-    line = profile_line("both")  # perf and VTune: auto picks perf when it is there
-    assert "--device cpu" in line and "--tool" not in line and "--perf-bin perf" in line
+    line = profile_line("both")  # the required collection is perf's, so perf is named
+    assert "--device cpu" in line and "--tool perf" in line and "--perf-bin perf" in line
     assert "--metric-group" not in line and "--unitrace-bin" not in line
     config.profiler.perf_enabled = False
     assert "--tool vtune" in profile_line("vtune")
@@ -610,8 +610,33 @@ def test_a_perf_only_host_workspace_is_told_to_profile(tmp_path):
     assert "`unitrace_enabled: true` or" not in text
     line = next(x for x in text.splitlines() if "xe-forge-skill profile" in x)
     assert "--tool perf" in line
-    config.profiler.vtune_enabled = True  # both: auto picks perf when it is there
-    generate_workspace(tmp_path / "both", config, "scale", "", reference_code="x = 1\n")
-    both = next(x for x in (tmp_path / "both" / "CLAUDE.md").read_text().splitlines()
-                if "xe-forge-skill profile" in x)  # fmt: skip
-    assert "--tool" not in both and "--perf-bin" in both
+    # Every saved trial needs its perf counts, recorded against the trial.
+    assert "--require-profiles 'perf stat'" in text and "--kernel-name scale" in line
+    assert "needs its perf counts" in text and "stall-reason" not in text
+    config.profiler.perf_enabled = False
+    generate_workspace(tmp_path / "off", config, "scale", "", reference_code="x = 1\n")
+    assert "--require-profiles" not in (tmp_path / "off" / "CLAUDE.md").read_text()
+
+
+def test_a_host_calibration_measures_float8_only_when_asked(monkeypatch):
+    from xe_forge.frontend import calibrate
+
+    monkeypatch.setenv("XE_FORGE_DEVICE", "cpu")
+    rec = calibrate.measure(read_bytes=4 << 20, n=8, iters=1)
+    assert "float8_e4m3fn" not in rec["matmul_tflops"]  # not a value, not an unmeasured
+    assert "--dtypes float8_e4m3fn" in rec["not_requested"]["matmul_tflops.float8_e4m3fn"]
+    asked = calibrate.measure(read_bytes=4 << 20, n=8, iters=1, dtypes=("float8_e4m3fn",))
+    assert "float8_e4m3fn" in asked["matmul_tflops"] and "not_requested" not in asked
+
+
+def test_a_trial_tree_can_require_perf_counts(tmp_path):
+    from xe_forge.core.trial_manager import TrialManager
+
+    baseline = tmp_path / "base.py"
+    baseline.write_text("x = 1\n")
+    manager = TrialManager(tmp_path / "trials")
+    manager.init("k", str(baseline), required_profile_groups=("perf stat",))
+    with pytest.raises(ValueError, match="Unsupported"):
+        TrialManager(tmp_path / "other").init(
+            "k", str(baseline), required_profile_groups=("perf everything",)
+        )
