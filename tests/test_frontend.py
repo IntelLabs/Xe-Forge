@@ -2374,6 +2374,52 @@ def test_a_cost_is_not_refuted_by_another_dtypes_peak():
     assert naming.refuted(names, shapes("float32"), calib, 0.05)
 
 
+def _cost_workload(cost):
+    from xe_forge.frontend.ir import Naming, Workload
+
+    return Workload(workload_id="c", family="other", dims={}, dtypes=["float32", "uint8"],
+                    layout=[], attrs={"cost": cost}, var_axes={}, calls=1, device_us=100.0,
+                    share=1.0, ops=[], naming=Naming("kernel"))  # fmt: skip
+
+
+def test_a_cost_bound_uses_its_declared_compute_dtype():
+    calib = {"bandwidth_gbs": 1000.0, "matmul_tflops": {"float32": 1.0, "int8": 10.0}}
+    cost = {"bytes": "1000", "flops": "10000000"}  # 10 us at the float32 peak, 1 at int8's
+    _, as_float = analyze.cost_bound(_cost_workload(cost), calib, {})
+    _, as_int8 = analyze.cost_bound(_cost_workload({**cost, "compute": "int8"}), calib, {})
+    assert as_float == pytest.approx(0.1) and as_int8 == pytest.approx(0.01)
+
+
+def test_a_declared_compute_dtype_without_a_peak_is_noted_unpeaked():
+    ctx = {}
+    w = _cost_workload({"bytes": "1000", "flops": "1000", "compute": "int8"})
+    assert analyze.cost_bound(w, {"bandwidth_gbs": 1.0, "matmul_tflops": {"float32": 1.0}}, ctx)
+    assert ctx["unpeaked"] == {"int8"}
+
+
+def test_a_declared_compute_dtype_is_calibrated_and_refutes_with_its_peak():
+    from xe_forge.frontend import naming
+    from xe_forge.frontend.ir import CaptureRun
+
+    w = _cost_workload({"bytes": "1", "flops": "1", "compute": "int8"})
+    assert "int8" in analyze.peak_dtypes(CaptureRun(run={}, ops=[], workloads=[w]))
+    calib = {"bandwidth_gbs": 1000.0, "matmul_tflops": {"float32": 10.0, "int8": 100.0}}
+    names = {"ops": {"K": {"cost": {"bytes": "1000000", "flops": "1000000000",
+                                    "compute": "int8"}}}}  # fmt: skip
+    shapes = {"K": {"shapes": [{"us_per_call": 60.0, "dims": {}, "dtype": "float32"}]}}
+    assert naming.refuted(names, shapes, calib, 0.05) == []  # 10 us at int8's peak, not 100
+
+
+def test_an_unknown_compute_dtype_is_a_naming_problem(tmp_path):
+    from xe_forge.frontend import naming
+
+    names = {"ops": {"K": {"route": "aten", "cost": {"bytes": "1", "compute": "nope"}}}}
+    problems = naming.validate(names, {"K": {"dims": {}}}, tmp_path)
+    assert any("cost.compute" in p for p in problems)
+    kept, _ = naming.keep_valid(names, {"K": {"dims": {}}}, tmp_path)
+    assert kept["ops"]["K"] == {"route": "aten"}  # the cost goes, the naming stays
+
+
 @pytest.mark.parametrize("route", ["library", "kernel"])
 def test_an_unpeaked_gemm_is_not_stopped_at_roofline(route):
     from xe_forge.frontend.ir import CaptureRun
@@ -3288,3 +3334,65 @@ def test_a_calibration_of_another_device_than_the_capture_is_noted():
     note = other_device(calib, {"device": {"type": "gpu", "name": "card-b"}})
     assert "xpu card-a" in note and "gpu card-b" in note
     assert other_device(calib, {"device": {"type": "gpu", "name": "card-a"}}) is None
+
+
+def test_a_compute_dtype_without_a_matmul_to_measure_is_a_naming_problem(tmp_path):
+    from xe_forge.frontend import naming
+
+    names = {"ops": {"K": {"route": "aten", "cost": {"bytes": "1", "compute": "uint8"}}}}
+    problems = naming.validate(names, {"K": {"dims": {}}}, tmp_path)
+    assert any("no matmul the calibration can measure" in p for p in problems)
+
+
+def test_the_declared_compute_dtypes_are_those_of_costs_with_flops():
+    from xe_forge.frontend import naming
+
+    names = {"ops": {
+        "A": {"cost": {"bytes": "1", "flops": "1", "compute": "int8"}},
+        "B": {"cost": {"bytes": "1", "compute": "float8_e4m3fn"}},  # no flops: no peak read
+        "C": {"kernels": {"k": {"cost": {"bytes": "1", "flops": "1", "compute": "bf16"}}}},
+    }}  # fmt: skip
+    assert naming.cost_dtypes(names) == {"int8", "bfloat16"}
+
+
+def test_calibration_measures_the_declared_compute_dtypes_too(tmp_path, monkeypatch):
+    import xe_forge.frontend.cli as fcli
+
+    path, cap = _calib_cap(tmp_path)
+    asked = []
+
+    def call(cmd, env, timeout):
+        asked.append(sorted(cmd[cmd.index("--dtypes") + 1 :]))
+        out = Path(cmd[cmd.index("-o") + 1])
+        out.write_text(json.dumps({"matmul_tflops": dict.fromkeys(asked[-1], 50.0)}))
+        return 0
+
+    monkeypatch.setattr(fcli.subprocess, "call", call)
+    fcli.calibrate_missing(path, cap, tmp_path / "run", also={"int8", "uint8"})
+    assert asked == [["bfloat16", "float16", "int8"]]  # uint8 has no matmul to measure
+
+
+def test_naming_checks_a_declared_compute_cost_at_the_peak_it_measures(tmp_path, monkeypatch):
+    from xe_forge.frontend import cli
+    from xe_forge.frontend.ir import CapturedOp, CaptureRun, TensorArg
+
+    calib = tmp_path / "calibration.json"
+    calib.write_text(json.dumps({"bandwidth_gbs": 1000.0, "matmul_tflops": {"float32": 10.0}}))
+    op = CapturedOp(id="o", framework_op="K", args=[TensorArg([4, 4], "float32")], calls=1,
+                    device_us=60.0, kernel_symbols={"k": 60.0})  # fmt: skip
+    cap = CaptureRun(run={}, ops=[op])
+    cost = {"bytes": "1000000", "flops": "1000000000", "compute": "int8"}  # 100 us at float32's
+    monkeypatch.setattr(
+        cli, "_agent", lambda *a, **k: {"ops": {"K": {"route": "aten", "cost": dict(cost)}}}
+    )
+
+    def measure_peaks(dtypes):
+        assert dtypes == {"int8"}
+        calib.write_text(
+            json.dumps({"bandwidth_gbs": 1000.0, "matmul_tflops": {"float32": 10.0, "int8": 100.0}})
+        )
+        return calib
+
+    got = cli.name(tmp_path / "capture.json", tmp_path, "py", 5, tmp_path, 1.0, calib, cap=cap,
+                   measure_peaks=measure_peaks)  # fmt: skip
+    assert json.loads(got.read_text())["ops"]["K"]["cost"] == cost  # 10 us at int8's: kept

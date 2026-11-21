@@ -906,3 +906,24 @@ def test_the_run_templates_speak_of_the_host_on_a_host():
     assert "XE_FORGE_QUANTIZATION" in patch
     gpu = render("frontend-capture.md.j2", **{**ctx, "device": "xpu", "on_host": False})
     assert "HostTimeline" not in gpu and "unitrace" in gpu
+
+
+@pytest.mark.parametrize(
+    ("device", "named", "want"),
+    [("cpu", "xpu", "cpu"), ("cpu", "", "cpu"), ("xpu", "xpu:1", "xpu:1"), ("xpu", "", "xpu")],
+)
+def test_a_named_device_of_another_type_does_not_replace_device(monkeypatch, device, named, want):
+    from xe_forge.config import ConfigManager
+
+    monkeypatch.setenv("DEVICE_TYPE", device)
+    monkeypatch.setenv("XPU_DEVICE", named)
+    assert ConfigManager().config.device_config.device == want
+
+
+def test_a_named_device_the_request_already_names_is_kept(monkeypatch, caplog):
+    from xe_forge.config import ConfigManager
+
+    monkeypatch.setenv("DEVICE_TYPE", "xpu:1")
+    monkeypatch.setenv("XPU_DEVICE", "xpu:0")
+    assert ConfigManager().config.device_config.device == "xpu:1"
+    assert "XPU_DEVICE=xpu:0 ignored" in caplog.text

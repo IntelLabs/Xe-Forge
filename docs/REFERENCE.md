@@ -103,7 +103,7 @@ passed to every per-kernel `xe-forge` run (for example `-- --no-unitrace`).
 | `--top` | 3 | Kernels to optimize |
 | `--at-roofline` | 0.8 | Efficiency of its bound at which a kernel is left alone |
 | `--min-gain` | 0.005 | Smallest share of device time worth optimizing |
-| `--calibration` | none (counter bounds only) | `xe-forge calibrate` output. Before naming, a matmul peak the capture's GEMMs and costs need and the file lacks is measured into it; a dtype that cannot be measured has no compute bound, is bounded by bandwidth alone, and is never stopped at roofline |
+| `--calibration` | none (counter bounds only) | `xe-forge calibrate` output. Before naming, a matmul peak the capture's GEMMs and costs need and the file lacks is measured into it, and so is the peak of a compute dtype the naming agent's costs declare, before those costs are checked; a dtype that cannot be measured has no compute bound, is bounded by bandwidth alone, and is never stopped at roofline |
 | `--name-coverage` | 0.99 | Share of device time whose ops the naming agent must place |
 | `--analyze-only` | off | Stop after the manifest (`kernels.yaml`) |
 | `--agent-max-turns` | `--max-turns` | Turn limit of every frontend agent |
@@ -358,7 +358,7 @@ Bedrock credentials (`AWS_BEARER_TOKEN_BEDROCK`, or `AWS_ACCESS_KEY_ID` +
 |---|---|---|---|
 | `DEVICE_TYPE` | `xpu` | `--device` | `xe-forge` |
 | `DSL` | `triton` | `--dsl` | `xe-forge` |
-| `XPU_DEVICE` | `DEVICE_TYPE` | Device name when the device is not `cuda`; set, it replaces `--device xpu`/`cpu` | `xe-forge` |
+| `XPU_DEVICE` | `DEVICE_TYPE` | Device name when the device is not `cuda`; used only when it is of the type `--device` asks for, so it never turns `--device cpu` into `xpu` (a warning says it was ignored) | `xe-forge` |
 | `DEFAULT_NUM_WARPS` | 32 (`cuda`: 4) | Default warps given to the optimizer | `xe-forge` |
 | `DEFAULT_NUM_STAGES` | 2 (`cuda`: 3) | Default pipeline stages | `xe-forge` |
 | `PREFERRED_TILE_M` | 256 (`cuda`: 128) | Preferred tile M | `xe-forge` |

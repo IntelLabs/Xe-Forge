@@ -2,6 +2,7 @@
 Configuration Manager for Xe-Forge kernel optimization pipeline
 """
 
+import logging
 import math
 import os
 from dataclasses import dataclass, field, fields
@@ -395,8 +396,19 @@ class ConfigManager:
                 preferred_tile_n=self._get_env("PREFERRED_TILE_N", 128, int),
                 preferred_tile_k=self._get_env("PREFERRED_TILE_K", 32, int),
             )
+        # XPU_DEVICE names one device of the requested type; it never replaces a device of
+        # another type, nor one the request already names.
+        named = self._get_env("XPU_DEVICE", "").strip()
+        device = device_type
+        if named and named != device_type:
+            if ":" not in device_type and named.split(":")[0] == device_type:
+                device = named
+            else:
+                logging.getLogger(__name__).warning(
+                    "XPU_DEVICE=%s ignored: the device asked for is %s", named, device_type
+                )
         return XPUConfig(
-            device=self._get_env("XPU_DEVICE", device_type),
+            device=device,
             dsl=dsl,
             grf_mode=self._get_env("GRF_MODE", "256"),
             default_num_warps=self._get_env("DEFAULT_NUM_WARPS", 32, int),

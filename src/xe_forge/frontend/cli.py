@@ -551,8 +551,13 @@ def name_and_read(a, cap, run_dir: Path, python: str, turns: int, repos: Path) -
                 if _tool(python, "capture", "parse", str(run_dir / "raw"), "-o", str(capture_path)):
                     return 1, python
                 cap = ir.load(capture_path)
+
+            def measure_peaks(dtypes, cap=cap):
+                a.calibration = calibrate_missing(a.calibration, cap, run_dir, dtypes)
+                return a.calibration
+
             name(capture_path, run_dir, python, turns, repos, a.name_coverage, a.calibration,
-                 cap=cap)  # fmt: skip
+                 cap=cap, measure_peaks=measure_peaks if a.calibration else None)  # fmt: skip
             if not names.is_file():
                 print("run: no names.json; the ops stay unnamed", file=sys.stderr)
                 return 0, python
@@ -635,8 +640,11 @@ def name(
     coverage: float,
     calibration: Path | None = None,
     cap=None,
+    measure_peaks=None,
 ) -> Path | None:
-    """Run the naming agent over the costliest ops; the written names.json, or None."""
+    """Run the naming agent over the costliest ops; the written names.json, or None.
+    ``measure_peaks(dtypes)``: measures the compute dtypes the answer's costs declare into the
+    calibration and returns its path, so the costs are checked at their own peak."""
     from xe_forge.frontend import ir, naming
     from xe_forge.frontend.canonical import _named_dims as named_dims
     from xe_forge.frontend.canonical import arg_label
@@ -729,6 +737,8 @@ def name(
     # A stated cost is a lower bound, so one above a measured call is wrong.
     from xe_forge.frontend.analyze import NOISE
 
+    if measure_peaks and (declared := naming.cost_dtypes(answer)):
+        calib = json.loads(measure_peaks(declared).read_text())
     every = {k: {"shapes": _shapes(by_key[k], top=None)} for k in listing}
     wrong = naming.refuted(answer, every, calib, NOISE)
     for k, sub, why in wrong:
@@ -756,9 +766,10 @@ def _stamp(cap) -> dict:
 CALIBRATE_TIMEOUT = int(os.environ.get("XE_FORGE_CALIBRATE_TIMEOUT", 1800))
 
 
-def calibrate_missing(path: Path, cap, run_dir: Path) -> Path:
+def calibrate_missing(path: Path, cap, run_dir: Path, also=()) -> Path:
     """Measure into the calibration at ``path`` the matmul peaks the capture's bounds read
-    and it lacks, so naming, analyze and the tools they start bound each dtype at its own.
+    (and ``also``'s) and it lacks, so naming, analyze and the tools they start bound each
+    dtype at its own.
     The calibration file the run reads from here: ``path``, or a copy in ``run_dir`` when
     ``path`` cannot be written."""
     import tempfile
@@ -787,7 +798,8 @@ def calibrate_missing(path: Path, cap, run_dir: Path) -> Path:
     calib = json.loads(path.read_text())
     if note := calibrate.other_device(calib, cap.run):
         print(f"run: NOTE {note}", file=sys.stderr)
-    merged = calibrate.complete(calib, peak_dtypes(cap), measure)
+    wanted = peak_dtypes(cap) | {d for d in also if calibrate.measurable(d)}
+    merged = calibrate.complete(calib, wanted, measure)
     if merged is calib:
         return path
     print(f"run: matmul TFLOP/s now {merged['matmul_tflops']}", flush=True)

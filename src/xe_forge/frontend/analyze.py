@@ -14,7 +14,7 @@ from xe_forge.frontend import formula
 from xe_forge.frontend.calibrate import peak_of
 from xe_forge.frontend.calibrate import peaks as calib_peaks
 from xe_forge.frontend.canonical import resolve_dims
-from xe_forge.frontend.dtypes import storage_bytes
+from xe_forge.frontend.dtypes import cost_compute, storage_bytes
 from xe_forge.frontend.ir import CaptureRun, Naming, Workload
 from xe_forge.models import DSL
 
@@ -168,7 +168,8 @@ def cost_bound(
     bw, peaks = calib_peaks(calib)
     if not bw or "bytes" not in cost:
         return None
-    dtype = next((d for d in w.dtypes if d.startswith(("bfloat", "float"))), None)
+    float_dtype = next((d for d in w.dtypes if d.startswith(("bfloat", "float"))), None)
+    dtype = cost_compute(cost, float_dtype)
     # No dtype to look up is no peak either, and noted like one the calibration lacks.
     peak = peak_of(peaks, dtype or UNKNOWN_DTYPE, ctx) if cost.get("flops") else None
 
@@ -286,14 +287,17 @@ def _sol_parts(w: Workload, calib: dict | None, ctx: dict | None) -> tuple | Non
 
 def peak_dtypes(capture: CaptureRun) -> set[str]:
     """The dtypes whose matmul peak a bound of this capture may read: every dtype of its ops'
-    arguments and its workloads (a GEMM's compute dtype included) that has a matmul to
-    measure."""
+    arguments and its workloads (a GEMM's and a stated cost's compute dtype included) that has
+    a matmul to measure."""
     from xe_forge.frontend.calibrate import measurable
 
     out = {a.dtype for op in capture.ops for a in op.args if a}
     for w in capture.workloads:
         out |= set(w.dtypes)
         out |= {p.get("compute") for p in w.attrs.get("parts") or [w.attrs]}
+        cost = w.attrs.get("cost") or {}
+        if cost.get("flops"):
+            out.add(cost_compute(cost, None))
     return {d for d in out if d and measurable(d)}
 
 
