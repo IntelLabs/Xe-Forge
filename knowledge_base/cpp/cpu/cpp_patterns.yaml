@@ -1,0 +1,90 @@
+patterns:
+  - id: compile_for_the_host_isa
+    name: Build for the instruction set the host has
+    stage: device_specific
+    applies_to: [cpu, cpp, isa, vectorization]
+    description: |
+      Without a target flag a compiler emits code for a baseline instruction set and
+      leaves wide vectors, fused multiply-add and the matrix extensions unused. The host's
+      instruction-set extensions are listed in the calibration's device record (`flags`)
+      and in /proc/cpuinfo. Build for the host (`-march=native`) or for a named target, and
+      record the choice in the trial.
+    rationale: |
+      The same loop can differ several times in throughput between vector widths. A
+      kernel built for one target does not run on a CPU without it: name the target the
+      kernel requires in the strategy.
+    pattern_before: "load_inline with no target flags, relying on the compiler's default."
+    pattern_after: "Add the target and optimization level to the trial's flags; check the hot loop in the profile uses the wide units."
+
+  - id: vectorize_the_inner_loop
+    name: Make the inner loop vectorizable, then check that it was
+    stage: memory_access
+    applies_to: [cpu, cpp, vectorization]
+    description: |
+      An inner loop vectorizes when it walks memory with unit stride, has no
+      loop-carried dependence the compiler cannot prove absent, and has no calls it cannot
+      inline. `#pragma omp simd`, `__restrict__` pointers and a reduction clause state
+      what the compiler cannot prove; intrinsics state the vector code outright. Tails
+      that are not a multiple of the vector width take a masked or scalar remainder.
+    rationale: |
+      Compiler vectorization reports (`-fopt-info-vec-missed` for GCC,
+      `-Rpass-missed=loop-vectorize` for Clang) say whether and why a loop was not
+      vectorized; the uarch profile's Retiring share and vector-instruction metrics
+      say whether it ran vectorized.
+    pattern_before: "Index arithmetic with a stride in the inner loop, or a possible alias between input and output."
+    pattern_after: "Make the vectorized dimension contiguous (transpose or pack once), mark pointers restrict, and guard the tail."
+
+  - id: block_for_the_caches
+    name: Block loops so each thread's working set fits its cache share
+    stage: memory_access
+    applies_to: [cpu, cpp, gemm, blocking]
+    description: |
+      A GEMM-like loop nest reuses each loaded value many times only if the blocks it works
+      on stay in cache. Block the loops so a register tile of the output stays in
+      registers, a panel of one operand in the per-core cache, and a block of the other in
+      the shared last-level cache share of the threads that use it. Packing an operand
+      into the order the inner kernel reads it makes those reads contiguous.
+    rationale: |
+      The cache sizes and how CPUs share them are in /sys/devices/system/cpu/cpu*/cache
+      and the placement's `llc_bytes`; block sizes are then measured, at least two as
+      sibling trials.
+    pattern_before: "Three nested loops over M, N, K with no blocking."
+    pattern_after: "A register-tiled micro-kernel inside K, N and M cache blocks, with packed operands."
+
+  - id: matrix_extensions_through_a_library_or_intrinsics
+    name: Use the host's matrix units for low-precision matmul
+    stage: device_specific
+    applies_to: [cpu, cpp, gemm, bf16, int8, amx]
+    description: |
+      Some Xeon CPUs have tile matrix units (AMX: `amx_tile`, `amx_bf16`, `amx_int8` in
+      the flags) that multiply bf16 or int8 tiles far faster than vector FMA. They are
+      reached through a library (oneDNN, or ATen's own matmul, which may already use
+      them) or through intrinsics (`_tile_loadd`, `_tile_dpbf16ps`, `_tile_stored`) after
+      the process requests permission for the tile state from the kernel
+      (arch_prctl ARCH_REQ_XCOMP_PERM). Operands are laid out in the tile's packed format.
+    rationale: |
+      Whether the units are present, and whether the reference already uses them, decides
+      whether a hand kernel can beat the reference: check the flags and the reference's
+      hotspots before writing one. fp32 inputs need a split into bf16 parts to keep fp32
+      accuracy; a tolerance the reference sets decides whether that is required.
+    prerequisites:
+      - The flags list the extension for the dtype in question.
+      - The hotspots profile of the reference shows where its matmul time goes.
+    pattern_before: "A vector-FMA kernel for a bf16 GEMM on a CPU with tile units."
+    pattern_after: "A tile-unit micro-kernel with packed operands, or a library call, measured against the reference."
+
+  - id: threads_inside_the_extension
+    name: The extension owns its parallelism
+    stage: device_specific
+    applies_to: [cpu, cpp, openmp, threads]
+    description: |
+      torch runs its own ops on its intra-op thread pool; a C++ extension's loops run on
+      one thread unless the extension parallelizes them (OpenMP with -fopenmp in both
+      compile and link flags, or at::parallel_for, which uses torch's pool). Mixing two
+      threading runtimes in one process oversubscribes the CPUs.
+    rationale: |
+      at::parallel_for shares torch's pool and its thread count; an OpenMP region in the
+      extension uses whichever OpenMP runtime the extension links, which may be another
+      copy than torch's.
+    pattern_before: "A serial loop over a large tensor, or an OpenMP region next to torch ops on another runtime."
+    pattern_after: "at::parallel_for, or OpenMP from the same runtime torch loaded; check the hotspots profile shows one runtime."

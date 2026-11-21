@@ -10,6 +10,8 @@ unitrace_enabled: {% if unitrace_enabled %}true{% else %}false{% endif %}
 unitrace_bin: "{{ unitrace_bin }}"
 vtune_enabled: {% if vtune_enabled %}true{% else %}false{% endif %}
 vtune_bin: "{{ vtune_bin }}"
+perf_enabled: {% if perf_enabled %}true{% else %}false{% endif %}
+perf_bin: "{{ perf_bin }}"
 {%- if compiler_flags %}
 compiler_flags: {{ compiler_flags | tojson }}
 {%- endif %}

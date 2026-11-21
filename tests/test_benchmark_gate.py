@@ -55,6 +55,22 @@ def test_comparison_always_validates_before_timing(legacy_setting):
     executor.execute.assert_not_called()
 
 
+def _host_timer(us=10.0, each=None):
+    """A stand-in for the host sampler: restores and runs each call as it would, so the
+    order of loads, resets and forwards is real, and reports ``us`` per sample."""
+
+    def samples(*given):  # set on the class, a Mock is called without self
+        call, args, iters = given[-3:]
+        for _ in range(iters):
+            call.reset()
+            if each:
+                each()
+            call.forward(*args)
+        return [us] * iters
+
+    return Mock(side_effect=samples)
+
+
 @pytest.mark.parametrize("wrong", [False, True])
 @pytest.mark.parametrize("cached", [None, 20.0])
 def test_extracted_reference_workload_isolates_inputs_and_gates_timing(wrong, cached):
@@ -110,7 +126,7 @@ def test_extracted_reference_workload_isolates_inputs_and_gates_timing(wrong, ca
 
     executor = KernelBenchExecutor(device="cpu")
     executor._compile_module = compile_module
-    executor.time = Mock(return_value=10.0)
+    executor._host_samples = timer = _host_timer()
     result = executor.compare_reference_workload(
         "reference",
         "baseline",
@@ -119,10 +135,11 @@ def test_extracted_reference_workload_isolates_inputs_and_gates_timing(wrong, ca
     )
     assert result.optimized_correct is not wrong, result.feedback_message
     if wrong:
-        executor.time.assert_not_called()
-    else:
-        assert executor.time.call_count == (1 if cached else 2)
-        assert result.speedup == (2.0 if cached else 1.0)
+        timer.assert_not_called()
+    else:  # both arms timed every time, a cached baseline or not
+        # Both slot orders, both arms, every round.
+        assert timer.call_count == 4 * executor.rounds and result.speedup == 1.0
+        assert result.verdict == "INDISTINGUISHABLE"
 
 
 @pytest.mark.parametrize("fail", [False, True])
@@ -137,7 +154,8 @@ def test_reference_models_are_offloaded_between_validation_and_timing(fail):
     def compile_module(self, code):
         class Model(torch.nn.Module):
             def to(self, device):
-                assert not active
+                # The reference is resident alone; the two timed arms may be together.
+                assert "reference" not in active and (code != "reference" or not active)
                 active.add(code)
                 events.append((code, "load"))
                 return self
@@ -150,7 +168,7 @@ def test_reference_models_are_offloaded_between_validation_and_timing(fail):
                 return self
 
             def forward(self, values):
-                assert active == {code}
+                assert code in active and (code != "reference" or active == {code})
                 events.append((code, "forward"))
                 if fail and code == "trial":
                     raise ValueError("candidate failed")
@@ -161,14 +179,12 @@ def test_reference_models_are_offloaded_between_validation_and_timing(fail):
     executor = KernelBenchExecutor(device="cpu")
     executor._compile_module = compile_module.__get__(executor)
 
-    def timer(model, inputs):
-        assert len(active) == 1
-        assert events.count(("trial", "forward")) == 2
-        events.append((next(iter(active)), "time"))
-        model(*inputs)
-        return 10.0
+    def each():
+        assert active and "reference" not in active  # offloaded before anything is timed
+        assert events.count(("trial", "forward")) >= 2  # validated before it is timed
+        events.append(("arms", "time"))
 
-    executor.time = Mock(side_effect=timer)
+    executor._host_samples = timer = _host_timer(each=each)
     result = executor.compare_reference_workload("reference", "baseline", "trial")
     assert not active
     assert result.optimized_correct is not fail, result.feedback_message
@@ -178,9 +194,10 @@ def test_reference_models_are_offloaded_between_validation_and_timing(fail):
     assert [name for name, event in events if event == "load"] == (
         ["reference", "baseline", "trial"]
         if fail
-        else ["reference", "baseline", "trial", "baseline", "trial"]
+        # validated, then timed in both slot orders
+        else ["reference", "baseline", "trial", "baseline", "trial", "trial", "baseline"]
     )
-    assert executor.time.call_count == (0 if fail else 2)
+    assert timer.call_count == (0 if fail else 4 * executor.rounds)
 
 
 @pytest.mark.parametrize("wrong_update", [False, True])
@@ -207,23 +224,19 @@ def test_stateful_reference_resets_before_validation_and_each_timed_call(wrong_u
     executor = KernelBenchExecutor(device="cpu")
     executor._compile_module = compile_module.__get__(executor)
 
-    def timer(call, inputs):
-        call(*inputs)
-        call(*inputs)
-        call(*inputs)
-        return 10.0
-
-    executor.time = Mock(side_effect=timer)
+    executor._host_samples = timer = _host_timer()
     result = executor.compare_reference_workload("reference", "baseline", "trial")
     assert result.optimized_correct is not wrong_update, result.feedback_message
-    assert all(value == 5.0 for code, value in starts)
+    assert all(value == 5.0 for code, value in starts)  # every call from the restored buffer
     if wrong_update:
-        executor.time.assert_not_called()
+        timer.assert_not_called()
         assert "Updated buffers differ" in result.feedback_message
     else:
-        assert executor.time.call_count == 2
-        assert "reset plus forward" in result.feedback_message
-        assert len(starts) == 12
+        assert timer.call_count == 4 * executor.rounds
+        assert "buffer restore and cache flush run untimed" in result.feedback_message
+        per_round = max(1, executor.benchmark_iters // executor.rounds)
+        # 6 validation calls, then warmup and timed calls for both arms in both slot orders.
+        assert len(starts) == 6 + 4 * executor.warmup_iters + 4 * executor.rounds * per_round
 
 
 @pytest.fixture(autouse=True)
@@ -269,9 +282,9 @@ def test_builtin_reference_without_spec(tmp_path, monkeypatch, capsys, cached, c
         path = tmp_path / f"{name}.py"
         path.write_text(name)
         paths[name] = str(path)
-    timer = Mock(return_value=10.0)
+    timer = _host_timer()
     monkeypatch.setattr(KernelBenchExecutor, "_compile_module", compile_module)
-    monkeypatch.setattr(KernelBenchExecutor, "time", timer)
+    monkeypatch.setattr(KernelBenchExecutor, "_host_samples", timer)
     code = benchmark._run_builtin(
         _args(
             **paths,
@@ -285,11 +298,9 @@ def test_builtin_reference_without_spec(tmp_path, monkeypatch, capsys, cached, c
     output = capsys.readouterr().out
     assert ("Performance:" in output) is correct
     assert ("Correctness: PASSED" in output) is correct
-    assert ("TIMER: device_buffer_reset_plus_forward" in output) is correct
-    if not correct:
-        timer.assert_not_called()
-    else:
-        assert timer.call_count == (1 if cached else 2)
+    assert ("TIMER: host_forward_after_untimed_reset" in output) is correct
+    rounds = KernelBenchExecutor(device="cpu").rounds
+    assert timer.call_count == (4 * rounds if correct else 0)
 
 
 def _reference_with_spec(tmp_path, monkeypatch, spec_text, scale=1.0):
@@ -331,9 +342,9 @@ def _reference_with_spec(tmp_path, monkeypatch, spec_text, scale=1.0):
         paths[name] = str(path)
     spec = tmp_path / "decode.yaml"
     spec.write_text(spec_text)
-    timer = Mock(return_value=10.0)
+    timer = _host_timer()
     monkeypatch.setattr(KernelBenchExecutor, "_compile_module", compile_module)
-    monkeypatch.setattr(KernelBenchExecutor, "time", timer)
+    monkeypatch.setattr(KernelBenchExecutor, "_host_samples", timer)
     return paths, str(spec), shapes, timer
 
 
@@ -710,17 +721,56 @@ def test_spec_with_inputs_keeps_its_own_path(tmp_path):
     assert "xe-forge-skill profile <kernel_file> --spec test_kernels/decode.yaml" in instructions
 
 
-def test_time_forward_off_gpu_times_the_whole_call(monkeypatch):
-    from unittest.mock import Mock
-
+def test_on_the_host_only_the_forward_is_timed(monkeypatch):
+    import xe_forge.core.topology as topology
     from xe_forge.core.executor import KernelBenchExecutor
 
-    timer = Mock(return_value=10.0)
-    monkeypatch.setattr(KernelBenchExecutor, "time", timer)
-    call, args = object(), (1,)
+    log = []
 
-    assert KernelBenchExecutor(device="cpu").time_forward(call, args) == 10.0
-    timer.assert_called_once_with(call, args)
+    class Call:
+        def __call__(self, *args):
+            log.append("warmup")
+
+        def reset(self):
+            log.append("reset")
+
+        def forward(self, *args):
+            log.append("forward")
+
+    monkeypatch.setattr(topology, "placement", lambda: {"llc_bytes": 1024})
+    executor = KernelBenchExecutor(device="cpu")
+    assert executor.time_forward(Call(), (1,)) > 0
+    timed = log[executor.warmup_iters :]
+    assert log[: executor.warmup_iters] == ["warmup"] * executor.warmup_iters
+    assert timed == ["reset", "forward"] * executor.benchmark_iters
+    assert executor._host_flush.numel() == 2048  # twice the caches of the CPUs it may use
+
+
+def test_every_timed_call_reads_the_same_inputs(monkeypatch):
+    from xe_forge.core.executor import KernelBenchExecutor
+
+    code = (
+        "import torch\n"
+        "class Model(torch.nn.Module):\n"
+        "    def forward(self, x):\n"
+        "        return x * 2\n"
+        "def get_inputs():\n"
+        "    return [torch.ones(4)]\n"
+        "def get_init_inputs():\n"
+        "    return []\n"
+    )
+    seen = []
+
+    def interleaved(self, call_a, args_a, call_b, args_b):
+        seen.extend(a[0].data_ptr() for a in (args_a, args_b))
+        return 1.0, 1.0, [1.0] * self.rounds
+
+    monkeypatch.setattr(KernelBenchExecutor, "time_interleaved", interleaved)
+    executor = KernelBenchExecutor(device="cpu")
+    result = executor.compare_reference_workload(code, code, code)
+    assert result.original_correct and result.optimized_correct
+    # Separate copies of one tensor can time differently; one copy is shared by all arms.
+    assert len(seen) == 4 and len(set(seen)) == 1
 
 
 @pytest.mark.parametrize(

@@ -1,0 +1,150 @@
+patterns:
+  - id: placement_is_the_launchers
+    name: Read the placement before reasoning about threads or memory
+    stage: analysis
+    applies_to: [cpu, numa, threads, profiling]
+    description: |
+      A host run uses the CPUs and memory nodes its launcher gave it (numactl, taskset,
+      the scheduler's cpuset). `benchmark` (`PLACEMENT:`), `profile` (`Placement:`) and
+      the calibration (`device.placement`) report it: the CPU list, the sockets and NUMA nodes those CPUs are on, the
+      memory nodes its cpuset allows (`memory_nodes`) and the memory policy the launcher
+      set (`memory_policy`: `default` is first touch, `bind:N` allocates only on node N,
+      `interleave:...` spreads pages over nodes), the hardware threads beyond the first of each
+      core (`smt_siblings`), the last-level cache of those CPUs, and every threading
+      variable (OMP_*, KMP_*, MKL_*, ...) it inherited.
+    rationale: |
+      Peak bandwidth, the cache a working set must fit in and the cost of a parallel
+      region all depend on which CPUs and memory nodes the run has. A conclusion drawn
+      under one placement is not evidence for another; a calibration from another
+      placement is flagged and not merged.
+    pattern_before: "Assume the whole machine, or a default thread count, and size the work to it."
+    pattern_after: |
+      Size blocking from the placement's cache, the team from its CPU count, and judge a
+      bandwidth-bound kernel against the calibration measured under the same placement.
+    prerequisites:
+      - The calibration's placement equals the benchmark's; otherwise re-run calibrate under it.
+
+  - id: first_touch_places_pages
+    name: Pages live on the node of the thread that first wrote them
+    stage: memory_access
+    applies_to: [cpu, numa, dual_socket, bandwidth]
+    description: |
+      Under the default policy a page is placed on the memory node of the CPU that first
+      writes it. A buffer filled by one thread sits on one node; every thread on another
+      socket then reads it across the socket link. The calibration measures read bandwidth
+      both ways (`bandwidth_gbs`, buffer written by all threads; `bandwidth_gbs_one_writer`,
+      written by one): the gap between them is what remote placement costs under this
+      placement, and is near zero when the placement spans one node.
+    rationale: |
+      When a placement spans sockets, which thread first touches which pages decides how
+      much of the traffic is local. Outputs a kernel allocates and fills itself are
+      placed by the kernel's own work split.
+    pattern_before: "Allocate and zero a large buffer on one thread, then process it with a full team."
+    pattern_after: |
+      Initialize (or copy into) a buffer with the same static work split that later reads
+      it, so each thread's slice is on its own node. Inputs the harness owns are placed by
+      it: measure, and say in the strategy what was assumed.
+    prerequisites:
+      - The placement spans more than one NUMA node; on one node this changes nothing.
+      - Check the profile's remote-access metrics (memory-access analysis) before and after.
+
+  - id: thread_team_matches_placement
+    name: One team over the placement, with a deliberate SMT choice
+    stage: device_specific
+    applies_to: [cpu, threads, openmp, smt]
+    description: |
+      A threading runtime sizes its team from its own variables, else from the CPUs it
+      sees, often counting every hardware thread. Two hardware threads of one core share
+      its execution units and caches: a compute-bound kernel often gains nothing from the
+      second, a latency-bound one may. Binding threads to CPUs (OMP_PROC_BIND, OMP_PLACES,
+      KMP_AFFINITY) keeps a thread's cache and its first-touched pages local.
+    rationale: |
+      An unbound team migrates between CPUs and sockets; an oversubscribed one time-slices.
+      Both show as run-to-run variation and as remote accesses.
+    pattern_before: "Leave the team size and binding to whatever the environment happens to set."
+    pattern_after: |
+      Choose the team size and binding inside the trial (for example omp_set_num_threads,
+      or a num_threads clause) and try at least two choices, one thread per core and one
+      per hardware thread, as sibling trials.
+    prerequisites:
+      - Read `thread_env` in the placement: a variable set by the launcher applies to both arms.
+
+  - id: parallel_region_overhead
+    name: A parallel region has a fixed cost; small work pays it every call
+    stage: algorithmic
+    applies_to: [cpu, threads, openmp, small_shapes]
+    description: |
+      Entering and leaving a parallel region wakes and joins the team. When the work
+      per call is small (one token, a short vector), that cost can be most of the time.
+      Fusing consecutive ops into one region, or running small work on fewer threads,
+      removes it.
+    rationale: |
+      The hotspots analysis shows it as time in the runtime's barrier or wait functions
+      rather than in the kernel's own loop.
+    pattern_before: "One parallel region per small op, each followed by an implicit barrier."
+    pattern_after: |
+      One region over consecutive ops with barriers only where data flows between threads,
+      or a team size chosen from the work size, measured.
+
+  - id: single_vs_dual_socket
+    name: A placement across sockets is a different machine, not a bigger one
+    stage: device_specific
+    applies_to: [cpu, numa, dual_socket, bandwidth]
+    description: |
+      Across sockets, the memory bandwidth and the last-level cache add up only when each
+      thread works on data local to its socket; shared data is read over the socket link,
+      and a reduction across sockets pays its latency. A kernel tuned on one socket can
+      scale poorly to two, and one built for two (data split per socket, a per-socket
+      copy of small read-only data) can be slower on one.
+    rationale: |
+      The memory-access analysis reports DRAM bandwidth per package, socket-link (UPI)
+      utilization and the share of remote accesses: those, not the elapsed time alone,
+      say whether the placement or the kernel is the limit.
+    pattern_before: "Tune on one socket, then run the same kernel across both and expect twice the throughput."
+    pattern_after: |
+      Benchmark under each placement the workload will run in, against that placement's
+      calibration. Split work and data per NUMA node when the placement spans several,
+      and replicate small read-only data per node when the profile shows it read remotely.
+
+  - id: vtune_cpu_evidence_contract
+    name: Read VTune's CPU metrics as what they measure (when VTune is the profiler)
+    stage: analysis
+    applies_to: [cpu, vtune, profiling]
+    description: |
+      perf is the host's default profiler (perf_evidence.yaml); `profile --tool vtune`, or
+      a workspace with perf disabled, runs one VTune analysis instead and reports its summary and the hotspots
+      by function as VTune named them, with no threshold applied. `hotspots` attributes
+      CPU time to functions and modules; `uarch-exploration` gives the top-down breakdown
+      (Retiring, Front-End Bound, Bad Speculation, Back-End Bound and their children) as
+      a share of pipeline slots; `memory-access` gives memory-bound shares, DRAM bandwidth
+      (observed against VTune's platform maximum, per package), socket-link utilization
+      and remote-access counts.
+    rationale: |
+      A top-down share is of pipeline slots, not of time; a high Back-End Bound share
+      says where slots stall, not which code to change. The collection is one window over
+      the timed calls by default (a VTune start or stop command costs far more than a short
+      forward), buffer resets included, and the report gives the forwards' share of it
+      (`Collection window:`). Whatever else ran in that window is in the totals too: a
+      thread pool spinning idle between calls, and other processes for a system-wide
+      analysis such as memory-access. No cache flush runs between profiled calls, while
+      `benchmark` flushes before each: a working set smaller than the placement's
+      `llc_bytes` is read from cache in the profile and from memory in the benchmark, so
+      the profile's DRAM figures do not describe the benchmarked condition. VTune's
+      "Platform Maximum" bandwidth is its own figure; the calibration's `bandwidth_gbs`
+      is the one measured under this placement. Without the sampling driver, attribution
+      of memory metrics to memory objects is unavailable; the totals remain.
+    field_semantics:
+      CPU Time: "Time on CPU summed over threads, not elapsed time."
+      Effective CPU Utilization: "Share of the placement's CPUs busy over the collection; idle threads lower it."
+      Memory Bound: "Share of pipeline slots stalled on loads or stores at any level."
+      DRAM Bandwidth Bound: "Share of time near the DRAM bandwidth VTune measured for the platform."
+      "NUMA: % of Remote Accesses": "Share of sampled loads served by another node's memory."
+    prerequisites:
+      - Match the hot function to the kernel's code by name; time in the runtime's wait or barrier functions is synchronization, not the kernel.
+      - Compare profiles only under the same placement, analysis and workload.
+      - When the forwards are a small share of the window, the summary describes the rest;
+        profile again with more `--iters` before reading totals as the kernel's.
+    pattern_before: "Back-End Bound is high, so the kernel is memory bound; prefetch more."
+    pattern_after: |
+      Name the child metric that carries the share (Memory Bound vs Core Bound, and below
+      it L1/L2/L3/DRAM), state the change it suggests, and let `benchmark` decide.

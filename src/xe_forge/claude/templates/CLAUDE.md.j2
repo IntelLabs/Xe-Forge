@@ -12,13 +12,35 @@ At the start of every session, read `config.yaml` in the workspace root. It cont
   generated this workspace, `builtin` when they come from Xe-Forge's own executor
 - **`unitrace_enabled`** / **`unitrace_bin`** — unitrace device timing, ComputeBasic and EU stall profiling;
   prefer this over VTune when both are enabled
-- **`vtune_enabled`** / **`vtune_bin`** — VTune GPU profiling, if available this session
+- **`vtune_enabled`** / **`vtune_bin`** — VTune profiling, if available this session
+- **`perf_enabled`** / **`perf_bin`** — Linux perf profiling of a host run (the host's
+  default profiler; VTune is used there only when perf is disabled)
 - **`compiler_flags`** — extra flags to pass the target compiler when building this kernel,
   if the host set any
 
 All runtime behavior below is gated by these values; re-read `config.yaml` if anything looks off.
 
-{% if dsl == "sycl" %}
+{% if on_host %}
+## RESOURCE FEEDBACK
+
+This run is placed by its launcher on the CPUs and memory nodes `benchmark` and `profile`
+report (`PLACEMENT:`, `Placement:`); its calibration is that placement's. Read
+{% if dsl in ("cpp", "sycl") %}`knowledge_base/{{ dsl }}/cpu/` and {% endif %}`knowledge_base/common/cpu/` before choosing a
+threading, vectorization, blocking or memory-placement change, and to read the
+{{ host_tool }} counters and metrics the profile reports. Every one is reported as the tool
+named it, with no threshold applied: one missing from the profile, or listed as unknown,
+is unmeasured, not zero. Which events, metrics and analyses to ask `profile` for
+(`--analysis`, `--events`, `--metrics`, `--system-wide`, `--collector-arg`, `--window`) is
+your choice; `knowledge_base/common/cpu/` names useful ones and how to read them.
+
+After profiling, use this reasoning pattern:
+
+**Observation -> hypothesis -> proposed change -> expected metric change -> benchmark result**
+
+Cite the measured function, metrics and artifact path in the observation. State what
+would disprove the hypothesis. Record the benchmark result after testing the change,
+never as a prediction presented as a result.
+{% elif dsl == "sycl" %}
 ## RESOURCE FEEDBACK
 
 When profiling is enabled, read `knowledge_base/sycl/xpu/resource_feedback.yaml`
@@ -346,8 +368,8 @@ call is what is optimized. The library itself is never edited and no new kernel 
   needs others than the run's defaults.
 {%- endif %}
 {%- else %}
-{%- if dsl == "sycl" %} If it contains `TODO` markers, this is a from-scratch task: it is
-  a working harness (`load_inline`, a `Model` wrapper) with the SYCL kernel and
+{%- if dsl in ("sycl", "cpp") %} If it contains `TODO` markers, this is a from-scratch task: it is
+  a working harness (`load_inline`, a `Model` wrapper) with the {{ "SYCL" if dsl == "sycl" else "C++" }} kernel and
   `Model.forward` left for you to write. Copy `get_inputs`/`get_init_inputs` and any
   dimension constants in from the reference above rather than importing them — this
   file is compiled and run on its own, with no access to sibling files (Rule 5). Fill
@@ -558,6 +580,11 @@ worth more to the next one than a run that finished and said nothing.
   for every named kernel type passed to `parallel_for`, including unchanged helper kernels.
   Change that identity when the implementation changes. A distinct `load_inline` module
   name alone does not isolate device kernel names; collisions can corrupt either arm.
+{%- if on_host %}
+- **One queue on the CPU device, created once, and waited on before returning.** torch runs
+  CPU tensors on no SYCL queue, so the kernel owns one (a function-local static); the call is
+  timed until it returns, so work still queued when it returns is not measured.
+{%- else %}
 - **Use the caller's queue.** Do not create a `sycl::queue`. Obtain the one the framework
   already runs on; its entry point's API says how. A kernel
   that submits to its own queue runs correctly, out of order with everything around it, and
@@ -565,6 +592,7 @@ worth more to the next one than a run that finished and said nothing.
 - **Do not synchronize inside the kernel function.** No `queue.wait()`, no host-side barrier
   per call: the harness owns synchronization, and a wait inside the call is measured as part
   of the kernel.
+{%- endif %}
 - **Sub-group size is declared, not assumed.** Annotate with
   `[[sycl::reqd_sub_group_size(N)]]` and use a size this part actually supports; a
   sub-group reduction written for one width is silently wrong on another.
@@ -577,10 +605,12 @@ worth more to the next one than a run that finished and said nothing.
   large ones.
 - **Local memory is a resource, not free storage.** Every `local_accessor` byte reduces
   occupancy; a work-group size that fits at one tile size may not at the next.
+{%- if not on_host %}
 - **Register-file mode is a per-trial choice, recorded in the trial source** (e.g. the
   `sycl::ext::intel::experimental::grf_size` kernel property). When the profile shows a
   dominant stall reason or an occupancy change, at least one trial varies it or the
   optimization level against its parent, and `benchmark` decides.
+{%- endif %}
 - **Tile parameters are measured, not chosen.** A trial built on a work-group size,
   sub-group width, split count or elements-per-step tries at least two values as sibling
   trials from the same parent; a difference inside the measured noise band is no verdict.
@@ -613,6 +643,26 @@ worth more to the next one than a run that finished and said nothing.
   sub-group width or elements-per-work-item tries at least two values as siblings.
 - **Port back to the `.cl` the profile names.** The trial's kernel string maps onto that
   file; the generator's host code changes only if a launch parameter it chooses changes.
+- The kernel must be self-contained — all helpers inline in the one source string.
+{% elif dsl == "cpp" %}
+- **Give every implementation its own identity.** Baseline and trial extensions coexist in
+  one process: a distinct `load_inline` module name and a distinct C++ namespace for each
+  implementation, changed when the implementation changes.
+- **The call is done when it returns.** It is timed until then; no work left running on
+  threads of its own after it returns.
+- **Compile flags are part of the trial.** The optimization level, the instruction set it
+  targets and the threading runtime are recorded in the trial source, and a trial that
+  changes one says so in its `--strategy`.
+- **Threads and placement are measured, not chosen.** The CPUs this run may use are the
+  launcher's; a trial built on a thread count, a work split or a memory-placement choice
+  tries at least two as sibling trials from the same parent.
+- **Vectorized access has preconditions.** Guard tails rather than assuming the shape
+  divides evenly by the vector or block width.
+- **Accumulate in a wider type**: reductions over `half`/`bfloat16` accumulate in `float`.
+{%- if compiler_flags %}
+- Pass `compiler_flags` from `config.yaml` on every compile; they are additional to the
+  flags a trial chooses, not a replacement for them.
+{%- endif %}
 - The kernel must be self-contained — all helpers inline in the one source string.
 {% elif dsl == "cuda" %}
 - Use the caller's stream; do not create one, and do not synchronize inside the kernel call.

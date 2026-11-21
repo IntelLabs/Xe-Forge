@@ -1,10 +1,11 @@
-"""Measure the card's read bandwidth and matmul throughput per dtype for roofline bounds.
+"""Measure the device's read bandwidth and matmul throughput per dtype for roofline bounds.
 
 An unmeasurable value is ``None`` with its reason in ``unmeasured``; never 0.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -59,8 +60,33 @@ def measurable(name: str) -> bool:
     return name in SPECIAL or (isinstance(dt, torch.dtype) and dt.is_floating_point)
 
 
+def _placement(device: dict) -> str | None:
+    """A host placement's tag, or None for a device that has none."""
+    from xe_forge.core.topology import placement_tag
+
+    p = device.get("placement")
+    if not (isinstance(p, dict) and p.get("cpus")):
+        return None
+    # The thread count is part of what was measured, as much as the CPUs it ran on.
+    return f"{placement_tag(p)}_threads{device.get('threads', 'unknown')}"
+
+
 def _identity(device: dict) -> tuple:
-    return device.get("type"), device.get("name")
+    # On a host, the CPUs and memory nodes a run may use are part of what was measured.
+    return device.get("type"), device.get("name"), _placement(device)
+
+
+def _where(device: dict) -> str:
+    p = device["placement"]
+    return (f"CPUs {p['cpus']} (memory nodes {p.get('memory_nodes')}, policy "
+            f"{p.get('memory_policy') or 'unknown'}) with {device.get('threads', 'unknown')} "
+            "threads")  # fmt: skip
+
+
+def _short(device: dict) -> str:
+    """A device as one line: its type and name, and on a host its placement."""
+    tag = _placement(device)
+    return f"{device.get('type')} {device.get('name')}" + (f" ({tag})" if tag else "")
 
 
 def other_device(calib: dict | None, run: dict) -> str | None:
@@ -76,6 +102,11 @@ def other_device(calib: dict | None, run: dict) -> str | None:
         return (f"the calibration was measured on {mine.get('type')} {mine['name']}, the "
                 f"capture ran on {theirs.get('type')} {theirs['name']}: its bounds are that "
                 "device's")  # fmt: skip
+    if _placement(mine) and _placement(theirs) and _placement(mine) != _placement(theirs):
+        return (
+            f"the calibration was measured under {_where(mine)}, the capture ran under "
+            f"{_where(theirs)}: its bounds are that placement's"
+        )
     return None
 
 
@@ -103,8 +134,8 @@ def complete(calib: dict, dtypes, measure_fn=None) -> dict:
         and calib.get("device")
         and _identity(rec["device"]) != _identity(calib["device"])
     ):
-        print(f"calibrate: measured on {rec['device']}, not the calibration's "
-              f"{calib['device']}; not merged, the compute bound of {', '.join(missing)} "
+        print(f"calibrate: measured on {_short(rec['device'])}, not the calibration's "
+              f"{_short(calib['device'])}; not merged, the compute bound of {', '.join(missing)} "
               "stays unknown", file=sys.stderr)  # fmt: skip
         return calib
     out = {**calib, "matmul_tflops": dict(tried), "unmeasured": dict(calib.get("unmeasured") or {})}
@@ -125,6 +156,17 @@ def complete(calib: dict, dtypes, measure_fn=None) -> dict:
 def _time_us(fn, dev, iters: int) -> float:
     import torch
 
+    if dev == "cpu":  # host work: done when the call returns
+        import time
+
+        for _ in range(3):
+            fn()
+        times = []
+        for _ in range(iters):
+            t = time.perf_counter_ns()
+            fn()
+            times.append((time.perf_counter_ns() - t) / 1e3)
+        return min(times)
     mod = getattr(torch, dev)
     for _ in range(3):
         fn()
@@ -143,7 +185,11 @@ def _time_us(fn, dev, iters: int) -> float:
 def measure(
     read_bytes: int = 1 << 30, n: int = 8192, iters: int = 20, dtypes: tuple | None = None
 ) -> dict:
-    """``read_bytes`` must exceed the card's caches; ``n`` is the square matmul size."""
+    """``read_bytes`` must exceed the device's caches; ``n`` is the square matmul size.
+
+    On a host, everything is measured under the placement the process inherited, and read
+    bandwidth twice: from a buffer first written by one thread (its pages on that thread's
+    memory node) and by all threads (pages spread over the nodes they run on)."""
     import torch
 
     from xe_forge.frontend.profile import device, device_info, device_type
@@ -155,20 +201,59 @@ def measure(
         "matmul_tflops": {},
         "unmeasured": {},
     }
-    if dev == "cpu":
-        rec["unmeasured"]["all"] = "no GPU visible to torch"
-        return rec
     index = torch.device(device()).index
-    if index is not None:  # tensors below are allocated on the current device
+    if dev != "cpu" and index is not None:  # tensors below are allocated on the current device
         getattr(torch, dev).set_device(index)
-    try:
-        # Random data: a constant fill compresses and reads faster than real tensors.
-        x = torch.rand(read_bytes // 2, dtype=torch.float16, device=dev)
+
+    def read_gbs(x) -> float:
         us = _time_us(lambda: x.sum(), dev, iters)
-        rec["bandwidth_gbs"] = round(x.numel() * x.element_size() / us / 1e3, 1)
-        del x
-    except Exception as exc:
-        rec["unmeasured"]["bandwidth_gbs"] = repr(exc)
+        return _significant(x.numel() * x.element_size() / us / 1e3)
+
+    read_dtype = torch.float32  # one dtype on every device, so the bytes read mean the same
+    # How bandwidth was read, so a record made another way can be told apart.
+    rec["bandwidth_dtype"], rec["read_bytes"] = str(read_dtype).removeprefix("torch."), read_bytes
+    width = torch.tensor([], dtype=read_dtype).element_size()
+    llc = (rec["device"].get("placement") or {}).get("llc_bytes")
+    if llc and read_bytes <= llc:
+        rec["unmeasured"]["bandwidth_gbs"] = (
+            f"read_bytes {read_bytes} fits in the {llc} bytes of last-level cache of the CPUs "
+            "this run may use: it would time the cache"
+        )
+    else:
+
+        def buffer(writers: int | None = None):
+            # Random data: a constant fill compresses and reads faster than real tensors.
+            if dev != "cpu":
+                return torch.rand(read_bytes // width, dtype=read_dtype, device=dev)
+            # On a host, pages are placed by the first write: zero_ runs on the thread pool,
+            # so it places them as that many writers would; the random fill then reuses them.
+            threads = torch.get_num_threads()
+            try:
+                torch.set_num_threads(writers or threads)
+                x = torch.empty(read_bytes // width, dtype=read_dtype).zero_()
+            finally:
+                torch.set_num_threads(threads)
+            return x.uniform_()
+
+        try:
+            x = buffer()
+            rec["bandwidth_gbs"] = read_gbs(x)
+            del x
+        except Exception as exc:
+            rec["unmeasured"]["bandwidth_gbs"] = repr(exc)
+        if dev == "cpu":
+            if torch.get_num_threads() == 1:
+                rec["bandwidth_gbs_one_writer"] = None
+                rec["unmeasured"]["bandwidth_gbs_one_writer"] = (
+                    "one thread: the same buffer as bandwidth_gbs"
+                )
+            else:
+                try:
+                    x = buffer(writers=1)
+                    rec["bandwidth_gbs_one_writer"] = read_gbs(x)
+                    del x
+                except Exception as exc:
+                    rec["unmeasured"]["bandwidth_gbs_one_writer"] = repr(exc)
 
     def fp(dt):
         a, b = (torch.randn(n, n, device=dev, dtype=dt) for _ in range(2))
@@ -198,18 +283,27 @@ def measure(
             continue
         try:
             us = _time_us(make(), dev, max(1, iters // 2))
-            rec["matmul_tflops"][name] = round(2 * n**3 / us / 1e6, 1)
+            rec["matmul_tflops"][name] = _significant(2 * n**3 / us / 1e6)
         except Exception as exc:
             rec["matmul_tflops"][name] = None
             rec["unmeasured"][f"matmul_tflops.{name}"] = repr(exc)
     return rec
 
 
+def _significant(value: float) -> float:
+    """Three significant digits: a slow rate stays a small number, never rounds to 0."""
+    return float(f"{value:.3g}")
+
+
 def default_path(rec: dict) -> Path:
     name = re.sub(
         r"[^A-Za-z0-9]+", "_", str(rec["device"].get("name", rec["device"]["type"]))
     ).strip("_")
-    return CACHE / f"{name}.json"
+    tag = _placement(rec["device"])
+    if not tag:
+        return CACHE / f"{name}.json"
+    # The full placement is in the record; a hash keeps a long CPU list within a file name.
+    return CACHE / f"{name}_{hashlib.sha256(tag.encode()).hexdigest()[:12]}.json"
 
 
 def main(

@@ -13,6 +13,12 @@ from xe_forge.core.profiler import _run_tree as real_run_tree  # before the fixt
 
 
 @pytest.fixture(autouse=True)
+def _a_gpu_run(monkeypatch):
+    """These are GPU profiles; the host's are in test_cpu.py."""
+    monkeypatch.setenv("XE_FORGE_DEVICE", "xpu")
+
+
+@pytest.fixture(autouse=True)
 def _collection_via_run(monkeypatch):
     """Route the collector's process-group runner through subprocess.run, which tests fake."""
     import subprocess
@@ -1319,7 +1325,8 @@ def get_inputs():
     assert call.model.cache.item() == (1 if reference_mode == "valid" else 3)
     assert os.environ["PTI_ENABLE_COLLECTION"] == "0"
     if profiler_type is XPUProfiler:
-        assert transitions == [False, True, False, True, False]
+        # The collection starts paused: no pause before the first resume, which VTune refuses.
+        assert transitions == [True, False, True, False]
 
 
 @pytest.mark.parametrize("skill", ["benchmark", "profile"])

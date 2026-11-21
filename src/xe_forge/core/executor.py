@@ -58,6 +58,10 @@ def no_change_message(speedup: float, band: float, original_us: float, optimized
             "regression and not a win: try a change that moves the bottleneck.")  # fmt: skip
 
 
+# The host flush writes this many times the last-level cache of the CPUs a run may use.
+HOST_FLUSH_LLC_MULTIPLE = 2
+
+
 class KernelBenchExecutor:
     """
     Executes GPU kernels using KernelBench-style testing.
@@ -100,6 +104,7 @@ class KernelBenchExecutor:
         self.atol = atol
         self._temp_dir = None
         self._module_counter = 0
+        self.flush_note = ""
 
     def time(
         self,
@@ -132,10 +137,11 @@ class KernelBenchExecutor:
     def time_forward(self, call, args: tuple) -> float:
         """Device time of ``call.forward`` alone; buffer restore and cache flush run untimed.
 
-        Off GPU this is :meth:`time` on the whole call (restore plus forward).
+        On a device other than a GPU or the host this is :meth:`time` on the whole call
+        (restore plus forward).
         """
         device = torch.device(self.device)
-        if device.type not in ("xpu", "cuda"):
+        if device.type not in ("xpu", "cuda", "cpu"):
             return self.time(call, args)
         for _ in range(self.warmup_iters):
             call(*args)
@@ -149,9 +155,12 @@ class KernelBenchExecutor:
 
         Buffer restore and a cache flush run untimed before each; a dummy matmul then
         fills the queue so the host has enqueued the end event before a short kernel
-        finishes, and launch latency is not timed as kernel time.
+        finishes, and launch latency is not timed as kernel time. On the host a call is
+        done when it returns, so each is timed by the host clock around it.
         """
         device = torch.device(self.device)
+        if device.type == "cpu":
+            return self._host_samples(call, args, iters)
         if not hasattr(self, "_flush"):
             self._flush = torch.empty(256 * 1024 * 1024, dtype=torch.int8, device=device)
             self._fill = torch.randn(1024, 1024, device=device)
@@ -171,6 +180,41 @@ class KernelBenchExecutor:
             end.record()
         torch.accelerator.synchronize()
         return [start.elapsed_time(end) * 1e3 for start, end in events]
+
+    def _host_samples(self, call, args: tuple, iters: int) -> list[float]:
+        """*iters* host timings of ``call.forward`` in microseconds, each after an untimed
+        restore and a write over twice the last-level cache of the CPUs this run may use
+        (none when that cache's size is unknown, as the result then says)."""
+        import time
+
+        if not hasattr(self, "_host_flush"):
+            from xe_forge.core.topology import placement
+
+            llc = placement().get("llc_bytes")
+            if llc is None:
+                self.flush_note = (
+                    " The last-level cache size of these CPUs is unknown (no cache in sysfs): "
+                    "no cache flush ran before the timed calls, so inputs may be timed from cache."
+                )
+                self._host_flush = None
+            else:
+                self._host_flush = torch.empty(HOST_FLUSH_LLC_MULTIPLE * llc, dtype=torch.int8)
+                # A fact for the reader, not a correction: the flush is a parallel write on
+                # torch's pool, whose threads may still be awake when the timed call starts.
+                self.flush_note = (
+                    f" Before each timed call a {self._host_flush.numel()}-byte flush ran on "
+                    f"torch's thread pool ({torch.get_num_threads()} threads), right before "
+                    "the call."
+                )
+        out = []
+        for _ in range(iters):
+            call.reset()
+            if self._host_flush is not None:
+                self._host_flush.zero_()
+            t = time.perf_counter_ns()
+            call.forward(*args)
+            out.append((time.perf_counter_ns() - t) / 1e3)
+        return out
 
     def time_interleaved(self, call_a, args_a: tuple, call_b, args_b: tuple):
         """Time two calls in alternating rounds; returns ``(a_us, b_us, ratios)``.
@@ -629,7 +673,8 @@ class KernelBenchExecutor:
                 )
                 workload.validate()
                 verdict, note = None, ""
-                if torch.device(self.device).type in ("xpu", "cuda"):
+                interleaved = torch.device(self.device).type in ("xpu", "cuda", "cpu")
+                if interleaved:
                     # Both arms, every time, in alternating rounds, twice with the slots
                     # swapped (see _swapped_ratios), so drift and slot bias land on both.
                     original_time, optimized_time, ratios = self._swapped_ratios(
@@ -667,9 +712,15 @@ class KernelBenchExecutor:
                     verdict=verdict,
                     feedback_message=(
                         "Reference outputs and updated buffers verified for two calls "
-                        "from restored initial buffers. On GPU, timing is forward only with "
-                        "fixed inputs (buffer restore and cache flush run untimed); off GPU it "
-                        "is reset plus forward." + note
+                        "from restored initial buffers. "
+                        + (
+                            "Timing is forward only with fixed inputs (buffer restore and "
+                            "cache flush run untimed)."
+                            if interleaved
+                            else "Timing is buffer restore plus forward."
+                        )
+                        + note
+                        + self.flush_note
                     ),
                 )
         except Exception as exc:
@@ -689,6 +740,10 @@ class KernelBenchExecutor:
         r1 = a/b and r2 = b/a measured with the slots swapped, that bias multiplies both,
         and sqrt(r1 / r2) cancels it. *first* is the prepared (a, b) workload; the swapped
         one is built here. Returns ``(a_us, b_us, ratios)``.
+
+        Every timed call reads the same input tensors. Two copies of one tensor can differ
+        in speed by where their pages landed, and a copy per arm would put that difference
+        on one arm; validation has already shown no arm writes its inputs.
         """
         swapped = ReferenceWorkload.prepare(
             self._compile_module,
@@ -701,11 +756,12 @@ class KernelBenchExecutor:
             spec_workload,
         )
         workloads = [first, swapped]
-        runs = []
+        runs, inputs = [], None
         for w in workloads:
             try:
-                call_a = w.prepare_call(w.original)
-                call_b = w.prepare_call(w.optimized)
+                call_a = w.prepare_call(w.original, inputs)
+                inputs = call_a.inputs
+                call_b = w.prepare_call(w.optimized, inputs)
                 runs.append(
                     self.time_interleaved(
                         call_a, tuple(call_a.inputs), call_b, tuple(call_b.inputs)

@@ -126,18 +126,24 @@ def generate_workspace(
     if spec_path:
         profile_args.extend(["--spec", f"test_kernels/{kernel_name}.yaml"])
     profile_args.extend(variant_args)
-    if config.profiler.unitrace_enabled:
+    host = str(device).split(":")[0] == "cpu"
+    if host:  # routed by device, not by the first device torch sees
+        profile_args.extend(["--device", str(device)])
+    unitrace = config.profiler.unitrace_enabled and not host  # unitrace profiles a GPU
+    if unitrace:
         profile_args.extend(["--unitrace-bin", config.profiler.unitrace_bin])
         profile_args.extend(["--metric-group", config.profiler.unitrace_metric_group])
-    require_profiles = (
-        config.profiler.unitrace_enabled and config.profiler.unitrace_metric_group == "all"
-    )
+    require_profiles = unitrace and config.profiler.unitrace_metric_group == "all"
     if require_profiles:
         profile_args.extend(["--kernel-name", kernel_name])
     if config.profiler.vtune_enabled:
         profile_args.extend(["--vtune-bin", config.profiler.vtune_bin])
-    if config.profiler.unitrace_enabled != config.profiler.vtune_enabled:
-        profile_args.extend(["--tool", "unitrace" if config.profiler.unitrace_enabled else "vtune"])
+    if host and config.profiler.perf_enabled:
+        profile_args.extend(["--tool", "perf", "--perf-bin", config.profiler.perf_bin])
+    elif host and config.profiler.vtune_enabled:
+        profile_args.extend(["--tool", "vtune"])
+    elif not host and unitrace != config.profiler.vtune_enabled:
+        profile_args.extend(["--tool", "unitrace" if unitrace else "vtune"])
     profile_options = shlex.join(profile_args)
 
     compiler_flags = config.engine.compiler_flags
@@ -150,15 +156,17 @@ def generate_workspace(
     # With a kernel repo the baseline is a copy of the repo's kernel, never a from-scratch seed.
     if (
         not kernel_code
-        and dsl == "sycl"
+        and dsl in ("sycl", "cpp")
         and measurement == "builtin"
         and reference_code
         and not kernel_repo
     ):
         kernel_code = _render(
-            "sycl_torch_extension_seed.py.j2",
+            f"{dsl}_torch_extension_seed.py.j2",
             kernel_name=kernel_name,
             compiler_flag_list=compiler_flag_list,
+            device=device,
+            on_host=host,
         )
     (workspace / "CLAUDE.md").write_text(
         _render(
@@ -167,6 +175,8 @@ def generate_workspace(
             stack_check=bool(config.external.stack_python),
             dsl=dsl,
             device=device,
+            on_host=host,
+            host_tool="perf" if config.profiler.perf_enabled else "VTune",
             kernel_name=kernel_name,
             ext=ext,
             measurement=measurement,
@@ -195,6 +205,8 @@ def generate_workspace(
             measurement=measurement,
             vtune_enabled=config.profiler.vtune_enabled,
             vtune_bin=config.profiler.vtune_bin,
+            perf_enabled=config.profiler.perf_enabled,
+            perf_bin=config.profiler.perf_bin,
             unitrace_enabled=config.profiler.unitrace_enabled,
             unitrace_bin=config.profiler.unitrace_bin,
             compiler_flags=compiler_flags,

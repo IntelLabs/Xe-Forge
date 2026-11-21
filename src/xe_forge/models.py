@@ -14,6 +14,7 @@ class DSL(StrEnum):
     SYCL = "sycl"
     CUDA = "cuda"
     OPENCL = "opencl"
+    CPP = "cpp"
 
     @property
     def code_language(self) -> str:
@@ -27,7 +28,8 @@ class DSL(StrEnum):
 
         A compiled DSL stored under ``.py`` is not cosmetic: the extension is
         what a builder, an editor and a compiler driver dispatch on. An OpenCL kernel is a
-        Python file holding the OpenCL C source as a string (launched via ``xe_forge.opencl``).
+        Python file holding the OpenCL C source as a string (launched via ``xe_forge.opencl``);
+        a C++ kernel likewise holds its source for ``torch.utils.cpp_extension.load_inline``.
         """
         if self == DSL.SYCL:
             return ".cpp"

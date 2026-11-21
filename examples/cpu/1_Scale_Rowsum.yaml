@@ -1,0 +1,29 @@
+inputs:
+  X:
+    shape: [ROWS, COLS]
+    dtype: float32
+
+inits:
+  - dim: SCALE
+
+default_variant: bench-cpu
+
+ci:
+  - params: [X]
+    dtype: float32
+    dims:
+      ROWS: 64
+      COLS: 256
+      SCALE: 0.5
+    flop: "2*ROWS*COLS"
+    bytes: "4*ROWS*COLS + 4*ROWS"
+
+bench-cpu:
+  - params: [X]
+    dtype: float32
+    dims:
+      ROWS: 8192
+      COLS: 8192
+      SCALE: 0.5
+    flop: "2*ROWS*COLS"
+    bytes: "4*ROWS*COLS + 4*ROWS"

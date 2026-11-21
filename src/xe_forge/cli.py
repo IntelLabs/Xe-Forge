@@ -95,7 +95,7 @@ Examples:
     parser.add_argument(
         "--dsl",
         type=str,
-        choices=["triton", "gluon", "sycl", "cuda", "opencl"],
+        choices=["triton", "gluon", "sycl", "cuda", "opencl", "cpp"],
         default=None,
         help="Kernel DSL (default: triton)",
     )

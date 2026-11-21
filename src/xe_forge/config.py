@@ -217,8 +217,10 @@ class TrialConfig:
 
 @dataclass
 class ProfilerConfig:
-    """GPU profiler configuration (unitrace and/or VTune)"""
+    """Profiler configuration: unitrace and/or VTune on a GPU; perf, or VTune, on the host"""
 
+    perf_enabled: bool = True
+    perf_bin: str = "perf"
     vtune_enabled: bool = False
     vtune_bin: str = "vtune"
     unitrace_enabled: bool = False
@@ -357,6 +359,8 @@ class ConfigManager:
 
         # Profiler Configuration
         profiler_cfg = ProfilerConfig(
+            perf_enabled=self._get_env("PERF_ENABLED", True, bool),
+            perf_bin=self._get_env("PERF_BIN", "perf"),
             vtune_enabled=self._get_env("VTUNE_ENABLED", False, bool),
             vtune_bin=self._get_env("VTUNE_BIN", "vtune"),
             unitrace_enabled=self._get_env("UNITRACE_ENABLED", False, bool),

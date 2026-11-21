@@ -41,7 +41,24 @@ def device_info() -> dict:
     info = {"type": dev, "torch": torch.__version__}
     if dev in ("xpu", "cuda"):
         info["name"] = getattr(torch, dev).get_device_name(torch.device(device()).index or 0)
+    elif dev == "cpu":
+        from xe_forge.core.topology import cpu_flags, model_name, placement
+
+        info["name"] = model_name()
+        info["flags"] = cpu_flags()
+        info["placement"] = placement()  # the launcher's binding, as this process got it
+        info["threads"] = torch.get_num_threads()
     return info
+
+
+def host_placement() -> dict:
+    """The launcher's placement of this host process and torch's thread count: what a host
+    timing or profile was measured under."""
+    import torch
+
+    from xe_forge.core.topology import placement
+
+    return {**placement(), "threads": torch.get_num_threads()}
 
 
 def profile_region(fn, raw_dir: Path, with_stack: bool = True) -> Path:
