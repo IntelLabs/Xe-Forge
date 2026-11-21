@@ -152,3 +152,48 @@ patterns:
     pattern_after: |
       Name the child metric that carries the share (Memory Bound vs Core Bound, and below
       it L1/L2/L3/DRAM), state the change it suggests, and let `benchmark` decide.
+
+  - id: packed_weights_that_fit_in_cache
+    name: Weights small enough to stay in the last-level cache are not read from memory
+    stage: analysis
+    applies_to: [cpu, quantization, bandwidth, roofline, decode]
+    description: |
+      A quantized model's weights can be smaller than the placement's `llc_bytes`. A decode
+      step then re-reads them from cache, not from memory, and a bound computed from
+      `bandwidth_gbs` is lower than what the step achieves: `analyze` reports such a
+      workload as unbounded. Each matrix alone is far smaller than the whole model, so
+      whether it stays cached depends on what the other layers evict between two reads of it.
+    rationale: |
+      The DRAM bandwidth is the limit only for data that misses the cache. A per-matrix
+      sweep (one GEMV repeated) measures the cached case; the whole model's step measures
+      what the real reuse distance leaves. On a placement across sockets, each socket's
+      cache holds only what its own threads read.
+    pattern_before: "Compare a 2-bit GEMV's time against weight bytes / bandwidth_gbs and call it at roofline."
+    pattern_after: |
+      Compare the packed weight bytes of the whole model with `llc_bytes`; when they are
+      close, measure memory-controller reads during the decode window (perf_evidence.yaml)
+      and state the cost from what was read, or from compute alone when it is the limit.
+    prerequisites:
+      - The placement's `llc_bytes` is known; with it unknown, measure the reads instead.
+
+  - id: file_mapped_weights_and_first_touch
+    name: Memory-mapped weights live where the page cache put them
+    stage: memory_access
+    applies_to: [cpu, numa, dual_socket, bandwidth]
+    description: |
+      A framework that maps its weight file (mmap) reads pages the kernel's page cache
+      placed when the file was first read, often by one thread, on one node, possibly in an
+      earlier process. Under a placement across nodes those weights are then remote for
+      every thread on the other node, whatever the launcher's memory policy says for new
+      allocations.
+    rationale: |
+      The calibration measures both cases: `bandwidth_gbs` for a buffer first written by
+      all threads, `bandwidth_gbs_one_writer` for one written by a single thread. Which one
+      bounds a weight read depends on how the framework loaded the weights, which its own
+      options (mmap off, a copy into allocated memory, repacking at load) decide.
+    pattern_before: "Bound a dual-socket decode step by the all-threads bandwidth while its weights were mapped from a file."
+    pattern_after: |
+      Say in the strategy how the weights were loaded and which calibration bandwidth that
+      implies; check it with local versus remote DRAM events (perf_evidence.yaml).
+    prerequisites:
+      - The placement spans more than one NUMA node; on one node this changes nothing.

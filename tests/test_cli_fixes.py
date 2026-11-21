@@ -176,9 +176,13 @@ def _gpu() -> str | None:
     return "cuda" if torch.cuda.is_available() else None
 
 
-@pytest.mark.skipif(_gpu() is None, reason="the token reference scores on a GPU")
-def test_the_agents_own_reference_runner_scores_the_tokens(tmp_path):
-    """A model transformers cannot load: the agent's load() is the reference."""
+@pytest.mark.parametrize("dev", [
+    pytest.param(_gpu(), marks=pytest.mark.skipif(_gpu() is None, reason="no GPU here")),
+    "cpu",  # a run on the host scores on the host
+])  # fmt: skip
+def test_the_agents_own_reference_runner_scores_the_tokens(tmp_path, dev):
+    """A model transformers cannot load: the agent's load() is the reference, on the run's
+    device."""
     import json
     import subprocess
     import sys
@@ -216,10 +220,10 @@ def test_the_agents_own_reference_runner_scores_the_tokens(tmp_path):
     out = subprocess.run([sys.executable, "-c", patch._REFERENCE, "m", "1", "4", "3", "0",
                           str(tmp_path / "got.json"), "", "float32", "", "2",
                           str(tmp_path / "ref.py")],
-                         capture_output=True, text=True, env={**os.environ, "XE_FORGE_DEVICE": _gpu()})  # fmt: skip
+                         capture_output=True, text=True, env={**os.environ, "XE_FORGE_DEVICE": dev})  # fmt: skip
     assert out.returncode == 0, out.stderr[-500:]
     res = json.loads(out.stdout.strip().splitlines()[-1])
-    assert res["transformers"][0].endswith("ref.py")
+    assert res["transformers"][0].endswith("ref.py") and res["device"] == dev
     assert max(res["gaps"]["0"][0]) < 1e-3  # the reference's own tokens: no gap
 
 
@@ -365,3 +369,18 @@ def test_the_builtin_skill_prints_no_ratio_inside_the_noise_band(tmp_path, monke
     out = benchmark.parse_outcome(capsys.readouterr().out)
     assert out.get("verdict") != "SLOWER_ON"
     assert out["speedup"] == pytest.approx(1 / (0.5 + 0.5 / 2), abs=0.01)
+
+
+@pytest.mark.skipif(_gpu() is not None, reason="needs a machine without a GPU")
+def test_the_reference_refuses_the_host_when_a_gpu_run_asked_for_one(tmp_path):
+    import subprocess
+    import sys
+
+    from xe_forge.skills import patch
+
+    (tmp_path / "got.json").write_text("[[1]]")
+    env = {k: v for k, v in os.environ.items() if k != "XE_FORGE_DEVICE"}
+    out = subprocess.run([sys.executable, "-c", patch._REFERENCE, "m", "1", "4", "1", "0",
+                          str(tmp_path / "got.json"), "", "float32", "", "1"],
+                         capture_output=True, text=True, env=env)  # fmt: skip
+    assert out.returncode != 0 and "sees no GPU" in out.stderr

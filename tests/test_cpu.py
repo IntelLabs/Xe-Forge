@@ -640,3 +640,269 @@ def test_a_trial_tree_can_require_perf_counts(tmp_path):
         TrialManager(tmp_path / "other").init(
             "k", str(baseline), required_profile_groups=("perf everything",)
         )
+
+
+# ── `xe-forge run` on a host: the launcher's timeline, perf's symbols joined to it ──
+
+HOST_LAUNCHER = """#!{python}
+import json, os, time
+from xe_forge.frontend import profile
+raw = os.environ["RAW_DIR"]
+tl = profile.HostTimeline(raw, threads=4)
+for timed in {windows}:
+    with tl.window(timed=timed):
+        t = tl.now()
+        if timed:  # the hook is on: every node reported, at fixed offsets from the window's start
+            tl.node("MUL_MAT", t + 1000, t + 101000)
+            tl.node("RMS_NORM", t + 102000, t + 122000)
+        time.sleep(0.01)  # the window outlasts its nodes
+tl.write()
+json.dump({{"framework": "toyfw", "framework_version": "1", "model": {{"name": "toy"}},
+           "runtime": {{"batch": 1, "precision": "float32", "quantization": "float32"}},
+           "device": profile.device_info(threads=4), "repeats": 2}},
+          open(os.path.join(raw, "meta.json"), "w"))
+json.dump({{"mm": {{"framework_op": "MUL_MAT", "kernels": ["^MUL_MAT$"],
+                   "args": [{{"name": "x", "shape": [1, 64], "dtype": "float32"}}]}},
+           "norm": {{"framework_op": "RMS_NORM", "kernels": ["^RMS_NORM$"],
+                     "args": [{{"name": "x", "shape": [1, 64], "dtype": "float32"}}]}}}},
+          open(os.path.join(raw, "ops.json"), "w"))
+"""
+
+# Stub perf: `record ... -o DATA -- launcher` runs the launcher, then writes one sample in
+# each node of its timed windows and one between them; `script -i DATA` prints DATA.
+PERF_STUB = """#!{python}
+import json, os, subprocess, sys
+argv = sys.argv[1:]
+if argv[0] == "script":
+    sys.stdout.write(open(argv[argv.index("-i") + 1]).read())
+    sys.exit(0)
+data = argv[argv.index("-o") + 1]
+code = subprocess.call(argv[argv.index("--") + 1:])
+lines = []
+for w in json.load(open(os.path.join(os.environ["RAW_DIR"], "host_timeline.json")))["windows"]:
+    if not w["timed"] or {empty}:
+        continue
+    for name, s, e in w["nodes"]:
+        t = (s + e) // 2
+        sym = "toy_gemm (/opt/toy/libtoy.so)" if name == "MUL_MAT" else "toy_norm (/opt/toy/libtoy.so)"
+        lines.append(f"  4242 {{t // 10**9}}.{{t % 10**9:09d}}:     250000      7f00 {{sym}}")
+    t = w["nodes"][-1][2] + 10
+    lines.append(f"  4243 {{t // 10**9}}.{{t % 10**9:09d}}:     250000      7f01 gomp_spin ([unknown])")
+open(data, "w").write("\\n".join(lines) + "\\n")
+sys.exit(code)
+"""
+
+
+def _host_capture(tmp_path, windows=(True, True, False), empty=False):
+    import os
+    import stat
+    import subprocess
+    import sys
+
+    def exe(path, text):
+        path.write_text(text)
+        path.chmod(path.stat().st_mode | stat.S_IEXEC)
+        return path
+
+    launcher = exe(tmp_path / "run.sh", HOST_LAUNCHER.format(python=sys.executable,
+                                                            windows=list(windows)))  # fmt: skip
+    perf = exe(tmp_path / "perf", PERF_STUB.format(python=sys.executable, empty=empty))
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path), XE_FORGE_DEVICE="cpu")
+
+    def tool(*argv):
+        r = subprocess.run([sys.executable, "-m", "xe_forge.skills", *argv], capture_output=True,
+                           text=True, env=env)  # fmt: skip
+        return r.returncode, r.stdout + r.stderr
+
+    raw = tmp_path / "raw"
+    return tool, raw, tool("capture", "run", str(launcher), "-o", str(raw), "--perf-bin", str(perf))
+
+
+def test_a_host_capture_times_the_nodes_and_names_the_code_each_ran(tmp_path):
+    import json
+
+    tool, raw, (code, out) = _host_capture(tmp_path)
+    assert code == 0, out
+    assert "with the node hook off took" in out
+    launches = json.loads((raw / "host_launches.json").read_text())
+    assert launches["launches"] == [["MUL_MAT", 100.0], ["RMS_NORM", 20.0]]
+    assert launches["repeats"] == 2 and launches["match"] == 1.0  # the two timed windows agree
+    run = json.loads((raw / "run.json").read_text())
+    assert run["host"]["node_us"] == 120.0 and run["host"]["plain_us"] is not None
+    assert run["device"]["threads"] == 4 and "placement" in run["device"]
+    kernels = json.loads((raw / "host_kernels.json").read_text())
+    mm = kernels["nodes"]["MUL_MAT"]
+    assert mm["calls"] == 2 and mm["symbols"] == {"toy_gemm [libtoy.so]": 500.0}
+    assert kernels["unattributed"]["symbols"] == {"gomp_spin [unknown]": 500.0}  # between nodes
+
+    code, out = tool("capture", "parse", str(raw), "-o", str(tmp_path / "capture.json"))
+    assert code == 0, out
+    assert "the host timeline saw" in out
+    cap = json.loads((tmp_path / "capture.json").read_text())
+    by_op = {o["framework_op"]: o for o in cap["ops"]}
+    assert by_op["MUL_MAT"]["device_us"] == 100.0 and by_op["RMS_NORM"]["device_us"] == 20.0
+    assert by_op["MUL_MAT"]["framework_meta"]["host"]["MUL_MAT"]["symbols"]
+    assert cap["run"]["host_kernels"]["samples"] == 6
+
+
+def test_a_host_capture_without_a_plain_window_says_why_the_hook_cost_is_unknown(tmp_path):
+    import json
+
+    _, raw, (code, out) = _host_capture(tmp_path, windows=(True,))
+    assert code == 0, out
+    host = json.loads((raw / "run.json").read_text())["host"]
+    assert host["plain_us"] is None and "hook off" in host["plain_us_why"]
+    assert "unknown (the launcher ran no window with the hook off" in out
+
+
+def test_a_host_capture_with_no_sample_in_a_node_fails(tmp_path):
+    _, _, (code, out) = _host_capture(tmp_path, empty=True)
+    assert code == 1 and "no perf sample fell in a node" in out
+
+
+def test_perf_samples_outside_the_timed_windows_are_not_counted():
+    from xe_forge.core.profiler import parse_perf_script
+    from xe_forge.skills.capture import join_samples
+
+    timeline = {"windows": [
+        {"timed": False, "start_ns": 0, "end_ns": 100, "nodes": []},
+        {"timed": True, "start_ns": 1000, "end_ns": 2000, "nodes": [["A", 1100, 1500]]},
+    ]}  # fmt: skip
+    text = "\n".join([
+        "  1 0.000000050:  10  ff f ([unknown])",            # the plain window
+        "  1 0.000001200:  10  ff f (/lib/libx.so)",          # in A
+        "  2 0.000001700:  10  ff g (/lib/libx.so)",          # timed, between nodes
+        "  1 0.000005000:  10  ff h (/lib/libx.so)",          # after every window
+        "header line perf may print",
+    ])  # fmt: skip
+    samples = parse_perf_script(text)
+    assert len(samples) == 4 and samples[1] == (1, 1200, 10, "f [libx.so]")
+    joined = join_samples(timeline, samples)
+    assert joined["samples"] == 2
+    assert joined["nodes"]["A"]["symbols"] == {"f [libx.so]": 0.01}
+    assert joined["unattributed"]["symbols"] == {"g [libx.so]": 0.01}
+
+
+def test_a_launcher_imports_the_host_api_where_there_is_no_torch(tmp_path):
+    """A fresh interpreter, torch and the kernel stack unimportable: what a launcher in a
+    framework's own venv sees."""
+    import os
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; sys.modules['torch'] = None; sys.modules['ai_bench'] = None\n"
+        "from xe_forge.frontend import profile\n"
+        f"tl = profile.HostTimeline({str(tmp_path)!r}, threads=2)\n"
+        "with tl.window():\n    tl.node('A', tl.now(), tl.now())\n"
+        "tl.write(); print(profile.device_info(threads=2)['threads'])\n"
+    )
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path), XE_FORGE_DEVICE="cpu")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
+    assert out.returncode == 0, out.stderr[-800:]
+    assert out.stdout.strip() == "2" and (tmp_path / "host_timeline.json").is_file()
+
+
+def test_a_window_left_open_is_named_not_a_traceback(tmp_path):
+    from xe_forge.skills.capture import _still_open
+
+    assert _still_open({"windows": [{"timed": True, "start_ns": 0, "end_ns": 5}]}) is None
+    why = _still_open({"windows": [{"timed": True, "start_ns": 0, "end_ns": None}]})
+    assert "window 0" in why and "still open" in why
+
+
+def test_a_cpp_symbol_with_parentheses_keeps_its_name():
+    from xe_forge.core.profiler import parse_perf_line
+
+    line = "  7 1.000000001:  250000  7f00 std::function<void (int)>::operator()(int) const (/a/libx.so)"
+    assert parse_perf_line(line) == (7, 1_000_000_001, 250000,
+                                     "std::function<void (int)>::operator()(int) const [libx.so]")  # fmt: skip
+    assert (
+        parse_perf_line("  7 1.000000001:  1  ff [unknown] ([unknown])")[3] == "[unknown] [unknown]"
+    )
+
+
+def test_a_node_the_perf_pass_never_named_is_a_problem(tmp_path):
+    import json
+
+    tool, raw, (code, out) = _host_capture(tmp_path)
+    assert code == 0, out
+    kernels = json.loads((raw / "host_kernels.json").read_text())
+    del kernels["nodes"]["RMS_NORM"]
+    (raw / "host_kernels.json").write_text(json.dumps(kernels))
+    manifest = json.loads((raw / "MANIFEST.json").read_text())
+    from xe_forge.skills.capture import _sha256
+
+    manifest["host_kernels.json"] = _sha256(raw / "host_kernels.json")
+    (raw / "MANIFEST.json").write_text(json.dumps(manifest))
+    code, out = tool("capture", "parse", str(raw), "-o", str(tmp_path / "capture.json"))
+    assert code == 1 and "['RMS_NORM']" in out and "not in the perf pass" in out
+
+
+def test_a_host_device_record_needs_no_torch(monkeypatch):
+    import builtins
+
+    from xe_forge.frontend import profile
+
+    real = builtins.__import__
+
+    def no_torch(name, *a, **k):
+        if name == "torch":
+            raise ImportError("no torch here")
+        return real(name, *a, **k)
+
+    monkeypatch.setenv("XE_FORGE_DEVICE", "cpu")
+    monkeypatch.setattr(builtins, "__import__", no_torch)
+    info = profile.device_info(threads=8)
+    assert info["type"] == "cpu" and info["torch"] is None and info["threads"] == 8
+    assert profile.device_info()["threads"] is None  # unknown, not a guess
+
+
+def test_host_optimize_runs_no_unitrace(tmp_path):
+    from types import SimpleNamespace
+
+    from xe_forge.frontend.cli import xe_forge_command
+
+    entry = {"dsl": "cpp", "name": "k", "spec": "s.yaml"}
+    opts = SimpleNamespace(engine="claude", device="cpu", max_turns=1, passthrough=[],
+                           compiler_flags=None)  # fmt: skip
+    assert "--unitrace" not in xe_forge_command(entry, "v", tmp_path, tmp_path, opts)
+    opts.device = "xpu"
+    assert "--unitrace" in xe_forge_command(entry, "v", tmp_path, tmp_path, opts)
+
+
+def test_the_run_templates_speak_of_the_host_on_a_host():
+    from xe_forge.claude.generator import render
+    from xe_forge.frontend import cli
+
+    ctx = {
+        "model": "m",
+        "framework": "fw",
+        "python": "py",
+        "cache": "/c",
+        "inputs": {},
+        "precision": "auto",
+        "quantization": "q2:uint8",
+        "kv_cache": "auto",
+        "refused": [],
+        "answer": "a.json",
+        "framework_notes": [],
+        "workload": "text",
+        "runtime_keys": cli.WORKLOADS["text"],
+        "repos": "/r",
+        "what": "x",
+        "reason": "y",
+        "batch": 1,
+        "input_len": 8,
+        "output_len": 4,
+        "device": "cpu",
+        "on_host": True,
+    }
+    capture = render("frontend-capture.md.j2", **ctx)
+    assert "HostTimeline" in capture and "raw/host_launches.json" in capture
+    assert "unitrace" not in capture and "GPU" not in capture
+    patch = render("frontend-patch.md.j2", **ctx)
+    assert "GPU" not in patch and "--quantization q2:uint8" in patch
+    assert "XE_FORGE_QUANTIZATION" in patch
+    gpu = render("frontend-capture.md.j2", **{**ctx, "device": "xpu", "on_host": False})
+    assert "HostTimeline" not in gpu and "unitrace" in gpu

@@ -433,7 +433,11 @@ def capture(
 
     # runtime_keys: the launcher must record exactly the fields the reuse check reads back,
     # or a good capture is refused for a field it never wrote.
+    from xe_forge.skills.capture import on_host
+
+    dev = getattr(a, "device", None) or os.environ.get("XE_FORGE_DEVICE") or ""
     context = {"model": a.model, "framework": a.framework, "cache": CACHE,
+               "device": dev, "on_host": on_host(a),
                "workload": a.workload, "runtime_keys": WORKLOADS[a.workload],
                "framework_notes": getattr(a, "framework_note", []) or [],
                **workload(a), "inputs": getattr(a, "inputs", None) or {},
@@ -507,6 +511,8 @@ def capture(
             check += ["--prompt-file", context["inputs"]["prompts"]["file"]]
         if str(context["precision"]).startswith(("float", "bfloat")):  # declared, not auto
             check += ["--precision", context["precision"]]
+        if context["quantization"] not in (None, "", "auto"):  # scored and reported, not gated
+            check += ["--quantization", context["quantization"]]
         redo: list = []
         code = _tool(python, *check, problems=redo)  # the gate is the tool's, not the agent's word
         if code != 0 and done:
@@ -673,6 +679,8 @@ def name(
             ],
             "call_site": top.call_site,
             **({"gemm": top.framework_meta["gemm"]} if top.framework_meta.get("gemm") else {}),
+            # On a host: the code perf saw each node run, CPU time per symbol, by node name.
+            **({"host": top.framework_meta["host"]} if top.framework_meta.get("host") else {}),
             "dims": named_dims(top),
             "shapes": _shapes(ops),  # what the namer reads; its costs are checked on all
         }
@@ -881,6 +889,8 @@ def inputs(manifest_path: Path, run_dir: Path, a, python, turns, repos) -> dict:
 
 
 def xe_forge_command(entry: dict, variant: str, repo: Path, workspace: Path, opts) -> list[str]:
+    from xe_forge.skills.capture import on_host
+
     cmd = [
         sys.executable, "-m", "xe_forge.cli",
         "--engine", opts.engine,
@@ -893,8 +903,9 @@ def xe_forge_command(entry: dict, variant: str, repo: Path, workspace: Path, opt
         "--kernel-repo", str(repo),
         "--spec", entry["spec"],
         "--variant", variant,
-        "--unitrace",  # device timing, ComputeBasic and EU stall per trial; --no-unitrace wins
     ]  # fmt: skip
+    if not on_host(opts):  # a host profiles with perf, as its workspace says
+        cmd.append("--unitrace")  # device timing, ComputeBasic and EU stall; --no-unitrace wins
     if entry.get("record"):
         cmd += ["--dataset-record", entry["record"]]
     if entry.get("target") == "library":
@@ -913,6 +924,7 @@ def xe_forge_command(entry: dict, variant: str, repo: Path, workspace: Path, opt
 def optimize(manifest_path: Path, run_dir: Path, opts) -> list[tuple[str, str]]:
     """One Xe-Forge run per enabled (kernel, variant), in sequence; returns the pairs."""
     from xe_forge.frontend import manifest
+    from xe_forge.skills.capture import on_host
 
     data = manifest.load(manifest_path)
     repos_dir = Path(opts.kernel_repos).resolve() if opts.kernel_repos else REPO_DIR.parent
@@ -926,7 +938,8 @@ def optimize(manifest_path: Path, run_dir: Path, opts) -> list[tuple[str, str]]:
     rest = list(opts.passthrough)
     unitrace = rest[rest.index("--unitrace-bin") + 1] if "--unitrace-bin" in rest[:-1] else (
         os.environ.get("UNITRACE_BIN", "unitrace"))  # fmt: skip
-    if "--no-unitrace" not in rest and shutil.which(unitrace) is None:
+    on_gpu = not on_host(opts)
+    if on_gpu and "--no-unitrace" not in rest and shutil.which(unitrace) is None:
         raise SystemExit(f"optimize: profiling needs unitrace ({unitrace!r} not found); "
                          "set UNITRACE_BIN, or pass -- --no-unitrace")  # fmt: skip
 

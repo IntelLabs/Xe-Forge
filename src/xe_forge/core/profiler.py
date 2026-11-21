@@ -885,6 +885,31 @@ def parse_perf_report(text: str) -> list[dict]:
     return sections
 
 
+PERF_SCRIPT_FIELDS = "tid,time,period,ip,sym,dso"
+# The dso is the last parenthesized group: a C++ symbol may hold parentheses of its own.
+_PERF_SAMPLE = re.compile(
+    r"^\s*(\d+)\s+(\d+)\.(\d{9}):\s+(\d+)\s+[0-9a-f]+\s+(.*)\s+\(([^()]*(?: \(deleted\))?)\)\s*$"
+)
+
+
+def parse_perf_line(line: str) -> tuple[int, int, int, str] | None:
+    """One line of ``perf script -F tid,time,period,ip,sym,dso --ns``: (tid, time_ns, period,
+    "symbol [dso]"), or None for a line of another shape (a call chain, a header). perf's
+    own ``[unknown]`` names are kept as it wrote them."""
+    m = _PERF_SAMPLE.match(line)
+    if not m:
+        return None
+    sym, dso = m[5], m[6]
+    dso = Path(dso).name if dso.startswith("/") else dso
+    where = dso if dso.startswith("[") else f"[{dso}]"
+    return int(m[1]), int(m[2]) * 1_000_000_000 + int(m[3]), int(m[4]), f"{sym} {where}"
+
+
+def parse_perf_script(text: str) -> list[tuple[int, int, int, str]]:
+    """Every sample line of a ``perf script`` output (:func:`parse_perf_line`)."""
+    return [s for s in map(parse_perf_line, text.splitlines()) if s]
+
+
 class PerfCPUProfiler(_HostProfiler):
     """Linux perf on the host. ``stat`` counts events and perf's metrics over the window;
     ``record`` samples and reports the hottest shared objects and symbols. The window is

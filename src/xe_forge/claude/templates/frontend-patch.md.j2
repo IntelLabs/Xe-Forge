@@ -1,7 +1,13 @@
-{{ framework }} cannot run {{ model }} on this machine's GPU as it is: {{ what }} -- {{ reason }}.
+{% set dev = "the host" if on_host | default(false) else "the GPU" %}{{ framework }} cannot run {{ model }} on this machine's {% if on_host | default(false) %}CPUs{% else %}GPU{% endif %} as it is: {{ what }} -- {{ reason }}.
 Establish the patch that makes it run, correctly, before anything is measured. The framework's
 interpreter is {{ python }}.
-
+{% if framework_notes | default([]) %}
+Constraints on this machine, from someone who has run this before; they hold for the patched
+build, generate.sh and anything you make for it too:
+{% for note in framework_notes %}
+ - {{ note }}
+{% endfor %}
+{% endif %}
  - Clone the upstream source of the package that needs the change (the one {{ python }} has
    installed, at its latest default branch) into {{ repos }}/<its name>, unless a clone is
    there; record its HEAD as the base. Work on a branch `xe-forge/<what>` and commit the patch
@@ -16,19 +22,27 @@ interpreter is {{ python }}.
  - Add it the way the framework adds one: read its docs for new models or ops and copy the
    structure of the closest one it already has. A plain, correct implementation first --
    torch, or the framework's own portable kernels; making it fast is Xe-Forge's job later.
-   Nothing that only hides the gap: no generic fallback backend, no CPU path, no emulation of
+   Nothing that only hides the gap: no generic fallback backend{% if not on_host | default(false) %}, no CPU path{% endif %}, no emulation of
    a number format this device has no kernel for (that is {"error": ...}, not a patch).
  - Build it into a venv layered over {{ python }}, holding only what you rebuilt, and check
    that the patched package imports from there and the framework still imports.
 {% if workload == "text" %} - Write generate.sh here: under $FRAMEWORK_PYTHON, run {{ model }} with the framework, on
-   the GPU, eagerly, on `xe_forge.frontend.profile.token_ids(profile.hf_vocab(tok),
+   {{ dev }}, eagerly, on `xe_forge.frontend.profile.token_ids(profile.hf_vocab(tok),
    int($BATCH), int($INPUT_LEN), $PROMPT_FILE)`, generating $OUTPUT_LEN tokens with no stop at
    EOS, plain greedy -- the argmax of the raw logits, no repetition, frequency or presence
    penalty, the checkpoint's generation_config ignored -- and write the generated ids to
    $OUT/tokens.json as [[ids of sequence 0], ...]. The check sets those four variables (a
    natural-text prompt, the tokens it scores); read them from the environment, no defaults.
+   It runs the checkpoint at its own precision (converted without loss when the framework
+   needs its own format), never quantized: the check judges the port, and a quantization's
+   error would hide a defect in it or fail a correct one.{% if quantization is defined and quantization != "auto" %}
+   When `XE_FORGE_QUANTIZATION` is set ({{ quantization }} here, what the run declares), run
+   the same with the weights quantized as it names, made with the framework's own tool and
+   the inputs that tool documents for it, once, under {{ cache }}/models/, reused when there;
+   say in notes what it was made from. The check scores those tokens too and reports them,
+   never failing on them: whether that quality is acceptable is the person's choice.{% endif %}
 {% elif workload == "action" %} - Write generate.sh here: under $FRAMEWORK_PYTHON, call the policy {{ model }} once with the
-   framework, on the GPU, eagerly, on the camera images {{ input_images | join(", ") }}, the
+   framework, on {{ dev }}, eagerly, on the camera images {{ input_images | join(", ") }}, the
    instruction {{ prompt | tojson }}, the robot state {% if state %}in {{ state }}{% else %}as zeros{% endif %}{% if steps %} and {{ steps }} denoising steps{% endif %},
    with `seed=42`, and write into $OUT, each a float32 `.npy` of the array as the policy holds it:
      - `prompt_embeds.npy` -- what its vision-language backbone produced for that observation
@@ -41,7 +55,7 @@ interpreter is {{ python }}.
    Switch off anything that makes one run differ from the next: CPU or layerwise offload,
    autotuning.
 {% else %} - Write generate.sh here: under $FRAMEWORK_PYTHON, run {{ model }} with the framework, on
-   the GPU, eagerly, with the prompt {{ prompt | tojson }}{% if negative_prompt %} (negative
+   {{ dev }}, eagerly, with the prompt {{ prompt | tojson }}{% if negative_prompt %} (negative
    prompt {{ negative_prompt | tojson }}){% endif %} and `seed=42`, one output, and write into $OUT:
      - `prompt_embeds.npy` -- what the text encoder produced. One small tensor, and an op the
        transformer shares with the encoder changes it too, so it cannot be assumed unchanged;
@@ -66,7 +80,7 @@ interpreter is {{ python }}.
    accuracy number yourself: the check appends the measured ones, and fails without the file.
  - Write patch.json here: {"python": "<the layered venv's python>", "repo": "<the clone's
    directory name under {{ repos }}>", "base": "<base commit>", "package": "<the module the
-   patch changes, importable>"}, plus "reference_python": "<an interpreter with the GPU torch
+   patch changes, importable>"}, plus "reference_python": "<an interpreter with {% if on_host | default(false) %}a torch{% else %}the GPU torch{% endif %}
    and a transformers that loads {{ model }}>" when {{ python }}'s cannot (a venv over its
    torch with the latest transformers), and "trust_remote_code": true when the model needs
    its own code. When no transformers loads it at all, add "reference": "<a Python file here>"
@@ -76,11 +90,12 @@ interpreter is {{ python }}.
      xe-forge-skill patch check . --repos {{ repos }} --framework-python {{ python }} \
        --model {{ model }} --batch {{ batch }}{% if workload == "text" %} --input-len {{ input_len }}{% if 'prompts' in inputs %} \
        --prompt-file {{ inputs.prompts.file }}{% endif %}{% if precision is defined and precision.startswith(("float", "bfloat")) %} \
-       --precision {{ precision }}{% endif %}{% endif %}
+       --precision {{ precision }}{% endif %}{% if quantization is defined and quantization != "auto" %} \
+       --quantization {{ quantization }}{% endif %}{% endif %}
    It diffs base..HEAD itself (and writes the commits as an `.mbox`), applies that to a
    fresh clone, checks the import, runs
    generate.sh, then compares its output against a reference.
-{% if workload == "text" %}   The reference is transformers, or your "reference" runner, scoring your tokens on the GPU:
+{% if workload == "text" %}   The reference is transformers, or your "reference" runner, scoring your tokens on {{ dev }}:
    fed each sequence's prompt and generated prefix, every generated token must be within
    0.3 nat of the reference's best. It scores in {{ precision if precision is defined and precision.startswith(("float", "bfloat")) else "bf16" }}; a sequence that fails there is judged again in
    float32 over several slightly perturbed forwards, a token failing only by more than the

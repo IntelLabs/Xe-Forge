@@ -282,6 +282,13 @@ def main():
     c_run.add_argument("launcher", help="executable that runs one profiled batch into $RAW_DIR")
     c_run.add_argument("-o", "--raw", required=True, help="raw/ directory to write")
     c_run.add_argument("--unitrace", default=os.environ.get("UNITRACE_BIN", "unitrace"))
+    c_run.add_argument("--device", default=os.environ.get("XE_FORGE_DEVICE"),
+                       help="the run's device (default $XE_FORGE_DEVICE); cpu: the launcher's "
+                       "HostTimeline times the nodes and perf names their code")  # fmt: skip
+    c_run.add_argument("--perf-bin", default=os.environ.get("PERF_BIN", "perf"),
+                       help="perf on a host (env PERF_BIN)")  # fmt: skip
+    c_run.add_argument("--collector-arg", dest="collector_args", action="append", default=[],
+                       help="one more option for `perf record` on a host, as perf spells it")  # fmt: skip
     c_run.add_argument("--sampling-interval", type=int,
                        default=int(os.environ.get("XE_FORGE_SAMPLING_INTERVAL_US", 25)),
                        help="unitrace metric sampling interval in us (default 25, env "
@@ -340,6 +347,10 @@ def main():
     pc.add_argument("--prompt-file", help="the run's prompt text (xe-forge run --prompt-file)")
     pc.add_argument("--precision", default="bfloat16",
                     help="the float dtype scored first: the run's declared compute")  # fmt: skip
+    pc.add_argument("--quantization", default=None,
+                    help="the run's declared quantization: generate.sh runs again with "
+                    "XE_FORGE_QUANTIZATION set, and its tokens are scored and reported, "
+                    "never gated")  # fmt: skip
     pc.add_argument("--no-reference", action="store_true",
                     help="skip only the transformers comparison, keeping every other check: "
                     "the patch is a real diff that applies to a fresh clone, the patched "

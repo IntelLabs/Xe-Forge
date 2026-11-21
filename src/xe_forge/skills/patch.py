@@ -14,7 +14,8 @@ Checks, in order: the patch is git's own diff of base..HEAD and applies to a fre
 base; the patched package imports from outside the framework's venv; then each of generate.sh's
 first --min-match tokens of every sequence is within --tolerance nat of the best token of a
 Hugging Face transformers reference fed the same prefix (teacher forcing: one forward per
-sequence, on the GPU in --precision, bf16 unless the run declares another) -- under patch.json's "reference_python" (the
+sequence, on the run's device -- the GPU, or the host when the run is on it -- in --precision,
+bf16 unless the run declares another) -- under patch.json's "reference_python" (the
 agent's, when the framework's transformers cannot load the model), else --reference-python,
 else the framework's interpreter. A sequence that fails there is judged again, all its positions,
 in float32 (on the GPU, or the CPU when it does not fit there), over DRAWS forwards: one
@@ -25,7 +26,11 @@ when its smallest gap over the draws exceeds the tolerance plus their spread, an
 where more than one token in eight passes only within that spread is too unstable to judge,
 a FAIL. A stable model has no spread: the tolerance alone. If the float32 pass fails, the first
 verdict stands. The agent owns that environment; the scoring and precision are fixed here.
-Exit 0 passes.
+generate.sh runs the checkpoint at its own precision: the gate judges the port. With
+--quantization (the run's, when it declares one), generate.sh runs once more with
+XE_FORGE_QUANTIZATION set and the same reference scores those tokens too; that is recorded
+in check.json's "quantized" and PR.md, a fact for whoever chose the quantization, never a
+failure. Exit 0 passes.
 """
 
 from __future__ import annotations
@@ -41,14 +46,14 @@ PROMPT = Path(__file__).with_name("patch_prompt.txt")  # plain English prose, an
 DRAWS = 8  # float32 forwards of a sequence the first pass fails: one clean, the rest perturbed
 
 _REFERENCE = """
-import json, sys, torch
+import json, os, sys, torch
 from xe_forge.frontend import profile
 model_id, batch, input_len, n, trust = sys.argv[1], *map(int, sys.argv[2:5]), sys.argv[5] == "1"
 got = json.load(open(sys.argv[6]))
 prompt_file, dtype, draws = sys.argv[7] or None, sys.argv[8], int(sys.argv[10])
 rows = [int(i) for i in sys.argv[9].split(",")] if sys.argv[9] else range(min(len(got), batch))
 dev = profile.device_type()
-if dev == "cpu":
+if dev == "cpu" and os.environ.get("XE_FORGE_DEVICE", "").split(":")[0] != "cpu":
     sys.exit("the reference interpreter sees no GPU")
 ref_path = sys.argv[11] if len(sys.argv) > 11 else ""
 if ref_path:  # the agent's runner: load(model, dtype, device) -> (model, tokenizer or Vocab)
@@ -174,6 +179,38 @@ def _by_native(work: Path, python: str, patched: Path, record: dict,
     return []
 
 
+def _quantized(work: Path, python: str, quant: str, prompt: str, n: int, args, score) -> dict:
+    """generate.sh again with XE_FORGE_QUANTIZATION, scored by the same reference: per
+    sequence the gaps, the worst, and the share of tokens that are the reference's best."""
+    with tempfile.TemporaryDirectory() as out:
+        env = _env(FRAMEWORK_PYTHON=python, OUT=out, BATCH=str(args.batch), OUTPUT_LEN=str(n),
+                   PROMPT_FILE=prompt, XE_FORGE_QUANTIZATION=quant,
+                   **({} if args.input_len is None else {"INPUT_LEN": str(args.input_len)}))  # fmt: skip
+        t0 = time.perf_counter()
+        gen = subprocess.run(["bash", str(work / "generate.sh")], cwd=work, env=env,
+                             capture_output=True, text=True)  # fmt: skip
+        rec = {"quantization": quant, "run_s": round(time.perf_counter() - t0, 1)}
+        tokens = Path(out) / "tokens.json"
+        if gen.returncode != 0 or not tokens.is_file():
+            return {**rec, "error": f"generate.sh with XE_FORGE_QUANTIZATION={quant} failed "
+                    f"(exit {gen.returncode}): {gen.stderr.strip()[-400:]}"}  # fmt: skip
+        got = json.loads(tokens.read_text())
+        ref = score(args.precision, tokens=tokens)
+        if ref.returncode != 0:
+            return {
+                **rec,
+                "tokens": got,
+                "error": f"the reference failed: {ref.stderr.strip()[-400:]}",
+            }
+        gaps = [g[0] for _, g in sorted(json.loads(ref.stdout.strip().splitlines()[-1])["gaps"].items(),
+                                        key=lambda kv: int(kv[0]))]  # fmt: skip
+        flat = [x for g in gaps for x in g]
+        return {**rec, "tokens": got, "gaps": gaps,
+                "worst": [round(max(g, default=float("inf")), 4) for g in gaps],
+                "mean_gap": round(sum(flat) / len(flat), 4) if flat else None,
+                "best_share": round(sum(x == 0 for x in flat) / len(flat), 4) if flat else None}  # fmt: skip
+
+
 def check(args) -> tuple[list[str], dict]:
     """(problems, record) of the patch in ``args.dir``."""
     work = Path(args.dir).resolve()
@@ -258,13 +295,13 @@ def check(args) -> tuple[list[str], dict]:
         # The model's own reference runner, when transformers cannot load it (patch.json).
         runner = str((work / meta["reference"]).resolve()) if meta.get("reference") else ""
 
-        def score(dtype: str, rows: list[int] | None = None, draws: int = 1):
-            """Teacher forcing on the candidate's own tokens, on the GPU."""
+        def score(dtype: str, rows: list[int] | None = None, draws: int = 1, tokens=None):
+            """Teacher forcing on the candidate's own tokens, on the run's device."""
             return subprocess.run([
                 meta.get("reference_python") or args.reference_python or args.framework_python,
                 "-c", _REFERENCE, args.model, str(args.batch), str(args.input_len), str(n),
                 "1" if args.trust_remote_code or meta.get("trust_remote_code") else "0",
-                str(got_path), prompt, dtype,
+                str(tokens or got_path), prompt, dtype,
                 ",".join(map(str, rows)) if rows else "", str(draws), runner],
                 capture_output=True, text=True, env=_env())  # fmt: skip
 
@@ -302,6 +339,9 @@ def check(args) -> tuple[list[str], dict]:
                             f"sequence {k}: the reference is too unstable to judge -- "
                             f"{fp32['excused'][k]} of {len(ls)} tokens pass only within its own "
                             f"spread over {DRAWS} perturbed float32 forwards")  # fmt: skip
+        quant = getattr(args, "quantization", None)
+        if quant and quant != "auto" and not problems:
+            record["quantized"] = _quantized(work, python, quant, prompt, n, args, score)
     worst = [round(max(r, default=float("inf")), 4) for r in gaps]
     record.update(tokens=got, gaps=gaps, worst=worst, judge=judge, judge_first=args.precision, first_gaps=first, fp32=fp32,
                   tolerance=tol, required=n, transformers=res.get("transformers"),
@@ -310,6 +350,17 @@ def check(args) -> tuple[list[str], dict]:
         problems.append(f"tokens fall more than {tol} nat below transformers' best within the "
                         f"first {n}: worst per sequence {worst} ({len(got)} of {args.batch})")  # fmt: skip
     return problems, record
+
+
+def _quantized_facts(q: dict | None) -> dict:
+    if not q:
+        return {}
+    name = q["quantization"]
+    if q.get("error"):
+        return {f"{name}: scored": f"no ({q['error'][:200]})"}
+    return {f"{name}: worst gap per sequence (nat)": q["worst"],
+            f"{name}: mean gap (nat)": q["mean_gap"],
+            f"{name}: share of tokens the reference's best": q["best_share"]}  # fmt: skip
 
 
 def run(args) -> int:
@@ -326,6 +377,7 @@ def run(args) -> int:
         "transformers": record.get("transformers"), "quality": quality.get("verdict"),
         "patched run (s)": record.get("patched_s"), "native run (s)": record.get("native_s"),
         "op gain (native / patched)": record.get("op_gain"),
+        **_quantized_facts(record.get("quantized")),
         "check": "FAIL" if problems else "PASS",
     }  # fmt: skip
     if record.get("head") and not measured_pr(work / "PR.md", facts):
@@ -351,6 +403,12 @@ def run(args) -> int:
             )
         print(f"patch check: PASS {record['repo']} {record['base'][:12]}..{record['head'][:12]} "
               f"({len(record['files'])} files); {how} -> {record['patch']}")  # fmt: skip
+        q = record.get("quantized")
+        if q:
+            print(f"patch check: {q['quantization']} (reported, not gated): "
+                  + (q["error"] if q.get("error") else
+                     f"worst gap per sequence {q['worst']} nat, mean {q['mean_gap']}, "
+                     f"{q['best_share']:.0%} of tokens the reference's best"))  # fmt: skip
         for k in (record.get("fp32") or {}).get("gaps") or {}:
             print(
                 f"patch check: sequence {k} judged in float32 on {record['fp32']['device']} "
