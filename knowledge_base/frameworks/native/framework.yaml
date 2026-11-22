@@ -1,0 +1,20 @@
+# Facts about how this framework is delivered and checked. The run's code reads these keys and
+# hands them to the agents' instructions; nothing tests the framework's name.
+
+# No upstream project to clone: the patch agent creates the framework's repository itself, a
+# skeleton commit as its base and the model's engine on top (contract.md, "Repository").
+upstream: false
+
+# With a declared --quantization the framework quantizes the weights itself, and generate.sh
+# exports what its quantized weights decode to. The check then gates those tokens against the
+# original model holding that export, so it judges the engine's arithmetic, not the format's
+# loss; how far the export lies from the checkpoint is reported per tensor.
+quantized_gate: dequantized
+
+# What the agents read first, relative to this directory.
+read_first: [README.md, contract.md]
+
+# The run times this framework's kernel trials inside the model: each trial is built into the
+# repository with the patch's build script (contract.md, "Build"), and the run's launcher runs
+# the model on that build. patch check requires the script.
+trial_build: true

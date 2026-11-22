@@ -72,8 +72,15 @@ reset-plus-forward benchmark. Never infer end-to-end speedup from trace timings.
 
 ## RULES — NEVER VIOLATE
 
+{% if repo_trials | default(false) -%}
+1. **ONLY create** trial directories `t<N>/` and output directories, each holding only the
+   files of `{{ kernel_repo }}` the trial changes, at their repository paths
+   (`t<N>/src/kernels/cpu/kernels.cpp`). `benchmark` builds the repository with exactly
+   those files in place and times the kernel inside the model it came from.
+{%- else -%}
 1. **ONLY create** kernel files (trial files `t<N>{{ ext }}` or output files){% if measurement == "host" %}, or a
    trial *directory* `t<N>/` holding a kernel that is split across sources{% endif %}.
+{%- endif %}
 2. **NEVER create** benchmark scripts, test scripts, helper utilities, or any other files.
 {%- if dataset or lessons %}
    There {{ "are exactly two exceptions" if dataset and lessons else "is exactly one exception" }}, and no others:
@@ -93,7 +100,11 @@ reset-plus-forward benchmark. Never infer end-to-end speedup from trace timings.
   use the diagnostic to repair the named implementation and rerun the mandatory tools.
   Never time or rank a failing candidate. For infrastructure failures, stop and report
   the error. Do NOT work around either failure with custom scripts.
-{%- if measurement == "host" %}
+{%- if repo_trials | default(false) %}
+5. A trial is the repository with **exactly the files its directory holds** put in place of
+   the repository's own, and nothing else: copy each file you change whole, from the
+   baseline, and edit the copy. A file the trial does not hold is the repository's.
+{%- elif measurement == "host" %}
 5. A trial is built from **exactly the files you name**, and nothing else. One file is one
    file; several files are a directory, passed as a directory to `validate`, `trial save`
    and `benchmark` alike. Naming a single file of a split kernel builds it against the
@@ -319,7 +330,13 @@ call is what is optimized. The library itself is never edited and no new kernel 
 {%- endif %}
 - Read `test_kernels/{{ kernel_name }}{{ ext }}` if it exists — that is the baseline to
   optimize.
-{%- if kernel_repo and target == "library" %} If it does not exist, write it before Step 2:
+{%- if repo_trials | default(false) %} If it does not exist, write it before Step 2: the
+  directory `test_kernels/{{ kernel_name }}/` holding unmodified copies, at their repository
+  paths, of the files of `{{ kernel_repo }}` the `kernel-locator` profile names as the
+  kernel's source -- copied, not rewritten: `benchmark` refuses a baseline whose files differ
+  from the repository (`VERDICT: BASELINE_NOT_REPOSITORY`). It builds the repository and
+  runs the model on it, so the baseline is the kernel the model ran.
+{%- elif kernel_repo and target == "library" %} If it does not exist, write it before Step 2:
   the library call as the section above describes, wrapped as a `Model`.
 {%- elif kernel_repo %} If it does not exist, write it before Step 2 as a self-contained copy
   of the kernel the `kernel-locator` profile names, in its own language, wrapped as a
@@ -415,13 +432,16 @@ call is what is optimized. The library itself is never edited and no new kernel 
   on this part and by nothing else.
 
 ### Step 2: Initialize
-{% if baseline_oracle %}
+{% if repo_trials | default(false) %}
+Before initializing trials, check that the baseline is the repository and runs in the model
+at every shape (its time per call there is the captured one):
+{% elif baseline_oracle %}
 Before initializing trials, check that the baseline builds, runs on the device and
 repeats deterministically -- it is the oracle, so nothing else checks it:
 {% elif reference_workload %}
 Before initializing trials, verify the generated baseline against the immutable reference:
 {% endif %}
-{%- if reference_workload %}
+{%- if reference_workload or repo_trials | default(false) %}
 ```bash
 xe-forge-skill benchmark test_kernels/{{ kernel_name }}{{ ext }} test_kernels/{{ kernel_name }}{{ ext }} {{ benchmark_options }}
 ```
@@ -440,7 +460,7 @@ For each trial:
 3. **Save** — `xe-forge-skill trial save {{ kernel_name }} <path> --parent <id> --strategy "description"`.
 4. **Benchmark** (MANDATORY every trial):
   - **Trial t0:** `xe-forge-skill benchmark test_kernels/{{ kernel_name }}{{ ext }} <saved_trial_file> {{ benchmark_options }} --kernel-name {{ kernel_name }} --trial-id <trial_id>`
-{%- if reference_workload %}
+{%- if reference_workload or repo_trials | default(false) %}
    - **Trials t1+:** the same command. The baseline is re-timed beside the trial in every run, so pass no `--baseline-us`.
 {%- else %}
    - **Trials t1+:** get the cached baseline via `xe-forge-skill trial baseline-us {{ kernel_name }}`, then the same command with `--baseline-us <cached>`
@@ -654,9 +674,14 @@ worth more to the next one than a run that finished and said nothing.
   file; the generator's host code changes only if a launch parameter it chooses changes.
 - The kernel must be self-contained — all helpers inline in the one source string.
 {% elif dsl == "cpp" %}
+{%- if not repo_trials | default(false) %}
 - **Give every implementation its own identity.** Baseline and trial extensions coexist in
   one process: a distinct `load_inline` module name and a distinct C++ namespace for each
   implementation, changed when the implementation changes.
+{%- else %}
+- **The kernel keeps the repository's interface.** Its signature, its name and how the
+  model calls it stay as they are: the model is what runs it.
+{%- endif %}
 - **The call is done when it returns.** It is timed until then; no work left running on
   threads of its own after it returns.
 - **Compile flags are part of the trial.** The optimization level, the instruction set it
@@ -672,7 +697,9 @@ worth more to the next one than a run that finished and said nothing.
 - Pass `compiler_flags` from `config.yaml` on every compile; they are additional to the
   flags a trial chooses, not a replacement for them.
 {%- endif %}
+{%- if not repo_trials | default(false) %}
 - The kernel must be self-contained — all helpers inline in the one source string.
+{%- endif %}
 {% elif dsl == "cuda" %}
 - Use the caller's stream; do not create one, and do not synchronize inside the kernel call.
 - Declare launch bounds rather than relying on the compiler's occupancy guess.

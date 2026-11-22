@@ -2,7 +2,7 @@
 Establish the patch that makes it run, correctly, before anything is measured. The framework's
 interpreter is {{ python }}.
 {% if framework_kb | default(none) %}
-{{ framework }} has its own knowledge base, {{ framework_kb }}: read {{ (facts.read_first or ["README.md"]) | join(", ") }} there first. Where
+{{ framework }} has its own knowledge base, {{ framework_kb }}: read {{ (facts.read_first | default(["README.md"])) | join(", ") }} there first. Where
 it and the steps below differ on how this framework is built, delivered or run, it holds.
 {% endif %}{% if framework_notes | default([]) %}
 Constraints on this machine, from someone who has run this before; they hold for the patched
@@ -50,8 +50,9 @@ build, generate.sh and anything you make for it too:
    contract's), once, under {{ cache }}/models/, reused when there, and write
    $OUT/dequantized.json: {"weights": "<the directory of what the quantized weights decode
    to>"}, as the contract says. The check gates those tokens against the original model
-   holding that export: a quantized run that is wrong for its own weights fails, and the
-   format's loss against the checkpoint is reported per tensor, never gated.{% else %}
+   holding that export: a quantized run that is wrong for its own weights fails. The format's
+   loss is reported: per tensor against the checkpoint (a tensor further from it than zeros
+   fails), and the same tokens scored against the checkpoint itself.{% else %}
    When `XE_FORGE_QUANTIZATION` is set ({{ quantization }} here, what the run declares), run
    the same with the weights quantized as it names, made with the framework's own tool and
    the inputs that tool documents for it, once, under {{ cache }}/models/, reused when there;
@@ -99,12 +100,16 @@ build, generate.sh and anything you make for it too:
    patch changes, importable>"}, plus "reference_python": "<an interpreter with {% if on_host | default(false) %}a torch{% else %}the GPU torch{% endif %}
    and a transformers that loads {{ model }}>" when {{ python }}'s cannot (a venv over its
    torch with the latest transformers), and "trust_remote_code": true when the model needs
-   its own code. When no transformers loads it at all, add "reference": "<a Python file here>"
+   its own code.{% if facts.trial_build | default(false) %} Add "build": "build.sh" and write build.sh here: it builds the
+   repository tree at $SRC (default: the clone) into the venv at $VENV (default: ./venv),
+   out of tree -- nothing written into $SRC -- layered over {{ python }}, then runs the
+   repository's own kernel tests against that build and exits nonzero when either fails.
+   The run builds every kernel trial of this repository with it, in a tree of its own.{% endif %} When no transformers loads it at all, add "reference": "<a Python file here>"
    defining `load(model, dtype, device)` that returns the model, as the model's own code builds
    it, and its tokenizer (or an `xe_forge.frontend.profile.Vocab`); the model is called on a
    (1, T) tensor of ids and returns logits. Then run
      xe-forge-skill patch check . --repos {{ repos }} --framework-python {{ python }} \
-       --model {{ model }} --batch {{ batch }}{% if workload == "text" %} --input-len {{ input_len }}{% if 'prompts' in inputs %} \
+       --model {{ model }} --batch {{ batch }}{% if facts.trial_build | default(false) %} --require-build{% endif %}{% if workload == "text" %} --input-len {{ input_len }}{% if 'prompts' in inputs %} \
        --prompt-file {{ inputs.prompts.file }}{% endif %}{% if precision is defined and precision.startswith(("float", "bfloat")) %} \
        --precision {{ precision }}{% endif %}{% if quantization is defined and quantization != "auto" %} \
        --quantization {{ quantization }}{% if dequantized %} --quantized-gate dequantized{% endif %}{% endif %}{% endif %}

@@ -30,7 +30,10 @@ generate.sh runs the checkpoint at its own precision: the gate judges the port. 
 --quantization (the run's, when it declares one), generate.sh runs once more with
 XE_FORGE_QUANTIZATION set and the same reference scores those tokens too; that is recorded
 in check.json's "quantized" and PR.md, a fact for whoever chose the quantization, never a
-failure. Exit 0 passes.
+failure -- unless --quantized-gate dequantized: a framework that quantizes the weights itself
+names what they decode to, and its quantized tokens are gated against the original model
+holding those (scored in float32), the same tokens against the checkpoint reported beside.
+Exit 0 passes.
 """
 
 from __future__ import annotations
@@ -94,8 +97,8 @@ if export:  # the framework's dequantized weights in place of the checkpoint's: 
                 errs[k] = float((v.float() - o).norm() / max(float(o.norm()), 1e-30))
                 sd[k] = v.to(sd[k].device, sd[k].dtype)
     bad += [] if errs else [f"{export} holds no tensor"]
-    bad += [f"{k}: relative error {e:.3g} against the checkpoint, no closer than zeros"
-            for k, e in errs.items() if e >= 1]
+    bad += [f"{k}: relative error {e:.3g} against the checkpoint, further from it than zeros"
+            for k, e in errs.items() if e > 1]
     if bad:
         print(json.dumps({"export_problems": bad}))
         sys.exit(3)
@@ -233,7 +236,11 @@ def _quantized(work: Path, python: str, quant: str, prompt: str, n: int, args, s
             if not named.is_file():
                 return {**rec, "tokens": got, "error": "generate.sh wrote no $OUT/dequantized.json "
                         "naming the weights its quantized run decodes to"}  # fmt: skip
-            export = str((work / json.loads(named.read_text()).get("weights", "")).resolve())
+            told = json.loads(named.read_text())
+            if not isinstance(told, dict) or not told.get("weights"):
+                return {**rec, "tokens": got, "error": '$OUT/dequantized.json is not '
+                        '{"weights": "<directory>"}'}  # fmt: skip
+            export = str((work / told["weights"]).resolve())
             rec["export_dir"] = export
         ref = score("float32" if gate else args.precision, tokens=tokens, export=export)
         if ref.returncode != 0:
@@ -246,13 +253,25 @@ def _quantized(work: Path, python: str, quant: str, prompt: str, n: int, args, s
                 if told
                 else f"the reference failed: {ref.stderr.strip()[-400:]}",
             }
-        res = json.loads(ref.stdout.strip().splitlines()[-1])
-        gaps = [g[0] for _, g in sorted(res["gaps"].items(), key=lambda kv: int(kv[0]))]
-        flat = [x for g in gaps for x in g]
-        return {**rec, "tokens": got, "gaps": gaps, "export": res.get("export"),
-                "worst": [round(max(g, default=float("inf")), 4) for g in gaps],
-                "mean_gap": round(sum(flat) / len(flat), 4) if flat else None,
-                "best_share": round(sum(x == 0 for x in flat) / len(flat), 4) if flat else None}  # fmt: skip
+        rec.update(tokens=got, export=json.loads(ref.stdout.strip().splitlines()[-1]).get("export"),
+                   **_gap_facts(ref))  # fmt: skip
+        if gate:  # what the person who chose the quantization judges: the same tokens against
+            # the checkpoint itself, reported
+            orig = score(args.precision, tokens=tokens)
+            rec["against_checkpoint"] = (_gap_facts(orig) if orig.returncode == 0 else
+                                         {"error": f"the reference failed: {orig.stderr.strip()[-300:]}"})  # fmt: skip
+        return rec
+
+
+def _gap_facts(ref: subprocess.CompletedProcess) -> dict:
+    """Per sequence the gaps, the worst, the mean and the share of the reference's best, from a
+    reference's output."""
+    res = json.loads(ref.stdout.strip().splitlines()[-1])
+    gaps = [g[0] for _, g in sorted(res["gaps"].items(), key=lambda kv: int(kv[0]))]
+    flat = [x for g in gaps for x in g]
+    return {"gaps": gaps, "worst": [round(max(g, default=float("inf")), 4) for g in gaps],
+            "mean_gap": round(sum(flat) / len(flat), 4) if flat else None,
+            "best_share": round(sum(x == 0 for x in flat) / len(flat), 4) if flat else None}  # fmt: skip
 
 
 def _quantized_gate(q: dict, args, tol: float) -> list[str]:
@@ -313,6 +332,14 @@ def check(args) -> tuple[list[str], dict]:
         problems.append(f"{python} cannot import {package!r}: {where.stderr.strip()[-300:]}")
     elif prefix and where.stdout.strip().startswith(prefix):
         problems.append(f"{package} imports from the framework's venv ({prefix}), not the patch")
+    if getattr(args, "require_build", False):
+        script = work / str(meta.get("build") or "")
+        if not meta.get("build") or not script.is_file():
+            problems.append('patch.json names no "build" script beside it: the run builds trials '
+                            "of this repository with it")  # fmt: skip
+        elif not all(v in script.read_text() for v in ("$SRC", "$VENV")):
+            problems.append(f"{script.name} does not read $SRC and $VENV: it must build any tree "
+                            "of the repository into any venv")  # fmt: skip
     if problems:
         return problems, record
     return score(work, meta, python, args, record), record
@@ -441,6 +468,11 @@ def _quantized_facts(q: dict | None) -> dict:
         facts[f"{name}: judged against"] = "the original model holding its dequantized weights"
         facts[f"{name}: mean relative error of those weights"] = round(e["mean_rel_error"], 6)
         facts[f"{name}: worst tensors"] = ", ".join(f"{k} {v}" for k, v in e["worst"])
+        c = q.get("against_checkpoint") or {}
+        facts[f"{name}: against the checkpoint, worst gap per sequence (nat)"] = (
+            c.get("worst") if not c.get("error") else f"not scored ({c['error'][:200]})"
+        )
+        facts[f"{name}: against the checkpoint, share of tokens its best"] = c.get("best_share")
     return facts
 
 

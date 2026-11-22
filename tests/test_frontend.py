@@ -1374,6 +1374,7 @@ def test_patch_check_gates_quantized_tokens_on_the_frameworks_own_dequantized_we
         q = json.loads((work / "check.json").read_text())["quantized"]
         assert q["gated"] and q["worst"] == [0, 0] and q["export"]["tensors"] == 1
         assert 0 < q["export"]["mean_rel_error"] < 1  # the grid's loss, reported
+        assert len(q["against_checkpoint"]["worst"]) == 2  # the same tokens, the checkpoint's
         pr = (work / "PR.md").read_text()
         assert "Q1:grid: judged against | the original model holding its dequantized" in pr
 
@@ -1879,9 +1880,15 @@ def test_the_whole_model_is_put_against_its_roofline(tmp_path):
 
     a = an.Analysis("r", 0.0, [], {"a": d("a", 300.0, 0.5), "b": d("b", 100.0, None)}, {})
     r = a.roofline()
-    assert r == {"device_us": 800.0, "bound_us": 300.0, "bounded_share": 0.75, "eff": 0.375}
-    assert an.roofline_line(r) == ("Model roofline: 0.8 ms of device time against a bound of "
-                                   "0.3 ms, efficiency 37.5% (75.0% of the time has a bound).")  # fmt: skip
+    assert r == {"us": 800.0, "of": "device time", "attributed_us": 800.0, "bound_us": 300.0,
+                 "bounded_share": 0.75, "eff": 0.375}  # fmt: skip
+    assert an.roofline_line(r) == ("Model roofline: 0.8 ms (device time) against a bound of "
+                                   "0.3 ms, efficiency 37.5% (75.0% of the op time has a bound).")  # fmt: skip
+    # Launches no op claims are time the model took.
+    assert an.Analysis("r", 1000.0, [], a.decisions, {}).roofline()["eff"] == 0.3
+    # On a host: the wall time with the hook off, what runs between nodes included.
+    host = an.Analysis("r", 800.0, [], a.decisions, {}, wall_us=1200.0).roofline()
+    assert host["eff"] == 0.25 and host["of"] == "wall time, hook off"
     none = an.Analysis("r", 0.0, [], {"b": d("b", 100.0, None)}, {}).roofline()
     assert none["eff"] is None and "unknown" in an.roofline_line(none)
     (tmp_path / "analysis.json").write_text(json.dumps(a.as_dict()))

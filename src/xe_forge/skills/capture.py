@@ -290,13 +290,27 @@ def join_samples(timeline: dict, samples) -> dict:
             "unattributed": tidy(loose), "samples": counted, "windows": len(windows)}  # fmt: skip
 
 
+def _host_run_record(raw: Path, launcher: Path, host: dict) -> None:
+    """run.json and MANIFEST.json of a host capture's raw/."""
+    run = json.loads((raw / "meta.json").read_text())
+    run.update(launcher=str(launcher), launcher_sha256=_sha256(launcher), trace_steps=None,
+               host=host)  # fmt: skip
+    (raw / "run.json").write_text(json.dumps(run, indent=1) + "\n")
+    (raw / "MANIFEST.json").write_text(json.dumps(_manifest(raw), indent=1) + "\n")
+
+
 def _run_host(args, launcher: Path, raw: Path) -> int:
     """``capture run`` on a host: the launcher's HostTimeline times every node of the plain
-    pass; a second pass under ``perf record`` names the code each node ran."""
+    pass; a second pass under ``perf record`` names the code each node ran, unless
+    ``--timeline-only`` asks for the times alone (a capture read for its times, not its code)."""
     from xe_forge.core.profiler import PERF_SCRIPT_FIELDS, parse_perf_line
 
     perf = args.perf_bin
-    if shutil.which(perf) is None and not Path(perf).is_file():
+    if (
+        not getattr(args, "timeline_only", False)
+        and shutil.which(perf) is None
+        and not Path(perf).is_file()
+    ):
         print(f"capture run: no perf at {perf!r} (set --perf-bin or PERF_BIN)")
         return 1
     if raw.exists():
@@ -350,6 +364,12 @@ def _run_host(args, launcher: Path, raw: Path) -> int:
             "match": round(_same_work(window, prev), 4) if prev else None,
             "trace_steps": None, "launches": window,
         }) + "\n")  # fmt: skip
+        if getattr(args, "timeline_only", False):
+            _host_run_record(raw, launcher, host)
+            print(f"capture run: {len({n for n, _ in window})} node types, "
+                  f"{host['node_us'] / 1e3:.1f} ms in nodes of a {host['window_us'] / 1e3:.1f} ms "
+                  f"window (host timeline only, no perf pass) -> {raw}")  # fmt: skip
+            return 0
 
         # Pass 2, under perf: what code each node ran, sampled on every thread. It may run
         # fewer steps (--trace-steps); the join is by node name, not by position.
@@ -395,11 +415,7 @@ def _run_host(args, launcher: Path, raw: Path) -> int:
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
-    run = json.loads((raw / "meta.json").read_text())
-    run.update(launcher=str(launcher), launcher_sha256=_sha256(launcher), trace_steps=None,
-               host=host)  # fmt: skip
-    (raw / "run.json").write_text(json.dumps(run, indent=1) + "\n")
-    (raw / "MANIFEST.json").write_text(json.dumps(_manifest(raw), indent=1) + "\n")
+    _host_run_record(raw, launcher, host)
     names = {n for n, _ in window}
     print(f"capture run: {len(names)} node types, {host['node_us'] / 1e3:.1f} ms in nodes of a "
           f"{host['window_us'] / 1e3:.1f} ms window (host timeline); perf: "

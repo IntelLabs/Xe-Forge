@@ -216,6 +216,9 @@ class ExternalConfig:
     integration_repos: list[str] = field(default_factory=list)
     # The stack's interpreter; set, the port-back agent builds and tests the port there.
     stack_python: str | None = None
+    # Trials are directories of kernel_repo's files at their repository paths, built into the
+    # repository and timed by the benchmark command (in the model the kernel came from).
+    repo_trials: bool = False
     timeout: int = DEFAULT_TIMEOUT
 
 
@@ -354,6 +357,7 @@ class ConfigManager:
             benchmark=self._get_env("EXTERNAL_BENCHMARK", None),
             validate=self._get_env("EXTERNAL_VALIDATE", None),
             stack_python=self._get_env("STACK_PYTHON", None),
+            repo_trials=self._get_env("REPO_TRIALS", False, bool),
             dataset_record=self._get_env("DATASET_RECORD", None),
             lessons=self._get_env("LESSONS_DIR", None),
             kernel_repo=self._get_env("KERNEL_REPO", None),

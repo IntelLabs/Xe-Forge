@@ -1,6 +1,6 @@
 Optimize `$ARGUMENTS` into a {{ dsl | upper }} kernel.
 
-Resolve the argument to a file in `test_kernels/` — it could be a full filename, partial
+Resolve the argument to a {% if repo_trials | default(false) %}baseline directory{% else %}file{% endif %} in `test_kernels/` — it could be a full filename, partial
 name, or just a number. Glob to find the match; if ambiguous, pick the closest and say which
 you picked. Nobody is watching this session, so never stop to ask.
 

@@ -427,12 +427,16 @@ def framework_kb(framework: str) -> tuple[Path | None, dict]:
 
     if not framework or not framework.replace("-", "_").replace(".", "_").isidentifier():
         return None, {}
-    root = Path(os.environ.get("KNOWLEDGE_DIR") or SRC_DIR.parent / "knowledge_base")
-    kb = (root / "frameworks" / framework).resolve()
-    if not kb.is_dir():
-        return None, {}
-    facts = kb / "framework.yaml"
-    return kb, (yaml.safe_load(facts.read_text()) or {}) if facts.is_file() else {}
+    # KNOWLEDGE_DIR first (a relative one read from the checkout, where its .env is), then
+    # the checkout's own knowledge base.
+    given = Path(os.environ.get("KNOWLEDGE_DIR") or "")
+    roots = [given if given.is_absolute() else SRC_DIR.parent / given] if str(given) != "." else []
+    for root in [*roots, SRC_DIR.parent / "knowledge_base"]:
+        kb = (root / "frameworks" / framework).resolve()
+        if kb.is_dir():
+            facts = kb / "framework.yaml"
+            return kb, (yaml.safe_load(facts.read_text()) or {}) if facts.is_file() else {}
+    return None, {}
 
 
 def capture(
@@ -462,9 +466,13 @@ def capture(
                "kv_cache": getattr(a, "kv_cache", "auto"), "refused": refused or []}  # fmt: skip
     kb, facts = framework_kb(a.framework)
     context.update(framework_kb=str(kb) if kb else None, framework_facts=facts)
+    print(f"capture: {a.framework}'s knowledge base: {kb or 'none'}", flush=True)
     stack = run_dir / "stack.json"
     for _ in range(3):
         rounds = json.loads(stack.read_text())["patches"] if stack.is_file() else []
+        # What the patches made, so the capture agent runs on them: their patch.json.
+        context["patched"] = [json.loads((Path(r) / "patch.json").read_text())
+                              for r in rounds if (Path(r) / "patch.json").is_file()]  # fmt: skip
         work = run_dir / f"patch-{len(rounds) + 1}"  # after the stack: a resume never overwrites
         # A resume into a patch that was asked on this stack and workload: the capture agent
         # is not asked again what it already answered.
@@ -533,6 +541,8 @@ def capture(
             check += ["--quantization", context["quantization"]]
             if facts.get("quantized_gate"):  # unless the framework quantizes it itself
                 check += ["--quantized-gate", str(facts["quantized_gate"])]
+        if facts.get("trial_build"):  # its kernels' trials are built with the patch's script
+            check += ["--require-build"]
         # --prove scores the tokens again on its patched build, with these same arguments.
         (work / "check-args.json").write_text(json.dumps(check[3:]) + "\n")
         redo: list = []
@@ -923,7 +933,29 @@ def inputs(manifest_path: Path, run_dir: Path, a, python, turns, repos) -> dict:
 # ── optimize ───────────────────────────────────────────────────────────────
 
 
-def xe_forge_command(entry: dict, variant: str, repo: Path, workspace: Path, opts) -> list[str]:
+def inmodel_flags(run_dir: Path, entry: dict, repo: Path, opts) -> list[str]:
+    """The workspace's flags that time its trials inside the model (``xe-forge-skill
+    inmodel``): for a kernel of a repository the run built into its stack with a build script,
+    on a host, under an agent CLI. None of them otherwise."""
+    from xe_forge import agent_cli as agents
+    from xe_forge.frontend import inmodel
+    from xe_forge.skills.capture import on_host
+
+    if not (on_host(opts) and agents.BACKENDS.get(opts.engine) and entry.get("record")):
+        return []
+    if inmodel.provider(run_dir.resolve(), repo) is None:
+        return []
+    tool = [sys.executable, "-m", "xe_forge.skills", "inmodel", "--run-dir",
+            str(run_dir.resolve()), "--repo", str(repo)]  # fmt: skip
+    bench = [*tool, "--record", str(entry["record"]), "--baseline", "{baseline}", "--trial",
+             "{trial}", "--variant", "{variant}", "--workspace", "{workspace}"]  # fmt: skip
+    return ["--external-benchmark", shlex.join(bench),
+            "--external-validate", shlex.join([*tool, "--build-only", "--trial", "{trial}"]),
+            "--repo-trials"]  # fmt: skip
+
+
+def xe_forge_command(entry: dict, variant: str, repo: Path, workspace: Path, opts,
+                     inmodel: list[str] | None = None) -> list[str]:  # fmt: skip
     from xe_forge.skills.capture import on_host
 
     cmd = [
@@ -953,7 +985,7 @@ def xe_forge_command(entry: dict, variant: str, repo: Path, workspace: Path, opt
         cmd += ["--stack-python", opts.stack_python]
     if entry["dsl"] == "sycl" and opts.compiler_flags:
         cmd += ["--compiler-flags", opts.compiler_flags.replace("{kernel_repo}", str(repo))]
-    return cmd + list(opts.passthrough)
+    return cmd + list(inmodel or []) + list(opts.passthrough)
 
 
 def optimize(manifest_path: Path, run_dir: Path, opts) -> list[tuple[str, str]]:
@@ -998,7 +1030,8 @@ def optimize(manifest_path: Path, run_dir: Path, opts) -> list[tuple[str, str]]:
                 status_path.write_text(json.dumps(status, indent=1) + "\n")
                 print(f"optimize: {entry['name']} ({variant}): {status['skipped']}")
                 continue
-            cmd = xe_forge_command(entry, variant, repo, workspace, opts)
+            cmd = xe_forge_command(entry, variant, repo, workspace, opts,
+                                   inmodel_flags(run_dir, entry, repo, opts))  # fmt: skip
             log = manifest.sidecar(workspace, ".log")
             print(
                 f"optimize: {entry['name']} ({variant}) -> {workspace}\n  {shlex.join(cmd)}",

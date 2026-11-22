@@ -65,7 +65,10 @@ def generate_workspace(
 
     dsl = config.device_config.dsl
     device = config.device_config.device
-    ext = _kernel_ext(dsl)
+    # Trials as the repository's own files, built into it and timed in the model: a baseline,
+    # a trial and the output are directories at the repository's paths, not one source file.
+    repo_trials = bool(config.external.repo_trials and config.external.kernel_repo)
+    ext = "" if repo_trials else _kernel_ext(dsl)
     # What the session is told its numbers come from. The commands it runs are the
     # same either way -- the delegation happens inside xe-forge-skill -- but the
     # verdicts it may see, and so the rules it has to follow, are not.
@@ -138,7 +141,9 @@ def generate_workspace(
     if unitrace:
         profile_args.extend(["--unitrace-bin", config.profiler.unitrace_bin])
         profile_args.extend(["--metric-group", config.profiler.unitrace_metric_group])
-    perf, vtune = config.profiler.perf_enabled, config.profiler.vtune_enabled
+    # A trial in the model has no standalone file to profile: its times come from the model.
+    perf = config.profiler.perf_enabled and not repo_trials
+    vtune = config.profiler.vtune_enabled and not repo_trials
     # The collections every saved trial must have: unitrace's two groups on a GPU, and on a
     # host perf's counts, the host's default profile.
     if host and perf:
@@ -150,13 +155,13 @@ def generate_workspace(
     require_profiles = bool(required_groups)
     if require_profiles:
         profile_args.extend(["--kernel-name", kernel_name])
-    if config.profiler.vtune_enabled:
+    if vtune:
         profile_args.extend(["--vtune-bin", config.profiler.vtune_bin])
     if host and perf:  # the required collection is perf's, so perf is named, not auto
         profile_args.extend(["--tool", "perf", "--perf-bin", config.profiler.perf_bin])
     elif host and vtune:
         profile_args.extend(["--tool", "vtune"])
-    elif not host and unitrace != config.profiler.vtune_enabled:
+    elif not host and unitrace != vtune:
         profile_args.extend(["--tool", "unitrace" if unitrace else "vtune"])
     profile_options = shlex.join(profile_args)
 
@@ -215,6 +220,7 @@ def generate_workspace(
             kernel_repo=kernel_repo,
             integration_repos=integration_repos,
             kernel_locator_profile_path=KERNEL_LOCATOR_PROFILE_PATH,
+            repo_trials=repo_trials,
         )
     )
     (workspace / "config.yaml").write_text(
@@ -224,9 +230,9 @@ def generate_workspace(
             dsl=dsl,
             device=device,
             measurement=measurement,
-            vtune_enabled=config.profiler.vtune_enabled,
+            vtune_enabled=vtune,
             vtune_bin=config.profiler.vtune_bin,
-            perf_enabled=config.profiler.perf_enabled,
+            perf_enabled=perf,
             perf_bin=config.profiler.perf_bin,
             unitrace_enabled=config.profiler.unitrace_enabled,
             unitrace_bin=config.profiler.unitrace_bin,
@@ -250,6 +256,7 @@ def generate_workspace(
             kernel_repo=kernel_repo,
             integration_repos=integration_repos,
             kernel_locator_profile_path=KERNEL_LOCATOR_PROFILE_PATH,
+            repo_trials=repo_trials,
         )
     )
 
@@ -291,6 +298,7 @@ def generate_workspace(
                 profile_path=KERNEL_LOCATOR_PROFILE_PATH,
                 ext=ext,
                 stack_python=config.external.stack_python,
+                repo_trials=repo_trials,
             )
         )
 

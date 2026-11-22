@@ -221,7 +221,7 @@ Hardware counters of one kernel. See [PROFILING.md](PROFILING.md).
 
 | Subcommand | Arguments and flags | What it does |
 |---|---|---|
-| `run` | `LAUNCHER -o RAW [--unitrace BIN] [--sampling-interval US] [--trace-steps N]` | Run a launcher (it writes into `$RAW_DIR`) timed, then under unitrace, into `raw/`. `--unitrace` defaults to `UNITRACE_BIN`, `--sampling-interval` to `XE_FORGE_SAMPLING_INTERVAL_US` (25), `--trace-steps` to `XE_FORGE_TRACE_STEPS` (2; 0 runs the full workload under unitrace too) |
+| `run` | `LAUNCHER -o RAW [--unitrace BIN] [--sampling-interval US] [--trace-steps N]` | Run a launcher (it writes into `$RAW_DIR`) timed, then under unitrace, into `raw/`. `--unitrace` defaults to `UNITRACE_BIN`, `--sampling-interval` to `XE_FORGE_SAMPLING_INTERVAL_US` (25), `--trace-steps` to `XE_FORGE_TRACE_STEPS` (2; 0 runs the full workload under unitrace too). On a host, `--timeline-only` keeps the launcher's timeline pass and skips the perf pass: the node times without the code they ran |
 | `parse` | `RAW -o CAPTURE_JSON [--names NAMES_JSON] [--min-known PCT]` | `raw/` to `capture.json`, checked against unitrace; `--names` applies a `names.json`; at least `--min-known` (90) % of op time must be in kernels unitrace saw |
 
 ### `patch check DIR`
@@ -256,6 +256,26 @@ name); the patch's `check.json`, `PR.md` and `quality.json` are left as they are
 must run the model under `$FRAMEWORK_PYTHON`, or another build cannot be scored. Exit 0
 passes, 1 fails, 2 could not judge (the reference failed, or that contract does not hold).
 `--prove` runs it on its patched arm, with the arguments saved in `patch-<n>/check-args.json`.
+
+`patch check --require-build`: patch.json must name a `"build"` script beside it that builds
+`$SRC` into `$VENV`; the run passes it when the framework's `framework.yaml` says
+`trial_build: true`.
+
+### `inmodel --run-dir RUN --repo REPO --trial DIR [--baseline DIR --record JSON --variant V] [--build-only]`
+
+A kernel trial built into the run's own framework and timed inside the model. For a repository
+the run's stack built with a `build` script (patch.json), on a host, `optimize` hands each
+workspace this as its external benchmark and validator (and `--repo-trials`), so a trial is a
+directory of the repository's files at their repository paths. It builds the repository with
+those files in place (the patch's `build.sh`, which also runs the repository's kernel tests),
+runs the run's launcher on the build (`capture run --timeline-only`, then `capture parse
+--names`), and reads each variant's time per call as the spec's `captured_us` was read. A trial
+is correct when it builds, every variant runs as often as on the baseline, and its output
+passes `patch score` with the check's arguments. `XE_FORGE_MODEL_REPEATS` (2) captures per arm,
+in ABBA order; a ratio inside the captures' own spread is `INDISTINGUISHABLE`. The baseline
+must be the repository's files unchanged (`BASELINE_NOT_REPOSITORY`) at the commit the patch
+check judged (`REPOSITORY_MOVED`). One measurement serves every variant of a pair
+(`<workspace>/.inmodel/`). `--build-only` is the validator: the build and the tests alone.
 
 ### `bound CAPTURE_JSON`
 
@@ -344,6 +364,7 @@ Bedrock credentials (`AWS_BEARER_TOKEN_BEDROCK`, or `AWS_ACCESS_KEY_ID` +
 | `BENCHMARK_MIN_EFFECT` | 0.02 | Relative difference below which two timings count as equal; a finite number above 0 | `xe-forge`, `benchmark` |
 | `XE_FORGE_BUILTIN_BENCHMARK` | off | `1`/`true`/`yes`/`on` = `benchmark --builtin-benchmark` | `benchmark` |
 | `XE_FORGE_BASELINE_SLACK` | 1.5 | How much slower than the captured kernel a baseline may run before it is not that kernel | `benchmark` |
+| `XE_FORGE_MODEL_REPEATS` | 2 | Captures per arm of a trial timed in the model | `inmodel` |
 | `XE_FORGE_BENCHMARK_TIMEOUT` | `EXTERNAL_TIMEOUT` | Seconds per shape before `benchmark` gives up on a hang | `benchmark` |
 | `MAX_ATTEMPTS_PER_STAGE` | 3 | Read but unused | `xe-forge` |
 | `VALIDATE_EACH_STAGE` | true | Read but unused | `xe-forge` |

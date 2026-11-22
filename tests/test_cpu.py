@@ -529,7 +529,7 @@ def test_the_benchmark_says_where_the_flush_ran(monkeypatch):
     monkeypatch.setattr(topo, "placement", lambda: {"llc_bytes": 512})
     executor = KernelBenchExecutor(device="cpu")
     executor._host_samples(Call(), (), 1)
-    assert "1024-byte flush ran on torch's thread pool" in executor.flush_note
+    assert "1024-byte read flush ran on torch's thread pool" in executor.flush_note
 
 
 def test_an_arm_that_writes_its_inputs_is_refused_even_within_tolerance():
@@ -755,6 +755,25 @@ def test_a_host_capture_without_a_plain_window_says_why_the_hook_cost_is_unknown
     assert "unknown (the launcher ran no window with the hook off" in out
 
 
+def test_a_timeline_only_host_capture_times_the_nodes_without_perf(tmp_path):
+    """Read for its times alone (a trial timed in the model): no perf pass, nor perf at all."""
+    import json
+
+    tool, raw, _ = _host_capture(tmp_path)
+    launcher = tmp_path / "run.sh"
+    code, out = tool("capture", "run", str(launcher), "-o", str(raw), "--timeline-only",
+                     "--perf-bin", str(tmp_path / "no-perf"))  # fmt: skip
+    assert code == 0 and "host timeline only" in out, out
+    assert not (raw / "host_kernels.json").exists()
+    assert json.loads((raw / "run.json").read_text())["host"]["node_us"] == 120.0
+    code, out = tool("capture", "parse", str(raw), "-o", str(tmp_path / "capture.json"))
+    assert code == 0, out
+    by_op = {
+        o["framework_op"]: o for o in json.loads((tmp_path / "capture.json").read_text())["ops"]
+    }
+    assert by_op["MUL_MAT"]["device_us"] == 100.0
+
+
 def test_a_host_capture_with_no_sample_in_a_node_fails(tmp_path):
     _, _, (code, out) = _host_capture(tmp_path, empty=True)
     assert code == 1 and "no perf sample fell in a node" in out
@@ -871,7 +890,7 @@ def test_host_optimize_runs_no_unitrace(tmp_path):
     assert "--unitrace" in xe_forge_command(entry, "v", tmp_path, tmp_path, opts)
 
 
-def test_the_run_templates_speak_of_the_host_on_a_host():
+def test_the_run_templates_speak_of_the_host_on_a_host(tmp_path, monkeypatch):
     from xe_forge.claude.generator import render
     from xe_forge.frontend import cli
 
@@ -923,6 +942,16 @@ def test_the_run_templates_speak_of_the_host_on_a_host():
     capture = render("frontend-capture.md.j2", **native)
     assert '"unsupported": "model", "what": "m"' in capture and "contract.md" in capture
     assert cli.framework_kb("../native") == (None, {}) and cli.framework_kb("fw") == (None, {})
+    # A relative KNOWLEDGE_DIR (the checkout's .env) is the checkout's, from any directory.
+    monkeypatch.setenv("KNOWLEDGE_DIR", "./knowledge_base")
+    monkeypatch.chdir(tmp_path)
+    assert cli.framework_kb("native")[0] == kb
+    monkeypatch.setenv("KNOWLEDGE_DIR", str(tmp_path))  # one without frameworks/: the checkout's
+    assert cli.framework_kb("native")[0] == kb
+    # A knowledge base with no framework.yaml renders with the defaults.
+    bare = {**native, "framework_facts": {}}
+    assert "read README.md there first" in render("frontend-patch.md.j2", **bare)
+    assert "read README.md there first" in render("frontend-capture.md.j2", **bare)
 
 
 @pytest.mark.parametrize(

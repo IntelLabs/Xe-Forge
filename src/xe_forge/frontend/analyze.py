@@ -62,6 +62,7 @@ class Analysis:
     entries: list[Entry]
     decisions: dict[str, Decision]
     options: dict
+    wall_us: float | None = None  # a host's workload wall time, its per-node hook off
 
     def as_dict(self) -> dict:
         return {
@@ -87,18 +88,23 @@ class Analysis:
 
     def roofline(self) -> dict:
         """The whole model against its roofline: the bound of every workload that has one,
-        summed, over all the device time. A workload with no bound adds time and no bound, so
-        the efficiency is never overstated; ``bounded_share`` says how much of the time is
-        bounded at all."""
-        device = sum(d.mean_us * d.calls for d in self.decisions.values())
+        summed, over the time the model took -- on a host the workload's wall time with the
+        per-node hook off, which holds what runs between nodes too (barriers, dispatch); else
+        all the device time, unattributed launches included. A workload with no bound adds
+        time and no bound, so the efficiency is never overstated; ``bounded_share`` says how
+        much of the attributed time is bounded at all."""
+        attributed = sum(d.mean_us * d.calls for d in self.decisions.values())
         known = [d for d in self.decisions.values() if d.eff is not None]
         bounded = sum(d.mean_us * d.calls for d in known)
         bound = sum(d.mean_us * d.calls * d.eff for d in known)
+        took = self.wall_us or max(self.total_device_us or 0.0, attributed)
         return {
-            "device_us": round(device, 1),
+            "us": round(took, 1),
+            "of": "wall time, hook off" if self.wall_us else "device time",
+            "attributed_us": round(attributed, 1),
             "bound_us": round(bound, 1) if known else None,
-            "bounded_share": round(bounded / device, 4) if device else None,
-            "eff": round(bound / device, 4) if known and device else None,
+            "bounded_share": round(bounded / attributed, 4) if attributed else None,
+            "eff": round(bound / took, 4) if known and took else None,
         }
 
 
@@ -106,9 +112,9 @@ def roofline_line(r: dict) -> str:
     """One line of ``Analysis.roofline()``, for the run's output and SUMMARY.md."""
     if r.get("eff") is None:
         return "Model roofline: unknown (no workload has a bound)."
-    return (f"Model roofline: {r['device_us'] / 1e3:.1f} ms of device time against a bound "
-            f"of {r['bound_us'] / 1e3:.1f} ms, efficiency {r['eff']:.1%} "
-            f"({r['bounded_share']:.1%} of the time has a bound).")  # fmt: skip
+    return (f"Model roofline: {r['us'] / 1e3:.1f} ms ({r['of']}) against a bound of "
+            f"{r['bound_us'] / 1e3:.1f} ms, efficiency {r['eff']:.1%} "
+            f"({r['bounded_share']:.1%} of the op time has a bound).")  # fmt: skip
 
 
 AT_ROOFLINE = 0.8
@@ -489,6 +495,7 @@ def analyze(
     return Analysis(
         run_id=capture.run.get("id", ""),
         total_device_us=capture.run.get("total_device_us", 0.0),
+        wall_us=(capture.run.get("host") or {}).get("plain_us"),
         entries=entries,
         decisions=decisions,
         options={

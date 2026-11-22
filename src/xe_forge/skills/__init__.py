@@ -46,6 +46,9 @@ def _patch_scoring_args(pc) -> None:
                     help="the run's declared quantization: generate.sh runs again with "
                     "XE_FORGE_QUANTIZATION set, and its tokens are scored and reported, "
                     "never gated")  # fmt: skip
+    pc.add_argument("--require-build", action="store_true",
+                    help='patch.json must name a "build" script that builds $SRC into $VENV: '
+                    "the run builds kernel trials of the repository with it")  # fmt: skip
     pc.add_argument("--quantized-gate", choices=["dequantized"], default=None,
                     help="with --quantization: gate the quantized tokens against the original "
                     "model holding the weights generate.sh's quantized run decodes to "
@@ -325,6 +328,9 @@ def main():
     c_run.add_argument("launcher", help="executable that runs one profiled batch into $RAW_DIR")
     c_run.add_argument("-o", "--raw", required=True, help="raw/ directory to write")
     c_run.add_argument("--unitrace", default=os.environ.get("UNITRACE_BIN", "unitrace"))
+    c_run.add_argument("--timeline-only", action="store_true",
+                       help="on a host: the launcher's timeline alone, no perf pass -- a "
+                       "capture read for its node times, not for the code they ran")  # fmt: skip
     c_run.add_argument("--device", default=os.environ.get("XE_FORGE_DEVICE"),
                        help="the run's device (default $XE_FORGE_DEVICE); cpu: the launcher's "
                        "HostTimeline times the nodes and perf names their code")  # fmt: skip
@@ -374,6 +380,22 @@ def main():
     ps.add_argument("--out", required=True, help="where the record is written")
     for sub in (pc, ps):
         _patch_scoring_args(sub)
+
+    # -- inmodel --
+    p_in = subparsers.add_parser(
+        "inmodel", help="A kernel trial built into the run's framework and timed in the model"
+    )
+    p_in.add_argument("--run-dir", required=True, help="the xe-forge run's directory")
+    p_in.add_argument("--repo", required=True, help="the kernel's repository, the stack built it")
+    p_in.add_argument("--trial", required=True, help="a directory of repository files")
+    p_in.add_argument(
+        "--baseline", help="test_kernels/<kernel>/: the repository's files as they are"
+    )
+    p_in.add_argument("--record", help="records/<kernel>.json: each variant's captured workload")
+    p_in.add_argument("--variant", help="the spec variant answered")
+    p_in.add_argument("--workspace", default=".", help="where measurements are kept")
+    p_in.add_argument("--build-only", action="store_true",
+                      help="validate: the trial builds and the repository's tests pass")  # fmt: skip
 
     # -- bound --
     p_bound = subparsers.add_parser("bound", help="Each workload's efficiency against its bound")
@@ -433,6 +455,8 @@ def main():
         from xe_forge.skills.inputs import run
     elif args.skill == "fuse":
         from xe_forge.skills.fuse import run
+    elif args.skill == "inmodel":
+        from xe_forge.frontend.inmodel import run
 
     # A tool's verdict is its exit code: a failed check must not exit 0.
     return run(args)

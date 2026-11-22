@@ -217,6 +217,12 @@ Examples:
         "{kernel} {trial} {dsl} {stage} {workspace}",
     )
     host_group.add_argument(
+        "--repo-trials",
+        action="store_true",
+        help="Trials are directories of --kernel-repo's files at their repository paths; the "
+        "external benchmark builds the repository with them (in the model the kernel came from)",
+    )
+    host_group.add_argument(
         "--stack-python",
         type=str,
         help="Interpreter of the stack the kernel serves; the port-back agent then builds its "
@@ -330,6 +336,8 @@ def _load_config(args) -> Config:
         os.environ["EXTERNAL_VALIDATE"] = args.external_validate
     if getattr(args, "stack_python", None):
         os.environ["STACK_PYTHON"] = args.stack_python
+    if getattr(args, "repo_trials", False):
+        os.environ["REPO_TRIALS"] = "true"
     if getattr(args, "dataset_record", None):
         os.environ["DATASET_RECORD"] = args.dataset_record
     if getattr(args, "lessons", None):

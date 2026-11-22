@@ -4,9 +4,10 @@ kernels it spends its time in can be named and optimized. The framework's interp
 {{ python }}; {{ framework }} is installed there. Read its own code and docs for how to do
 this; nothing here knows that framework.
 {% set facts = framework_facts | default({}) or {} %}{% if framework_kb | default(none) %}
-{{ framework }} has its own knowledge base, {{ framework_kb }}: read {{ (facts.read_first or ["README.md"]) | join(", ") }} there first.
+{{ framework }} has its own knowledge base, {{ framework_kb }}: read {{ (facts.read_first | default(["README.md"])) | join(", ") }} there first.
 What it says about running a model, its launcher and its hooks overrides the search below.
-{% if facts.upstream is defined and not facts.upstream %}It has no upstream release: a model runs on it only once its engine for that model is
+{% if patched | default([]) %}{{ python }} runs on what the patches made for it: {% for p in patched %}`{{ p.get("package") }}` from {{ p.get("repo") }}{% if not loop.last %}, {% endif %}{% endfor %} (each patch's patch.json).
+{% endif %}{% if facts.upstream is defined and not facts.upstream and not patched | default([]) %}It has no upstream release: a model runs on it only once its engine for that model is
 written. With none in {{ python }} for {{ model }} ({{ framework }}'s package for it does not import), write
 {"unsupported": "model", "what": "{{ model }}", "reason": "no {{ framework }} engine for it yet"} as {{ answer }}
 and stop: the engine is written first, and you are run again on it.

@@ -58,7 +58,7 @@ def no_change_message(speedup: float, band: float, original_us: float, optimized
             "regression and not a win: try a change that moves the bottleneck.")  # fmt: skip
 
 
-# The host flush writes this many times the last-level cache of the CPUs a run may use.
+# The host flush reads this many times the last-level cache of the CPUs a run may use.
 HOST_FLUSH_LLC_MULTIPLE = 2
 
 
@@ -183,8 +183,10 @@ class KernelBenchExecutor:
 
     def _host_samples(self, call, args: tuple, iters: int) -> list[float]:
         """*iters* host timings of ``call.forward`` in microseconds, each after an untimed
-        restore and a write over twice the last-level cache of the CPUs this run may use
-        (none when that cache's size is unknown, as the result then says)."""
+        restore and a read over twice the last-level cache of the CPUs this run may use
+        (none when that cache's size is unknown, as the result then says). A read evicts
+        without leaving the cache full of modified lines, which a model's call does not
+        find either: a write would make every miss of the timed call write one back too."""
         import time
 
         if not hasattr(self, "_host_flush"):
@@ -199,11 +201,12 @@ class KernelBenchExecutor:
                 )
                 self._host_flush = None
             else:
-                self._host_flush = torch.empty(HOST_FLUSH_LLC_MULTIPLE * llc, dtype=torch.int8)
+                # Written once here, so its pages exist; each flush then only reads it.
+                self._host_flush = torch.zeros(HOST_FLUSH_LLC_MULTIPLE * llc, dtype=torch.int8)
                 # A fact for the reader, not a correction: the flush is a parallel write on
                 # torch's pool, whose threads may still be awake when the timed call starts.
                 self.flush_note = (
-                    f" Before each timed call a {self._host_flush.numel()}-byte flush ran on "
+                    f" Before each timed call a {self._host_flush.numel()}-byte read flush ran on "
                     f"torch's thread pool ({torch.get_num_threads()} threads), right before "
                     "the call."
                 )
@@ -211,7 +214,7 @@ class KernelBenchExecutor:
         for _ in range(iters):
             call.reset()
             if self._host_flush is not None:
-                self._host_flush.zero_()
+                self._host_flush.sum(dtype=torch.int64)
             t = time.perf_counter_ns()
             call.forward(*args)
             out.append((time.perf_counter_ns() - t) / 1e3)

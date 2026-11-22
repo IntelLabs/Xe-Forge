@@ -200,7 +200,8 @@ def _rescore(run_dir: Path, prove_dir: Path, arms: dict) -> tuple[str, str]:
     if q:  # reported as the check reports it, beside the check's own figure
         was = (json.loads((work / "check.json").read_text()).get("quantized") or {}
                if (work / "check.json").is_file() else {})  # fmt: skip
-        said += (f"; {q['quantization']} (reported, not gated): " + (
+        how = "gated on its dequantized weights" if q.get("gated") else "reported, not gated"
+        said += (f"; {q['quantization']} ({how}): " + (
             q["error"][:200] if q.get("error") else
             f"worst {q['worst']} nat, the check's {was.get('worst')}"))  # fmt: skip
     return "ok", said
