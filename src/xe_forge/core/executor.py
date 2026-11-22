@@ -203,7 +203,7 @@ class KernelBenchExecutor:
             else:
                 # Written once here, so its pages exist; each flush then only reads it.
                 self._host_flush = torch.zeros(HOST_FLUSH_LLC_MULTIPLE * llc, dtype=torch.int8)
-                # A fact for the reader, not a correction: the flush is a parallel write on
+                # A fact for the reader, not a correction: the flush is a parallel read on
                 # torch's pool, whose threads may still be awake when the timed call starts.
                 self.flush_note = (
                     f" Before each timed call a {self._host_flush.numel()}-byte read flush ran on "

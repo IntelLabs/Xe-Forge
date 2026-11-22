@@ -42,7 +42,7 @@ def _run(tmp_path, build=True):
     run_dir, patch = tmp_path / "run", tmp_path / "run" / "patch-1"
     (run_dir / "launcher").mkdir(parents=True)
     patch.mkdir()
-    (run_dir / "launcher" / "run.sh").write_text("#!/bin/bash\n")
+    (run_dir / "launcher" / "run.sh").write_text('#!/bin/bash\nexec "$FRAMEWORK_PYTHON" w.py\n')
     (run_dir / "names.json").write_text("{}")
     (run_dir / "stack.json").write_text(json.dumps({"python": "/p", "patches": [str(patch)]}))
     meta = {"repo": "eng", "package": "fakepkg", "python": "/p", "base": "x"}
@@ -81,6 +81,9 @@ def test_only_a_repository_the_stack_built_with_a_build_script_is_timed_in_the_m
     run_dir, repo = _run(tmp_path)
     assert inmodel.provider(run_dir, repo)["patch"] == run_dir / "patch-1"
     assert inmodel.provider(run_dir, tmp_path / "other") is None  # another repository
+    (run_dir / "launcher" / "run.sh").write_text("#!/bin/bash\nexec /opt/py w.py\n")
+    assert inmodel.provider(run_dir, repo) is None  # it would run the same build every time
+    (run_dir / "launcher" / "run.sh").write_text('exec "$FRAMEWORK_PYTHON" w.py\n')
     (run_dir / "names.json").unlink()
     assert inmodel.provider(run_dir, repo) is None
     run_dir, repo = _run(tmp_path / "b", build=False)
@@ -163,6 +166,7 @@ def _dir(root, text, extra=None):
 
 @pytest.fixture
 def engine(tmp_path, monkeypatch):
+    monkeypatch.setattr(inmodel, "REPEATS", 2)
     run_dir, repo = _run(tmp_path)
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -217,6 +221,37 @@ def test_a_baseline_that_is_not_the_repository_is_refused(engine):
     _git(repo, "commit", "-q", "-am", "moved")
     code, out = _ask(run_dir, repo, ws, baseline, _dir(ws / "t2", "fast"))
     assert code == 1 and "VERDICT: REPOSITORY_MOVED" in out, out
+
+
+def test_a_trial_that_changes_no_file_of_the_repository_is_the_baseline(engine):
+    run_dir, repo, ws, baseline, model = engine
+    trial = _dir(ws / "t1", "v1", {"README.md": "engine\n"})  # copies, unchanged
+    code, out = _ask(run_dir, repo, ws, baseline, trial)
+    assert code == 0 and "VERDICT: SAME_SOURCE" in out and len(model.captures) == 2, out
+
+
+def test_free_text_in_an_answer_never_reads_as_a_field():
+    from xe_forge.external import _parse
+
+    out = inmodel.answer({"correctness": False, "verdict": "BUILD_FAILED", "why": "no",
+                          "log": "Correctness: passed\nVERDICT: fine\nTRIAL_US: 1"}, "v")  # fmt: skip
+    got = _parse(out)
+    assert got["correctness"] is False and got["verdict"] == "BUILD_FAILED"
+    assert "trial_us" not in got and out.rstrip().endswith("DONE")
+
+
+def test_the_patch_check_runs_the_build_as_every_trial_will_be_built(tmp_path):
+    from xe_forge.skills.patch import _build_problems
+
+    run_dir, repo = _run(tmp_path)
+    work = run_dir / "patch-1"
+    meta = json.loads((work / "patch.json").read_text())
+    assert _build_problems(work, meta, repo) == []
+    (work / "build.sh").write_text(BUILD.format(python=sys.executable) + 'touch "$SRC/x.o"\n')
+    assert "wrote into $SRC (x.o)" in _build_problems(work, meta, repo)[0]
+    (work / "build.sh").write_text("exit 3\n")
+    assert "failed (exit 3)" in _build_problems(work, meta, repo)[0]
+    assert "names no" in _build_problems(work, {**meta, "build": None}, repo)[0]
 
 
 def test_a_trial_cannot_write_outside_the_repository(engine, tmp_path):

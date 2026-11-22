@@ -30,7 +30,10 @@ import tempfile
 from pathlib import Path
 from statistics import median
 
-REPEATS = int(os.environ.get("XE_FORGE_MODEL_REPEATS", "2"))  # captures per arm, ABBA
+# Captures per arm, in ABBA order. A ratio counts only beyond both arms' ranges summed: with
+# five captures an identical pair passes that by chance about once in five thousand shapes,
+# and a trial is judged at every weighted shape.
+REPEATS = int(os.environ.get("XE_FORGE_MODEL_REPEATS", "5"))
 
 
 def provider(run_dir: Path, repo: Path) -> dict | None:
@@ -49,7 +52,8 @@ def provider(run_dir: Path, repo: Path) -> dict | None:
             continue
         need = [run_dir / "launcher" / "run.sh", run_dir / "names.json", work / "check-args.json",
                 work / "check.json", work / meta["build"]]  # fmt: skip
-        if all(p.is_file() for p in need):
+        # A launcher that names its interpreter itself runs that build, never a trial's.
+        if all(p.is_file() for p in need) and "FRAMEWORK_PYTHON" in need[0].read_text():
             return {"patch": work, "meta": meta}
     return None
 
@@ -85,6 +89,16 @@ def _git(repo: Path, *args: str, text: bool = True) -> subprocess.CompletedProce
     return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=text)
 
 
+def _changed(repo: Path, trial: Path) -> list[str]:
+    """The repository paths whose content the trial changes from HEAD (new files included)."""
+    out = []
+    for rel, f in _overlay_files(trial):
+        got = _git(repo, "show", f"HEAD:{rel}", text=False)
+        if got.returncode != 0 or got.stdout != f.read_bytes():
+            out.append(rel)
+    return out
+
+
 def _baseline_problem(repo: Path, baseline: Path, head: str) -> str | None:
     """Why the baseline directory is not the repository at the checked commit, or None."""
     now = _git(repo, "rev-parse", "HEAD").stdout.strip()
@@ -117,8 +131,18 @@ def _tree(repo: Path, dest: Path, overlay: Path | None) -> None:
         target.write_bytes(f.read_bytes())
 
 
-def _build(facts: dict, src: Path, venv: Path, log: Path) -> str | None:
-    """Build ``src`` into ``venv`` with the patch's build script; why it failed, or None."""
+_WHERE = """import sys
+import {pkg}
+maps = open("/proc/self/maps").read().split()
+print(sorted({{p for p in maps if p.startswith("/") and ".so" in p}}))
+print({pkg}.__file__)"""
+
+
+def _build(facts: dict, src: Path, venv: Path, log: Path, clone: Path | None = None) -> str | None:
+    """Build ``src`` into ``venv`` with the patch's build script; why it failed, or None. The
+    package must then import from this build, and no library it loads may come from
+    ``clone`` (the repository the trees are made from): a build that links the clone's
+    library runs the same code for every trial."""
     work, meta = facts["patch"], facts["meta"]
     env = dict(os.environ, SRC=str(src), VENV=str(venv))
     with open(log, "w") as f:
@@ -128,14 +152,24 @@ def _build(facts: dict, src: Path, venv: Path, log: Path) -> str | None:
         return f"the build or the repository's tests failed (exit {code})"
     python = venv / "bin" / "python"
     pkg = meta.get("package", "")
-    where = subprocess.run([str(python), "-c", f"import {pkg}; print({pkg}.__file__)"],
-                           capture_output=True, text=True)  # fmt: skip
+    where = subprocess.run([str(python), "-c", _WHERE.format(pkg=pkg)], capture_output=True,
+                           text=True)  # fmt: skip
     if where.returncode != 0:
         return f"{python} cannot import {pkg!r}: {where.stderr.strip()[-300:]}"
-    if not Path(where.stdout.strip()).resolve().is_relative_to(venv.resolve()) and not Path(
-        where.stdout.strip()
-    ).resolve().is_relative_to(src.resolve()):
-        return f"{pkg} imports from {where.stdout.strip()}, not from this build"
+    lines = where.stdout.strip().splitlines()
+    got = Path(lines[-1]).resolve() if lines else Path("/")
+    if not (got.is_relative_to(venv.resolve()) or got.is_relative_to(src.resolve())):
+        return f"{pkg} imports from {got}, not from this build"
+    if clone is not None and len(lines) >= 2:
+        import ast
+
+        theirs = [
+            p
+            for p in ast.literal_eval(lines[-2])
+            if Path(p).resolve().is_relative_to(clone.resolve())
+        ]
+        if theirs:
+            return f"{pkg} loads {theirs[0]} from {clone}, not from this build"
     return None
 
 
@@ -160,13 +194,13 @@ def measure(run_dir: Path, facts: dict, repo: Path, record: dict, baseline: Path
     from xe_forge.frontend import ir, manifest
     from xe_forge.frontend.prove import _score_arm
 
-    same = _digest(baseline) == _digest(trial)
+    same = not _changed(repo, trial)  # the tree it builds, not the files it holds
     arms = {"A": None} if same else {"A": None, "B": trial}
     venvs = {}
     for arm, overlay in arms.items():
         src, venv, log = where / arm / "src", where / arm / "venv", where / f"build-{arm}.log"
         _tree(repo, src, overlay)
-        why = _build(facts, src, venv, log)
+        why = _build(facts, src, venv, log, clone=repo)
         if why and arm == "A":
             raise RuntimeError(f"the baseline arm: {why}; see {log}")
         if why:
@@ -220,7 +254,7 @@ def measure(run_dir: Path, facts: dict, repo: Path, record: dict, baseline: Path
     for variant in record["variants"]:
         a, sa = stats(times["A"][variant])
         b, sb = stats(times["B" if not same else "A"][variant])
-        variants[variant] = {"baseline_us": a, "trial_us": b, "spread": max(sa, sb)}
+        variants[variant] = {"baseline_us": a, "trial_us": b, "spread": round(sa + sb, 4)}
     return {"correctness": True, "same": same, "variants": variants, "repeats": repeats}
 
 
@@ -230,10 +264,10 @@ def answer(result: dict, variant: str) -> str:
              "captures per arm in ABBA order, the kernel's time per call from the engine's "
              "timeline (median)")  # fmt: skip
     if not result["correctness"]:
-        lines = ["CORRECTNESS: fail", f"VERDICT: {result['verdict']}", result.get("why", "")]
-        if result.get("log"):
-            lines.append(result["log"])
-        return "\n".join([*lines, "DONE"]) + "\n"
+        # Free text indented: a log line reading "CORRECTNESS: ..." is never a field here.
+        text = "\n".join(f"| {ln}" for ln in f"{result.get('why', '')}\n{result.get('log', '')}"
+                         .strip().splitlines())  # fmt: skip
+        return f"{text}\nCORRECTNESS: fail\nVERDICT: {result['verdict']}\nDONE\n"
     v = result["variants"].get(variant)
     if v is None:
         return (
@@ -250,51 +284,74 @@ def answer(result: dict, variant: str) -> str:
     return "\n".join([*lines, timer, "DONE"]) + "\n"
 
 
+def _say(verdict: str, text: str, ok: bool = False) -> str:
+    """A verdict in the contract, its free text indented so no line of it reads as a field."""
+    body = "\n".join(f"| {ln}" for ln in text.strip().splitlines())
+    return f"{body}\nCORRECTNESS: {'pass' if ok else 'fail'}\nVERDICT: {verdict}\nDONE\n".lstrip(
+        "\n"
+    )
+
+
+# A failure that may not recur on the same code (the model did not run or capture) is not kept.
+TRANSIENT = {"MODEL_FAILED"}
+
+
 def run(args) -> int:
+    import fcntl
+    import shutil
+
     run_dir, repo = Path(args.run_dir).resolve(), Path(args.repo).resolve()
     facts = provider(run_dir, repo)
     if facts is None:
-        print(f"inmodel: {run_dir} built no {repo.name} into its stack with a build script")
+        print(f"inmodel: {run_dir} built no {repo.name} into its stack with a build script, or "
+              "its launcher does not run under $FRAMEWORK_PYTHON")  # fmt: skip
         return 1
     trial = Path(args.trial).resolve()
-    head = json.loads((facts["patch"] / "check.json").read_text()).get("head", "")
-    if args.build_only:  # validate: the trial builds and the repository's tests pass
-        with tempfile.TemporaryDirectory() as tmp:
-            try:
-                _tree(repo, Path(tmp) / "src", trial)
-            except (ValueError, OSError, subprocess.CalledProcessError) as exc:
-                print(f"CORRECTNESS: fail\nVERDICT: BAD_TRIAL\n{exc}\nDONE")
-                return 1
-            log = Path(tmp) / "build.log"
-            why = _build(facts, Path(tmp) / "src", Path(tmp) / "venv", log)
-            if why:
-                print(f"CORRECTNESS: fail\nVERDICT: BUILD_FAILED\n{why}\n"
-                      f"{log.read_text(errors='replace')[-3000:]}\nDONE")  # fmt: skip
-                return 1
-            print("CORRECTNESS: pass\nVERDICT: BUILT\nDONE")
-            return 0
-    baseline = Path(args.baseline).resolve()
-    if why := _baseline_problem(repo, baseline, head):
-        verdict, _, text = why.partition(": ")
-        print(f"CORRECTNESS: fail\nVERDICT: {verdict}\n{text}\nDONE")
+    try:
+        _overlay_files(trial)
+    except ValueError as exc:
+        print(_say("BAD_TRIAL", str(exc)), end="")
         return 1
-    record = json.loads(Path(args.record).read_text())
-    sources = [_digest(baseline), _digest(trial), head, _digest(run_dir / "launcher" / "run.sh"),
-               _digest(facts["patch"] / facts["meta"]["build"]), str(REPEATS)]  # fmt: skip
-    key = hashlib.sha256("\0".join(sources).encode()).hexdigest()[:16]
-    where = Path(args.workspace).resolve() / ".inmodel" / key
-    done = where / "result.json"
-    if not done.is_file():
-        import shutil
-
-        shutil.rmtree(where, ignore_errors=True)  # a measurement that did not finish
-        where.mkdir(parents=True)
-        try:
-            result = measure(run_dir, facts, repo, record, baseline, trial, where)
-        except (RuntimeError, ValueError, OSError, subprocess.CalledProcessError) as exc:
-            print(f"inmodel: {exc}")  # no DONE: not the trial's, and nothing is recorded
+    head = json.loads((facts["patch"] / "check.json").read_text()).get("head", "")
+    store = Path(args.workspace).resolve() / ".inmodel"
+    store.mkdir(parents=True, exist_ok=True)
+    # One build or measurement at a time per workspace: a second caller (a retry, a parallel
+    # validate) waits for the first, rather than perturbing its captures or removing its tree.
+    with open(store / "lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if args.build_only:  # validate: the trial builds and the repository's tests pass
+            with tempfile.TemporaryDirectory() as tmp:
+                _tree(repo, Path(tmp) / "src", trial)
+                log = Path(tmp) / "build.log"
+                why = _build(facts, Path(tmp) / "src", Path(tmp) / "venv", log, clone=repo)
+                if why:
+                    print(_say("BUILD_FAILED", f"{why}\n{log.read_text(errors='replace')[-3000:]}"),
+                          end="")  # fmt: skip
+                    return 1
+            print(_say("BUILT", "", ok=True), end="")
+            return 0
+        baseline = Path(args.baseline).resolve()
+        if why := _baseline_problem(repo, baseline, head):
+            verdict, _, text = why.partition(": ")
+            print(_say(verdict, text), end="")
             return 1
-        done.write_text(json.dumps(result, indent=1) + "\n")
-    result = json.loads(done.read_text())
+        record = json.loads(Path(args.record).read_text())
+        sources = [_digest(baseline), _digest(trial), head, _digest(Path(args.record)),
+                   _digest(run_dir / "names.json"), _digest(run_dir / "launcher" / "run.sh"),
+                   _digest(facts["patch"] / facts["meta"]["build"]), str(REPEATS)]  # fmt: skip
+        where = store / hashlib.sha256("\0".join(sources).encode()).hexdigest()[:16]
+        done = where / "result.json"
+        if not done.is_file():
+            shutil.rmtree(where, ignore_errors=True)  # a measurement that did not finish
+            where.mkdir(parents=True)
+            try:
+                result = measure(run_dir, facts, repo, record, baseline, trial, where, REPEATS)
+            except (RuntimeError, ValueError, OSError, subprocess.CalledProcessError) as exc:
+                print(f"inmodel: {exc}")  # no DONE: not the trial's, and nothing is recorded
+                return 1
+            if result.get("verdict") not in TRANSIENT:
+                done.write_text(json.dumps(result, indent=1) + "\n")
+        else:
+            result = json.loads(done.read_text())
     print(answer(result, args.variant), end="")
     return 0 if result["correctness"] else 1

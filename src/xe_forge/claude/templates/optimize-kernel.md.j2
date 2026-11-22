@@ -27,8 +27,9 @@ unitrace_enabled, vtune_enabled). Follow the CLAUDE.md workflow exactly — ever
    Then dispatch the `kernel-locator` agent **once** and read the
    `{{ kernel_locator_profile_path }}` it writes. This kernel already exists in
    `{{ kernel_repo }}`; the profile says how it is registered, built, tested and
-   benchmarked today. If no benchmark exists, write one yourself first, following the
-   sibling pattern the profile points at, before starting the trial loop.
+   benchmarked today.{% if repo_trials | default(false) %} `benchmark` times a trial inside the model: write no
+   benchmark of your own.{% else %} If no benchmark exists, write one yourself first, following the
+   sibling pattern the profile points at, before starting the trial loop.{% endif %}
 {%- endif %}
 {%- if lessons %}
    Read every `*.md` under `{{ lessons.dir }}` too — what earlier runs measured on this

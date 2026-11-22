@@ -293,6 +293,33 @@ def _quantized_gate(q: dict, args, tol: float) -> list[str]:
     return []
 
 
+def _build_problems(work: Path, meta: dict, repo: Path) -> list[str]:
+    """``--require-build``: the patch's build script, run as the run will run it on every
+    kernel trial -- on a fresh tree of the repository at HEAD, into a venv of its own -- must
+    build it and pass the repository's tests, write nothing into the tree, and give a package
+    that imports from that build and loads no library from the clone."""
+    from xe_forge.frontend.inmodel import _build, _tree
+
+    script = work / str(meta.get("build") or "")
+    if not meta.get("build") or not script.is_file():
+        return ['patch.json names no "build" script beside it: the run builds kernel trials of '
+                "this repository with it"]  # fmt: skip
+    with tempfile.TemporaryDirectory() as tmp:
+        src, venv, log = Path(tmp) / "src", Path(tmp) / "venv", Path(tmp) / "build.log"
+        _tree(repo, src, None)
+        before = {p: p.stat().st_mtime_ns for p in src.rglob("*")}
+        why = _build({"patch": work, "meta": meta}, src, venv, log, clone=repo)
+        if why:
+            return [f"{script.name} on a fresh tree of the repository ($SRC) into a venv of its "
+                    f"own ($VENV): {why}: {log.read_text(errors='replace')[-600:]}"]  # fmt: skip
+        after = {p: p.stat().st_mtime_ns for p in src.rglob("*")}
+        wrote = sorted(str(p.relative_to(src)) for p in after if before.get(p) != after[p])
+        if wrote:
+            return [f"{script.name} wrote into $SRC ({', '.join(wrote[:5])}): it must build out of "
+                    "tree, a build directory under $VENV"]  # fmt: skip
+    return []
+
+
 def check(args) -> tuple[list[str], dict]:
     """(problems, record) of the patch in ``args.dir``."""
     work = Path(args.dir).resolve()
@@ -332,14 +359,8 @@ def check(args) -> tuple[list[str], dict]:
         problems.append(f"{python} cannot import {package!r}: {where.stderr.strip()[-300:]}")
     elif prefix and where.stdout.strip().startswith(prefix):
         problems.append(f"{package} imports from the framework's venv ({prefix}), not the patch")
-    if getattr(args, "require_build", False):
-        script = work / str(meta.get("build") or "")
-        if not meta.get("build") or not script.is_file():
-            problems.append('patch.json names no "build" script beside it: the run builds trials '
-                            "of this repository with it")  # fmt: skip
-        elif not all(v in script.read_text() for v in ("$SRC", "$VENV")):
-            problems.append(f"{script.name} does not read $SRC and $VENV: it must build any tree "
-                            "of the repository into any venv")  # fmt: skip
+    if getattr(args, "require_build", False) and not problems:
+        problems += _build_problems(work, meta, repo)
     if problems:
         return problems, record
     return score(work, meta, python, args, record), record

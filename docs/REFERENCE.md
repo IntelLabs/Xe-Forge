@@ -271,8 +271,8 @@ those files in place (the patch's `build.sh`, which also runs the repository's k
 runs the run's launcher on the build (`capture run --timeline-only`, then `capture parse
 --names`), and reads each variant's time per call as the spec's `captured_us` was read. A trial
 is correct when it builds, every variant runs as often as on the baseline, and its output
-passes `patch score` with the check's arguments. `XE_FORGE_MODEL_REPEATS` (2) captures per arm,
-in ABBA order; a ratio inside the captures' own spread is `INDISTINGUISHABLE`. The baseline
+passes `patch score` with the check's arguments. `XE_FORGE_MODEL_REPEATS` (5) captures per arm,
+in ABBA order; a ratio inside both arms' ranges summed is `INDISTINGUISHABLE`. The baseline
 must be the repository's files unchanged (`BASELINE_NOT_REPOSITORY`) at the commit the patch
 check judged (`REPOSITORY_MOVED`). One measurement serves every variant of a pair
 (`<workspace>/.inmodel/`). `--build-only` is the validator: the build and the tests alone.
@@ -364,7 +364,7 @@ Bedrock credentials (`AWS_BEARER_TOKEN_BEDROCK`, or `AWS_ACCESS_KEY_ID` +
 | `BENCHMARK_MIN_EFFECT` | 0.02 | Relative difference below which two timings count as equal; a finite number above 0 | `xe-forge`, `benchmark` |
 | `XE_FORGE_BUILTIN_BENCHMARK` | off | `1`/`true`/`yes`/`on` = `benchmark --builtin-benchmark` | `benchmark` |
 | `XE_FORGE_BASELINE_SLACK` | 1.5 | How much slower than the captured kernel a baseline may run before it is not that kernel | `benchmark` |
-| `XE_FORGE_MODEL_REPEATS` | 2 | Captures per arm of a trial timed in the model | `inmodel` |
+| `XE_FORGE_MODEL_REPEATS` | 5 | Captures per arm of a trial timed in the model | `inmodel` |
 | `XE_FORGE_BENCHMARK_TIMEOUT` | `EXTERNAL_TIMEOUT` | Seconds per shape before `benchmark` gives up on a hang | `benchmark` |
 | `MAX_ATTEMPTS_PER_STAGE` | 3 | Read but unused | `xe-forge` |
 | `VALIDATE_EACH_STAGE` | true | Read but unused | `xe-forge` |

@@ -25,7 +25,7 @@ src/                    the core: safetensors, weight binding, hooks, the model 
 src/kernels/cpu/        host kernels, C++ (intrinsics where the profile says)
 src/kernels/sycl/       Intel GPU kernels, SYCL, built only for a GPU device
 python/<package>/       the binding (below)
-CMakeLists.txt          builds build/libxf.so; -DXF_SYCL=ON adds the SYCL kernels (icpx -fsycl)
+CMakeLists.txt          builds libxf.so (out of tree: build.sh gives it its directory); -DXF_SYCL=ON adds the SYCL kernels (icpx -fsycl)
 ```
 
 - The core calls kernels only through `xf_kernels.h`: one function per op, taking the
@@ -58,8 +58,8 @@ gates: write it this way from the start.
 
 `build.sh` beside patch.json (patch.json `"build": "build.sh"`) builds any tree of the
 repository into any venv: `SRC` (default: the clone) is the tree, `VENV` (default: `./venv`)
-the venv layered over the framework's interpreter. It builds out of tree, writes nothing into
-`$SRC`, and then runs the repository's own kernel tests against that build, exiting nonzero
+the venv layered over the framework's interpreter. It builds out of tree, in a build
+directory under `$VENV`, writes nothing into `$SRC`, and then runs the repository's own kernel tests against that build, exiting nonzero
 when the build or a test fails. The run builds every kernel trial with it, each in a tree of
 its own, and times the trial by running the model on that build, so a kernel is optimized
 where it runs: inside the engine's parallel region, at the model's own shapes. Keep the tests
@@ -75,8 +75,9 @@ engine runs where it was put.
 ## Binding
 
 `python/<package>` is imported from a venv layered over the framework's interpreter (which
-holds torch and transformers), with nothing installed into that interpreter. It loads
-`build/libxf.so` with ctypes and offers:
+holds torch and transformers), with nothing installed into that interpreter. On import it
+loads the library its own build made (under `$VENV`, see Build) with ctypes, never one from
+the clone, and offers:
 
 ```python
 Engine(weights_dir, device="cpu" | "xpu" | "xpu:N", threads=None)

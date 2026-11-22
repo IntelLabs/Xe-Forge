@@ -213,9 +213,14 @@ like.
 - **The profile is the map, not the territory.** `{{ kernel_locator_profile_path }}`
   names the real implementation file, its build target and its existing test/benchmark
   (or says plainly that one is missing). Trust it over guessing from the op's name.
+{%- if repo_trials | default(false) %}
+- **The benchmark is the model.** `benchmark` builds the repository with a trial and runs
+  the model on it; write no benchmark of your own.
+{%- else %}
 - **If no benchmark exists**, write one yourself, following the closest sibling pattern
   the profile points at, before starting the trial loop — an unmeasured op cannot be
   optimized, only guessed at.
+{%- endif %}
 - **What a trial may change — every win must port back.** The winner is delivered as a patch,
   so a trial may only change what a patch can carry:
   - anything inside the op — a different algorithm, fused or eliminated launches, new kernels

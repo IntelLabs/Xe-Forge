@@ -67,7 +67,8 @@ def generate_workspace(
     device = config.device_config.device
     # Trials as the repository's own files, built into it and timed in the model: a baseline,
     # a trial and the output are directories at the repository's paths, not one source file.
-    repo_trials = bool(config.external.repo_trials and config.external.kernel_repo)
+    repo_trials = bool(config.external.repo_trials and config.external.kernel_repo
+                       and config.external.benchmark)  # fmt: skip
     ext = "" if repo_trials else _kernel_ext(dsl)
     # What the session is told its numbers come from. The commands it runs are the
     # same either way -- the delegation happens inside xe-forge-skill -- but the
