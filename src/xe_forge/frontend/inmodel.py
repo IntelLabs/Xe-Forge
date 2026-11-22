@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -131,13 +132,6 @@ def _tree(repo: Path, dest: Path, overlay: Path | None) -> None:
         target.write_bytes(f.read_bytes())
 
 
-_WHERE = """import sys
-import {pkg}
-maps = open("/proc/self/maps").read().split()
-print(sorted({{p for p in maps if p.startswith("/") and ".so" in p}}))
-print({pkg}.__file__)"""
-
-
 def _build(facts: dict, src: Path, venv: Path, log: Path, clone: Path | None = None) -> str | None:
     """Build ``src`` into ``venv`` with the patch's build script; why it failed, or None. The
     package must then import from this build, and no library it loads may come from
@@ -152,7 +146,9 @@ def _build(facts: dict, src: Path, venv: Path, log: Path, clone: Path | None = N
         return f"the build or the repository's tests failed (exit {code})"
     python = venv / "bin" / "python"
     pkg = meta.get("package", "")
-    where = subprocess.run([str(python), "-c", _WHERE.format(pkg=pkg)], capture_output=True,
+    from xe_forge.claude.generator import render
+
+    where = subprocess.run([str(python), "-c", render("inmodel-where.py.j2", pkg=pkg)], capture_output=True,
                            text=True)  # fmt: skip
     if where.returncode != 0:
         return f"{python} cannot import {pkg!r}: {where.stderr.strip()[-300:]}"
@@ -187,14 +183,49 @@ def _capture(run_dir: Path, out: Path, python: Path) -> Path | None:
     return cap
 
 
+def _check_one(module: str, python: Path, kernel: str, shape: dict) -> tuple[int, str]:
+    """(exit code, what it said) of the engine's ``kernel_check`` on one shape."""
+    argv = [str(python), "-m", module, "--kernel", kernel, "--dims", json.dumps(shape["dims"]),
+            "--dtype", str(shape.get("dtype")), "--rtol", str(shape["rtol"]), "--atol",
+            str(shape["atol"])]  # fmt: skip
+    got = subprocess.run(argv, capture_output=True, text=True)
+    return got.returncode, (got.stdout + got.stderr).strip()[-1500:]
+
+
+def _numeric(facts: dict, pythons: dict, kernel: str, spec: dict, record: dict) -> str | None:
+    """The trial's kernel against its PyTorch reference at every recorded variant's shape and
+    tolerance (the engine's ``kernel_check``, patch.json): why it fails, or None. A shape the
+    baseline's kernel fails too says nothing of the trial: that raises (the check's fault)."""
+    module = facts["meta"].get("kernel_check")
+    if not module:
+        raise RuntimeError(
+            'patch.json names no "kernel_check": no kernel can be checked on its own'
+        )
+    arm = "B" if "B" in pythons else "A"
+    for variant in record["variants"]:
+        for shape in spec.get(variant) or []:
+            code, said = _check_one(module, pythons[arm], kernel, shape)
+            if code == 0:
+                continue
+            if arm == "A" or _check_one(module, pythons["A"], kernel, shape)[0] != 0:
+                raise RuntimeError(f"the baseline's kernel fails its own check at {variant} "
+                                   f"{shape['dims']}, so the check is not judging it:\n{said}")  # fmt: skip
+            return (f"{variant} {shape['dims']}: not within rtol {shape['rtol']}, atol "
+                    f"{shape['atol']} of its reference, where the baseline's is:\n{said}")  # fmt: skip
+    return None
+
+
 def measure(run_dir: Path, facts: dict, repo: Path, record: dict, baseline: Path,
-            trial: Path, where: Path, repeats: int = REPEATS) -> dict:  # fmt: skip
+            trial: Path, where: Path, repeats: int = REPEATS, spec: dict | None = None) -> dict:  # fmt: skip
     """The result of one (baseline, trial) pair at every variant of ``record``. Raises
     RuntimeError on what is not the trial's (the baseline arm does not build or run)."""
     from xe_forge.frontend import ir, manifest
     from xe_forge.frontend.prove import _score_arm
 
     same = not _changed(repo, trial)  # the tree it builds, not the files it holds
+    (where / "trial.digest").write_text(_digest(trial))  # a profile of it reuses its build
+    if same:
+        (where / "same").touch()
     arms = {"A": None} if same else {"A": None, "B": trial}
     venvs = {}
     for arm, overlay in arms.items():
@@ -207,6 +238,12 @@ def measure(run_dir: Path, facts: dict, repo: Path, record: dict, baseline: Path
             return {"correctness": False, "verdict": "BUILD_FAILED",
                     "why": why, "log": log.read_text(errors="replace")[-3000:]}  # fmt: skip
         venvs[arm] = venv / "bin" / "python"
+    # The kernel on its own first, against its reference at every shape: cheap, and a wrong
+    # kernel is refused before the model is run on it.
+    if spec is not None:
+        why = _numeric(facts, venvs, record.get("definition", ""), spec, record)
+        if why:
+            return {"correctness": False, "verdict": "NUMERIC_FAILED", "why": why}
     times: dict[str, dict[str, list[float]]] = {a: {} for a in arms}
     calls: dict[str, dict[str, int]] = {a: {} for a in arms}
     for r in range(1, repeats + 1):
@@ -233,8 +270,12 @@ def measure(run_dir: Path, facts: dict, repo: Path, record: dict, baseline: Path
             return {"correctness": False, "verdict": "WORK_DIFFERS",
                     "why": f"{variant} ran {n} times on the trial's build, {calls['A'][variant]} "
                            "on the baseline's: the model did not do the same work"}  # fmt: skip
-    scored = _score_arm(facts["patch"], json.loads((facts["patch"] / "check-args.json").read_text()),
-                        str(venvs["B" if not same else "A"]), where / "output.json")  # fmt: skip
+    # The tokens only: the step report belongs to the patch check and prove, not to a trial.
+    argv = [
+        a for a in json.loads((facts["patch"] / "check-args.json").read_text()) if a != "--steps"
+    ]
+    scored = _score_arm(facts["patch"], argv, str(venvs["B" if not same else "A"]),
+                        where / "output.json")  # fmt: skip
     if scored is None or scored.get("unscored") or scored.get("exit") not in (0, 1):
         raise RuntimeError(f"the output could not be scored ({where / 'output.json'})")
     if not scored["pass"]:
@@ -256,6 +297,121 @@ def measure(run_dir: Path, facts: dict, repo: Path, record: dict, baseline: Path
         b, sb = stats(times["B" if not same else "A"][variant])
         variants[variant] = {"baseline_us": a, "trial_us": b, "spread": round(sa + sb, 4)}
     return {"correctness": True, "same": same, "variants": variants, "repeats": repeats}
+
+
+# The profile's events: where a kernel's cycles go, how many instructions retire in them, and
+# what misses. Sampled per symbol inside the model's own steps.
+EVENTS = os.environ.get("XE_FORGE_MODEL_EVENTS", "cycles,instructions,cache-misses,branch-misses")
+_SAMPLE = re.compile(
+    r"^\s*(\d+)\s+(\d+)\.(\d{9}):\s+(\d+)\s+(\S+?):\s+[0-9a-f]+\s+(.*)\s+\(([^()]*)\)\s*$"
+)
+
+
+def _event(name: str) -> str:
+    """perf's printed event name as asked for: ``cycles`` of ``cycles:u`` or ``cpu_core/cycles/``."""
+    if "/" in name:
+        name = name.split("/")[1] or name
+    return name.split(":")[0]
+
+
+def _built(store: Path, trial: Path) -> Path | None:
+    """A venv a measurement already built for this trial's content, or None."""
+    want = _digest(trial)
+    for mark in store.glob("*/trial.digest"):
+        if mark.read_text() == want:
+            arm = "A" if (mark.parent / "same").exists() else "B"
+            venv = mark.parent / arm / "venv"
+            if (venv / "bin" / "python").exists():
+                return venv
+    return None
+
+
+def profile(run_dir: Path, facts: dict, repo: Path, trial: Path, where: Path, kernel: str) -> str:
+    """The model on this trial's build under ``perf record`` (:data:`EVENTS`), every sample in a
+    step of a timed window kept: per symbol, its events and instructions per cycle, the
+    kernel's own symbols first; per step type, its time per call (``profile.json`` holds each
+    step's symbols too). Raises RuntimeError when the build or the model does not run."""
+    import bisect
+
+    from xe_forge.skills.capture import _env, _launch
+
+    venv = _built(where.parent, trial)
+    if venv is None:
+        src, venv, log = where / "src", where / "venv", where / "build.log"
+        _tree(repo, src, trial)
+        if why := _build(facts, src, venv, log, clone=repo):
+            raise RuntimeError(f"{why}; see {log}")
+    raw, data = where / "raw", where / "perf.data"
+    raw.mkdir()
+    perf = os.environ.get("PERF_BIN", "perf")
+    cmd = [perf, "record", "-q", "-e", EVENTS, "-k", "CLOCK_MONOTONIC", "-o", str(data), "--"]
+    env = dict(_env(), FRAMEWORK_PYTHON=str(venv / "bin" / "python"))
+    code = _launch(run_dir / "launcher" / "run.sh", raw, cmd, where / "launcher.log", env, where)
+    if code or not data.is_file() or not (raw / "host_timeline.json").is_file():
+        raise RuntimeError(
+            f"perf record or the model failed (exit {code}); see {where / 'launcher.log'}"
+        )
+    timeline = json.loads((raw / "host_timeline.json").read_text())
+    timed = [w for w in timeline.get("windows") or [] if w.get("timed")]
+    spans = sorted((s, e, name) for w in timed for name, s, e in w.get("nodes") or [])
+    starts = [s for s, _, _ in spans]
+    steps: dict[str, dict] = {}
+    for s, e, name in spans:
+        st = steps.setdefault(name, {"us": 0.0, "calls": 0})
+        st["us"] += (e - s) / 1e3
+        st["calls"] += 1
+    counts: dict[str, dict[str, dict[str, float]]] = {}  # step -> symbol -> event -> count
+    proc = subprocess.Popen([perf, "script", "-i", str(data), "-F",
+                             "tid,time,event,period,ip,sym,dso", "--ns"],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)  # fmt: skip
+    assert proc.stdout is not None
+    for line in proc.stdout:  # streamed: every thread's samples can exceed memory
+        m = _SAMPLE.match(line)
+        if not m:
+            continue
+        t = int(m[2]) * 10**9 + int(m[3])
+        i = bisect.bisect_right(starts, t) - 1
+        if i < 0 or t > spans[i][1]:
+            continue  # outside every step: load, warm-up, between steps
+        dso = m[7] if m[7].startswith("[") else f"[{Path(m[7]).name}]"
+        sym = counts.setdefault(spans[i][2], {}).setdefault(f"{m[6]} {dso}", {})
+        ev = _event(m[5])
+        sym[ev] = sym.get(ev, 0.0) + int(m[4])
+    err = proc.stderr.read() if proc.stderr else ""
+    if proc.wait() != 0:
+        raise RuntimeError(f"perf script failed: {err.strip()[-300:]}")
+    data.unlink()  # large, and the counts are kept
+    per_sym: dict[str, dict[str, float]] = {}
+    for syms in counts.values():
+        for sym, evs in syms.items():
+            for ev, n in evs.items():
+                per_sym.setdefault(sym, {}).setdefault(ev, 0.0)
+                per_sym[sym][ev] += n
+    events = [e for e in EVENTS.split(",") if any(e in v for v in per_sym.values())]
+    if not events:
+        raise RuntimeError(
+            f"perf recorded no sample of {EVENTS} inside a step: {err.strip()[-300:]}"
+        )
+    first = events[0]
+    order = sorted(per_sym, key=lambda s: (kernel not in s, -per_sym[s].get(first, 0.0)))[:15]
+    total = sum(v.get(first, 0.0) for v in per_sym.values()) or 1.0
+    lines = [f"In-model profile of {trial.name} ({', '.join(events)}; samples inside the model's "
+             "steps of its timed windows):", f"{'symbol':60s} {first + ' %':>10s} " +
+             " ".join(f"{e:>14s}" for e in events) + "        IPC"]  # fmt: skip
+    for sym in order:
+        v = per_sym[sym]
+        ipc = (v.get("instructions", 0) / v["cycles"]) if v.get("cycles") else None
+        lines.append(f"{sym[:60]:60s} {100 * v.get(first, 0.0) / total:9.1f}% "
+                     + " ".join(f"{v.get(e, 0.0):14.3g}" for e in events)
+                     + (f" {ipc:10.2f}" if ipc is not None else ""))  # fmt: skip
+    lines.append("Steps (time per call under perf; profile.json holds each step's symbols):")
+    for name, st in sorted(steps.items(), key=lambda kv: -kv[1]["us"])[:10]:
+        lines.append(f"  {name}: {st['us'] / max(st['calls'], 1):.2f} us x {st['calls']}")
+    text = "\n".join(lines) + "\n"
+    (where / "profile.txt").write_text(text)
+    (where / "profile.json").write_text(json.dumps(
+        {"events": events, "symbols": per_sym, "steps": steps, "by_step": counts}, indent=1))  # fmt: skip
+    return text
 
 
 def answer(result: dict, variant: str) -> str:
@@ -312,6 +468,14 @@ def run(args) -> int:
     except ValueError as exc:
         print(_say("BAD_TRIAL", str(exc)), end="")
         return 1
+    # A trial is judged by the repository's check and references, never by its own edits to them.
+    module = str(facts["meta"].get("kernel_check") or "")
+    own = [p for p in _changed(repo, trial) if p.startswith("reference/")
+           or (module and p.endswith(module.split(".")[-1] + ".py"))]  # fmt: skip
+    if own:
+        print(_say("BAD_TRIAL", f"the trial changes what checks it ({', '.join(own)}): a trial "
+                   "changes kernels, never their references or their check"), end="")  # fmt: skip
+        return 1
     head = json.loads((facts["patch"] / "check.json").read_text()).get("head", "")
     store = Path(args.workspace).resolve() / ".inmodel"
     store.mkdir(parents=True, exist_ok=True)
@@ -319,6 +483,17 @@ def run(args) -> int:
     # validate) waits for the first, rather than perturbing its captures or removing its tree.
     with open(store / "lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        if args.profile:  # the trial's build in the model, under perf
+            where = store / f"profile-{_digest(trial)[:16]}"
+            shutil.rmtree(where, ignore_errors=True)
+            where.mkdir(parents=True)
+            try:
+                print(profile(run_dir, facts, repo, trial, where, args.kernel or ""), end="")
+            except (RuntimeError, ValueError, OSError, subprocess.CalledProcessError) as exc:
+                print(f"inmodel: profile failed: {exc}")
+                return 1
+            print(f"Artifacts: {where}")
+            return 0
         if args.build_only:  # validate: the trial builds and the repository's tests pass
             with tempfile.TemporaryDirectory() as tmp:
                 _tree(repo, Path(tmp) / "src", trial)
@@ -336,7 +511,11 @@ def run(args) -> int:
             print(_say(verdict, text), end="")
             return 1
         record = json.loads(Path(args.record).read_text())
+        import yaml
+
+        spec = yaml.safe_load(Path(args.spec).read_text()) if args.spec else None
         sources = [_digest(baseline), _digest(trial), head, _digest(Path(args.record)),
+                   _digest(Path(args.spec)) if args.spec else "",
                    _digest(run_dir / "names.json"), _digest(run_dir / "launcher" / "run.sh"),
                    _digest(facts["patch"] / facts["meta"]["build"]), str(REPEATS)]  # fmt: skip
         where = store / hashlib.sha256("\0".join(sources).encode()).hexdigest()[:16]
@@ -345,7 +524,8 @@ def run(args) -> int:
             shutil.rmtree(where, ignore_errors=True)  # a measurement that did not finish
             where.mkdir(parents=True)
             try:
-                result = measure(run_dir, facts, repo, record, baseline, trial, where, REPEATS)
+                result = measure(run_dir, facts, repo, record, baseline, trial, where, REPEATS,
+                                 spec)  # fmt: skip
             except (RuntimeError, ValueError, OSError, subprocess.CalledProcessError) as exc:
                 print(f"inmodel: {exc}")  # no DONE: not the trial's, and nothing is recorded
                 return 1

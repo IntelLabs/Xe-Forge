@@ -9,7 +9,10 @@ launcher timed, and "host" holds what perf sampled while each ran: CPU time per 
 shared object, summed over every thread and every node of that name -- one symbol can serve
 several shapes, and its "us" and "calls" are the sampled pass's, which can be shorter than
 the measured run. The symbol, not the node name, is what to find in the source.
-
+{% if framework_kb | default(none) %}{% set facts = framework_facts | default({}) or {} %}
+{{ framework }} has its own knowledge base, {{ framework_kb }}: read {{ (facts.read_first | default(["README.md"])) | join(", ") }} there first.
+What it says about its ops' costs overrides the rules for "cost" below.
+{% endif %}
 For each key, find where the op is implemented -- the registration of its namespace, the
 kernels it launches, the source behind them -- by reading the framework and the
 repositories, not by guessing from names. A kernel whose source is in a repository that is

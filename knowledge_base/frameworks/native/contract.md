@@ -4,7 +4,11 @@ The run, `patch check` and the capture measure an engine only through this contr
 
 ## Repository
 
-- A new git repository under the run's `--kernel-repos`, named for the model
+- Only the patch step builds an engine for a run: the capture runs what a patch made and
+  passed its check, never a build of its own from a repository it finds.
+- When the model's repository is already under `--kernel-repos`, the patch reuses it: its
+  base and branch as they are, the engine brought up to this contract in new commits on top.
+- Otherwise a new git repository under the run's `--kernel-repos`, named for the model
   (`native-<model>`). Its first commit is the skeleton: the runtime from `runtime/` brought
   into the layout below, the build, and the binding with no model in it. That commit is the
   patch's base; the model's engine is committed on top of it, on a branch `xe-forge/<model>`,
@@ -66,6 +70,40 @@ where it runs: inside the engine's parallel region, at the model's own shapes. K
 quick (seconds) and covering every kernel at the shapes the model serves, decode and prefill:
 they are each trial's numeric check beside the tokens.
 
+## Kernel references and checks
+
+Every kernel the core calls has its op as PyTorch, and a check that holds the built kernel
+to it. The run checks every kernel trial with them, at every shape the model serves, before
+timing it; the PyTorch op is also the reference the agent optimizing that kernel reads.
+
+- `reference/<kernel>.py`, named by the kernel's symbol (`reference/xf_cpu_linear.py`): the
+  op copied from the model's code with its semantics exact (norm placement and offsets,
+  rotary layout, scaling, masks, how the checkpoint packs the weight), as `class
+  Model(torch.nn.Module)` with `get_init_inputs(**dims)` and `get_inputs(**dims)`. The dims are
+  the spec's: each argument's sizes named by its role on the timeline and its index
+  (`X_D0`, `WEIGHT_D1`), plus the named sizes (`M`, `N`, `K`). The variants of one kernel
+  may name different arguments (a bias, a residual present or not): `get_inputs(**dims)`
+  accepts every set the spec holds and builds what the names say. Inputs are built as the
+  model builds them -- structured inputs (positions from the cache length, fused projections'
+  segment sizes from the model's config) as the model calls the kernel. `--dtype` is the
+  activations' dtype; weights are the dtype the engine stores them in.
+- patch.json `"kernel_check": "<package>.kernel_check"`: `python -m <module> --kernel <kernel>
+  --dims '<json>' --dtype <dtype> --rtol R --atol A` builds those inputs, runs the kernel of
+  this build (through the library, its own thread team, on its own) and the reference, prints
+  the largest absolute and relative difference, and exits 0 when the kernel is within the
+  tolerance everywhere, 1 otherwise. `--help` exits 0.
+- `build.sh`'s tests may be these checks at a few shapes; the run's check covers every shape.
+
+## Costs
+
+The engine chooses its kernels' arithmetic, and the checks judge it, so a cost bounds what
+any engine the checks accept must do, not what this kernel does today. A matmul's products
+can run in the dtype the weights are stored in: when that dtype is narrower than the
+activations' and has a matmul to measure, it is the cost's `"compute"`, whatever dtype the
+activations hold. Low-bit weights take the dtype their products run in (integer dot
+products). The flops stay the operation's count. A kernel that splits the activations to
+keep their accuracy does a multiple of that work, and its efficiency shows the multiple.
+
 ## Threads and placement
 
 The engine takes the thread count it is given (the binding's `threads`, else the OpenMP
@@ -115,8 +153,8 @@ The core calls `xf_hook_step` after every step of the forward pass, from one thr
 two barriers when the step runs inside a parallel region.
 
 - `XF_DUMP=dir`: the outputs of the first forward call (`XF_DUMP_CALLS=n` for more) as raw
-  fp32, plus `dir/index.jsonl`, one line per step: `block`, `layer`, `step`, `op`, `module`,
-  `rows`, `numel`, `file`. `module` names the reference submodule whose forward output equals
+  fp32, plus `dir/index.jsonl`, one line per step: `call` (the forward's index), `block`,
+  `layer`, `step`, `op`, `module`, `rows`, `numel`, `file`. `module` names the reference submodule whose forward output equals
   this output, flattened per token, `{i}` standing for `layer`; `""` where none does. `rows` is
   the number of tokens, or 1 for a value holding only the last position.
 - `XF_TIMELINE=file` (or `Engine.timeline`): one JSON line per step of every forward, in
@@ -147,6 +185,11 @@ With none of them set a step pays no hook cost and no synchronization.
   incremental decoding giving the tokens a full recompute gives, and a small random model of
   the same architecture (every layer kind and ratio kept, windows below the prompt) before the
   real one.
-- Each kernel trial: `build.sh` (the build and the repository's kernel tests), the same work
-  in the model at every shape, and the tokens scored again on that build.
+- Each kernel trial: `build.sh` (the build and the repository's kernel tests), the kernel
+  against its reference at every shape (`kernel_check`), the same work in the model at every
+  shape, and the tokens scored again on that build. It is profiled in the model too: per
+  symbol its cycles, instructions, IPC and misses inside the steps.
+- The whole engine against the reference model, step by step: `patch check` dumps the first
+  forward (`XF_DUMP`) and reports every step's error against the module it names, and the
+  worst, beside the tokens; `--prove` reports it for the merged engine.
 - `--prove`: the same scoring again on the build with the run's winning kernels.

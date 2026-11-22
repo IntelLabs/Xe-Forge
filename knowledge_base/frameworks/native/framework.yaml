@@ -18,3 +18,7 @@ read_first: [README.md, contract.md]
 # repository with the patch's build script (contract.md, "Build"), and the run's launcher runs
 # the model on that build. patch check requires the script.
 trial_build: true
+
+# The engine dumps each step of a forward (contract.md, XF_DUMP): patch check reports every
+# step against the reference model's module it names, and the worst, beside the tokens.
+step_dump: true

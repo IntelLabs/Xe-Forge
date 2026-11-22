@@ -196,6 +196,10 @@ def _rescore(run_dir: Path, prove_dir: Path, arms: dict) -> tuple[str, str]:
     if b.get("worst") is None:  # no tokens: an output compared as the check compares it
         return "ok", f"output on arm B passes its check again ({b.get('reference')})"
     said = f"tokens on arm B pass their check again (worst per sequence {b['worst']} nat)"
+    w = (b.get("steps") or {}).get("worst")
+    if w:  # reported: which step of the merged engine is furthest from the reference's module
+        said += (f"; worst step against the reference {w['block']}.{w['layer']}.{w['step']} "
+                 f"(relative error {w['rel_err']:.3g})")  # fmt: skip
     q = b.get("quantized")
     if q:  # reported as the check reports it, beside the check's own figure
         was = (json.loads((work / "check.json").read_text()).get("quantized") or {}

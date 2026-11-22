@@ -46,6 +46,10 @@ def _patch_scoring_args(pc) -> None:
                     help="the run's declared quantization: generate.sh runs again with "
                     "XE_FORGE_QUANTIZATION set, and its tokens are scored and reported, "
                     "never gated")  # fmt: skip
+    pc.add_argument("--steps", action="store_true",
+                    help="report the engine's first forward step by step (generate.sh with "
+                    "XF_DUMP) against the reference model's modules each step names, in float32; "
+                    "never gated")  # fmt: skip
     pc.add_argument("--require-build", action="store_true",
                     help='patch.json must name a "build" script that builds $SRC into $VENV: '
                     "the run builds kernel trials of the repository with it")  # fmt: skip
@@ -393,7 +397,12 @@ def main():
     )
     p_in.add_argument("--record", help="records/<kernel>.json: each variant's captured workload")
     p_in.add_argument("--variant", help="the spec variant answered")
+    p_in.add_argument("--spec", help="the kernel's spec: each variant's shape and tolerance")
     p_in.add_argument("--workspace", default=".", help="where measurements are kept")
+    p_in.add_argument("--profile", action="store_true",
+                      help="the trial's build in the model under perf: per symbol its events "
+                      "and instructions per cycle, per step its time per call")  # fmt: skip
+    p_in.add_argument("--kernel", help="the kernel's symbol, listed first in a profile")
     p_in.add_argument("--build-only", action="store_true",
                       help="validate: the trial builds and the repository's tests pass")  # fmt: skip
 

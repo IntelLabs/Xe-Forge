@@ -26,6 +26,18 @@ BUILD = """set -e
 mkdir -p "$VENV/bin" "$VENV/lib/fakepkg"
 : > "$VENV/lib/fakepkg/__init__.py"
 cp "$SRC/src/k.cpp" "$VENV/lib/fakepkg/k.cpp"
+cat > "$VENV/lib/fakecheck.py" <<'EOS'
+import argparse, json, pathlib, sys
+a = argparse.ArgumentParser()
+for f in ("--kernel", "--dims", "--dtype", "--rtol", "--atol"):
+    a.add_argument(f)
+a = a.parse_args()
+kernel = (pathlib.Path(__file__).parent / "fakepkg" / "k.cpp").read_text().strip()
+dims = json.loads(a.dims)
+bad = (kernel == "wrong" and dims["M"] == 1) or "BROKEN" in dims
+print(f"max_abs {{1.0 if bad else 0.0}}")
+sys.exit(1 if bad else 0)
+EOS
 printf '#!/bin/bash\\nPYTHONPATH=%s exec {python} "$@"\\n' "$VENV/lib" > "$VENV/bin/python"
 chmod +x "$VENV/bin/python"
 """
@@ -45,7 +57,13 @@ def _run(tmp_path, build=True):
     (run_dir / "launcher" / "run.sh").write_text('#!/bin/bash\nexec "$FRAMEWORK_PYTHON" w.py\n')
     (run_dir / "names.json").write_text("{}")
     (run_dir / "stack.json").write_text(json.dumps({"python": "/p", "patches": [str(patch)]}))
-    meta = {"repo": "eng", "package": "fakepkg", "python": "/p", "base": "x"}
+    meta = {
+        "repo": "eng",
+        "package": "fakepkg",
+        "python": "/p",
+        "base": "x",
+        "kernel_check": "fakecheck",
+    }
     if build:
         meta["build"] = "build.sh"
         (patch / "build.sh").write_text(BUILD.format(python=sys.executable))
@@ -103,9 +121,14 @@ def test_the_optimize_command_is_unchanged_without_the_facts(tmp_path):
     flags = cli.inmodel_flags(run_dir, entry, repo, opts)
     assert flags[0] == "--external-benchmark" and "{trial}" in flags[1] and "{variant}" in flags[1]
     assert flags[2] == "--external-validate" and "--build-only" in flags[3]
-    assert flags[4] == "--repo-trials"
+    assert flags[4] == "--external-profile" and "--profile" in flags[5] and "{trial}" in flags[5]
+    assert flags[6] == "--repo-trials" and "{spec}" in flags[1]
     cmd = cli.xe_forge_command(entry, "v", repo, tmp_path / "ws", opts, flags)
-    assert cmd[-5:] == flags
+    assert cmd[-7:] == flags
+    (repo / "reference").mkdir()
+    (repo / "reference" / "k.py").write_text("class Model: pass\n")
+    flags = cli.inmodel_flags(run_dir, entry, repo, opts)
+    assert flags[-2:] == ["--reference", str(repo / "reference" / "k.py")]  # the op as PyTorch
     assert (
         cli.inmodel_flags(run_dir, entry, repo, SimpleNamespace(**{**vars(opts), "device": "xpu"}))
         == []
@@ -119,7 +142,7 @@ class _Model:
         from xe_forge.frontend import ir, manifest, prove
 
         self.captures = []
-        times = {"v1": 10.0, "fast": 5.0, "near": 10.05, "fewer": 5.0, "bad": 5.0}
+        times = {"v1": 10.0, "fast": 5.0, "near": 10.05, "fewer": 5.0, "bad": 5.0, "wrong": 5.0}
 
         def capture(run_dir, out, python):
             kernel = (Path(python).parent.parent / "lib" / "fakepkg" / "k.cpp").read_text().strip()
@@ -136,7 +159,10 @@ class _Model:
         monkeypatch.setattr(ir, "load", lambda p: json.loads(Path(p).read_text()))
         monkeypatch.setattr(manifest, "per_call", lambda cap, ref: tuple(cap[ref]))
 
+        self.scored = []
+
         def score(work, argv, python, out):
+            self.scored.append(list(argv))
             kernel = (Path(python).parent.parent / "lib" / "fakepkg" / "k.cpp").read_text().strip()
             ok = kernel != "bad"
             return {"pass": ok, "exit": 0 if ok else 1, "problems": [] if ok else ["tokens fall"]}
@@ -144,12 +170,25 @@ class _Model:
         monkeypatch.setattr(prove, "_score_arm", score)
 
 
-def _ask(run_dir, repo, ws, baseline, trial, variant="bench-t1", build_only=False):
-    record = ws / "record.json"
-    record.write_text(json.dumps({"variants": {"bench-t1": "w@T=1", "bench-t512": "w@T=512"}}))
+def _ask(run_dir, repo, ws, baseline, trial, variant="bench-t1", build_only=False, broken=False):
+    record, spec = ws / "record.json", ws / "spec.yaml"
+    record.write_text(
+        json.dumps({"definition": "k", "variants": {"bench-t1": "w@T=1", "bench-t512": "w@T=512"}})
+    )
+    shape = {"dtype": "float32", "rtol": 1e-3, "atol": 1e-4}
+    one = {"M": 1, **({"BROKEN": 1} if broken else {})}
+    spec.write_text(
+        json.dumps(
+            {
+                "bench-t1": [{**shape, "dims": one}],
+                "bench-t512": [{**shape, "dims": {"M": 512}}],
+            }
+        )
+    )  # JSON is YAML
     args = argparse.Namespace(run_dir=str(run_dir), repo=str(repo), trial=str(trial),
-                              baseline=str(baseline), record=str(record), variant=variant,
-                              workspace=str(ws), build_only=build_only)  # fmt: skip
+                              baseline=str(baseline), record=str(record), spec=str(spec),
+                              variant=variant, workspace=str(ws), build_only=build_only,
+                              profile=False, kernel="k")  # fmt: skip
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         code = inmodel.run(args)
@@ -201,6 +240,7 @@ def test_a_difference_inside_the_captures_spread_has_no_speedup(engine):
 
 @pytest.mark.parametrize("text, extra, verdict", [
     ("fast", {"FAIL": "x"}, "BUILD_FAILED"),  # the build or the repository's tests
+    ("wrong", None, "NUMERIC_FAILED"),        # the kernel against its reference, at M=1
     ("fewer", None, "WORK_DIFFERS"),          # the model did other work
     ("bad", None, "OUTPUT_FAILED"),           # its tokens fail their check
 ])  # fmt: skip
@@ -247,11 +287,50 @@ def test_the_patch_check_runs_the_build_as_every_trial_will_be_built(tmp_path):
     work = run_dir / "patch-1"
     meta = json.loads((work / "patch.json").read_text())
     assert _build_problems(work, meta, repo) == []
+    assert "kernel_check" in _build_problems(work, {**meta, "kernel_check": None}, repo)[0]
     (work / "build.sh").write_text(BUILD.format(python=sys.executable) + 'touch "$SRC/x.o"\n')
     assert "wrote into $SRC (x.o)" in _build_problems(work, meta, repo)[0]
     (work / "build.sh").write_text("exit 3\n")
     assert "failed (exit 3)" in _build_problems(work, meta, repo)[0]
     assert "names no" in _build_problems(work, {**meta, "build": None}, repo)[0]
+
+
+def test_a_check_the_baseline_fails_too_is_not_the_trials_failure(engine):
+    run_dir, repo, ws, baseline, model = engine
+    code, out = _ask(run_dir, repo, ws, baseline, _dir(ws / "t1", "fast"), broken=True)
+    assert code == 1 and "fails its own check" in out and "DONE" not in out, out
+    assert not list((ws / ".inmodel").glob("*/result.json"))  # nothing recorded against it
+
+
+def test_a_trial_never_changes_what_checks_it(engine):
+    run_dir, repo, ws, baseline, _ = engine
+    trial = _dir(ws / "t1", "fast", {})
+    (trial / "reference").mkdir()
+    (trial / "reference" / "k.py").write_text("class Model: pass\n")
+    code, out = _ask(run_dir, repo, ws, baseline, trial)
+    assert code == 1 and "VERDICT: BAD_TRIAL" in out and "reference/k.py" in out, out
+
+
+def test_a_trial_scores_its_tokens_without_the_step_report(engine):
+    run_dir, repo, ws, baseline, model = engine
+    args = run_dir / "patch-1" / "check-args.json"
+    args.write_text(json.dumps(["--model", "m", "--steps"]))
+    assert _ask(run_dir, repo, ws, baseline, _dir(ws / "t1", "fast"))[0] == 0
+    assert model.scored == [["--model", "m"]]
+
+
+def test_a_profile_line_of_perf_is_read_with_its_event():
+    line = (
+        "3142931 1063349.533525987:    4786240 instructions:      153572e01029 "
+        "rangeiter_next (/usr/lib64/libpython3.12.so.1.0)"
+    )
+    m = inmodel._SAMPLE.match(line)
+    assert m and m[4] == "4786240" and m[5] == "instructions" and m[6] == "rangeiter_next"
+    assert m[7] == "/usr/lib64/libpython3.12.so.1.0"
+    # as perf prints events it had to restrict, or a hybrid part's core PMU
+    for printed in ("cycles:u", "cpu_core/cycles/"):
+        m = inmodel._SAMPLE.match(line.replace("instructions", printed))
+        assert m and inmodel._event(m[5]) == "cycles"
 
 
 def test_a_trial_cannot_write_outside_the_repository(engine, tmp_path):
@@ -279,8 +358,11 @@ def test_the_workspace_speaks_of_repository_files_when_trials_run_in_the_model(t
     cfg.device_config.device, cfg.device_config.dsl = "cpu", "cpp"
     cfg.external.kernel_repo, cfg.external.repo_trials = str(tmp_path), True
     cfg.external.benchmark = "inmodel {trial}"
+    cfg.external.profile = "inmodel --profile --trial {trial} --workspace {workspace}"
     generate_workspace(tmp_path / "ws", cfg, "k", "", spec_path=None)
     text = (tmp_path / "ws" / "CLAUDE.md").read_text()
+    assert "`inmodel --profile --trial <trial dir> --workspace .` builds the trial" in text
+    assert "Profile** (MANDATORY every trial)" in text
     assert "trial directories `t<N>/`" in text and "BASELINE_NOT_REPOSITORY" in text
     assert "load_inline" not in text and "self-contained" not in text
     assert "trial finalize k output/k_optimized --require-measured" in text

@@ -543,6 +543,8 @@ def capture(
                 check += ["--quantized-gate", str(facts["quantized_gate"])]
         if facts.get("trial_build"):  # its kernels' trials are built with the patch's script
             check += ["--require-build"]
+        if facts.get("step_dump") and a.workload == "text":  # its steps against the reference's
+            check += ["--steps"]
         # --prove scores the tokens again on its patched build, with these same arguments.
         (work / "check-args.json").write_text(json.dumps(check[3:]) + "\n")
         redo: list = []
@@ -731,9 +733,12 @@ def name(
     from xe_forge.models import DSL
 
     calib = json.loads(calibration.read_text()) if calibration else None
+    kb, facts = framework_kb(cap.run.get("framework") or "")
     context = {
         "model": model.get("name"),
         "framework": cap.run.get("framework"),
+        "framework_kb": str(kb) if kb else None,
+        "framework_facts": facts,
         "coverage": f"{covered:.0%}",
         "repos": repos,
         "routes": naming.ROUTES,
@@ -947,11 +952,19 @@ def inmodel_flags(run_dir: Path, entry: dict, repo: Path, opts) -> list[str]:
         return []
     tool = [sys.executable, "-m", "xe_forge.skills", "inmodel", "--run-dir",
             str(run_dir.resolve()), "--repo", str(repo)]  # fmt: skip
-    bench = [*tool, "--record", str(entry["record"]), "--baseline", "{baseline}", "--trial",
-             "{trial}", "--variant", "{variant}", "--workspace", "{workspace}"]  # fmt: skip
-    return ["--external-benchmark", shlex.join(bench),
-            "--external-validate", shlex.join([*tool, "--build-only", "--trial", "{trial}"]),
-            "--repo-trials"]  # fmt: skip
+    bench = [*tool, "--record", str(entry["record"]), "--spec", "{spec}", "--baseline",
+             "{baseline}", "--trial", "{trial}", "--variant", "{variant}", "--workspace",
+             "{workspace}"]  # fmt: skip
+    prof = [*tool, "--profile", "--kernel", entry["name"], "--trial", "{trial}", "--workspace",
+            "{workspace}"]  # fmt: skip
+    flags = ["--external-benchmark", shlex.join(bench),
+             "--external-validate", shlex.join([*tool, "--build-only", "--trial", "{trial}"]),
+             "--external-profile", shlex.join(prof), "--repo-trials"]  # fmt: skip
+    # The op as PyTorch, the engine's own reference for this kernel: the workspace's semantics.
+    ref = repo / "reference" / f"{entry['name']}.py"
+    if ref.is_file() and not entry.get("reference"):
+        flags += ["--reference", str(ref)]
+    return flags
 
 
 def xe_forge_command(entry: dict, variant: str, repo: Path, workspace: Path, opts,

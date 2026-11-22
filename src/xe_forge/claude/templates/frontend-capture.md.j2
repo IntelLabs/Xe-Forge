@@ -8,9 +8,13 @@ this; nothing here knows that framework.
 What it says about running a model, its launcher and its hooks overrides the search below.
 {% if patched | default([]) %}{{ python }} runs on what the patches made for it: {% for p in patched %}`{{ p.get("package") }}` from {{ p.get("repo") }}{% if not loop.last %}, {% endif %}{% endfor %} (each patch's patch.json).
 {% endif %}{% if facts.upstream is defined and not facts.upstream and not patched | default([]) %}It has no upstream release: a model runs on it only once its engine for that model is
-written. With none in {{ python }} for {{ model }} ({{ framework }}'s package for it does not import), write
+written and has passed its patch check. Only what a patch made runs here: never build,
+install or layer an engine yourself, even when its repository is already on this machine --
+an engine that has not passed its check is not one to measure. With no patched build for
+{{ model }} in {{ python }} ({{ framework }}'s package for it does not import), write
 {"unsupported": "model", "what": "{{ model }}", "reason": "no {{ framework }} engine for it yet"} as {{ answer }}
-and stop: the engine is written first, and you are run again on it.
+and stop: the engine is established first (from that repository, when there is one), and you
+are run again on it.
 {% endif %}{% endif %}
 {% if framework_notes %}Constraints on this machine, from someone who has run this before. These are not
 guesses and not optional; a run that ignores one usually fails late, after the

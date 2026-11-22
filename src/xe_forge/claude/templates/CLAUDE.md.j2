@@ -480,6 +480,15 @@ For each trial:
    named instead. That is not a half-recorded trial: a trial with both times and no ratio
    ranks **at parity**, above every measured regression.
 {%- endif %}
+{%- if profile_command | default(none) %}
+6. **Profile** (MANDATORY every trial) — `{{ profile_command }}` builds the trial and runs the
+  model on it under perf: per symbol its cycles, instructions, IPC and misses inside the
+  model's steps, the kernel's own symbols first, and each step's time per call. Profile the
+  baseline once before t0. Each next trial's `--strategy` cites the profiled measurement it
+  targets (symbol, event or IPC, value, trial), and after profiling state the kernel's
+  symbols' cycles and IPC beside its parent's. A profile is never a timing: `benchmark`'s
+  numbers are the only ones a trial is ranked on.
+{%- else %}
 6. **Profile** — if {% if on_host %}`perf_enabled: true` or `vtune_enabled: true`{% else %}`unitrace_enabled: true` or `vtune_enabled: true`{% endif %} in `config.yaml`,
   run `xe-forge-skill profile <kernel_file> {{ profile_options }}{% if require_profiles %} --trial-id <trial_id>{% endif %}`
   and use the output to guide the next trial.{% if has_spec %} Use the same `--variant` as the benchmark.{% endif %}
@@ -503,6 +512,7 @@ For each trial:
   trials, the next trial targets that stall reason directly, or the summary says why it cannot.
 {%- endif %}
   If both are `false`, skip this step. Collection isolates forward calls from setup and warmup.
+{%- endif %}
 {% if reference_workload %}
   The profiler validates the trial against the immutable reference and restores buffers
   outside collection. Forward-only profile timings must not replace the benchmark's

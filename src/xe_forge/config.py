@@ -219,6 +219,9 @@ class ExternalConfig:
     # Trials are directories of kernel_repo's files at their repository paths, built into the
     # repository and timed by the benchmark command (in the model the kernel came from).
     repo_trials: bool = False
+    # The command that profiles a trial where the benchmark times it; placeholders {trial}
+    # and {workspace}. With it the workspace's profile step runs it.
+    profile: str | None = None
     timeout: int = DEFAULT_TIMEOUT
 
 
@@ -358,6 +361,7 @@ class ConfigManager:
             validate=self._get_env("EXTERNAL_VALIDATE", None),
             stack_python=self._get_env("STACK_PYTHON", None),
             repo_trials=self._get_env("REPO_TRIALS", False, bool),
+            profile=self._get_env("EXTERNAL_PROFILE", None),
             dataset_record=self._get_env("DATASET_RECORD", None),
             lessons=self._get_env("LESSONS_DIR", None),
             kernel_repo=self._get_env("KERNEL_REPO", None),

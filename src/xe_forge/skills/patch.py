@@ -139,6 +139,33 @@ print(json.dumps({"gaps": gaps, "device": dev, "transformers": source, "export":
 """
 
 
+def _steps(work: Path, python: str, meta: dict, args, prompt: str) -> dict:
+    """The engine's first forward on the check's prompt, step by step (``XF_DUMP``), against
+    the reference model's module each step names, in float32: every step's relative error, in
+    the order the steps ran, and the worst. Reported, never gated."""
+    from xe_forge.claude.generator import render
+
+    with tempfile.TemporaryDirectory() as out, tempfile.TemporaryDirectory() as dump:
+        gen = subprocess.run(["bash", str(work / "generate.sh")], cwd=work, capture_output=True,
+                             text=True, env=_env(FRAMEWORK_PYTHON=python, OUT=out, BATCH="1",
+                                                 OUTPUT_LEN="1", PROMPT_FILE=prompt,
+                                                 INPUT_LEN=str(args.input_len), XF_DUMP=dump))  # fmt: skip
+        if gen.returncode != 0 or not (Path(dump) / "index.jsonl").is_file():
+            return {"error": f"generate.sh with XF_DUMP wrote no step dump (exit {gen.returncode}): "
+                    f"{gen.stderr.strip()[-300:]}"}  # fmt: skip
+        ref = subprocess.run([meta.get("reference_python") or args.reference_python or
+                              args.framework_python, "-c", render("patch-steps.py.j2"), args.model, dump, prompt,
+                              str(args.input_len), "1" if args.trust_remote_code or
+                              meta.get("trust_remote_code") else "0"],
+                             capture_output=True, text=True, env=_env())  # fmt: skip
+    if ref.returncode != 0:
+        return {"error": f"the reference failed: {ref.stderr.strip()[-300:]}"}
+    rows = json.loads(ref.stdout.strip().splitlines()[-1])
+    scored = [r for r in rows if "rel_err" in r]
+    worst = max(scored, key=lambda r: r["rel_err"], default=None)
+    return {"steps": rows, "worst": worst}
+
+
 def _native(work: Path, python: str, out: Path) -> tuple[subprocess.CompletedProcess, float]:
     """generate.sh again, with the framework's own plain-torch path instead of the new op.
 
@@ -317,6 +344,14 @@ def _build_problems(work: Path, meta: dict, repo: Path) -> list[str]:
         if wrote:
             return [f"{script.name} wrote into $SRC ({', '.join(wrote[:5])}): it must build out of "
                     "tree, a build directory under $VENV"]  # fmt: skip
+        module = meta.get("kernel_check")
+        if not module:
+            return ['patch.json names no "kernel_check" module: every kernel trial is checked '
+                    "against its PyTorch reference with it"]  # fmt: skip
+        got = subprocess.run([str(venv / "bin" / "python"), "-m", str(module), "--help"],
+                             capture_output=True, text=True)  # fmt: skip
+        if got.returncode != 0:
+            return [f"python -m {module} --help fails on the build: {got.stderr.strip()[-400:]}"]
     return []
 
 
@@ -465,6 +500,8 @@ def score(work: Path, meta: dict, python: str, args, record: dict,
         if quant and quant != "auto" and not problems:
             record["quantized"] = _quantized(work, python, quant, prompt, n, args, teacher)
             problems += _quantized_gate(record["quantized"], args, tol)
+        if getattr(args, "steps", False) and not problems:  # reported beside the tokens
+            record["steps"] = _steps(work, python, meta, args, prompt)
     worst = [round(max(r, default=float("inf")), 4) for r in gaps]
     record.update(tokens=got, gaps=gaps, worst=worst, judge=judge, judge_first=args.precision, first_gaps=first, fp32=fp32,
                   tolerance=tol, required=n, transformers=res.get("transformers"),
@@ -473,6 +510,22 @@ def score(work: Path, meta: dict, python: str, args, record: dict,
         problems.append(f"tokens fall more than {tol} nat below transformers' best within the "
                         f"first {n}: worst per sequence {worst} ({len(got)} of {args.batch})")  # fmt: skip
     return problems
+
+
+def _steps_facts(s: dict | None) -> dict:
+    if not s:
+        return {}
+    if s.get("error"):
+        return {"steps against the reference": f"not compared ({s['error'][:200]})"}
+    w = s.get("worst") or {}
+    label = f"{w.get('block')}.{w.get('layer')}.{w.get('step')}"
+    rows = s.get("steps") or []
+    scored = sum("rel_err" in r for r in rows)
+    return {
+        "steps compared with the reference's modules": scored,
+        "steps not compared (no module, other size)": len(rows) - scored,
+        "worst step (relative error)": f"{label} {w.get('rel_err', 0):.3g}" if w else None,
+    }
 
 
 def _quantized_facts(q: dict | None) -> dict:
@@ -551,6 +604,7 @@ def run(args) -> int:
         "patched run (s)": record.get("patched_s"), "native run (s)": record.get("native_s"),
         "op gain (native / patched)": record.get("op_gain"),
         **_quantized_facts(record.get("quantized")),
+        **_steps_facts(record.get("steps")),
         "check": "FAIL" if problems else "PASS",
     }  # fmt: skip
     if record.get("head") and not measured_pr(work / "PR.md", facts):

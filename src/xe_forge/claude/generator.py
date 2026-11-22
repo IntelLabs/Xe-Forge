@@ -165,6 +165,13 @@ def generate_workspace(
     elif not host and unitrace != vtune:
         profile_args.extend(["--tool", "unitrace" if unitrace else "vtune"])
     profile_options = shlex.join(profile_args)
+    # Where a trial is timed in the model, it is profiled there too: the host's command, with
+    # the trial directory for the session to fill in.
+    profile_command = (
+        config.external.profile.replace("{trial}", "<trial dir>").replace("{workspace}", ".")
+        if repo_trials and config.external.profile
+        else None
+    )
 
     compiler_flags = config.engine.compiler_flags
     # Parsed the way a shell would, so a quoted flag (-DNAME='a b') reaches the
@@ -222,6 +229,7 @@ def generate_workspace(
             integration_repos=integration_repos,
             kernel_locator_profile_path=KERNEL_LOCATOR_PROFILE_PATH,
             repo_trials=repo_trials,
+            profile_command=profile_command,
         )
     )
     (workspace / "config.yaml").write_text(

@@ -1510,6 +1510,7 @@ def test_run_gates_the_quantized_tokens_of_a_framework_that_quantizes_itself(
                         output_len=2, quantization="q4:uint8")  # fmt: skip
     assert cli.capture(a, "/fw/python", tmp_path, 5, tmp_path / "repos")[0] == 0
     assert ("--quantized-gate" in checks[0]) is gated
+    assert ("--steps" in checks[0]) is gated and ("--require-build" in checks[0]) is gated
     assert bool(contexts[0]["framework_kb"]) is gated  # what the agents are told to read
 
 
