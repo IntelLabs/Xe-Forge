@@ -179,11 +179,17 @@ class _Model:
                 xs = [x[0] * x[1] if isinstance(x, list) else x for x in xs]
                 m = sorted(xs)[len(xs) // 2]
                 return m, (max(xs) - min(xs)) / m
+
             out = []
             for wid, kernel in (("TOTAL", ""), ("w", "k"), ("g", "other")):
-                keys = ["w@T=1", "w@T=512", "g"] if wid == "TOTAL" else ["w@T=1" if wid == "w" else "g"]
+                keys = (
+                    ["w@T=1", "w@T=512", "g"]
+                    if wid == "TOTAL"
+                    else ["w@T=1" if wid == "w" else "g"]
+                )
                 (ua, sa), (ub, sb) = [
-                    tuple(map(sum, zip(*(arm(ps, k) for k in keys), strict=True))) for ps in (a_paths, b_paths)
+                    tuple(map(sum, zip(*(arm(ps, k) for k in keys), strict=True)))
+                    for ps in (a_paths, b_paths)
                 ]
                 out.append({"workload_id": wid, "kernel": kernel, "status": "matched",
                             "us_a": ua, "us_b": ub, "speedup": round(ua / ub, 4),

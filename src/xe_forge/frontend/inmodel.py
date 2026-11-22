@@ -481,7 +481,12 @@ def answer(result: dict, variant: str) -> str:
         )
     model = result.get("model")
     told = [f"| {ln}" for ln in _model_text(model).splitlines()] if model else []
-    lines = [*told, "CORRECTNESS: pass", f"BASELINE_US: {v['baseline_us']}", f"TRIAL_US: {v['trial_us']}"]
+    lines = [
+        *told,
+        "CORRECTNESS: pass",
+        f"BASELINE_US: {v['baseline_us']}",
+        f"TRIAL_US: {v['trial_us']}",
+    ]
     ratio = v["baseline_us"] / v["trial_us"] if v["trial_us"] else None
     if result.get("same"):
         lines.append("VERDICT: SAME_SOURCE")
