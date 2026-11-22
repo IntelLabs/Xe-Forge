@@ -146,7 +146,7 @@ def _build(facts: dict, src: Path, venv: Path, log: Path, clone: Path | None = N
         return f"the build or the repository's tests failed (exit {code})"
     python = venv / "bin" / "python"
     pkg = meta.get("package", "")
-    from xe_forge.claude.generator import render
+    from xe_forge.claude.render import render
 
     where = subprocess.run([str(python), "-c", render("inmodel-where.py.j2", pkg=pkg)], capture_output=True,
                            text=True)  # fmt: skip

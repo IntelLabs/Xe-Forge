@@ -53,7 +53,7 @@ def _steps(work: Path, python: str, meta: dict, args, prompt: str) -> dict:
     """The engine's first forward on the check's prompt, step by step (``XF_DUMP``), against
     the reference model's module each step names, in float32: every step's relative error, in
     the order the steps ran, and the worst. Reported, never gated."""
-    from xe_forge.claude.generator import render
+    from xe_forge.claude.render import render
 
     with tempfile.TemporaryDirectory() as out, tempfile.TemporaryDirectory() as dump:
         gen = subprocess.run(["bash", str(work / "generate.sh")], cwd=work, capture_output=True,
@@ -319,7 +319,7 @@ def score(work: Path, meta: dict, python: str, args, record: dict,
     check is judged on the tokens the check judged. ``into``: where an image or video
     comparison writes its record, else beside the patch. ``record["unscored"]``: the reference
     could not score, which says nothing of the tokens."""
-    from xe_forge.claude.generator import render
+    from xe_forge.claude.render import render
 
     problems: list[str] = []
     # The candidate first, then the reference: generate.sh never sees what it is checked against.

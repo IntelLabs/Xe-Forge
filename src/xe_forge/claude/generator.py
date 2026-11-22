@@ -13,28 +13,15 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
-
+from xe_forge.claude.render import render
 from xe_forge.config import Config, device_kind
 from xe_forge.core.dataset_record import load_dataset_record
 from xe_forge.core.lessons import load_lessons_log
 from xe_forge.core.spec_loader import load_spec
 
-_TEMPLATES_DIR = Path(__file__).parent / "templates"
-
 # Durable for the whole session, like dataset.profile_path: the kernel-locator agent
 # writes it once, and every later step reads it instead of re-exploring the repo.
 KERNEL_LOCATOR_PROFILE_PATH = "experiments/kernel_profile.md"
-
-_env = Environment(
-    loader=FileSystemLoader(str(_TEMPLATES_DIR)),
-    autoescape=select_autoescape(enabled_extensions=()),
-    keep_trailing_newline=True,
-    trim_blocks=False,
-    lstrip_blocks=False,
-    # A variable a template uses but the caller did not pass is an error, not a blank.
-    undefined=StrictUndefined,
-)
 
 
 def _profile_device_args(device) -> list[str]:
@@ -43,11 +30,7 @@ def _profile_device_args(device) -> list[str]:
     return ["--device", str(device)] if device_kind(device) == "cpu" or ":" in str(device) else []
 
 
-def _render(template_name: str, **context: object) -> str:
-    return _env.get_template(template_name).render(**context)
-
-
-render = _render
+_render = render
 
 
 def generate_workspace(

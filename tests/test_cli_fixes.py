@@ -480,3 +480,31 @@ def test_the_reference_refuses_the_host_when_a_gpu_run_asked_for_one(tmp_path):
                           str(tmp_path / "got.json"), "", "float32", "", "1"],
                          capture_output=True, text=True, env=env)  # fmt: skip
     assert out.returncode != 0 and "sees no GPU" in out.stderr
+
+
+def test_a_framework_interpreter_renders_the_build_check_without_the_pipeline(tmp_path):
+    import subprocess
+
+    # A framework's venv has jinja but not the pipeline's dependencies: the build check, run
+    # there, renders its script all the same.
+    (tmp_path / "build.sh").write_text("true\n")
+    (tmp_path / "venv" / "bin").mkdir(parents=True)
+    (tmp_path / "venv" / "bin" / "python").symlink_to(sys.executable)
+    code = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "class Block:\n"
+        "    def find_spec(self, name, *a):\n"
+        "        if name.split('.')[0] == 'ai_bench': raise ImportError(name)\n"
+        "sys.meta_path.insert(0, Block())\n"
+        "from xe_forge.frontend import inmodel\n"
+        "t = Path(sys.argv[1])\n"
+        "facts = {'patch': t, 'meta': {'build': 'build.sh', 'package': 'json'}}\n"
+        "print(inmodel._build(facts, t, t / 'venv', t / 'build.log'))\n"
+    )
+    src = str(Path(__file__).resolve().parents[1] / "src")
+    env = {**os.environ, "PYTHONPATH": src + os.pathsep + os.environ.get("PYTHONPATH", "")}
+    out = subprocess.run([sys.executable, "-c", code, str(tmp_path)], capture_output=True, text=True,
+                         env=env)  # fmt: skip
+    assert out.returncode == 0, out.stderr
+    assert "cannot import" not in out.stdout
