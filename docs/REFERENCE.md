@@ -272,7 +272,11 @@ runs the run's launcher on the build (`capture run --timeline-only`, then `captu
 --names`), and reads each variant's time per call as the spec's `captured_us` was read. A trial
 is correct when it builds, every variant runs as often as on the baseline, and its output
 passes `patch score` with the check's arguments. `XE_FORGE_MODEL_REPEATS` (5) captures per arm,
-in ABBA order; a ratio inside both arms' ranges summed is `INDISTINGUISHABLE`. The baseline
+in ABBA order; a ratio inside both arms' ranges summed is `INDISTINGUISHABLE`. The whole
+model is compared too, as `prove` compares it: a trial is `MODEL_SLOWER`, whatever its
+kernel's own time, when the model's total is slower beyond both arms' spreads summed, or when
+the workloads that moved beyond their own spreads lose more time in all than they save. Every
+other kernel's workload that moved is listed in the answer. The baseline
 must be the repository's files unchanged (`BASELINE_NOT_REPOSITORY`) at the commit the patch
 check judged (`REPOSITORY_MOVED`). One measurement serves every variant of a pair
 (`<workspace>/.inmodel/`). `--build-only` is the validator: the build and the tests alone.

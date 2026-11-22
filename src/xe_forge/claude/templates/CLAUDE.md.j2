@@ -76,7 +76,9 @@ reset-plus-forward benchmark. Never infer end-to-end speedup from trace timings.
 1. **ONLY create** trial directories `t<N>/` and output directories, each holding only the
    files of `{{ kernel_repo }}` the trial changes, at their repository paths
    (`t<N>/src/kernels/cpu/kernels.cpp`). `benchmark` builds the repository with exactly
-   those files in place and times the kernel inside the model it came from.
+   those files in place and times the kernel inside the model it came from. A trial that
+   makes the whole model slower fails (`MODEL_SLOWER`) however fast its kernel is; the
+   answer lists the other kernels' workloads it moved.
 {%- else -%}
 1. **ONLY create** kernel files (trial files `t<N>{{ ext }}` or output files){% if measurement == "host" %}, or a
    trial *directory* `t<N>/` holding a kernel that is split across sources{% endif %}.

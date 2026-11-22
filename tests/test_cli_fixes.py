@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from xe_forge.claude.generator import render
+
 
 def test_an_override_reaches_a_section_whose_name_holds_an_underscore():
     from xe_forge.config import ConfigManager
@@ -285,8 +287,6 @@ def test_the_agents_own_reference_runner_scores_the_tokens(tmp_path, dev):
     import subprocess
     import sys
 
-    from xe_forge.skills import patch
-
     (tmp_path / "ref.py").write_text(
         "import torch\n"
         "from xe_forge.frontend.profile import Vocab\n"
@@ -315,7 +315,7 @@ def test_the_agents_own_reference_runner_scores_the_tokens(tmp_path, dev):
         got.append(nxt)
         ids.append(nxt)
     (tmp_path / "got.json").write_text(json.dumps([got]))
-    out = subprocess.run([sys.executable, "-c", patch._REFERENCE, "m", "1", "4", "3", "0",
+    out = subprocess.run([sys.executable, "-c", render("patch-reference.py.j2"), "m", "1", "4", "3", "0",
                           str(tmp_path / "got.json"), "", "float32", "", "2",
                           str(tmp_path / "ref.py")],
                          capture_output=True, text=True, env={**os.environ, "XE_FORGE_DEVICE": dev})  # fmt: skip
@@ -474,11 +474,9 @@ def test_the_reference_refuses_the_host_when_a_gpu_run_asked_for_one(tmp_path):
     import subprocess
     import sys
 
-    from xe_forge.skills import patch
-
     (tmp_path / "got.json").write_text("[[1]]")
     env = {k: v for k, v in os.environ.items() if k != "XE_FORGE_DEVICE"}
-    out = subprocess.run([sys.executable, "-c", patch._REFERENCE, "m", "1", "4", "1", "0",
+    out = subprocess.run([sys.executable, "-c", render("patch-reference.py.j2"), "m", "1", "4", "1", "0",
                           str(tmp_path / "got.json"), "", "float32", "", "1"],
                          capture_output=True, text=True, env=env)  # fmt: skip
     assert out.returncode != 0 and "sees no GPU" in out.stderr

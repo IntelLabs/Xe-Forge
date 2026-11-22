@@ -139,10 +139,13 @@ class _Model:
     """The stubbed model: what each build's kernel is decides its times and its output."""
 
     def __init__(self, monkeypatch):
-        from xe_forge.frontend import ir, manifest, prove
+        from xe_forge.frontend import compare, ir, manifest, prove
 
         self.captures = []
-        times = {"v1": 10.0, "fast": 5.0, "near": 10.05, "fewer": 5.0, "bad": 5.0, "wrong": 5.0}
+        times = {"v1": 10.0, "fast": 5.0, "near": 10.05, "fewer": 5.0, "bad": 5.0, "wrong": 5.0,
+                 "slows": 5.0}  # fmt: skip
+        # The rest of the model: another kernel's workload, which only "slows" makes slower.
+        rest = {"slows": 4000.0}
 
         def capture(run_dir, out, python):
             kernel = (Path(python).parent.parent / "lib" / "fakepkg" / "k.cpp").read_text().strip()
@@ -152,7 +155,8 @@ class _Model:
             calls = 29 if kernel == "fewer" else 30
             out.mkdir(parents=True)
             (out / "capture.json").write_text(json.dumps(
-                {"w@T=1": [us, calls], "w@T=512": [us * 100, 3], "kernel": kernel}))  # fmt: skip
+                {"w@T=1": [us, calls], "w@T=512": [us * 100, 3], "kernel": kernel,
+                 "g": rest.get(kernel, 100.0) * (1 + 0.02 * (r - 1))}))  # fmt: skip
             return out / "capture.json"
 
         monkeypatch.setattr(inmodel, "_capture", capture)
@@ -168,6 +172,26 @@ class _Model:
             return {"pass": ok, "exit": 0 if ok else 1, "problems": [] if ok else ["tokens fall"]}
 
         monkeypatch.setattr(prove, "_score_arm", score)
+
+        def rows(a_paths, b_paths):  # prove's comparison of two arms, over the stubbed captures
+            def arm(paths, key):
+                xs = [json.loads(Path(p).read_text())[key] for p in paths]
+                xs = [x[0] * x[1] if isinstance(x, list) else x for x in xs]
+                m = sorted(xs)[len(xs) // 2]
+                return m, (max(xs) - min(xs)) / m
+            out = []
+            for wid, kernel in (("TOTAL", ""), ("w", "k"), ("g", "other")):
+                keys = ["w@T=1", "w@T=512", "g"] if wid == "TOTAL" else ["w@T=1" if wid == "w" else "g"]
+                (ua, sa), (ub, sb) = [
+                    tuple(map(sum, zip(*(arm(ps, k) for k in keys), strict=True))) for ps in (a_paths, b_paths)
+                ]
+                out.append({"workload_id": wid, "kernel": kernel, "status": "matched",
+                            "us_a": ua, "us_b": ub, "speedup": round(ua / ub, 4),
+                            "delta_us": ua - ub, "spread_a": sa / len(keys),
+                            "spread_b": sb / len(keys)})  # fmt: skip
+            return out
+
+        monkeypatch.setattr(compare, "compare", rows)
 
 
 def _ask(run_dir, repo, ws, baseline, trial, variant="bench-t1", build_only=False, broken=False):
@@ -238,6 +262,19 @@ def test_a_difference_inside_the_captures_spread_has_no_speedup(engine):
     assert code == 0 and "VERDICT: INDISTINGUISHABLE" in out and "SPEEDUP" not in out, out
 
 
+def test_a_trial_that_makes_the_model_slower_fails_however_fast_its_kernel(engine):
+    run_dir, repo, ws, baseline, _ = engine
+    code, out = _ask(run_dir, repo, ws, baseline, _dir(ws / "t1", "slows"))
+    assert code == 1 and "VERDICT: MODEL_SLOWER" in out and "SPEEDUP" not in out, out
+    assert "| " in out and "other g" in out  # the other kernel's workload it moved
+
+
+def test_a_faster_trial_says_what_the_whole_model_did(engine):
+    run_dir, repo, ws, baseline, _ = engine
+    code, out = _ask(run_dir, repo, ws, baseline, _dir(ws / "t1", "fast"))
+    assert code == 0 and "| the whole model:" in out and "VERDICT: MEASURED" in out, out
+
+
 @pytest.mark.parametrize("text, extra, verdict", [
     ("fast", {"FAIL": "x"}, "BUILD_FAILED"),  # the build or the repository's tests
     ("wrong", None, "NUMERIC_FAILED"),        # the kernel against its reference, at M=1
@@ -296,7 +333,7 @@ def test_the_patch_check_runs_the_build_as_every_trial_will_be_built(tmp_path):
 
 
 def test_a_check_the_baseline_fails_too_is_not_the_trials_failure(engine):
-    run_dir, repo, ws, baseline, model = engine
+    run_dir, repo, ws, baseline, _ = engine
     code, out = _ask(run_dir, repo, ws, baseline, _dir(ws / "t1", "fast"), broken=True)
     assert code == 1 and "fails its own check" in out and "DONE" not in out, out
     assert not list((ws / ".inmodel").glob("*/result.json"))  # nothing recorded against it

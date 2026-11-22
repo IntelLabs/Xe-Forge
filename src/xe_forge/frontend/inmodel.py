@@ -313,9 +313,10 @@ def _beyond(row: dict) -> bool:
 
 def _model(caps: dict[str, list[Path]], record: dict) -> dict:
     """The whole model on both builds, from the trial's own captures, as prove compares it:
-    its total, and every other workload that moved beyond the spread. A kernel can make the
-    model slower outside its own time -- what it leaves in the caches, the threads, the
-    clocks -- and only the model's total sees that."""
+    its total, and every workload that moved beyond its spread. A kernel can make the model
+    slower outside its own time -- what it leaves in the caches, the threads, the clocks --
+    which its own time never shows. Slower: the total is, or the time the moved workloads
+    gained and lost sums to a loss (the kernel saves less than it costs elsewhere)."""
     from xe_forge.frontend.compare import compare
 
     try:
@@ -323,22 +324,25 @@ def _model(caps: dict[str, list[Path]], record: dict) -> dict:
     except SystemExit as exc:  # the arms' captures ran different work
         raise RuntimeError(str(exc)) from exc
     total, own = rows[0], {ref.partition("@")[0] for ref in record["variants"].values()}
-    moved = sorted((r for r in rows[1:] if r["status"] == "matched"
-                    and r["workload_id"] not in own and _beyond(r)),
-                   key=lambda r: r["delta_us"])  # fmt: skip
+    kernel = record.get("definition") or ""
+    moved = [r for r in rows[1:] if r["status"] == "matched" and _beyond(r)]
+    net = round(sum(r["delta_us"] for r in moved), 3)
+    others = sorted((r for r in moved if r["workload_id"] not in own and r["kernel"] != kernel),
+                    key=lambda r: r["delta_us"])  # fmt: skip
     keep = ("workload_id", "kernel", "us_a", "us_b", "speedup")
     return {
         "baseline_us": total["us_a"], "trial_us": total["us_b"], "speedup": total["speedup"],
         "spread": round((total["spread_a"] or 0.0) + (total["spread_b"] or 0.0), 4),
-        "slower": _beyond(total) and total["speedup"] < 1,
-        "others": [{k: r[k] for k in keep} for r in moved],
+        "net_us": net, "slower": (_beyond(total) and total["speedup"] < 1) or net < 0,
+        "others": [{k: r[k] for k in keep} for r in others],
     }  # fmt: skip
 
 
 def _model_text(model: dict) -> str:
     """The model's total and the other workloads that moved, most time lost first."""
     lines = [f"the whole model: {model['baseline_us']} -> {model['trial_us']} us "
-             f"(x{model['speedup']}, spread {model['spread']})"]  # fmt: skip
+             f"(x{model['speedup']}, spread {model['spread']}); the workloads that moved beyond "
+             f"their spread save {model['net_us']} us in all"]  # fmt: skip
     for r in model["others"]:
         lines.append(f"  {r['kernel'] or '-'} {r['workload_id']}: {r['us_a']} -> {r['us_b']} us "
                      f"(x{r['speedup']}), not this kernel's own workload")  # fmt: skip
