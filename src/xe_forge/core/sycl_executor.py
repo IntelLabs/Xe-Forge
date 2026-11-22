@@ -45,15 +45,19 @@ class KernelType(Enum):
     MOE_GEMM = "moe_gemm"
 
 
-def _detect_device_target() -> str:
-    """The icpx AOT device target for the XPU torch sees: its PCI device id, which ocloc
+def _detect_device_target(device: str = "xpu") -> str:
+    """The icpx AOT device target for ``device``: its PCI device id, which ocloc
     takes as ``-device 0x...``."""
     try:
         import torch
 
         if not hasattr(torch, "xpu") or not torch.xpu.is_available():
             return ""
-        target = hex(torch.xpu.get_device_properties().device_id)
+        from xe_forge.config import device_kind
+
+        # Another type of device names no XPU: the current one, as when none is named.
+        named = device if device_kind(device) == "xpu" else None
+        target = hex(torch.xpu.get_device_properties(named).device_id)
         logger.info("SYCL device target: %s", target)
         return target
     except Exception as e:
@@ -143,7 +147,7 @@ class SyclExecutor:
             kernel_type = KernelType(kernel_type)
         self.kernel_type = kernel_type
         if device_target is None:
-            device_target = _detect_device_target()
+            device_target = _detect_device_target(device)
         self.device_target = device_target
         self.device = device
         self.dependencies = tuple(dependencies)

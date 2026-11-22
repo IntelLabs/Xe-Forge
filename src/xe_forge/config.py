@@ -15,6 +15,18 @@ from xe_forge.external import DEFAULT_TIMEOUT
 from xe_forge.models import OptimizationStage
 
 
+def device_kind(device) -> str:
+    """The type of a device name: ``xpu`` of ``xpu:1``. The index names one device of that
+    type; what is compared, chosen or looked up by type takes this."""
+    return str(device).split(":")[0]
+
+
+def device_index(device, default: int = 0) -> int:
+    """The index of a device name (1 of ``xpu:1``), else ``default``."""
+    _, sep, index = str(device).partition(":")
+    return int(index) if sep and index.isdigit() else default
+
+
 def noise_band() -> float:
     """The smallest speed change reported as one (``BENCHMARK_MIN_EFFECT``)."""
     raw = os.environ.get("BENCHMARK_MIN_EFFECT", "0.02")
@@ -386,7 +398,7 @@ class ConfigManager:
 
     def _build_device_config(self, device_type: str, dsl: str) -> DeviceConfig:
         """Build device-specific configuration based on device type."""
-        if device_type == "cuda":
+        if device_kind(device_type) == "cuda":
             return CUDAConfig(
                 device=device_type,
                 dsl=dsl,
@@ -401,7 +413,7 @@ class ConfigManager:
         named = self._get_env("XPU_DEVICE", "").strip()
         device = device_type
         if named and named != device_type:
-            if ":" not in device_type and named.split(":")[0] == device_type:
+            if ":" not in device_type and device_kind(named) == device_type:
                 device = named
             else:
                 logging.getLogger(__name__).warning(

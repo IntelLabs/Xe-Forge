@@ -45,11 +45,11 @@ picks them itself; `capture parse` checks that the trace ran what was declared.
 | capture | agent (`frontend-capture.md.j2`): decides whether the model fits, converts it if the framework needs that, writes `launcher/run.sh` | `raw/`, `capture.json` | `capture run`, `capture parse`; `run` parses again itself |
 | patch (when the framework lacks the architecture or an op) | agent (`frontend-patch.md.j2`): a patch in a clone under `--kernel-repos`, built into a layered venv, with `generate.sh` and `PR.md` | `patch-<n>/`, `stack.json` | `patch check`; capture then runs again on the patched stack, at most three patches |
 | name | agent (`frontend-name.md.j2`): finds each op's source, clones or fast-forwards its repository | `name/ops.json`, `names.json` | `naming.validate`: each name a symbol, its repository under `--kernel-repos`, its dsl one Xe-Forge has; with `--calibration`, a stated cost above any measured call is dropped |
-| analyze | code (`frontend/analyze.py`) | `analysis.json`, `kernels.yaml`, `specs/`, `records/` | bound arithmetic: GEMM roofline, counter speed-of-light, the costs the namer stated |
+| analyze | code (`frontend/analyze.py`) | `analysis.json`, `kernels.yaml`, `specs/`, `records/` | bound arithmetic: GEMM roofline, counter speed-of-light, the costs the namer stated; the whole model against its roofline (`Model roofline:` in the output and SUMMARY.md: every bounded workload's bound summed, over all the device time) |
 | inputs | agent (`frontend-inputs.md.j2`): per kernel, one shape per group of captured shapes that take the same path, with weights | `inputs/inputs.json`, the specs' `weights:` | `inputs check`: every captured shape in one group, a group within one configuration, weights summing to 1 |
 | optimize | one Xe-Forge run per kernel | `workspaces/`, `results/` | the benchmark gates below |
 | fuse (`--fuse`) | agent (`frontend-fuse.md.j2`): chains of ops one kernel could replace, each with a `_pytorch.py` reference; each passing one is optimized as a kernel, on clones carrying the winning patches | `fuse/` | `fuse check`: the ops were captured, the reference takes the anchor's dims; ranked by the chain's time after the kernels' wins |
-| prove (`--prove`) | agent (`frontend-build-arms.md.j2`) builds an unpatched and a patched stack; code re-runs the launcher in each | `prove/` | device time over `--prove-repeat` alternating captures per arm |
+| prove (`--prove`) | agent (`frontend-build-arms.md.j2`) builds an unpatched and a patched stack; code re-runs the launcher in each | `prove/` | device time over `--prove-repeat` captures per arm, in ABBA order; on a patched framework, the tokens scored again on the patched arm (`patch score`) before any capture, judged against arm A |
 
 **Name.** Each op gets a route: `kernel` (a kernel in a repository Xe-Forge can rewrite),
 `library` (the time is a library primitive; what is tuned is the call, in the repository
@@ -72,7 +72,14 @@ not one over that kernel.
 
 **Prove.** When the patches together fail in the model, each is proved alone; one that fails
 alone is marked "not proven in the model" and not mergeable in `results/`, and the rest are
-proved without it.
+proved without it. On a patched framework (`stack.json`), the patched arm's output is scored
+again by the patch check's scoring, with the arguments the check had
+(`patch-<n>/check-args.json`), before anything is timed. What is scored is `generate.sh`'s run
+of the model on the check's prompt, so a kernel the launcher reaches and `generate.sh` does not
+is not judged by it. A failure counts against the patches only when arm A, built the same way
+without them, passes; output that could not be judged (the reference failed) is said, and the
+time is still measured. With `--quantization`, the quantized tokens are reported beside the
+check's, not gated, as the check reports them.
 
 ## Run directory
 
@@ -120,6 +127,7 @@ setup (`frontend/cli.py`: `_setup_environ`, `_session_env`).
 | `xe-forge-skill capture run <launcher> -o raw` | runs the launcher plain, then under unitrace (device timing, the launch timeline, `ComputeBasic` counters when the device lists them); records the launcher's sha256 and a `MANIFEST.json` of `raw/` |
 | `xe-forge-skill capture parse raw -o capture.json [--names names.json]` | builds the op list and checks it: `raw/` unchanged, at least 90% (`--min-known`) of op time in kernels unitrace saw, every pattern of an op map matches a kernel and none is claimed twice, `runtime.inputs` hashes hold, declared dtypes ran |
 | `xe-forge-skill patch check <dir>` | the patch is git's own diff, applies to a fresh clone, imports from outside the framework's venv; then the output check below |
+| `xe-forge-skill patch score <dir> --python <py> --out <json>` | the output check alone, with `generate.sh` under another build of the stack; `--prove` runs it on the patched arm |
 | `xe-forge-skill bound capture.json` | each workload's efficiency against the stricter known bound |
 | `xe-forge-skill inputs check inputs.json --manifest kernels.yaml` | each chosen shape's captured share beside its weight |
 | `xe-forge-skill fuse check fusions.json --capture capture.json` | the fusions' ops, references and ranking |
@@ -177,4 +185,6 @@ vision and action runs, look at `outputs/` before using a patch.
 
 Nothing in the code. Run it with `--framework <its name>`, then record what to pass and
 what the agents did on a page in [frameworks/](frameworks/README.md), from
-[frameworks/TEMPLATE.md](frameworks/TEMPLATE.md).
+[frameworks/TEMPLATE.md](frameworks/TEMPLATE.md). Knowledge the agents should start from goes
+in `knowledge_base/frameworks/<its name>/`, with a `framework.yaml` for the facts the run acts
+on (see [frameworks/native.md](frameworks/native.md)).

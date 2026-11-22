@@ -82,7 +82,33 @@ class Analysis:
                 for e in self.entries
             ],
             "decisions": {k: asdict(v) for k, v in self.decisions.items()},
+            "roofline": self.roofline(),
         }
+
+    def roofline(self) -> dict:
+        """The whole model against its roofline: the bound of every workload that has one,
+        summed, over all the device time. A workload with no bound adds time and no bound, so
+        the efficiency is never overstated; ``bounded_share`` says how much of the time is
+        bounded at all."""
+        device = sum(d.mean_us * d.calls for d in self.decisions.values())
+        known = [d for d in self.decisions.values() if d.eff is not None]
+        bounded = sum(d.mean_us * d.calls for d in known)
+        bound = sum(d.mean_us * d.calls * d.eff for d in known)
+        return {
+            "device_us": round(device, 1),
+            "bound_us": round(bound, 1) if known else None,
+            "bounded_share": round(bounded / device, 4) if device else None,
+            "eff": round(bound / device, 4) if known and device else None,
+        }
+
+
+def roofline_line(r: dict) -> str:
+    """One line of ``Analysis.roofline()``, for the run's output and SUMMARY.md."""
+    if r.get("eff") is None:
+        return "Model roofline: unknown (no workload has a bound)."
+    return (f"Model roofline: {r['device_us'] / 1e3:.1f} ms of device time against a bound "
+            f"of {r['bound_us'] / 1e3:.1f} ms, efficiency {r['eff']:.1%} "
+            f"({r['bounded_share']:.1%} of the time has a bound).")  # fmt: skip
 
 
 AT_ROOFLINE = 0.8

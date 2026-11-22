@@ -29,9 +29,11 @@ class DSPyEngine(BaseEngine):
         self.profiler: XPUProfiler | UnitraceXPUProfiler | None = None
         p = config.profiler
         if p.unitrace_enabled:
-            self.profiler, binary = UnitraceXPUProfiler(p.unitrace_bin), p.unitrace_bin
+            self.profiler = UnitraceXPUProfiler(p.unitrace_bin, device=config.device_config.device)
+            binary = p.unitrace_bin
         elif p.vtune_enabled:
-            self.profiler, binary = XPUProfiler(p.vtune_bin), p.vtune_bin
+            self.profiler = XPUProfiler(p.vtune_bin, device=config.device_config.device)
+            binary = p.vtune_bin
         if self.profiler is not None and not self.profiler.available():
             logger.warning("%s not found, profiling disabled.", binary)
             self.profiler = None

@@ -52,7 +52,7 @@ def _names(args, name):
     return [n for n in (getattr(args, name, None) or []) if n]
 
 
-def _gpu_profilers(args, metric_group):
+def _gpu_profilers(args, metric_group, device="xpu"):
     from xe_forge.core.profiler import UnitraceXPUProfiler, XPUProfiler
 
     if args.tool == "perf":
@@ -75,10 +75,11 @@ def _gpu_profilers(args, metric_group):
                     capture_assembly=getattr(args, "assembly", False),
                     sampling_interval_us=getattr(args, "sampling_interval_us", None),
                     metric_group=group,
+                    device=device,
                 )
             )
     if args.tool in ("auto", "vtune") and metric_group == "ComputeBasic":
-        profilers.append(XPUProfiler(vtune_bin=args.vtune_bin))
+        profilers.append(XPUProfiler(vtune_bin=args.vtune_bin, device=device))
     return profilers
 
 
@@ -92,7 +93,7 @@ def run(args):
 
         device = device_type()
     host = device.split(":")[0] == "cpu"
-    profilers = _host_profilers(args) if host else _gpu_profilers(args, metric_group)
+    profilers = _host_profilers(args) if host else _gpu_profilers(args, metric_group, device)
     # Several collections of one source, each printed and recorded (unitrace's groups, or
     # perf's stat and record).
     every = metric_group == "all" or (host and len(profilers) > 1)

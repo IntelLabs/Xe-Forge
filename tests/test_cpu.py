@@ -906,6 +906,23 @@ def test_the_run_templates_speak_of_the_host_on_a_host():
     assert "XE_FORGE_QUANTIZATION" in patch
     gpu = render("frontend-capture.md.j2", **{**ctx, "device": "xpu", "on_host": False})
     assert "HostTimeline" not in gpu and "unitrace" in gpu
+    # A framework without a knowledge base: upstream is cloned, the quantized run reported.
+    assert "Clone the upstream source" in patch and "never failing on them" in patch
+    assert "knowledge base" not in patch and "knowledge base" not in capture
+    assert "--quantized-gate" not in patch
+
+    # One whose framework.yaml says it is generated and quantizes the weights itself.
+    kb, facts = cli.framework_kb("native")
+    assert kb.name == "native" and facts["upstream"] is False
+    native = {**ctx, "framework": "native", "framework_kb": str(kb), "framework_facts": facts}
+    patch = render("frontend-patch.md.j2", **native)
+    assert "Clone the upstream source" not in patch and "has no upstream to clone" in patch
+    assert f"{kb}: read README.md, contract.md there first" in patch
+    assert "$OUT/dequantized.json" in patch and "never failing on them" not in patch
+    assert "--quantization q2:uint8 --quantized-gate dequantized" in patch
+    capture = render("frontend-capture.md.j2", **native)
+    assert '"unsupported": "model", "what": "m"' in capture and "contract.md" in capture
+    assert cli.framework_kb("../native") == (None, {}) and cli.framework_kb("fw") == (None, {})
 
 
 @pytest.mark.parametrize(

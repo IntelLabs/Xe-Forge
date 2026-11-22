@@ -6,6 +6,7 @@ import logging
 
 import dspy
 
+from xe_forge.config import device_kind
 from xe_forge.knowledge.patterns import get_stage_for_issue, get_stage_for_issue_str
 from xe_forge.models import DSL, DetectedIssue, IssueType, KernelAnalysis, OptimizationStage
 
@@ -344,7 +345,9 @@ class AnalyzerAgent:
                     str(self.dsl.value if hasattr(self.dsl, "value") else self.dsl), "Triton"
                 ),
                 device_type=cfg.device_config.device,
-                device_description=_DEVICE_DESCS.get(cfg.device_config.device, "Intel XPU"),
+                device_description=_DEVICE_DESCS.get(
+                    device_kind(cfg.device_config.device), "Intel XPU"
+                ),
                 issue_categories_block=issue_block,
             )
             sig = sig.append_instructions(template_instructions)

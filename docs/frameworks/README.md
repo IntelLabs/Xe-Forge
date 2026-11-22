@@ -1,7 +1,10 @@
 # Frameworks
 
 Nothing in the code or in the agent templates reads these pages or names a framework:
-`--framework` is free text handed to the agents. The pages record what a person passes to
+`--framework` is free text handed to the agents. A framework may also have a knowledge base,
+`knowledge_base/frameworks/<framework>/`: the agents are told to read it first, and the facts
+in its `framework.yaml` (no upstream to clone, a quantized gate) change what they are asked
+and what the patch check gates, never a test of the name. The pages record what a person passes to
 `xe-forge run` for a framework and what the agents do with it. How a run works is in
 [FRAMEWORK.md](../FRAMEWORK.md); every flag is in [REFERENCE.md](../REFERENCE.md).
 
@@ -13,6 +16,7 @@ Nothing in the code or in the agent templates reads these pages or names a frame
 | `openvino` | text | run through optimize | [openvino.md](openvino.md) |
 | `vllm-omni` | vision | run | [vllm-omni.md](vllm-omni.md) |
 | `RLDX-1` | action | being brought up | none yet |
+| `native` | text | being brought up: the engine is written for the model | [native.md](native.md) |
 
 A page is named by the string passed to `--framework`.
 

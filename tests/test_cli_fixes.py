@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
+from pathlib import Path
 
 import pytest
 import yaml
@@ -124,6 +126,102 @@ def test_the_device_index_asked_for_reaches_naming_and_calibration(monkeypatch):
     assert profile.device_info()["name"] == "g" and seen == [("name", 1)]
     calibrate.measure(read_bytes=16, n=2, iters=1, dtypes=("float32",))
     assert ("set", 1) in seen
+
+
+@pytest.mark.parametrize("given", ["xpu", "xpu:1", "cuda:0", "cpu"])
+def test_the_optimize_cli_takes_a_device_with_its_index(monkeypatch, given):
+    from xe_forge import cli
+
+    monkeypatch.setattr(sys, "argv", ["xe-forge", "--device", given])
+    assert cli._parse_args()[1].device == given
+
+
+@pytest.mark.parametrize("given", ["npu", "xpu:", "xpu:a", "gpu:1"])
+def test_the_optimize_cli_refuses_a_device_it_cannot_run(monkeypatch, capsys, given):
+    from xe_forge import cli
+
+    monkeypatch.setattr(sys, "argv", ["xe-forge", "--device", given])
+    with pytest.raises(SystemExit):
+        cli._parse_args()
+    assert "optionally :<index>" in capsys.readouterr().err
+
+
+def test_an_indexed_device_is_its_type_where_the_type_decides(monkeypatch):
+    from xe_forge.config import ConfigManager, CUDAConfig, device_index, device_kind
+    from xe_forge.core import device_query
+    from xe_forge.knowledge.loader import load_knowledge_base
+    from xe_forge.prompts import PromptLibrary, render_signature_instructions
+
+    assert (device_kind("xpu:1"), device_index("xpu:1"), device_index("xpu", 3)) == ("xpu", 1, 3)
+    monkeypatch.setenv("DEVICE_TYPE", "cuda:1")
+    monkeypatch.delenv("XPU_DEVICE", raising=False)
+    cfg = ConfigManager().config.device_config
+    assert isinstance(cfg, CUDAConfig) and cfg.device == "cuda:1"  # the index reaches torch
+    assert PromptLibrary("triton", "xpu:1").device_type == "xpu"
+    for name in ("optimization_signature", "autotune_signature"):
+        assert render_signature_instructions(name, dsl="triton", device_type="xpu:1") == (
+            render_signature_instructions(name, dsl="triton", device_type="xpu")
+        )
+    kb = Path(__file__).resolve().parents[1] / "knowledge_base"
+    assert load_knowledge_base(kb, "triton", "xpu:1").summary() == (
+        load_knowledge_base(kb, "triton", "xpu").summary()
+    )
+    seen = []
+    monkeypatch.setattr("xe_forge.core.xpu_query.get_xpu_config", lambda i: seen.append(i) or i)
+    assert device_query.query_device("xpu:1") == 1 and device_query.query_device("xpu", 2) == 2
+
+
+def test_one_gpu_of_several_is_profiled_on_that_gpu(tmp_path):
+    from xe_forge.claude import generator
+
+    assert generator._profile_device_args("xpu:1") == ["--device", "xpu:1"]
+    assert generator._profile_device_args("cpu") == ["--device", "cpu"]
+    assert generator._profile_device_args("xpu") == []  # the first device torch sees
+
+
+def test_the_gpu_profilers_run_the_kernel_on_the_device_asked_for():
+    from xe_forge.core.profiler import UnitraceXPUProfiler, XPUProfiler
+    from xe_forge.skills.profile import _gpu_profilers
+
+    args = argparse.Namespace(tool="auto", unitrace_bin="u", vtune_bin="v")
+    made = _gpu_profilers(args, "ComputeBasic", "xpu:1")
+    assert [p.device for p in made] == ["xpu:1", "xpu:1"]
+    for p in (UnitraceXPUProfiler(device="xpu:1"), XPUProfiler(device="xpu:1")):
+        script = (p._generate_runner_script(Path("k.py"), 1, 2) if isinstance(p, UnitraceXPUProfiler)
+                  else p._generate_runner_script(Path("k.py"), 1, 2, Path("r")))  # fmt: skip
+        assert "'device': 'xpu:1'" in script, script
+    assert "'device': 'xpu'" in UnitraceXPUProfiler()._generate_runner_script(Path("k.py"), 1, 2)
+
+
+def test_the_hardware_query_describes_the_device_asked_for(monkeypatch):
+    import torch
+
+    from xe_forge.core import xpu_query
+
+    monkeypatch.setattr(torch.xpu, "is_available", lambda: True)
+    monkeypatch.setattr(torch.xpu, "device_count", lambda: 2)
+    monkeypatch.setattr(torch.xpu, "current_device", lambda: 0)
+    asked = []
+    monkeypatch.setattr(torch.xpu, "get_device_name", lambda i: asked.append(i) or "g")
+    props = argparse.Namespace(name="g", total_memory=2**30)
+    monkeypatch.setattr(torch.xpu, "get_device_properties", lambda i: props)
+    monkeypatch.setattr(torch.xpu, "get_device_capability", lambda i: {})
+    assert xpu_query.query_xpu_via_torch(1).device_id == 1 and asked[0] == 1
+    assert xpu_query.query_xpu_via_torch().device_id == 0  # none named: the current one
+
+
+@pytest.mark.parametrize("device, named", [("xpu:1", "xpu:1"), ("xpu", "xpu"), ("cpu", None)])
+def test_the_sycl_target_is_the_named_xpus_and_otherwise_the_current_one(monkeypatch, device,
+                                                                        named):  # fmt: skip
+    import torch
+
+    from xe_forge.core.sycl_executor import _detect_device_target
+
+    seen = []
+    monkeypatch.setattr(torch.xpu, "is_available", lambda: True)
+    monkeypatch.setattr(torch.xpu, "get_device_properties",
+                        lambda d=None: seen.append(d) or argparse.Namespace(device_id=0xE20B))  # fmt: skip
+    assert _detect_device_target(device) == "0xe20b" and seen == [named]
 
 
 def test_a_given_reference_is_never_the_locators_to_write():

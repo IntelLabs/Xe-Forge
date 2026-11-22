@@ -75,6 +75,34 @@ else:
         if dtype != "float32" or "out of memory" not in str(e).lower():
             raise
         m, dev = m.to("cpu").eval(), "cpu"
+export = sys.argv[12] if len(sys.argv) > 12 else ""
+facts = None
+if export:  # the framework's dequantized weights in place of the checkpoint's: each must be one of its tensors
+    import glob
+    from safetensors.torch import load_file
+    sd, errs, bad = m.state_dict(), {}, []
+    for f in sorted(glob.glob(os.path.join(export, "*.safetensors"))):
+        for k, v in load_file(f).items():
+            if k not in sd:
+                bad.append(f"{k}: not a tensor of the model")
+            elif tuple(v.shape) != tuple(sd[k].shape):
+                bad.append(f"{k}: shape {list(v.shape)}, the model's {list(sd[k].shape)}")
+            elif not torch.isfinite(v).all():
+                bad.append(f"{k}: not finite")
+            else:
+                o = sd[k].float().cpu()
+                errs[k] = float((v.float() - o).norm() / max(float(o.norm()), 1e-30))
+                sd[k] = v.to(sd[k].device, sd[k].dtype)
+    bad += [] if errs else [f"{export} holds no tensor"]
+    bad += [f"{k}: relative error {e:.3g} against the checkpoint, no closer than zeros"
+            for k, e in errs.items() if e >= 1]
+    if bad:
+        print(json.dumps({"export_problems": bad}))
+        sys.exit(3)
+    m.load_state_dict(sd, strict=True)
+    worst = sorted(errs.items(), key=lambda kv: -kv[1])[:5]
+    facts = {"tensors": len(errs), "mean_rel_error": sum(errs.values()) / len(errs),
+             "worst": [[k, round(e, 6)] for k, e in worst]}
 vocab = tok if hasattr(tok, "ordinary") else profile.hf_vocab(tok)
 prompts = profile.token_ids(vocab, batch, input_len, prompt_file)
 def logits(x):  # transformers' output, a tuple's first item, or the tensor itself
@@ -104,7 +132,7 @@ for i in rows:
         best = lp.max(-1).values
         gaps[i].append((best - lp[torch.arange(len(g), device=dev),
                                   torch.tensor(g, device=dev)]).tolist())
-print(json.dumps({"gaps": gaps, "device": dev, "transformers": source}))
+print(json.dumps({"gaps": gaps, "device": dev, "transformers": source, "export": facts}))
 """
 
 
@@ -135,10 +163,10 @@ def _env(**extra) -> dict:
 
 
 def _by_native(work: Path, python: str, patched: Path, record: dict,
-               margin: float | None = None) -> list[str]:  # fmt: skip
+               margin: float | None = None, into: Path | None = None) -> list[str]:  # fmt: skip
     """Judge an image or video patch against the framework's own torch path for the same op.
 
-    Writes ``quality.json`` beside the patch: the artifacts generate.sh saved (the prompt
+    Writes ``quality.json`` into ``into``, else beside the patch: the artifacts generate.sh saved (the prompt
     embedding, the step-1 and final latents, the picture or the frames), stage by stage. The
     gate is the earliest stage present, since the sampling loop amplifies a difference the
     further down you look. ``op_gain`` is the whole pipeline, native over patched.
@@ -156,7 +184,7 @@ def _by_native(work: Path, python: str, patched: Path, record: dict,
             ]
         if record.get("patched_s"):
             record["op_gain"] = round(native_s / record["patched_s"], 3)
-        judged = quality.quality(work, {"A": [Path(nat)], "B": [patched]},
+        judged = quality.quality(into or work, {"A": [Path(nat)], "B": [patched]},
                                  {"A": [Path(nat)], "B": [patched]},
                                  margin=quality.MARGIN if margin is None else margin)  # fmt: skip
         record["reference"] = f"the framework's plain-torch path ({judged['verdict']})"
@@ -181,7 +209,11 @@ def _by_native(work: Path, python: str, patched: Path, record: dict,
 
 def _quantized(work: Path, python: str, quant: str, prompt: str, n: int, args, score) -> dict:
     """generate.sh again with XE_FORGE_QUANTIZATION, scored by the same reference: per
-    sequence the gaps, the worst, and the share of tokens that are the reference's best."""
+    sequence the gaps, the worst, and the share of tokens that are the reference's best. With
+    ``--quantized-gate dequantized`` the reference is the original model holding the
+    dequantized export generate.sh names in $OUT/dequantized.json, scored in float32 (the
+    export's precision), and ``export`` says how far that export is from the checkpoint."""
+    gate = getattr(args, "quantized_gate", None) == "dequantized"
     with tempfile.TemporaryDirectory() as out:
         env = _env(FRAMEWORK_PYTHON=python, OUT=out, BATCH=str(args.batch), OUTPUT_LEN=str(n),
                    PROMPT_FILE=prompt, XE_FORGE_QUANTIZATION=quant,
@@ -189,26 +221,57 @@ def _quantized(work: Path, python: str, quant: str, prompt: str, n: int, args, s
         t0 = time.perf_counter()
         gen = subprocess.run(["bash", str(work / "generate.sh")], cwd=work, env=env,
                              capture_output=True, text=True)  # fmt: skip
-        rec = {"quantization": quant, "run_s": round(time.perf_counter() - t0, 1)}
+        rec = {"quantization": quant, "run_s": round(time.perf_counter() - t0, 1), "gated": gate}
         tokens = Path(out) / "tokens.json"
         if gen.returncode != 0 or not tokens.is_file():
             return {**rec, "error": f"generate.sh with XE_FORGE_QUANTIZATION={quant} failed "
                     f"(exit {gen.returncode}): {gen.stderr.strip()[-400:]}"}  # fmt: skip
         got = json.loads(tokens.read_text())
-        ref = score(args.precision, tokens=tokens)
+        export = ""
+        if gate:
+            named = Path(out) / "dequantized.json"
+            if not named.is_file():
+                return {**rec, "tokens": got, "error": "generate.sh wrote no $OUT/dequantized.json "
+                        "naming the weights its quantized run decodes to"}  # fmt: skip
+            export = str((work / json.loads(named.read_text()).get("weights", "")).resolve())
+            rec["export_dir"] = export
+        ref = score("float32" if gate else args.precision, tokens=tokens, export=export)
         if ref.returncode != 0:
+            last = (ref.stdout.strip().splitlines() or [""])[-1]
+            told = json.loads(last).get("export_problems") if last.startswith("{") else None
             return {
                 **rec,
                 "tokens": got,
-                "error": f"the reference failed: {ref.stderr.strip()[-400:]}",
+                "error": ("the dequantized export does not fit the model: " + "; ".join(told[:5]))
+                if told
+                else f"the reference failed: {ref.stderr.strip()[-400:]}",
             }
-        gaps = [g[0] for _, g in sorted(json.loads(ref.stdout.strip().splitlines()[-1])["gaps"].items(),
-                                        key=lambda kv: int(kv[0]))]  # fmt: skip
+        res = json.loads(ref.stdout.strip().splitlines()[-1])
+        gaps = [g[0] for _, g in sorted(res["gaps"].items(), key=lambda kv: int(kv[0]))]
         flat = [x for g in gaps for x in g]
-        return {**rec, "tokens": got, "gaps": gaps,
+        return {**rec, "tokens": got, "gaps": gaps, "export": res.get("export"),
                 "worst": [round(max(g, default=float("inf")), 4) for g in gaps],
                 "mean_gap": round(sum(flat) / len(flat), 4) if flat else None,
                 "best_share": round(sum(x == 0 for x in flat) / len(flat), 4) if flat else None}  # fmt: skip
+
+
+def _quantized_gate(q: dict, args, tol: float) -> list[str]:
+    """The problems of a gated quantized run (``--quantized-gate dequantized``); none when the
+    quantized run is only reported."""
+    if not q.get("gated"):
+        return []
+    if q.get("error"):
+        return [f"{q['quantization']}: {q['error']}"]
+    n = args.min_match
+    if (
+        len(q["gaps"]) != len(q["tokens"])
+        or any(len(g) < n for g in q["tokens"])
+        or any(w > tol for w in q["worst"])
+    ):
+        return [f"{q['quantization']}: tokens fall more than {tol} nat below the original model "
+                f"holding the dequantized export, within the first {n}: worst per sequence "
+                f"{q['worst']}"]  # fmt: skip
+    return []
 
 
 def check(args) -> tuple[list[str], dict]:
@@ -252,6 +315,18 @@ def check(args) -> tuple[list[str], dict]:
         problems.append(f"{package} imports from the framework's venv ({prefix}), not the patch")
     if problems:
         return problems, record
+    return score(work, meta, python, args, record), record
+
+
+def score(work: Path, meta: dict, python: str, args, record: dict,
+          into: Path | None = None) -> list[str]:  # fmt: skip
+    """generate.sh under ``python``, its tokens scored by the reference: the problems, with
+    ``record`` filled. ``check`` runs it on the patch's own interpreter once the patch holds;
+    ``patch score`` runs it on another build of the same stack, so a change made after the
+    check is judged on the tokens the check judged. ``into``: where an image or video
+    comparison writes its record, else beside the patch. ``record["unscored"]``: the reference
+    could not score, which says nothing of the tokens."""
+    problems: list[str] = []
     # The candidate first, then the reference: generate.sh never sees what it is checked against.
     n, tol, prompt = args.min_match, args.tolerance, str(args.prompt_file or PROMPT)
     with tempfile.TemporaryDirectory() as out:
@@ -265,21 +340,17 @@ def check(args) -> tuple[list[str], dict]:
         record["patched_s"] = round(time.perf_counter() - t0, 1)
         got_path = Path(out) / "tokens.json"
         if run.returncode != 0:
-            return [
-                f"generate.sh failed (exit {run.returncode}): {run.stderr.strip()[-400:]}"
-            ], record
+            return [f"generate.sh failed (exit {run.returncode}): {run.stderr.strip()[-400:]}"]
         if not got_path.is_file():
             # No tokens: an image or a video. The reference is then the framework's own
             # plain-torch path for the same op, not transformers -- there is nothing to
             # teacher-force, but there is something to compare, and the op gain to measure.
             if getattr(args, "no_reference", False):
                 record.update(reference="skipped (--no-reference)")
-                return problems, record
-            return _by_native(
-                work, python, Path(out), record, getattr(args, "margin", None)
-            ), record
+                return problems
+            return _by_native(work, python, Path(out), record, getattr(args, "margin", None), into)
         if args.input_len is None:  # tokens are scored on the prompt they continue
-            return ["generate.sh wrote tokens.json: pass --input-len to score them"], record
+            return ["generate.sh wrote tokens.json: pass --input-len to score them"]
         got = json.loads(got_path.read_text())
         if getattr(args, "no_reference", False):
             # Everything above still had to hold: the patch is git's own diff, it applies
@@ -290,28 +361,31 @@ def check(args) -> tuple[list[str], dict]:
             # So this says the patch builds and the model runs with it, and says NOTHING
             # about whether the output is right. Judge that yourself.
             record.update(output=got, reference="skipped (--no-reference)")
-            return problems, record
+            return problems
 
         # The model's own reference runner, when transformers cannot load it (patch.json).
         runner = str((work / meta["reference"]).resolve()) if meta.get("reference") else ""
 
-        def score(dtype: str, rows: list[int] | None = None, draws: int = 1, tokens=None):
-            """Teacher forcing on the candidate's own tokens, on the run's device."""
+        def teacher(dtype: str, rows: list[int] | None = None, draws: int = 1, tokens=None,
+                    export: str = ""):  # fmt: skip
+            """Teacher forcing on the candidate's own tokens, on the run's device; ``export``:
+            a directory of dequantized weights the reference model holds in place of its own."""
             return subprocess.run([
                 meta.get("reference_python") or args.reference_python or args.framework_python,
                 "-c", _REFERENCE, args.model, str(args.batch), str(args.input_len), str(n),
                 "1" if args.trust_remote_code or meta.get("trust_remote_code") else "0",
                 str(tokens or got_path), prompt, dtype,
-                ",".join(map(str, rows)) if rows else "", str(draws), runner],
+                ",".join(map(str, rows)) if rows else "", str(draws), runner, export],
                 capture_output=True, text=True, env=_env())  # fmt: skip
 
-        ref = score(args.precision)
+        ref = teacher(args.precision)
         if ref.returncode != 0:
+            record["unscored"] = True
             return [
                 f"the reference failed ({ref.stderr.strip()[-400:]}); patch.json's "
                 '"reference_python" (GPU torch and what loads the model), "trust_remote_code", '
                 'or "reference" (a runner with load(model, dtype, device)) set it up'
-            ], record
+            ]
         res = json.loads(ref.stdout.strip().splitlines()[-1])
         first = [res["gaps"][k][0] for k in sorted(res["gaps"], key=int)]
         gaps, judge = list(first), [args.precision] * len(first)
@@ -320,7 +394,7 @@ def check(args) -> tuple[list[str], dict]:
                  if i < len(got) and len(got[i]) >= n and max(g, default=0) > tol]  # fmt: skip
         fp32 = None
         if again:
-            ref32 = score("float32", again, DRAWS)
+            ref32 = teacher("float32", again, DRAWS)
             fp32 = {
                 "rows": again,
                 "error": ref32.stderr.strip()[-400:] if ref32.returncode else None,
@@ -341,7 +415,8 @@ def check(args) -> tuple[list[str], dict]:
                             f"spread over {DRAWS} perturbed float32 forwards")  # fmt: skip
         quant = getattr(args, "quantization", None)
         if quant and quant != "auto" and not problems:
-            record["quantized"] = _quantized(work, python, quant, prompt, n, args, score)
+            record["quantized"] = _quantized(work, python, quant, prompt, n, args, teacher)
+            problems += _quantized_gate(record["quantized"], args, tol)
     worst = [round(max(r, default=float("inf")), 4) for r in gaps]
     record.update(tokens=got, gaps=gaps, worst=worst, judge=judge, judge_first=args.precision, first_gaps=first, fp32=fp32,
                   tolerance=tol, required=n, transformers=res.get("transformers"),
@@ -349,7 +424,7 @@ def check(args) -> tuple[list[str], dict]:
     if len(gaps) != len(got) or any(len(g) < n for g in got) or any(w > tol for w in worst):
         problems.append(f"tokens fall more than {tol} nat below transformers' best within the "
                         f"first {n}: worst per sequence {worst} ({len(got)} of {args.batch})")  # fmt: skip
-    return problems, record
+    return problems
 
 
 def _quantized_facts(q: dict | None) -> dict:
@@ -358,12 +433,57 @@ def _quantized_facts(q: dict | None) -> dict:
     name = q["quantization"]
     if q.get("error"):
         return {f"{name}: scored": f"no ({q['error'][:200]})"}
-    return {f"{name}: worst gap per sequence (nat)": q["worst"],
-            f"{name}: mean gap (nat)": q["mean_gap"],
-            f"{name}: share of tokens the reference's best": q["best_share"]}  # fmt: skip
+    facts = {f"{name}: worst gap per sequence (nat)": q["worst"],
+             f"{name}: mean gap (nat)": q["mean_gap"],
+             f"{name}: share of tokens the reference's best": q["best_share"]}  # fmt: skip
+    if q.get("export"):  # gated against its own dequantized weights; the format's loss, reported
+        e = q["export"]
+        facts[f"{name}: judged against"] = "the original model holding its dequantized weights"
+        facts[f"{name}: mean relative error of those weights"] = round(e["mean_rel_error"], 6)
+        facts[f"{name}: worst tensors"] = ", ".join(f"{k} {v}" for k, v in e["worst"])
+    return facts
+
+
+UNSCORED = 2  # patch score: nothing was judged (the reference, or generate.sh's contract)
+
+
+def rescore(args) -> int:
+    """``patch score``: the scoring of ``check`` alone, generate.sh under ``--python`` (another
+    build of the patched stack), the record written to ``--out``. The patch's own files,
+    check.json, PR.md and quality.json, are left as its check wrote them. Exit 1: the output
+    fails; UNSCORED: it could not be judged."""
+    work, out = Path(args.dir).resolve(), Path(args.out).resolve()
+    meta = json.loads((work / "patch.json").read_text())
+    record = {"python": args.python, "dir": str(work)}
+    package = meta.get("package", "")
+    where = subprocess.run([args.python, "-c", f"import {package}; print({package}.__file__)"],
+                           capture_output=True, text=True, env=_env())  # fmt: skip
+    record["package_file"] = where.stdout.strip()  # which build generate.sh is given
+    if "FRAMEWORK_PYTHON" not in (work / "generate.sh").read_text():
+        # A script that names its interpreter itself runs the build it names, never this one.
+        problems, record["unscored"] = ["generate.sh does not run under $FRAMEWORK_PYTHON"], True
+    elif where.returncode != 0 or not record["package_file"]:
+        problems = [f"{args.python} cannot import {package!r}: {where.stderr.strip()[-300:]}"]
+    else:
+        out.with_suffix("").mkdir(parents=True, exist_ok=True)
+        problems = score(work, meta, args.python, args, record, out.with_suffix(""))
+    record["pass"] = not problems
+    out.write_text(json.dumps(record, indent=1) + "\n")
+    for p in problems:
+        print(f"patch score: FAIL {p}")
+    if problems and record.get("unscored"):
+        return UNSCORED
+    if not problems:
+        how = (f"tokens within {record['tolerance']} nat of the reference (worst "
+               f"{max(record['worst'], default=0)})" if "tolerance" in record
+               else record.get("reference") or "output compared")  # fmt: skip
+        print(f"patch score: PASS {args.python}: {how} -> {args.out}")
+    return 0 if not problems else 1
 
 
 def run(args) -> int:
+    if args.patch_command == "score":
+        return rescore(args)
     from xe_forge.skills.upstream import measured_pr
 
     problems, record = check(args)
@@ -405,7 +525,8 @@ def run(args) -> int:
               f"({len(record['files'])} files); {how} -> {record['patch']}")  # fmt: skip
         q = record.get("quantized")
         if q:
-            print(f"patch check: {q['quantization']} (reported, not gated): "
+            how = "gated on its dequantized weights" if q.get("gated") else "reported, not gated"
+            print(f"patch check: {q['quantization']} ({how}): "
                   + (q["error"] if q.get("error") else
                      f"worst gap per sequence {q['worst']} nat, mean {q['mean_gap']}, "
                      f"{q['best_share']:.0%} of tokens the reference's best"))  # fmt: skip

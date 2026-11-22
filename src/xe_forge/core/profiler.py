@@ -288,8 +288,9 @@ class ProfileResult:
 class XPUProfiler:
     """VTune-based GPU hardware counter profiler."""
 
-    def __init__(self, vtune_bin: str = "vtune"):
+    def __init__(self, vtune_bin: str = "vtune", device: str = "xpu"):
         self.vtune_bin = vtune_bin
+        self.device = device  # the kernel runs on this one, "xpu:1" of several
 
     def available(self) -> bool:
         """Check if VTune is accessible."""
@@ -396,7 +397,7 @@ class XPUProfiler:
         result_dir: Path,
         spec_path: str | Path | None = None,
         variant: str | None = None,
-        device: str = "xpu",
+        device: str | None = None,
         reference_path: str | Path | None = None,
     ) -> str:
         return _runner_script(
@@ -406,7 +407,7 @@ class XPUProfiler:
             iters=iters,
             spec_path=spec_path,
             variant=variant,
-            device=device,
+            device=device or self.device,
             reference_path=reference_path,
             vtune_bin=self.vtune_bin,
             result_dir=result_dir,
@@ -1024,8 +1025,10 @@ class UnitraceXPUProfiler:
         capture_assembly: bool = False,
         sampling_interval_us: int | None = None,
         metric_group: str = "ComputeBasic",
+        device: str = "xpu",
     ):
         self.unitrace_bin = unitrace_bin
+        self.device = device  # the kernel runs on this one, "xpu:1" of several
         self.artifacts_dir = Path(artifacts_dir) if artifacts_dir is not None else None
         self.parent_profile = Path(parent_profile) if parent_profile is not None else None
         self.capture_assembly = capture_assembly
@@ -1108,7 +1111,7 @@ class UnitraceXPUProfiler:
         iters: int,
         spec_path: str | Path | None = None,
         variant: str | None = None,
-        device: str = "xpu",
+        device: str | None = None,
         reference_path: str | Path | None = None,
     ) -> str:
         return _runner_script(
@@ -1118,7 +1121,7 @@ class UnitraceXPUProfiler:
             iters=iters,
             spec_path=spec_path,
             variant=variant,
-            device=device,
+            device=device or self.device,
             reference_path=reference_path,
         )
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from xe_forge.frontend import agent
@@ -95,7 +96,7 @@ def prove(run_dir: Path, recapture, python: str, repeat: int, max_turns: int) ->
     # patches, so it has no "alone".
     if got != "patched" or fused:
         return section
-    note = "not proven in the model: the model does not run with it, see prove/"
+    note = "not proven in the model: the model does not run with it, or its tokens fail, see prove/"
     if len(patches) == 1:
         _mark(run_dir / "results", patches[0], note)
         return section
@@ -147,6 +148,64 @@ def _mark(results: Path, patch: Path, note: str) -> None:
     rows_path.write_text(json.dumps(rows, indent=1, default=str) + "\n")
 
 
+def _score_arm(work: Path, argv: list[str], python_arm: str, out: Path) -> dict | None:
+    """``patch score`` of ``work`` with ``generate.sh`` under ``python_arm``: its record, or
+    None when it wrote none (it died before judging anything)."""
+    from xe_forge.frontend.cli import _tool
+
+    out.unlink(missing_ok=True)
+    # The tool only starts processes; the arm's interpreter runs generate.sh, not the tool.
+    code = _tool(sys.executable, "patch", "score", str(work), *argv, "--python", python_arm,
+                 "--out", str(out), problems=(problems := []))  # fmt: skip
+    if not out.is_file():
+        return None
+    rec = json.loads(out.read_text())
+    rec["problems"], rec["exit"] = problems, code
+    return rec
+
+
+def _rescore(run_dir: Path, prove_dir: Path, arms: dict) -> tuple[str, str]:
+    """("ok", "patched" or "base"; what to say): the patched framework's output scored again
+    on arm B, the stack with the winning patches, by ``patch score`` with the arguments its
+    check had. What it scores is generate.sh's run of the model, on the check's prompt.
+
+    Only a judged failure is the patches': one where arm A, built the same way without them,
+    passes. A run that could not be judged (the reference, a missing record) is said, and the
+    time is still measured. No patched framework: nothing to score, nothing said."""
+    stack = run_dir / "stack.json"
+    if not stack.is_file():
+        return "ok", ""
+    work = Path(json.loads(stack.read_text())["patches"][-1])
+    saved = work / "check-args.json"
+    if not saved.is_file():
+        return "ok", f"output not scored again: {saved} is missing (its check predates it)"
+    argv = json.loads(saved.read_text())
+    b = _score_arm(work, argv, arms["B"], prove_dir / "tokens-B.json")
+    if b is None or b.get("unscored") or b["exit"] not in (0, 1):
+        why = "; ".join((b or {}).get("problems") or []) or "patch score wrote no record"
+        return "ok", f"output not scored again on arm B: {why}"
+    if not b["pass"]:
+        a = _score_arm(work, argv, arms["A"], prove_dir / "tokens-A.json")
+        why = "; ".join(b["problems"])
+        if a is not None and not a.get("unscored") and not a["pass"]:
+            return "base", (f"arm A fails the output check as well, so the failure is not the "
+                            f"patches' ({why}; {prove_dir})")  # fmt: skip
+        return "patched", f"with the patches the output fails its check ({why}; {prove_dir})"
+    if b.get("reference", "").startswith("skipped"):
+        return "ok", f"output on arm B not compared ({b['reference']})"
+    if b.get("worst") is None:  # no tokens: an output compared as the check compares it
+        return "ok", f"output on arm B passes its check again ({b.get('reference')})"
+    said = f"tokens on arm B pass their check again (worst per sequence {b['worst']} nat)"
+    q = b.get("quantized")
+    if q:  # reported as the check reports it, beside the check's own figure
+        was = (json.loads((work / "check.json").read_text()).get("quantized") or {}
+               if (work / "check.json").is_file() else {})  # fmt: skip
+        said += (f"; {q['quantization']} (reported, not gated): " + (
+            q["error"][:200] if q.get("error") else
+            f"worst {q['worst']} nat, the check's {was.get('worst')}"))  # fmt: skip
+    return "ok", said
+
+
 def _prove(run_dir: Path, prove_dir: Path, patches: list[Path], recapture, python: str,
            repeat: int, max_turns: int, stack: Path | None = None) -> tuple[str, str]:  # fmt: skip
     """(the SUMMARY.md section, "ok", "patched" -- the patched arm could not be built or did not
@@ -160,9 +219,15 @@ def _prove(run_dir: Path, prove_dir: Path, patches: list[Path], recapture, pytho
                            stack)  # fmt: skip
     except (RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
         return f"## In model\n\nnot run: {exc}\n", "patched"
+    got, tokens = _rescore(run_dir, prove_dir, arms)
+    if got == "patched":
+        return f"## In model\n\nFAIL: {tokens}; the patches are not mergeable\n", "patched"
+    if got == "base":
+        return f"## In model\n\nnot run: {tokens}\n", "base"
     caps: dict[str, list[Path]] = {"A": [], "B": []}
     for i in range(1, repeat + 1):
-        for arm in ("A", "B"):  # alternate, so drift falls on both arms
+        # ABBA: the arms take turns to run first, so warm-up and drift fall on both.
+        for arm in ("A", "B") if i % 2 else ("B", "A"):
             path = prove_dir / f"{arm}-r{i}" / "capture.json"
             # The run's own cached launcher, under the arm's interpreter: identical work.
             code = recapture(run_dir, path.parent, arms[arm])
@@ -205,6 +270,6 @@ def _prove(run_dir: Path, prove_dir: Path, patches: list[Path], recapture, pytho
     return (
         f"## In model\n\n{len(patches)} patch(es), {repeat} captures per arm: total "
         f"{t['us_a']} -> {t['us_b']} us device time, {verdict}; per workload: "
-        f"`{out.relative_to(run_dir)}`\n",
+        f"`{out.relative_to(run_dir)}`" + (f"; {tokens}" if tokens else "") + "\n",
         "ok",
     )

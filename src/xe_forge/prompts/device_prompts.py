@@ -28,7 +28,9 @@ class PromptLibrary:
 
     def __init__(self, dsl: str = "triton", device_type: str = "xpu"):
         self.dsl = dsl
-        self.device_type = device_type
+        from xe_forge.config import device_kind
+
+        self.device_type = device_kind(device_type)  # the prompts are per type, not per device
 
     def device_description(self) -> str:
         return _DEVICE_DESCRIPTIONS.get(self.device_type, self.device_type.upper())

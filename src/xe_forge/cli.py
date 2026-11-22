@@ -18,6 +18,14 @@ from xe_forge.models import DSL, OptimizationStage
 logger = logging.getLogger(__name__)
 
 
+def _device_arg(text: str) -> str:
+    """``--device``: a device type, optionally with the index of one of several."""
+    kind, sep, index = text.partition(":")
+    if kind not in ("xpu", "cuda", "cpu") or (sep and not index.isdigit()):
+        raise argparse.ArgumentTypeError(f"{text!r}: xpu, cuda or cpu, optionally :<index>")
+    return text
+
+
 def _setup_dspy(config: Config) -> None:
     """Configure DSPy LM from the shared config. Used by all LLM-driven paths.
 
@@ -87,10 +95,10 @@ Examples:
     # Device and DSL configuration
     parser.add_argument(
         "--device",
-        type=str,
-        choices=["xpu", "cuda", "cpu"],
+        type=_device_arg,
         default=None,
-        help="Target device (default: xpu)",
+        help="Target device: xpu, cuda or cpu, with an index for one of several (xpu:1); "
+        "default xpu",
     )
     parser.add_argument(
         "--dsl",

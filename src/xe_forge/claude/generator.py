@@ -15,7 +15,7 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 
-from xe_forge.config import Config
+from xe_forge.config import Config, device_kind
 from xe_forge.core.dataset_record import load_dataset_record
 from xe_forge.core.lessons import load_lessons_log
 from xe_forge.core.spec_loader import load_spec
@@ -35,6 +35,12 @@ _env = Environment(
     # A variable a template uses but the caller did not pass is an error, not a blank.
     undefined=StrictUndefined,
 )
+
+
+def _profile_device_args(device) -> list[str]:
+    """The profile tool's ``--device``: given for the host and for one device of several, so
+    either is profiled where it runs rather than on the first device torch sees."""
+    return ["--device", str(device)] if device_kind(device) == "cpu" or ":" in str(device) else []
 
 
 def _render(template_name: str, **context: object) -> str:
@@ -126,9 +132,8 @@ def generate_workspace(
     if spec_path:
         profile_args.extend(["--spec", f"test_kernels/{kernel_name}.yaml"])
     profile_args.extend(variant_args)
-    host = str(device).split(":")[0] == "cpu"
-    if host:  # routed by device, not by the first device torch sees
-        profile_args.extend(["--device", str(device)])
+    host = device_kind(device) == "cpu"
+    profile_args.extend(_profile_device_args(device))
     unitrace = config.profiler.unitrace_enabled and not host  # unitrace profiles a GPU
     if unitrace:
         profile_args.extend(["--unitrace-bin", config.profiler.unitrace_bin])

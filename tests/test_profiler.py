@@ -571,6 +571,8 @@ def test_profile_cli_forwards_parent_profile(monkeypatch, interval, metric_group
             "spec.yaml",
             "--metric-group",
             metric_group,
+            "--device",
+            "xpu:1",
             *(["--sampling-interval-us", str(interval)] if interval is not None else []),
         ],
     )
@@ -586,6 +588,7 @@ def test_profile_cli_forwards_parent_profile(monkeypatch, interval, metric_group
             if interval is not None
             else int(os.environ.get("XE_FORGE_SAMPLING_INTERVAL_US", 25)),
             "metric_group": metric_group,
+            "device": "xpu:1",  # one GPU of several is profiled on that GPU
         }
     ]
     assert profile_arguments[0]["reference_path"] == "reference.py"
@@ -1018,12 +1021,13 @@ def test_unitrace_drains_completions_while_paused(monkeypatch):
         "prepare_call",
         lambda *args: PreparedCall(lambda: record_event("forward"), []),
     )
-    monkeypatch.setattr(torch.xpu, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.xpu, "synchronize", lambda device=None: None)
+    monkeypatch.setattr(torch.xpu, "current_stream", lambda device=None: device)
     monkeypatch.setattr(
         torch.xpu,
         "Event",
         lambda: SimpleNamespace(
-            record=lambda: record_event("record"),
+            record=lambda stream=None: record_event("record"),
             synchronize=lambda: record_event("drain"),
         ),
     )

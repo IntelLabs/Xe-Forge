@@ -1,14 +1,23 @@
-{% set dev = "the host" if on_host | default(false) else "the GPU" %}{{ framework }} cannot run {{ model }} on this machine's {% if on_host | default(false) %}CPUs{% else %}GPU{% endif %} as it is: {{ what }} -- {{ reason }}.
+{% set dev = "the host" if on_host | default(false) else "the GPU" %}{% set facts = framework_facts | default({}) or {} %}{% set generated = facts.upstream is defined and not facts.upstream %}{% set dequantized = facts.quantized_gate | default(none) == "dequantized" %}{{ framework }} cannot run {{ model }} on this machine's {% if on_host | default(false) %}CPUs{% else %}GPU{% endif %} as it is: {{ what }} -- {{ reason }}.
 Establish the patch that makes it run, correctly, before anything is measured. The framework's
 interpreter is {{ python }}.
-{% if framework_notes | default([]) %}
+{% if framework_kb | default(none) %}
+{{ framework }} has its own knowledge base, {{ framework_kb }}: read {{ (facts.read_first or ["README.md"]) | join(", ") }} there first. Where
+it and the steps below differ on how this framework is built, delivered or run, it holds.
+{% endif %}{% if framework_notes | default([]) %}
 Constraints on this machine, from someone who has run this before; they hold for the patched
 build, generate.sh and anything you make for it too:
 {% for note in framework_notes %}
  - {{ note }}
 {% endfor %}
 {% endif %}
- - Clone the upstream source of the package that needs the change (the one {{ python }} has
+{% if generated %} - {{ framework }} has no upstream to clone: create its repository under {{ repos }}/<its name>
+   as the knowledge base's contract says (unless it is there), its skeleton commit the base.
+   Work on a branch `xe-forge/<what>` and commit the engine there, so HEAD is the base plus
+   the engine. Follow the contract's conventions, leave nothing uncommitted, and name neither
+   Xe-Forge nor this workspace in the commits; add no `Signed-off-by` or other trailer.
+ - Write it as the contract lays it out, for {{ dev }}. A plain, correct implementation first;
+   making it fast is Xe-Forge's job later. Nothing that only hides the gap:{% else %} - Clone the upstream source of the package that needs the change (the one {{ python }} has
    installed, at its latest default branch) into {{ repos }}/<its name>, unless a clone is
    there; record its HEAD as the base. Work on a branch `xe-forge/<what>` and commit the patch
    there, so HEAD is the base plus the patch.
@@ -22,7 +31,7 @@ build, generate.sh and anything you make for it too:
  - Add it the way the framework adds one: read its docs for new models or ops and copy the
    structure of the closest one it already has. A plain, correct implementation first --
    torch, or the framework's own portable kernels; making it fast is Xe-Forge's job later.
-   Nothing that only hides the gap: no generic fallback backend{% if not on_host | default(false) %}, no CPU path{% endif %}, no emulation of
+   Nothing that only hides the gap:{% endif %} no generic fallback backend{% if not on_host | default(false) %}, no CPU path{% endif %}, no emulation of
    a number format this device has no kernel for (that is {"error": ...}, not a patch).
  - Build it into a venv layered over {{ python }}, holding only what you rebuilt, and check
    that the patched package imports from there and the framework still imports.
@@ -35,12 +44,19 @@ build, generate.sh and anything you make for it too:
    natural-text prompt, the tokens it scores); read them from the environment, no defaults.
    It runs the checkpoint at its own precision (converted without loss when the framework
    needs its own format), never quantized: the check judges the port, and a quantization's
-   error would hide a defect in it or fail a correct one.{% if quantization is defined and quantization != "auto" %}
+   error would hide a defect in it or fail a correct one.{% if quantization is defined and quantization != "auto" %}{% if dequantized %}
+   When `XE_FORGE_QUANTIZATION` is set ({{ quantization }} here, what the run declares), run
+   the same on weights quantized as it names, by {{ framework }}'s own quantizer (the
+   contract's), once, under {{ cache }}/models/, reused when there, and write
+   $OUT/dequantized.json: {"weights": "<the directory of what the quantized weights decode
+   to>"}, as the contract says. The check gates those tokens against the original model
+   holding that export: a quantized run that is wrong for its own weights fails, and the
+   format's loss against the checkpoint is reported per tensor, never gated.{% else %}
    When `XE_FORGE_QUANTIZATION` is set ({{ quantization }} here, what the run declares), run
    the same with the weights quantized as it names, made with the framework's own tool and
    the inputs that tool documents for it, once, under {{ cache }}/models/, reused when there;
    say in notes what it was made from. The check scores those tokens too and reports them,
-   never failing on them: whether that quality is acceptable is the person's choice.{% endif %}
+   never failing on them: whether that quality is acceptable is the person's choice.{% endif %}{% endif %}
 {% elif workload == "action" %} - Write generate.sh here: under $FRAMEWORK_PYTHON, call the policy {{ model }} once with the
    framework, on {{ dev }}, eagerly, on the camera images {{ input_images | join(", ") }}, the
    instruction {{ prompt | tojson }}, the robot state {% if state %}in {{ state }}{% else %}as zeros{% endif %}{% if steps %} and {{ steps }} denoising steps{% endif %},
@@ -91,7 +107,7 @@ build, generate.sh and anything you make for it too:
        --model {{ model }} --batch {{ batch }}{% if workload == "text" %} --input-len {{ input_len }}{% if 'prompts' in inputs %} \
        --prompt-file {{ inputs.prompts.file }}{% endif %}{% if precision is defined and precision.startswith(("float", "bfloat")) %} \
        --precision {{ precision }}{% endif %}{% if quantization is defined and quantization != "auto" %} \
-       --quantization {{ quantization }}{% endif %}{% endif %}
+       --quantization {{ quantization }}{% if dequantized %} --quantized-gate dequantized{% endif %}{% endif %}{% endif %}
    It diffs base..HEAD itself (and writes the commits as an `.mbox`), applies that to a
    fresh clone, checks the import, runs
    generate.sh, then compares its output against a reference.

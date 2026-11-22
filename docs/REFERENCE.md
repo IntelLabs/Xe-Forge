@@ -242,8 +242,20 @@ tokens scored against transformers. `DIR` holds `patch.json` and `generate.sh`.
 | `--trust-remote-code` | off | Pass `trust_remote_code` |
 | `--prompt-file` | none | The run's prompt text |
 | `--precision` | `bfloat16` | Float dtype scored first: the run's declared compute |
+| `--quantization` | none | The run's declared quantization: `generate.sh` runs again with `XE_FORGE_QUANTIZATION` set, and its tokens are scored and reported |
+| `--quantized-gate` | none | `dequantized`: gate those tokens against the original model holding the weights the quantized run decodes to (`$OUT/dequantized.json`), in float32, and report each tensor's error against the checkpoint; for a framework that quantizes the weights itself |
 | `--no-reference` | off | Skip only the reference comparison (for image or video output) |
 | `--margin` | 0.1 | Non-text output: how much worse than the native run's worst the patched run's worst may be against a float32 reference, as a relative squared error (for PSNR, 10·log10(1 + margin) dB) |
+
+### `patch score DIR --python PY --out JSON`
+
+The output check of `patch check` alone: `generate.sh` runs under `PY`, another build of the
+patched stack, and its tokens are scored the same way. It takes the same flags as `patch check`.
+The record goes to `JSON` (an image or video comparison beside it, in a directory of the same
+name); the patch's `check.json`, `PR.md` and `quality.json` are left as they are. `generate.sh`
+must run the model under `$FRAMEWORK_PYTHON`, or another build cannot be scored. Exit 0
+passes, 1 fails, 2 could not judge (the reference failed, or that contract does not hold).
+`--prove` runs it on its patched arm, with the arguments saved in `patch-<n>/check-args.json`.
 
 ### `bound CAPTURE_JSON`
 

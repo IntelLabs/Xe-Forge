@@ -419,6 +419,22 @@ def setup(a, run_dir: Path, turns: int) -> str | None:
     return got["python"]
 
 
+def framework_kb(framework: str) -> tuple[Path | None, dict]:
+    """(the framework's own knowledge base directory, its framework.yaml facts): what the
+    agents are told to read first and the facts their instructions act on. None and {} for a
+    framework with none, whose agents find their way from its own docs and code."""
+    import yaml
+
+    if not framework or not framework.replace("-", "_").replace(".", "_").isidentifier():
+        return None, {}
+    root = Path(os.environ.get("KNOWLEDGE_DIR") or SRC_DIR.parent / "knowledge_base")
+    kb = (root / "frameworks" / framework).resolve()
+    if not kb.is_dir():
+        return None, {}
+    facts = kb / "framework.yaml"
+    return kb, (yaml.safe_load(facts.read_text()) or {}) if facts.is_file() else {}
+
+
 def capture(
     a, python: str, run_dir: Path, turns: int, repos: Path, refused: list | None = None
 ) -> tuple[int, str]:
@@ -444,6 +460,8 @@ def capture(
                "precision": getattr(a, "precision", "auto"),
                "quantization": getattr(a, "quantization", "auto"),
                "kv_cache": getattr(a, "kv_cache", "auto"), "refused": refused or []}  # fmt: skip
+    kb, facts = framework_kb(a.framework)
+    context.update(framework_kb=str(kb) if kb else None, framework_facts=facts)
     stack = run_dir / "stack.json"
     for _ in range(3):
         rounds = json.loads(stack.read_text())["patches"] if stack.is_file() else []
@@ -513,6 +531,10 @@ def capture(
             check += ["--precision", context["precision"]]
         if context["quantization"] not in (None, "", "auto"):  # scored and reported, not gated
             check += ["--quantization", context["quantization"]]
+            if facts.get("quantized_gate"):  # unless the framework quantizes it itself
+                check += ["--quantized-gate", str(facts["quantized_gate"])]
+        # --prove scores the tokens again on its patched build, with these same arguments.
+        (work / "check-args.json").write_text(json.dumps(check[3:]) + "\n")
         redo: list = []
         code = _tool(python, *check, problems=redo)  # the gate is the tool's, not the agent's word
         if code != 0 and done:
@@ -857,6 +879,7 @@ def analyze(capture_path: Path, out_dir: Path, a: argparse.Namespace, weights=No
                         at_roofline=getattr(a, "at_roofline", an.AT_ROOFLINE))  # fmt: skip
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "analysis.json").write_text(json.dumps(result.as_dict(), indent=1) + "\n")
+    print(f"analyze: {an.roofline_line(result.roofline())}")
     path = manifest.emit(result, cap, capture_path, out_dir, weights)
     enabled = [e for e in result.entries if e.enabled]
     if cap.run.get("counters"):
@@ -1375,7 +1398,8 @@ def main(argv: list[str]) -> int:
         print(f"run: {a.workload} workload -- a missing-op patch is checked against the "
               "framework's own torch path (patch-*/quality.json, with the op gain), but an "
               "optimized kernel is not: it is kept on a per-kernel tolerance, and --prove "
-              "compares time only. A kernel can pass its tolerance and still shift the "
+              "compares time, and the patch against its torch path again, which a kernel "
+              "both paths run does not change. A kernel can pass its tolerance and still shift the "
               "output over the denoising steps, so look at the images or actions before "
               "using any patch from this run.")  # fmt: skip
     if a.analyze_only:

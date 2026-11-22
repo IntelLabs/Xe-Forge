@@ -288,6 +288,9 @@ def load_knowledge_base(
     dsl: str = "triton",
     device_type: str = "xpu",
 ) -> KnowledgeBase:
+    from xe_forge.config import device_kind
+
+    device_type = device_kind(device_type)  # the knowledge is per type, not per device
     kb = KnowledgeBase()
     kp = Path(knowledge_dir)
 

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import torch
 
+from xe_forge.config import device_kind
 from xe_forge.core.executor import KernelBenchExecutor
 from xe_forge.core.reference_workload import PreparedCall, ReferenceWorkload
 from xe_forge.core.resource_feedback import capture_build_provenance
@@ -136,10 +137,11 @@ def run_profile(
     if window not in ("each", "all"):
         raise ValueError(f"Unknown collection window: {window}")
     collection = Collection(tool, vtune_bin, result_dir, control_fds)
+    kind = device_kind(device)  # "xpu" of "xpu:1"
 
     def synchronize():
-        if device != "cpu":
-            getattr(torch, device).synchronize()
+        if kind != "cpu":
+            getattr(torch, kind).synchronize(device)
 
     provenance = (
         capture_build_provenance(Path(kernel_file).parent) if tool == "unitrace" else nullcontext()
@@ -157,9 +159,9 @@ def run_profile(
             record = _timed_calls(call, iters, window, collection.set, synchronize)
             if window_file is not None:
                 Path(window_file).write_text(json.dumps(record))
-            if tool == "unitrace" and device == "xpu":
+            if tool == "unitrace" and kind == "xpu":
                 event = torch.xpu.Event()
-                event.record()
+                event.record(torch.xpu.current_stream(device))  # the device asked for
                 event.synchronize()
         return call
     finally:

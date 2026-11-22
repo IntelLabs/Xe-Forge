@@ -16,6 +16,49 @@ import argparse
 import os
 
 
+def _patch_scoring_args(pc) -> None:
+    """The arguments ``patch check`` and ``patch score`` share."""
+    pc.add_argument("dir", help="holds patch.json and generate.sh")
+    pc.add_argument("--margin", type=float, default=0.1,
+                    help="non-text output: how much worse than the native run's worst the "
+                    "patched run's worst may be against a float32 reference, as a relative "
+                    "squared error (for PSNR, 10*log10(1 + margin) dB)")  # fmt: skip
+    pc.add_argument("--repos", required=True, help="the clones' directory (--kernel-repos)")
+    pc.add_argument(
+        "--framework-python", required=True, help="the unpatched framework's interpreter"
+    )
+    pc.add_argument(
+        "--reference-python", default=None, help="GPU torch + transformers, if not that"
+    )
+    pc.add_argument("--model", required=True)
+    pc.add_argument("--batch", type=int, required=True)
+    pc.add_argument(
+        "--input-len", type=int, help="prompt tokens; a model that returns tokens needs it"
+    )
+    pc.add_argument("--min-match", type=int, default=32, help="tokens scored per sequence")
+    pc.add_argument("--tolerance", type=float, default=0.3,
+                    help="nat a token may fall below transformers' best")  # fmt: skip
+    pc.add_argument("--trust-remote-code", action="store_true")
+    pc.add_argument("--prompt-file", help="the run's prompt text (xe-forge run --prompt-file)")
+    pc.add_argument("--precision", default="bfloat16",
+                    help="the float dtype scored first: the run's declared compute")  # fmt: skip
+    pc.add_argument("--quantization", default=None,
+                    help="the run's declared quantization: generate.sh runs again with "
+                    "XE_FORGE_QUANTIZATION set, and its tokens are scored and reported, "
+                    "never gated")  # fmt: skip
+    pc.add_argument("--quantized-gate", choices=["dequantized"], default=None,
+                    help="with --quantization: gate the quantized tokens against the original "
+                    "model holding the weights generate.sh's quantized run decodes to "
+                    "($OUT/dequantized.json), scored in float32, rather than only reporting "
+                    "them; for a framework that quantizes the weights itself")  # fmt: skip
+    pc.add_argument("--no-reference", action="store_true",
+                    help="skip only the transformers comparison, keeping every other check: "
+                    "the patch is a real diff that applies to a fresh clone, the patched "
+                    "package imports from the patch, and the model runs to completion under "
+                    "it. For a workload with no tokens to score -- an image or a video -- "
+                    "where whether the output is right is a human judgement")  # fmt: skip
+
+
 def main():
     from xe_forge import load_env
 
@@ -323,40 +366,14 @@ def main():
     pc = patch_sub.add_parser(
         "check", help="git diff, fresh apply, import, tokens scored by transformers"
     )
-    pc.add_argument("dir", help="holds patch.json and generate.sh")
-    pc.add_argument("--margin", type=float, default=0.1,
-                    help="non-text output: how much worse than the native run's worst the "
-                    "patched run's worst may be against a float32 reference, as a relative "
-                    "squared error (for PSNR, 10*log10(1 + margin) dB)")  # fmt: skip
-    pc.add_argument("--repos", required=True, help="the clones' directory (--kernel-repos)")
-    pc.add_argument(
-        "--framework-python", required=True, help="the unpatched framework's interpreter"
+    ps = patch_sub.add_parser(
+        "score", help="check's token scoring alone, generate.sh under another interpreter"
     )
-    pc.add_argument(
-        "--reference-python", default=None, help="GPU torch + transformers, if not that"
-    )
-    pc.add_argument("--model", required=True)
-    pc.add_argument("--batch", type=int, required=True)
-    pc.add_argument(
-        "--input-len", type=int, help="prompt tokens; a model that returns tokens needs it"
-    )
-    pc.add_argument("--min-match", type=int, default=32, help="tokens scored per sequence")
-    pc.add_argument("--tolerance", type=float, default=0.3,
-                    help="nat a token may fall below transformers' best")  # fmt: skip
-    pc.add_argument("--trust-remote-code", action="store_true")
-    pc.add_argument("--prompt-file", help="the run's prompt text (xe-forge run --prompt-file)")
-    pc.add_argument("--precision", default="bfloat16",
-                    help="the float dtype scored first: the run's declared compute")  # fmt: skip
-    pc.add_argument("--quantization", default=None,
-                    help="the run's declared quantization: generate.sh runs again with "
-                    "XE_FORGE_QUANTIZATION set, and its tokens are scored and reported, "
-                    "never gated")  # fmt: skip
-    pc.add_argument("--no-reference", action="store_true",
-                    help="skip only the transformers comparison, keeping every other check: "
-                    "the patch is a real diff that applies to a fresh clone, the patched "
-                    "package imports from the patch, and the model runs to completion under "
-                    "it. For a workload with no tokens to score -- an image or a video -- "
-                    "where whether the output is right is a human judgement")  # fmt: skip
+    ps.add_argument("--python", required=True,
+                    help="the interpreter generate.sh runs under, in place of patch.json's")  # fmt: skip
+    ps.add_argument("--out", required=True, help="where the record is written")
+    for sub in (pc, ps):
+        _patch_scoring_args(sub)
 
     # -- bound --
     p_bound = subparsers.add_parser("bound", help="Each workload's efficiency against its bound")
