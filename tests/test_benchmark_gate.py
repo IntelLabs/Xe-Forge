@@ -955,3 +955,51 @@ def test_a_sycl_result_inside_the_noise_band_still_says_correctness_went_uncheck
     got = ex.compare_kernels("orig", "opt", input_dir=str(tmp_path))
     assert "NO MEASURABLE CHANGE" in got.feedback_message
     assert "no output files for comparison" in got.feedback_message
+
+
+def test_a_spec_with_its_own_inputs_is_timed_on_the_host_as_a_reference_is(tmp_path, capsys):
+    """Both arms in alternating rounds, slots swapped, on the same input tensors, each forward
+    after an untimed restore and flush; the placement it ran under is printed."""
+    import argparse
+
+    import yaml
+
+    from xe_forge.core.executor import KernelBenchExecutor
+    from xe_forge.skills import benchmark
+
+    code = (
+        "import torch\n"
+        "class Model(torch.nn.Module):\n"
+        "    def forward(self, x):\n"
+        "        return x * 2\n"
+    )
+    for name in ("base.py", "opt.py"):
+        (tmp_path / name).write_text(code)
+    spec = tmp_path / "s.yaml"
+    spec.write_text(yaml.safe_dump({"inputs": {"X": {"shape": ["N"], "dtype": "float32"}},
+                                    "bench-cpu": [{"params": ["X"], "dtype": "float32",
+                                                   "dims": {"N": 8}}]}))  # fmt: skip
+    seen = []
+    timer = _host_timer()
+    real = timer.side_effect
+
+    def samples(*given):
+        seen.append(given[-2][0])
+        return real(*given)
+
+    timer.side_effect = samples
+    old = KernelBenchExecutor._host_samples
+    KernelBenchExecutor._host_samples = timer
+    try:
+        args = argparse.Namespace(spec=str(spec), variant="bench-cpu", baseline_us=None,
+                                  device="cpu", baseline=str(tmp_path / "base.py"), dsl=None,
+                                  optimized=str(tmp_path / "opt.py"), reference=None)  # fmt: skip
+        assert benchmark._run_builtin(args) == 0
+    finally:
+        KernelBenchExecutor._host_samples = old
+    text = capsys.readouterr().out
+    assert "alternating rounds, twice with the slots swapped" in text, text
+    assert "TIMER: host_forward_after_untimed_reset" in text and "PLACEMENT: {" in text
+    assert benchmark.parse_outcome(text)["verdict"] == "INDISTINGUISHABLE"  # equal timings
+    rounds = seen[2:]  # after the two execute() runs, which build their own inputs
+    assert rounds and all(x is rounds[0] for x in rounds)  # one set of tensors for both arms

@@ -2144,6 +2144,17 @@ def test_prove_never_blames_the_patches_for_a_base_that_fails_too(tmp_path, monk
     assert row["outcome"] == "win"  # not marked
 
 
+@pytest.mark.parametrize("a", [None, {"pass": False, "unscored": True, "exit": 2},
+                               {"pass": False, "exit": 3}])  # fmt: skip
+def test_a_base_that_cannot_be_judged_leaves_the_patches_failure_standing(tmp_path, monkeypatch, a):
+    got, _, order, row, _ = _prove_with_scores(
+        tmp_path, monkeypatch, {"B": {"pass": False}, "A": a}
+    )
+    assert "FAIL" in got and "arm A, without them, could not be judged" in got and not order, got
+    assert "arm A fails the output check as well" not in got
+    assert not row["mergeable"]
+
+
 @pytest.mark.parametrize("scores, says", [
     ({"B": None}, "patch score wrote no record"),  # the tool died before judging
     ({"B": {"pass": False, "unscored": True, "exit": 2}}, "not scored again on arm B"),

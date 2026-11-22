@@ -23,7 +23,7 @@ from ai_bench.utils import count_torch_flop, import_from_path
 
 from xe_forge.config import checked_band, noise_band
 from xe_forge.core.dtype_utils import make_rand_tensor
-from xe_forge.core.reference_workload import ReferenceWorkload
+from xe_forge.core.reference_workload import PreparedCall, ReferenceWorkload
 from xe_forge.models import ExecutionResult
 
 logger = logging.getLogger(__name__)
@@ -32,6 +32,15 @@ logger = logging.getLogger(__name__)
 def _has_callable_attr(obj, attr_name):
     """Check if object has a callable attribute with the given name."""
     return hasattr(obj, attr_name) and callable(getattr(obj, attr_name))
+
+
+def _host_call(fn: Callable, model, inputs) -> PreparedCall:
+    """``fn`` on ``inputs`` as a call the host sampler times: the model's buffers restored,
+    untimed, before each forward."""
+    if isinstance(model, torch.nn.Module):
+        buffers = {name: b.detach().clone() for name, b in model.named_buffers()}
+        return PreparedCall(model, list(inputs), buffers)
+    return PreparedCall(fn, list(inputs))
 
 
 @dataclass
@@ -304,8 +313,12 @@ class KernelBenchExecutor:
                     error_message=f"Kernel execution failed: {e}",
                 )
 
-            # Benchmark
-            time_us = self.time(fn, tuple(inputs))
+            # Benchmark. On the host, the forward alone after an untimed restore and cache
+            # flush, as on the reference path.
+            if torch.device(self.device).type == "cpu":
+                time_us = self.time_forward(_host_call(fn, _model, inputs), tuple(inputs))
+            else:
+                time_us = self.time(fn, tuple(inputs))
             logger.info(f"Execution time: {time_us:.2f} μs")
 
             # Calculate TFLOPS if flop count provided
@@ -593,14 +606,40 @@ class KernelBenchExecutor:
         original_time_us = original_result.execution_time_ms * 1000
         optimized_time_us = optimized_result.execution_time_ms * 1000
         speedup = original_time_us / optimized_time_us if optimized_time_us > 0 else 0.0
+        agree, note = True, ""
+        if torch.device(self.device).type == "cpu":
+            # As on the reference path: both arms in alternating rounds on the same inputs,
+            # twice with the slots swapped, so drift and slot bias land on both.
+            prep = {"kernel_name": kernel_name, "input_shapes": input_shapes, "dtype": dtype,
+                    "init_args": init_args, "input_dtypes": input_dtypes}  # fmt: skip
+            try:
+                original_time_us, optimized_time_us, ratios = self._host_swapped_ratios(
+                    original_code, optimized_code, inputs, prep
+                )
+            except Exception as exc:
+                return ComparisonResult(
+                    original_time_us=0.0,
+                    optimized_time_us=0.0,
+                    speedup=0.0,
+                    optimized_correct=False,
+                    feedback_message=f"FAILURE: timing the two kernels failed: {exc}",
+                )
+            speedup = sorted(ratios)[len(ratios) // 2]
+            agree = min(ratios) > 1 or max(ratios) < 1
+            note = (
+                f" Timed in {self.rounds} alternating rounds, twice with the slots swapped; "
+                f"per-round speedup {min(ratios):.3f}-{max(ratios):.3f}x."
+                + ("" if agree else " The rounds straddle 1.0.")
+                + self.flush_note
+            )
 
         # Check correctness
         original_correct = original_result.output_correct is not False
 
         # Slower only at the noise band's edge or past it: strictly inside it, neither a
-        # regression nor a win.
-        is_slower = speedup <= 1.0 - self.min_effect
-        within_noise = not is_slower and speedup < 1.0 + self.min_effect
+        # regression nor a win. Rounds that straddle 1.0 are neither.
+        is_slower = agree and speedup <= 1.0 - self.min_effect
+        within_noise = not is_slower and (not agree or speedup < 1.0 + self.min_effect)
 
         # Generate feedback message for CoVeR agent
         feedback_parts = []
@@ -639,7 +678,7 @@ class KernelBenchExecutor:
                     f"Correctness verified. Consider more aggressive optimizations."
                 )
 
-        feedback_message = " ".join(feedback_parts)
+        feedback_message = " ".join(feedback_parts) + note
 
         return ComparisonResult(
             original_time_us=original_time_us,
@@ -653,6 +692,24 @@ class KernelBenchExecutor:
             verdict="INDISTINGUISHABLE" if within_noise else None,
             feedback_message=feedback_message,
         )
+
+    def _host_swapped_ratios(self, a_code: str, b_code: str, inputs, prep: dict):
+        """:meth:`_swapped_ratios` for a kernel whose inputs the spec gives: per-round ``a/b``
+        speedups on the host, with the slot each arm is built and timed in cancelled, every
+        call reading the same input tensors. Returns ``(a_us, b_us, ratios)``."""
+        runs = []
+        for first, second in ((a_code, b_code), (b_code, a_code)):
+            calls = []
+            for code in (first, second):
+                module = self._compile_module(code)
+                if module is None:
+                    raise ValueError("Failed to compile kernel module")
+                fn, model, inputs = self.prepare_workload(module, inputs=inputs, **prep)
+                calls.append(_host_call(fn, model, inputs))
+            runs.append(self.time_interleaved(calls[0], tuple(inputs), calls[1], tuple(inputs)))
+        (a1, b1, r1), (b2, a2, r2) = runs
+        ratios = [(x / y) ** 0.5 for x, y in zip(r1, r2, strict=True)]
+        return (a1 * a2) ** 0.5, (b1 * b2) ** 0.5, ratios
 
     def compare_reference_workload(
         self,

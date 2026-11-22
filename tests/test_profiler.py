@@ -1092,7 +1092,7 @@ def test_execute_uses_shared_preparation(monkeypatch):
 
     monkeypatch.setattr(executor, "_compile_module", lambda code: module)
     monkeypatch.setattr(executor, "prepare_workload", prepare_workload)
-    monkeypatch.setattr(executor, "time", lambda fn, inputs: 5.0)
+    monkeypatch.setattr(executor, "time_forward", lambda call, inputs: 5.0)  # the host's timer
     result = executor.execute("source", input_shapes=[(3,)], dtype=torch.float32, flop=3)
 
     assert result.success

@@ -4,8 +4,8 @@ model_id, batch, input_len, n, trust = sys.argv[1], *map(int, sys.argv[2:5]), sy
 got = json.load(open(sys.argv[6]))
 prompt_file, dtype, draws = sys.argv[7] or None, sys.argv[8], int(sys.argv[10])
 rows = [int(i) for i in sys.argv[9].split(",")] if sys.argv[9] else range(min(len(got), batch))
-dev = profile.device_type()
-if dev == "cpu" and os.environ.get("XE_FORGE_DEVICE", "").split(":")[0] != "cpu":
+dev = profile.device()
+if profile.device_type() == "cpu" and os.environ.get("XE_FORGE_DEVICE", "").split(":")[0] != "cpu":
     sys.exit("the reference interpreter sees no GPU")
 ref_path = sys.argv[11] if len(sys.argv) > 11 else ""
 if ref_path:  # the agent's runner: load(model, dtype, device) -> (model, tokenizer or Vocab)

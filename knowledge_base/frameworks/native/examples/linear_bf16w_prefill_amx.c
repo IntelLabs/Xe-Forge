@@ -51,7 +51,8 @@ void xf_linear_bf16w_prefill_amx(const float *x, const uint16_t *w, float *y,
     syscall(SYS_arch_prctl, 0x1023, 18);
     const int64_t nkc = (K + 31) / 32;
     const int64_t nmp = (M + 31) / 32, nnp = (N + 31) / 32;
-    const int64_t gm = nmp < GM ? nmp : GM;
+    int64_t gm = nmp < GM ? nmp : GM;
+    if (gm > ctx->nthreads) gm = ctx->nthreads;  /* every n group has a thread */
     const int64_t gn = ctx->nthreads / gm;
 
     #pragma omp parallel num_threads(ctx->nthreads)

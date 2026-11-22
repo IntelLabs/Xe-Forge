@@ -169,9 +169,10 @@ def _rescore(run_dir: Path, prove_dir: Path, arms: dict) -> tuple[str, str]:
     on arm B, the stack with the winning patches, by ``patch score`` with the arguments its
     check had. What it scores is generate.sh's run of the model, on the check's prompt.
 
-    Only a judged failure is the patches': one where arm A, built the same way without them,
-    passes. A run that could not be judged (the reference, a missing record) is said, and the
-    time is still measured. No patched framework: nothing to score, nothing said."""
+    A judged failure on arm B is the patches' unless arm A, built the same way without them,
+    fails as well; when arm A cannot be judged, the failure stands and that is said. An arm B
+    run that could not be judged (the reference, a missing record) is said, and the time is
+    still measured. No patched framework: nothing to score, nothing said."""
     stack = run_dir / "stack.json"
     if not stack.is_file():
         return "ok", ""
@@ -187,9 +188,15 @@ def _rescore(run_dir: Path, prove_dir: Path, arms: dict) -> tuple[str, str]:
     if not b["pass"]:
         a = _score_arm(work, argv, arms["A"], prove_dir / "tokens-A.json")
         why = "; ".join(b["problems"])
-        if a is not None and not a.get("unscored") and not a["pass"]:
+        judged = a is not None and not a.get("unscored") and a["exit"] in (0, 1)
+        if judged and not a["pass"]:
             return "base", (f"arm A fails the output check as well, so the failure is not the "
                             f"patches' ({why}; {prove_dir})")  # fmt: skip
+        if not judged:
+            a_why = "; ".join((a or {}).get("problems") or []) or "patch score wrote no record"
+            return "patched", (f"with the patches the output fails its check ({why}); arm A, "
+                               f"without them, could not be judged ({a_why}), so the failure "
+                               f"stands ({prove_dir})")  # fmt: skip
         return "patched", f"with the patches the output fails its check ({why}; {prove_dir})"
     if b.get("reference", "").startswith("skipped"):
         return "ok", f"output on arm B not compared ({b['reference']})"

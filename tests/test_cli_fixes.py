@@ -354,7 +354,7 @@ def test_a_difference_inside_the_noise_band_is_no_regression(monkeypatch, opt_ms
     from xe_forge.core.executor import KernelBenchExecutor
     from xe_forge.models import ExecutionResult
 
-    ex = KernelBenchExecutor(device="cpu", min_effect=0.02)
+    ex = KernelBenchExecutor(device="xpu", min_effect=0.02)  # timed one arm after the other
     times = iter([1.0, opt_ms])
     monkeypatch.setattr(ex, "_check_correctness", lambda **k: True)
     monkeypatch.setattr(ex, "execute", lambda *a, **k: ExecutionResult(
@@ -371,7 +371,7 @@ def test_the_noise_band_edges_are_changes(monkeypatch, original_ms, slower, insi
     from xe_forge.core.sycl_executor import SyclExecutor
     from xe_forge.models import ExecutionResult
 
-    ex = KernelBenchExecutor(device="cpu", min_effect=0.02)
+    ex = KernelBenchExecutor(device="xpu", min_effect=0.02)  # timed one arm after the other
     times = iter([original_ms, 1.0])
     monkeypatch.setattr(ex, "_check_correctness", lambda **k: True)
     monkeypatch.setattr(ex, "execute", lambda *a, **k: ExecutionResult(
@@ -449,7 +449,8 @@ def test_the_builtin_skill_prints_no_ratio_inside_the_noise_band(tmp_path, monke
     monkeypatch.setattr(KernelBenchExecutor, "_check_correctness", lambda self, **k: True)
     monkeypatch.setattr(KernelBenchExecutor, "execute", lambda self, *a, **k: ExecutionResult(
         success=True, execution_time_ms=next(times), output_correct=True))  # fmt: skip
-    args = argparse.Namespace(spec=str(spec), variant="dec", baseline_us=None, device="cpu",
+    # A device that times one arm after the other, as the stubbed execute does.
+    args = argparse.Namespace(spec=str(spec), variant="dec", baseline_us=None, device="xpu",
                               baseline=str(tmp_path / "base.py"), dsl=None,
                               optimized=str(tmp_path / "opt.py"), reference=None)  # fmt: skip
     assert benchmark._run_builtin(args) == 0
