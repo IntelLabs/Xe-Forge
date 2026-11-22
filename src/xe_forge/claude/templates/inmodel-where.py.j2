@@ -1,0 +1,5 @@
+import sys
+import {{ pkg }}
+maps = open("/proc/self/maps").read().split()
+print(sorted({p for p in maps if p.startswith("/") and ".so" in p}))
+print({{ pkg }}.__file__)

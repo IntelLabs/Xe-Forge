@@ -246,6 +246,7 @@ def measure(run_dir: Path, facts: dict, repo: Path, record: dict, baseline: Path
             return {"correctness": False, "verdict": "NUMERIC_FAILED", "why": why}
     times: dict[str, dict[str, list[float]]] = {a: {} for a in arms}
     calls: dict[str, dict[str, int]] = {a: {} for a in arms}
+    caps: dict[str, list[Path]] = {a: [] for a in arms}
     for r in range(1, repeats + 1):
         for arm in (("A", "B") if r % 2 else ("B", "A")) if not same else ("A",):
             cap_path = _capture(run_dir, where / f"{arm}-r{r}", venvs[arm])
@@ -255,6 +256,7 @@ def measure(run_dir: Path, facts: dict, repo: Path, record: dict, baseline: Path
                 return {"correctness": False, "verdict": "MODEL_FAILED",
                         "why": f"the model did not run or capture on the trial's build "
                                f"({where / f'{arm}-r{r}'})"}  # fmt: skip
+            caps[arm].append(cap_path)
             cap = ir.load(cap_path)
             for variant, ref in record["variants"].items():
                 got = manifest.per_call(cap, ref)
@@ -270,6 +272,9 @@ def measure(run_dir: Path, facts: dict, repo: Path, record: dict, baseline: Path
             return {"correctness": False, "verdict": "WORK_DIFFERS",
                     "why": f"{variant} ran {n} times on the trial's build, {calls['A'][variant]} "
                            "on the baseline's: the model did not do the same work"}  # fmt: skip
+    model = None if same else _model(caps, record)
+    if model and model["slower"]:
+        return {"correctness": False, "verdict": "MODEL_SLOWER", "why": _model_text(model)}
     # The tokens only: the step report belongs to the patch check and prove, not to a trial.
     argv = [
         a for a in json.loads((facts["patch"] / "check-args.json").read_text()) if a != "--steps"
@@ -296,7 +301,48 @@ def measure(run_dir: Path, facts: dict, repo: Path, record: dict, baseline: Path
         a, sa = stats(times["A"][variant])
         b, sb = stats(times["B" if not same else "A"][variant])
         variants[variant] = {"baseline_us": a, "trial_us": b, "spread": round(sa + sb, 4)}
-    return {"correctness": True, "same": same, "variants": variants, "repeats": repeats}
+    return {"correctness": True, "same": same, "variants": variants, "repeats": repeats,
+            "model": model}  # fmt: skip
+
+
+def _beyond(row: dict) -> bool:
+    """A compare row whose two arms differ by more than their captures' spreads together."""
+    sp = (row.get("spread_a") or 0.0) + (row.get("spread_b") or 0.0)
+    return bool(row.get("speedup")) and abs(row["speedup"] - 1) > sp
+
+
+def _model(caps: dict[str, list[Path]], record: dict) -> dict:
+    """The whole model on both builds, from the trial's own captures, as prove compares it:
+    its total, and every other workload that moved beyond the spread. A kernel can make the
+    model slower outside its own time -- what it leaves in the caches, the threads, the
+    clocks -- and only the model's total sees that."""
+    from xe_forge.frontend.compare import compare
+
+    try:
+        rows = compare(caps["A"], caps["B"])
+    except SystemExit as exc:  # the arms' captures ran different work
+        raise RuntimeError(str(exc)) from exc
+    total, own = rows[0], {ref.partition("@")[0] for ref in record["variants"].values()}
+    moved = sorted((r for r in rows[1:] if r["status"] == "matched"
+                    and r["workload_id"] not in own and _beyond(r)),
+                   key=lambda r: r["delta_us"])  # fmt: skip
+    keep = ("workload_id", "kernel", "us_a", "us_b", "speedup")
+    return {
+        "baseline_us": total["us_a"], "trial_us": total["us_b"], "speedup": total["speedup"],
+        "spread": round((total["spread_a"] or 0.0) + (total["spread_b"] or 0.0), 4),
+        "slower": _beyond(total) and total["speedup"] < 1,
+        "others": [{k: r[k] for k in keep} for r in moved],
+    }  # fmt: skip
+
+
+def _model_text(model: dict) -> str:
+    """The model's total and the other workloads that moved, most time lost first."""
+    lines = [f"the whole model: {model['baseline_us']} -> {model['trial_us']} us "
+             f"(x{model['speedup']}, spread {model['spread']})"]  # fmt: skip
+    for r in model["others"]:
+        lines.append(f"  {r['kernel'] or '-'} {r['workload_id']}: {r['us_a']} -> {r['us_b']} us "
+                     f"(x{r['speedup']}), not this kernel's own workload")  # fmt: skip
+    return "\n".join(lines)
 
 
 # The profile's events: where a kernel's cycles go, how many instructions retire in them, and
@@ -429,7 +475,9 @@ def answer(result: dict, variant: str) -> str:
         return (
             f"CORRECTNESS: fail\nVERDICT: NO_SUCH_VARIANT\n{variant} is not in the record\nDONE\n"
         )
-    lines = ["CORRECTNESS: pass", f"BASELINE_US: {v['baseline_us']}", f"TRIAL_US: {v['trial_us']}"]
+    model = result.get("model")
+    told = [f"| {ln}" for ln in _model_text(model).splitlines()] if model else []
+    lines = [*told, "CORRECTNESS: pass", f"BASELINE_US: {v['baseline_us']}", f"TRIAL_US: {v['trial_us']}"]
     ratio = v["baseline_us"] / v["trial_us"] if v["trial_us"] else None
     if result.get("same"):
         lines.append("VERDICT: SAME_SOURCE")
@@ -517,7 +565,7 @@ def run(args) -> int:
         sources = [_digest(baseline), _digest(trial), head, _digest(Path(args.record)),
                    _digest(Path(args.spec)) if args.spec else "",
                    _digest(run_dir / "names.json"), _digest(run_dir / "launcher" / "run.sh"),
-                   _digest(facts["patch"] / facts["meta"]["build"]), str(REPEATS)]  # fmt: skip
+                   _digest(facts["patch"] / facts["meta"]["build"]), str(REPEATS), "model"]  # fmt: skip
         where = store / hashlib.sha256("\0".join(sources).encode()).hexdigest()[:16]
         done = where / "result.json"
         if not done.is_file():
