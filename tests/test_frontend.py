@@ -540,13 +540,15 @@ out({{"type": "result", "subtype": "success", "session_id": "s-1"}})
 
 CODEX_STUB = """\
 #!{python}
-# `codex exec --json`: first call stops with no answer; `exec ... resume <id>` finishes.
+# `codex exec --json`: first call stops with no answer, after a retry it recovered from;
+# `exec ... resume <id>` finishes.
 import json, subprocess, sys
 def out(o): print(json.dumps(o, separators=(',', ':')))
 argv = sys.argv[1:]
 assert argv[0] == "exec" and "--json" in argv, argv
 out({{"type": "thread.started", "thread_id": "t-1"}})
 if "resume" not in argv:
+    out({{"type": "error", "message": "Reconnecting... 1/5 (unexpected status 503)"}})
     out({{"type": "item.completed", "item": {{"type": "agent_message", "text": "caf\\u00e9 " * 200}}}})
     out({{"type": "turn.completed", "usage": {{}}}})
     sys.exit(0)
@@ -719,6 +721,25 @@ def test_codex_sessions_trust_the_workspace_and_oneshots_do_not(tmp_path, monkey
     schema = tmp_path / "s.json"
     schema.write_text("{}")
     assert "--trust" not in codex.oneshot("p", schema, tmp_path / "a.json", agents.READ_ONLY)
+
+
+_RETRY = '{"type":"error","message":"Reconnecting... 1/5 (unexpected status 503)"}'
+_DONE = '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
+_FAILED = '{"type":"turn.failed","error":{"message":"unexpected status 401 Unauthorized"}}'
+
+
+@pytest.mark.parametrize("events, failed, why", [
+    ([_DONE], False, "exit 0"),
+    ([_RETRY, _DONE], False, "exit 0"),       # a retry codex recovered from
+    ([_RETRY, _FAILED], True, "turn.failed"),
+    ([_DONE, _RETRY], True, "Reconnecting"),  # an error nothing completed after
+])  # fmt: skip
+def test_codex_parse_fails_a_session_only_on_an_error_it_did_not_recover_from(events, failed, why):
+    from xe_forge import agent_cli as agents
+
+    text = "\n".join(['{"type":"thread.started","thread_id":"t-1"}', *events])
+    got = agents.get("codex").parse(text, 0)
+    assert got[0] == "t-1" and got[1] is failed and why in got[2]
 
 
 def test_optimize_records_the_repo_revision(tmp_path):

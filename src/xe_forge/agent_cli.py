@@ -195,9 +195,19 @@ class Codex(Claude):
         sessions = re.findall(r'"thread_id":\s*"([^"]+)"', text)
         why = f"exit {returncode}"
         failed = returncode != 0
+        # codex reports a retry it is about to make ("Reconnecting... 1/5") as an error
+        # event too, so an error is a failure only when no turn completed after it; a turn
+        # that failed says so with turn.failed.
+        pending = None
         for line in text.splitlines():
-            if '"turn.failed"' in line or '"type":"error"' in line or '"type": "error"' in line:
-                failed, why = True, line[:300]
+            if '"turn.failed"' in line:
+                failed, why, pending = True, line[:300], None
+            elif '"type":"error"' in line or '"type": "error"' in line:
+                pending = line[:300]
+            elif '"turn.completed"' in line:
+                pending = None
+        if pending is not None:
+            failed, why = True, pending
         return (sessions[-1] if sessions else None), failed, why
 
     def auth_failed(self, line: str) -> bool:
