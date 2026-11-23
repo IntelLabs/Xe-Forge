@@ -742,6 +742,42 @@ def test_codex_parse_fails_a_session_only_on_an_error_it_did_not_recover_from(ev
     assert got[0] == "t-1" and got[1] is failed and why in got[2]
 
 
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+@pytest.mark.parametrize("ends", [False, True])
+def test_a_kernel_session_is_bounded_and_takes_its_detached_work_with_it(
+    tmp_path, monkeypatch, backend, ends
+):
+    """A kernel session stops at XE_FORGE_AGENT_TIMEOUT whatever its CLI's own limits, and
+    the work it detached stops with it, at the deadline or when the session ends."""
+    from xe_forge.config import Config
+    from xe_forge.engines.claude_engine import ClaudeEngine
+    from xe_forge.frontend import agent
+
+    pidfile = tmp_path / "child.pid"
+    rest = "exit 0" if ends else "sleep 60"
+    _stub_cli(tmp_path, monkeypatch, backend,
+              f"#!/bin/sh\nsleep 60 >/dev/null 2>&1 &\necho $! > {pidfile}\n{rest}\n")  # fmt: skip
+    monkeypatch.setattr(agent, "TIMEOUT", 1)
+    workspace = tmp_path / "ws"
+    (workspace / ".claude" / "commands").mkdir(parents=True)
+    (workspace / ".claude" / "commands" / "optimize-kernel.md").write_text("Optimize `$ARGUMENTS`.")
+    config = Config()
+    config.engine.engine = backend
+
+    start = time.monotonic()
+    code, msg = ClaudeEngine(config)._launch_claude(workspace, "k")
+    assert time.monotonic() - start < 15
+    if ends:
+        assert (code, msg) == (0, None)
+    else:
+        assert code != 0 and "deadline" in msg
+    pid = int(pidfile.read_text())
+    deadline = time.monotonic() + 15
+    while _alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert not _alive(pid), "the session's detached work outlived it"
+
+
 def test_optimize_records_the_repo_revision(tmp_path):
     from xe_forge.frontend.cli import _git_revision
 

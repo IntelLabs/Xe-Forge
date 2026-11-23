@@ -311,7 +311,7 @@ Bedrock credentials (`AWS_BEARER_TOKEN_BEDROCK`, or `AWS_ACCESS_KEY_ID` +
 | `AUTO_LAUNCH` | false | `--auto-launch` | `xe-forge` |
 | `MAX_TURNS` | 80 | `--max-turns` | `xe-forge` |
 | `XE_FORGE_AGENT` | `claude` | Agent CLI of the frontend agents, `claude` or `codex`; default of `--engine` for `run` / `optimize` | `run`, `optimize` |
-| `XE_FORGE_AGENT_TIMEOUT` | 21600 (6 h) | Seconds one frontend agent session may run | `run` |
+| `XE_FORGE_AGENT_TIMEOUT` | 21600 (6 h) | Seconds one agent session may run, a kernel session or a frontend agent | `xe-forge`, `run` |
 | `XE_FORGE_AGENT_RESUMES` | 5 | Times a frontend agent session is resumed before it fails | `run` |
 | `AGENT_STRATEGY` | `cover` | dspy optimizer: `cover`, `react` or `coordinator` | `xe-forge` |
 | `AGENT_MAX_ITERATIONS` | 5 | dspy optimizer iterations per stage | `xe-forge` |

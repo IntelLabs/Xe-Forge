@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import threading
 from pathlib import Path
 
 from xe_forge.engines.base import BaseEngine
@@ -185,6 +186,7 @@ class ClaudeEngine(BaseEngine):
         Returns ``(returncode, error_message)``.
         """
         from xe_forge import agent_cli as agents
+        from xe_forge.frontend import agent as frontend
 
         backend = self.backend
         try:
@@ -201,14 +203,24 @@ class ClaudeEngine(BaseEngine):
             return 1, msg
 
         max_turns = self.config.engine.max_turns
+        # A turn limit is not a time limit, and not every CLI has one (codex has none): the
+        # session is bounded by the same deadline as a frontend agent session.
+        timeout = frontend.TIMEOUT
         log_path = workspace / self.log_name
         cmd = backend.start(backend.task(workspace, kernel_name), max_turns, self.config)
 
-        print(f"\nLaunching {backend.name} in {workspace} (max {max_turns} turns)...")
+        print(
+            f"\nLaunching {backend.name} in {workspace} "
+            f"(max {max_turns} turns, at most {timeout} s)..."
+        )
         print(f"  session log: {log_path}")
 
+        expired = threading.Event()
         try:
             with open(log_path, "w", buffering=1) as log:
+                # Its own process group, so the deadline, an interrupt or the end of the
+                # session also stops the builds and benchmarks it started; left running,
+                # they hold the device.
                 proc = subprocess.Popen(
                     cmd,
                     cwd=str(workspace),
@@ -217,18 +229,39 @@ class ClaudeEngine(BaseEngine):
                     stderr=subprocess.STDOUT,
                     text=True,
                     bufsize=1,
+                    start_new_session=True,
                 )
-                assert proc.stdout is not None
-                for line in proc.stdout:
-                    # Teed rather than redirected: an unattended run needs the
-                    # file, and a watched one needs the terminal.
-                    print(line, end="")
-                    log.write(line)
-                returncode = proc.wait()
+
+                def expire() -> None:
+                    expired.set()
+                    frontend._kill_groups([proc.pid])
+
+                timer = threading.Timer(timeout, expire)
+                timer.daemon = True
+                timer.start()
+                try:
+                    assert proc.stdout is not None
+                    for line in proc.stdout:
+                        # Teed rather than redirected: an unattended run needs the
+                        # file, and a watched one needs the terminal.
+                        print(line, end="")
+                        log.write(line)
+                    returncode = proc.wait()
+                finally:
+                    timer.cancel()
+                    frontend._kill_groups([proc.pid])
         except OSError as exc:
             msg = f"could not run {backend.binary!r}: {exc}"
             logger.error(msg)
             return 1, msg
+
+        if expired.is_set():
+            msg = (
+                f"{backend.name} session stopped at the {timeout} s deadline "
+                f"(XE_FORGE_AGENT_TIMEOUT); see {log_path}"
+            )
+            logger.error(msg)
+            return returncode or 1, msg
 
         if returncode != 0:
             # A turn limit reached mid-search shows up here too. That is a
