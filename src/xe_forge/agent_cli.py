@@ -107,6 +107,10 @@ class Codex(Claude):
 
     name, binary, instructions = "codex", "codex", "AGENTS.md"
     _EXEC = ("--json", "--skip-git-repo-check")
+    # A session works in a generated workspace whose agents are project-local config
+    # (.codex/agents/), which codex loads only for a trusted project; --trust records the
+    # workspace as trusted in the user's codex config. One-shot calls stage no agents.
+    _SESSION = ("--dangerously-bypass-approvals-and-sandbox", "--trust")
 
     def env(self, config) -> dict[str, str]:
         env = os.environ.copy()
@@ -125,12 +129,12 @@ class Codex(Claude):
         return out
 
     def start(self, prompt: str, max_turns: int, config=None) -> list[str]:
-        return [self.path(), "exec", *self._EXEC, "--dangerously-bypass-approvals-and-sandbox",
-                *self._endpoint(config), prompt]  # fmt: skip
+        return [self.path(), "exec", *self._EXEC, *self._SESSION, *self._endpoint(config),
+                prompt]  # fmt: skip
 
     def resume(self, session: str, prompt: str, max_turns: int, config=None) -> list[str]:
-        return [self.path(), "exec", *self._EXEC, "--dangerously-bypass-approvals-and-sandbox",
-                *self._endpoint(config), "resume", session, prompt]  # fmt: skip
+        return [self.path(), "exec", *self._EXEC, *self._SESSION, *self._endpoint(config),
+                "resume", session, prompt]  # fmt: skip
 
     def interactive(self, kernel_name: str) -> str:
         """The command a person runs in the workspace to start the loop."""

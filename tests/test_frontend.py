@@ -706,6 +706,21 @@ def test_codex_reads_the_generated_workspace(tmp_path):
     assert not agents.get("claude").auth_failed('{"type":"assistant","text":"401"}')
 
 
+def test_codex_sessions_trust_the_workspace_and_oneshots_do_not(tmp_path, monkeypatch):
+    """codex loads the workspace's .codex/agents only for a trusted project, so the session
+    that works there trusts it, on start and on resume; a one-shot call stages no agents."""
+    from xe_forge import agent_cli as agents
+
+    _stub_cli(tmp_path, monkeypatch, "codex", "#!/bin/sh\n")
+    codex = agents.get("codex")
+    assert "--trust" in codex.start("p", 5)
+    resume = codex.resume("t-1", "p", 5)
+    assert "--trust" in resume and resume.index("--trust") < resume.index("resume")
+    schema = tmp_path / "s.json"
+    schema.write_text("{}")
+    assert "--trust" not in codex.oneshot("p", schema, tmp_path / "a.json", agents.READ_ONLY)
+
+
 def test_optimize_records_the_repo_revision(tmp_path):
     from xe_forge.frontend.cli import _git_revision
 
