@@ -108,7 +108,7 @@ passed to every per-kernel `xe-forge` run (for example `-- --no-unitrace`).
 | `--analyze-only` | off | Stop after the manifest (`kernels.yaml`) |
 | `--agent-max-turns` | `--max-turns` | Turn limit of every frontend agent |
 | `--prove` | off | Build the stack with the winning patches and measure them in the model |
-| `--prove-repeat` | 3 | Captures per arm in prove |
+| `--prove-repeat` | 3 | Captures per arm in prove; with `--rows`, every row in each |
 | `--fuse` | off | After optimizing, fuse chains of ops into one kernel |
 | `--fuse-top` | 2 | Fusions to optimize |
 | `--stack-check` | off | Each port-back agent builds and tests its port in the framework's stack (`--stack-python`) |
@@ -261,25 +261,30 @@ passes, 1 fails, 2 could not judge (the reference failed, or that contract does 
 `$SRC` into `$VENV`; the run passes it when the framework's `framework.yaml` says
 `trial_build: true`.
 
-### `inmodel --run-dir RUN --repo REPO --trial DIR [--baseline DIR --record JSON --variant V] [--build-only]`
+### `inmodel --run-dir RUN --repo REPO --trial DIR [--baseline DIR --record JSON --spec SPEC --variant V] [--build-only] [--profile --kernel K]`
 
-A kernel trial built into the run's own framework and timed inside the model. For a repository
-the run's stack built with a `build` script (patch.json), on a host, `optimize` hands each
-workspace this as its external benchmark and validator (and `--repo-trials`), so a trial is a
-directory of the repository's files at their repository paths. It builds the repository with
-those files in place (the patch's `build.sh`, which also runs the repository's kernel tests),
-runs the run's launcher on the build (`capture run --timeline-only`, then `capture parse
---names`), and reads each variant's time per call as the spec's `captured_us` was read. A trial
-is correct when it builds, every variant runs as often as on the baseline, and its output
-passes `patch score` with the check's arguments. `XE_FORGE_MODEL_REPEATS` (5) captures per arm,
-in ABBA order; a ratio inside both arms' ranges summed is `INDISTINGUISHABLE`. The whole
-model is compared too, as `prove` compares it: a trial is `MODEL_SLOWER`, whatever its
-kernel's own time, when the model's total is slower beyond both arms' spreads summed, or when
-the workloads that moved beyond their own spreads lose more time in all than they save. Every
-other kernel's workload that moved is listed in the answer. The baseline
-must be the repository's files unchanged (`BASELINE_NOT_REPOSITORY`) at the commit the patch
-check judged (`REPOSITORY_MOVED`). One measurement serves every variant of a pair
-(`<workspace>/.inmodel/`). `--build-only` is the validator: the build and the tests alone.
+A kernel trial built into the run's own engine and checked and timed there on its own. For a
+repository the run's stack built with a `build` script and a `kernel_check` module
+(patch.json), on a host, `optimize` hands each workspace this as its external benchmark,
+validator and profiler (and `--repo-trials`), so a trial is a directory of the repository's
+files at their repository paths. It builds the repository with those files in place (the
+patch's `build.sh`, which also runs the repository's kernel tests), checks the trial's kernel
+against its reference at every shape of the spec in one process (the module's `check`), scores
+the build's output with `patch score` and the check's arguments, and then times the trial's
+kernel against the baseline's at every weighted shape: both builds' packages imported in one
+process (`python -m xe_forge.frontend.standalone`), each kernel prepared by its module's
+`prepare`, timed by the executor's host timer in alternating rounds, twice with the slots
+swapped, on the team the run's model ran on (its capture's `runtime.threads`). A build whose
+library binds a symbol once per process (`STB_GNU_UNIQUE`) is refused: two builds of it in one
+process would share it. A shape whose rounds straddle 1.0, or whose speedup is inside the noise band
+(`BENCHMARK_MIN_EFFECT`), is `INDISTINGUISHABLE`. The model is not run for timing; `--prove`
+times the whole engine. A shape the baseline's kernel fails too is the check's fault, not the
+trial's. The baseline must be the repository's files unchanged (`BASELINE_NOT_REPOSITORY`) at
+the commit the patch check judged (`REPOSITORY_MOVED`). One measurement serves every variant
+of a pair (`<workspace>/.inmodel/`). `--build-only` is the validator: the build and the tests
+alone. `--profile` runs the trial's kernel under `perf record` at the weighted shapes, each for
+its weight's share of `XE_FORGE_KERNEL_PROFILE_SECONDS`, and counts the samples inside its
+calls.
 
 ### `bound CAPTURE_JSON`
 
@@ -368,7 +373,11 @@ Bedrock credentials (`AWS_BEARER_TOKEN_BEDROCK`, or `AWS_ACCESS_KEY_ID` +
 | `BENCHMARK_MIN_EFFECT` | 0.02 | Relative difference below which two timings count as equal; a finite number above 0 | `xe-forge`, `benchmark` |
 | `XE_FORGE_BUILTIN_BENCHMARK` | off | `1`/`true`/`yes`/`on` = `benchmark --builtin-benchmark` | `benchmark` |
 | `XE_FORGE_BASELINE_SLACK` | 1.5 | How much slower than the captured kernel a baseline may run before it is not that kernel | `benchmark` |
-| `XE_FORGE_MODEL_REPEATS` | 5 | Captures per arm of a trial timed in the model | `inmodel` |
+| `XE_FORGE_KERNEL_WARMUP` | the executor's (200) | Warm-up calls per arm of a trial's kernel timed on its own; on a GPU never fewer than 100 | `inmodel` |
+| `XE_FORGE_KERNEL_ITERS` | the executor's (200) | Timed calls per arm, split over the rounds | `inmodel` |
+| `XE_FORGE_KERNEL_ROUNDS` | the executor's (10) | Alternating rounds per slot order | `inmodel` |
+| `XE_FORGE_KERNEL_PROFILE_SECONDS` | 10 | How long a profiled trial's kernel runs in all | `inmodel` |
+| `XE_FORGE_MODEL_EVENTS` | `cycles,instructions,cache-misses,branch-misses` | perf events of a profiled trial's kernel | `inmodel` |
 | `XE_FORGE_BENCHMARK_TIMEOUT` | `EXTERNAL_TIMEOUT` | Seconds per shape before `benchmark` gives up on a hang | `benchmark` |
 | `MAX_ATTEMPTS_PER_STAGE` | 3 | Read but unused | `xe-forge` |
 | `VALIDATE_EACH_STAGE` | true | Read but unused | `xe-forge` |

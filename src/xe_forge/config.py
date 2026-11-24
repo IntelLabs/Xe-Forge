@@ -217,7 +217,7 @@ class ExternalConfig:
     # The stack's interpreter; set, the port-back agent builds and tests the port there.
     stack_python: str | None = None
     # Trials are directories of kernel_repo's files at their repository paths, built into the
-    # repository and timed by the benchmark command (in the model the kernel came from).
+    # repository and timed by the benchmark command.
     repo_trials: bool = False
     # The command that profiles a trial where the benchmark times it; placeholders {trial}
     # and {workspace}. With it the workspace's profile step runs it.

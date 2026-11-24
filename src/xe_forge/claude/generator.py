@@ -48,7 +48,7 @@ def generate_workspace(
 
     dsl = config.device_config.dsl
     device = config.device_config.device
-    # Trials as the repository's own files, built into it and timed in the model: a baseline,
+    # Trials as the repository's own files, built into it and timed there: a baseline,
     # a trial and the output are directories at the repository's paths, not one source file.
     repo_trials = bool(config.external.repo_trials and config.external.kernel_repo
                        and config.external.benchmark)  # fmt: skip
@@ -125,7 +125,7 @@ def generate_workspace(
     if unitrace:
         profile_args.extend(["--unitrace-bin", config.profiler.unitrace_bin])
         profile_args.extend(["--metric-group", config.profiler.unitrace_metric_group])
-    # A trial in the model has no standalone file to profile: its times come from the model.
+    # A trial built into the repository has no single file to profile: the host's command does.
     perf = config.profiler.perf_enabled and not repo_trials
     vtune = config.profiler.vtune_enabled and not repo_trials
     # The collections every saved trial must have: unitrace's two groups on a GPU, and on a
@@ -148,7 +148,7 @@ def generate_workspace(
     elif not host and unitrace != vtune:
         profile_args.extend(["--tool", "unitrace" if unitrace else "vtune"])
     profile_options = shlex.join(profile_args)
-    # Where a trial is timed in the model, it is profiled there too: the host's command, with
+    # Where a trial is built into the repository, it is profiled there too: the host's command, with
     # the trial directory for the session to fill in.
     profile_command = (
         config.external.profile.replace("{trial}", "<trial dir>").replace("{workspace}", ".")

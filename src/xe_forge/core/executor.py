@@ -60,6 +60,15 @@ class ComparisonResult:
     verdict: str | None = None
 
 
+def combine_swapped(run_ab: tuple, run_ba: tuple) -> tuple[float, float, list[float]]:
+    """``(a_us, b_us, ratios)`` of two :meth:`KernelBenchExecutor.time_interleaved` runs, the
+    first with a in the first slot, the second with the slots swapped. A slot's bias multiplies
+    both rounds' ratios, and sqrt(r1 / r2) cancels it."""
+    (a1, b1, r1), (b2, a2, r2) = run_ab, run_ba
+    ratios = [(x / y) ** 0.5 for x, y in zip(r1, r2, strict=True)]
+    return (a1 * a2) ** 0.5, (b1 * b2) ** 0.5, ratios
+
+
 def no_change_message(speedup: float, band: float, original_us: float, optimized_us: float) -> str:
     """Feedback for a ratio inside the noise band: not a regression, not a win."""
     return (f"NO MEASURABLE CHANGE: {speedup:.3f}x, within {band:.0%} of the original "
@@ -707,9 +716,7 @@ class KernelBenchExecutor:
                 fn, model, inputs = self.prepare_workload(module, inputs=inputs, **prep)
                 calls.append(_host_call(fn, model, inputs))
             runs.append(self.time_interleaved(calls[0], tuple(inputs), calls[1], tuple(inputs)))
-        (a1, b1, r1), (b2, a2, r2) = runs
-        ratios = [(x / y) ** 0.5 for x, y in zip(r1, r2, strict=True)]
-        return (a1 * a2) ** 0.5, (b1 * b2) ** 0.5, ratios
+        return combine_swapped(*runs)
 
     def compare_reference_workload(
         self,
@@ -831,9 +838,7 @@ class KernelBenchExecutor:
             finally:
                 w.original.cpu()
                 w.optimized.cpu()
-        (a1, b1, r1), (b2, a2, r2) = runs
-        ratios = [(x / y) ** 0.5 for x, y in zip(r1, r2, strict=True)]
-        return (a1 * a2) ** 0.5, (b1 * b2) ** 0.5, ratios
+        return combine_swapped(*runs)
 
     def _compile_module(self, kernel_code: str):
         """Compile Triton kernel module from source code.

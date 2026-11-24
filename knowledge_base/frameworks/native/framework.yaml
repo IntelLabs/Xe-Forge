@@ -14,9 +14,10 @@ quantized_gate: dequantized
 # What the agents read first, relative to this directory.
 read_first: [README.md, contract.md]
 
-# The run times this framework's kernel trials inside the model: each trial is built into the
-# repository with the patch's build script (contract.md, "Build"), and the run's launcher runs
-# the model on that build. patch check requires the script.
+# The run builds each of this framework's kernel trials into the repository with the patch's
+# build script (contract.md, "Build") and checks and times its kernel on that build on its own,
+# through the check module (contract.md, "Kernel references and checks"). patch check requires
+# both.
 trial_build: true
 
 # The engine dumps each step of a forward (contract.md, XF_DUMP): patch check reports every

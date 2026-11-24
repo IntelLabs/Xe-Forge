@@ -236,37 +236,69 @@ def _prove(run_dir: Path, prove_dir: Path, patches: list[Path], recapture, pytho
         return f"## In model\n\nFAIL: {tokens}; the patches are not mergeable\n", "patched"
     if got == "base":
         return f"## In model\n\nnot run: {tokens}\n", "base"
+    from xe_forge.frontend import ir, rows
+
+    try:
+        plan = rows.of(run_dir)  # several rows: every arm runs each, merged at the run's scales
+    except RuntimeError as exc:
+        return f"## In model\n\nnot run: {exc}\n", "base"
     caps: dict[str, list[Path]] = {"A": [], "B": []}
-    for i in range(1, repeat + 1):
-        # ABBA: the arms take turns to run first, so warm-up and drift fall on both.
-        for arm in ("A", "B") if i % 2 else ("B", "A"):
-            path = prove_dir / f"{arm}-r{i}" / "capture.json"
-            # The run's own cached launcher, under the arm's interpreter: identical work.
-            code = recapture(run_dir, path.parent, arms[arm])
-            if code not in (0, PARSE_REFUSED) or (code == 0 and not path.is_file()):
-                # One retry, and not a blind one: the commonest failure here is a startup
-                # timeout loading a large model off NFS from cold, and the attempt that
-                # just failed is what warms the page cache.
-                print(f"prove: arm {arm} run {i} failed, retrying once ({_why(path.parent)})",
-                      flush=True)  # fmt: skip
-                code = recapture(run_dir, path.parent, arms[arm])
-            if code == PARSE_REFUSED and arm == "B" and caps["A"]:
-                return (f"## In model\n\nnot run: arm B ran but its capture does not parse -- "
-                        f"the launcher does not hold on the patched build ({path.parent})\n",
-                        "launcher")  # fmt: skip
-            if code != 0 or not path.is_file():
-                if arm == "B" and caps["A"]:
-                    return (f"## In model\n\nFAIL: with the patches the model does not "
-                            f"run where the base does ({path.parent}); the patches are "
-                            f"not mergeable\n\n```\n{_why(path.parent)}\n```\n", "patched")  # fmt: skip
-                # The reason belongs in the report. A path alone sends the reader
-                # hunting through logs for a line the run already had.
-                return (f"## In model\n\nnot run: capture of arm {arm} failed "
-                        f"({path.parent})\n\n```\n{_why(path.parent)}\n```\n",
-                        "patched" if arm == "B" else "base")  # fmt: skip
-            caps[arm].append(path)
+    by_row: dict[str, list[list[Path]]] = {"A": [], "B": []}
+    failed = None  # arm B's failure at a row arm A has not run yet: A's run there decides
+    # ABBA: the arms take turns to run first, so warm-up and drift fall on both.
+    for i, r, arm in rows.schedule(repeat, len(plan[0]) if plan else 1):
+        path = prove_dir / f"{arm}-r{i}" / "capture.json"
+        if plan:
+            path = prove_dir / f"{arm}-r{i}" / f"row{r + 1:02d}" / "capture.json"
+        # The run's own cached launcher, under the arm's interpreter: identical work. The
+        # anchor row is the launcher's own sizes.
+        at = (plan[0][r],) if plan and r else ()
+        code = recapture(run_dir, path.parent, arms[arm], *at)
+        if code not in (0, PARSE_REFUSED) or (code == 0 and not path.is_file()):
+            # One retry, and not a blind one: the commonest failure here is a startup
+            # timeout loading a large model off NFS from cold, and the attempt that
+            # just failed is what warms the page cache.
+            print(f"prove: arm {arm} run {i}{f' row {r + 1}' if plan else ''} failed, retrying "
+                  f"once ({_why(path.parent)})", flush=True)  # fmt: skip
+            code = recapture(run_dir, path.parent, arms[arm], *at)
+        base_ran = caps["A"] or (plan and any(len(c) > r for c in by_row["A"]))
+        if arm == "B" and plan and not base_ran and (code != 0 or not path.is_file()):
+            failed = (code, path)
+            continue
+        if arm == "A" and failed and code == 0 and path.is_file():
+            code, path, arm, base_ran = *failed, "B", True
+        if code == PARSE_REFUSED and arm == "B" and base_ran:
+            return (f"## In model\n\nnot run: arm B ran but its capture does not parse -- "
+                    f"the launcher does not hold on the patched build ({path.parent})\n",
+                    "launcher")  # fmt: skip
+        if code != 0 or not path.is_file():
+            if arm == "B" and base_ran:
+                return (f"## In model\n\nFAIL: with the patches the model does not "
+                        f"run where the base does ({path.parent}); the patches are "
+                        f"not mergeable\n\n```\n{_why(path.parent)}\n```\n", "patched")  # fmt: skip
+            # The reason belongs in the report. A path alone sends the reader
+            # hunting through logs for a line the run already had.
+            return (f"## In model\n\nnot run: capture of arm {arm} failed "
+                    f"({path.parent})\n\n```\n{_why(path.parent)}\n```\n",
+                    "patched" if arm == "B" else "base")  # fmt: skip
+        if plan:
+            if r == 0:
+                by_row[arm].append([])
+            by_row[arm][-1].append(path)
+            if r + 1 < len(plan[0]):
+                continue
+            merged = rows.merge([ir.load(p) for p in by_row[arm][-1]], plan[0], plan[1])
+            path = ir.dump(merged, prove_dir / f"{arm}-r{i}" / "capture.json")
+        caps[arm].append(path)
     table = compare.compare(caps["A"], caps["B"])
     out = compare.write(table, prove_dir)
+    per_row = ""
+    for r, row in enumerate(plan[0] if plan else []):
+        each = compare.compare([c[r] for c in by_row["A"]], [c[r] for c in by_row["B"]])
+        compare.write(each, prove_dir / "rows" / f"{r + 1:02d}")
+        per_row += (f"\n- row {r + 1} (batch {row['batch']}, {row['input_len']} in, "
+                    f"{row['output_len']} out, weight {row['weight']}): {each[0]['us_a']} -> "
+                    f"{each[0]['us_b']} us, x{each[0]['speedup']}")  # fmt: skip
     from xe_forge.config import noise_band
 
     t = table[0]
@@ -282,6 +314,14 @@ def _prove(run_dir: Path, prove_dir: Path, patches: list[Path], recapture, pytho
     return (
         f"## In model\n\n{len(patches)} patch(es), {repeat} captures per arm: total "
         f"{t['us_a']} -> {t['us_b']} us device time, {verdict}; per workload: "
-        f"`{out.relative_to(run_dir)}`" + (f"; {tokens}" if tokens else "") + "\n",
+        f"`{out.relative_to(run_dir)}`"
+        + (f"; {tokens}" if tokens else "")
+        + "\n"
+        + (
+            f"\nEvery row, merged at the run's weights above; each row's own captures "
+            f"(`{(prove_dir / 'rows').relative_to(run_dir)}/NN/compare.md`):{per_row}\n"
+            if per_row
+            else ""
+        ),
         "ok",
     )

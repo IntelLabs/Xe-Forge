@@ -166,7 +166,7 @@ patterns:
     check: the elementwise step disappears from the profile; the checks unchanged.
   - id: speedup_must_move_end_to_end
     name: A kernel speedup counts only if the end-to-end time moves
-    rule: A microbenchmark win can vanish in the model (different cache state, frequency, neighbouring steps), and a change can slow the next step.
+    rule: A microbenchmark win can vanish in the model (different cache state, frequency, neighbouring steps), and a change can slow the next step. A trial is timed on its own; the run's --prove times the whole engine with every kernel's winner in it, and is where this shows.
     pattern: After every kernel change re-run the checks and the full profile, compare total prefill and decode time over at least two runs, and keep the change only if both gates pass and the total improved.
     check: the profile's totals, not the kernel's own step, are the decision.
   - id: bandwidth_floor_first

@@ -76,9 +76,10 @@ reset-plus-forward benchmark. Never infer end-to-end speedup from trace timings.
 1. **ONLY create** trial directories `t<N>/` and output directories, each holding only the
    files of `{{ kernel_repo }}` the trial changes, at their repository paths
    (`t<N>/src/kernels/cpu/kernels.cpp`). `benchmark` builds the repository with exactly
-   those files in place and times the kernel inside the model it came from. A trial that
-   makes the whole model slower fails (`MODEL_SLOWER`) however fast its kernel is; the
-   answer lists the other kernels' workloads it moved.
+   those files in place, checks its kernel against its reference at every shape and
+   scores the engine's tokens on that build, then times the kernel on its own against the
+   baseline's at every weighted shape. The whole engine is timed only at the end
+   (`--prove`), with every kernel's winner in it.
 {%- else -%}
 1. **ONLY create** kernel files (trial files `t<N>{{ ext }}` or output files){% if measurement == "host" %}, or a
    trial *directory* `t<N>/` holding a kernel that is split across sources{% endif %}.
@@ -440,8 +441,8 @@ call is what is optimized. The library itself is never edited and no new kernel 
 
 ### Step 2: Initialize
 {% if repo_trials | default(false) %}
-Before initializing trials, check that the baseline is the repository and runs in the model
-at every shape (its time per call there is the captured one):
+Before initializing trials, check that the baseline is the repository and runs on its own
+at every shape, near the time per call it was captured at in the model:
 {% elif baseline_oracle %}
 Before initializing trials, check that the baseline builds, runs on the device and
 repeats deterministically -- it is the oracle, so nothing else checks it:
@@ -483,9 +484,10 @@ For each trial:
    ranks **at parity**, above every measured regression.
 {%- endif %}
 {%- if profile_command | default(none) %}
-6. **Profile** (MANDATORY every trial) — `{{ profile_command }}` builds the trial and runs the
-  model on it under perf: per symbol its cycles, instructions, IPC and misses inside the
-  model's steps, the kernel's own symbols first, and each step's time per call. Profile the
+6. **Profile** (MANDATORY every trial) — `{{ profile_command }}` builds the trial and runs its
+  kernel on its own under perf, at the spec's weighted shapes, each for its weight's share of
+  the time: per symbol its cycles, instructions, IPC and misses inside the kernel's calls, the
+  kernel's own symbols first, and each shape's time per call. Profile the
   baseline once before t0. Each next trial's `--strategy` cites the profiled measurement it
   targets (symbol, event or IPC, value, trial), and after profiling state the kernel's
   symbols' cycles and IPC beside its parent's. A profile is never a timing: `benchmark`'s

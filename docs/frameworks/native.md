@@ -45,10 +45,11 @@ and the patch check gates it. Capture then runs on it, with the engine's per-ste
 The engine's own repository, `native-<model>` under `--kernel-repos`: the host kernels in
 `src/kernels/cpu/` (cpp), the GPU kernels in `src/kernels/sycl/` (sycl). The run optimizes
 them there. On a host, each trial is a directory of the repository's files: the engine is
-built with them (`build.sh`, with its kernel tests) and timed inside the model by the run's
-own launcher (`xe-forge-skill inmodel`), so a kernel that runs inside the engine's parallel
-region is timed there, and its tokens are scored again on that build. `--prove` scores them
-once more on the build with every winning kernel.
+built with them (`build.sh`, with its kernel tests), its kernel checked against its
+reference at every shape and timed on its own against the baseline's at every weighted shape,
+both builds in one process (`xe-forge-skill inmodel`), and its tokens scored again on that
+build. `--prove` scores them once more on the build with every winning kernel and times the
+whole engine at every workload.
 
 ## 6. The goal
 

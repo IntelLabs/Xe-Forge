@@ -37,6 +37,12 @@ CMakeLists.txt          builds libxf.so (out of tree: build.sh gives it its dire
   never includes a SYCL header. The core holds activations and the KV cache in the device's
   memory (host memory on the host, USM device memory on a GPU) and copies only the ids in and
   the logits out.
+- The engine serves the model's whole context: the KV cache, and every buffer sized by
+  positions, holds the context the model's config declares (`max_position_embeddings`, or
+  its equivalent), read from the checkpoint, never a constant of the engine. A sequence
+  longer than that fails with an error naming both lengths. A run of several rows runs the
+  launcher at each row's batch and lengths, long prompts included, and each is a workload the
+  engine is optimized for.
 - Host kernels are `noinline` functions named by op (`xf_cpu_matmul_q4`, ...), so a sampled
   profile attributes time to them. SYCL kernels are named by op too (the kernel name type), so
   the device trace attributes time to them.
@@ -65,8 +71,8 @@ repository into any venv: `SRC` (default: the clone) is the tree, `VENV` (defaul
 the venv layered over the framework's interpreter. It builds out of tree, in a build
 directory under `$VENV`, writes nothing into `$SRC`, and then runs the repository's own kernel tests against that build, exiting nonzero
 when the build or a test fails. The run builds every kernel trial with it, each in a tree of
-its own, and times the trial by running the model on that build, so a kernel is optimized
-where it runs: inside the engine's parallel region, at the model's own shapes. Keep the tests
+its own, and times the trial's kernel on that build on its own, at the shapes the run's
+workloads give it, against the baseline's kernel; only `--prove` runs the whole engine. Keep the tests
 quick (seconds) and covering every kernel at the shapes the model serves, decode and prefill:
 they are each trial's numeric check beside the tokens.
 
@@ -92,6 +98,26 @@ timing it; the PyTorch op is also the reference the agent optimizing that kernel
   this build (through the library, its own thread team, on its own) and the reference, prints
   the largest absolute and relative difference, and exits 0 when the kernel is within the
   tolerance everywhere, 1 otherwise. `--help` exits 0.
+- The module is also imported, under a name of its own, by Xe-Forge's interpreter (torch,
+  numpy and ctypes; the framework's other packages are not there), with another build's
+  beside it: the package and its modules import one another relatively, never by the
+  package's name, and each loads the library of its own build. It offers:
+
+  ```python
+  check(kernel, dims, dtype, rtol, atol, threads=0) -> {"ok": bool, "max_abs": float, "max_rel": float}
+  prepare(kernel, dims, dtype, threads=0) -> call   # call.forward(), call.reset()
+  ```
+
+  `check` is the command's check on one shape: it returns `"ok": False` for a kernel that is
+  wrong and never exits the process. `prepare` builds the inputs as `check` builds them,
+  seeded the same way so two builds get the same values, converted once into what the library
+  takes, the outputs allocated once; `call.forward()` is the library's kernel call alone, on
+  its own team, and `call.reset()` (optional when the kernel writes no input) restores what
+  the kernel writes in place, so every forward does the same work. The library binds no
+  symbol once per process (no `STB_GNU_UNIQUE`; GCC: `-fno-gnu-unique`): two builds of it in
+  one process would share it, and the run refuses such a build. The run checks every shape of a trial with `check`, in one process, and times
+  `forward` with its own timer, the baseline's and the trial's builds in one process, in
+  alternating rounds; the module holds no timer.
 - `build.sh`'s tests may be these checks at a few shapes; the run's check covers every shape.
 
 ## Costs
@@ -186,10 +212,13 @@ With none of them set a step pays no hook cost and no synchronization.
   the same architecture (every layer kind and ratio kept, windows below the prompt) before the
   real one.
 - Each kernel trial: `build.sh` (the build and the repository's kernel tests), the kernel
-  against its reference at every shape (`kernel_check`), the same work in the model at every
-  shape, and the tokens scored again on that build. It is profiled in the model too: per
-  symbol its cycles, instructions, IPC and misses inside the steps.
+  against its reference at every shape (`check`), the tokens scored again on that build, and
+  the kernel timed on its own against the baseline's at every weighted shape (`prepare`). It
+  is profiled on its own too, at those shapes: per symbol its cycles, instructions, IPC and
+  misses inside the kernel's calls.
 - The whole engine against the reference model, step by step: `patch check` dumps the first
   forward (`XF_DUMP`) and reports every step's error against the module it names, and the
   worst, beside the tokens; `--prove` reports it for the merged engine.
-- `--prove`: the same scoring again on the build with the run's winning kernels.
+- `--prove`: the same scoring again on the build with the run's winning kernels, and the
+  whole engine timed against the one the run started from, at every workload: a kernel that
+  is faster on its own and slows its neighbours shows there.

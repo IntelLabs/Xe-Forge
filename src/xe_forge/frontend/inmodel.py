@@ -1,18 +1,20 @@
-"""``xe-forge-skill inmodel``: a kernel trial timed inside the model it was captured from.
+"""``xe-forge-skill inmodel``: a kernel trial built into the run's engine and timed on its own.
 
 For a kernel whose repository the run itself built into its stack (a patch whose patch.json
-names a ``build`` script), a trial is a directory of that repository's files at their
-repository paths. This builds the repository with them in place, runs the run's own launcher
-on the build, reads the kernel's time per call from the capture -- the same launcher, the
-same ``capture parse --names`` and the same division as the spec's ``captured_us``, so the
-baseline is the captured kernel by construction -- and scores the build's output with the
-patch's own check. It answers in :mod:`xe_forge.external`'s contract, so ``benchmark``'s gates
-(every shape correct, the baseline-is-the-captured-kernel check, regressions per shape, the
-noise band) apply unchanged.
+names a ``build`` script and a ``kernel_check`` module), a trial is a directory of that
+repository's files at their repository paths. This builds the repository with them in place,
+checks the trial's kernel against its PyTorch reference at every shape, times it against the
+baseline's kernel at every weighted shape -- both builds' kernels in one process, through the
+check module's ``prepare``, in alternating rounds by Xe-Forge's host timer, twice with the
+slots swapped (:mod:`xe_forge.frontend.standalone`) -- and scores the build's output with the
+patch's own check. The model is not run for timing: only ``--prove`` times the whole engine.
+It answers in :mod:`xe_forge.external`'s contract, so ``benchmark``'s gates (every shape
+correct, the baseline-is-the-captured-kernel check, regressions per shape, the noise band)
+apply unchanged.
 
-Correctness of a trial: it builds and the repository's own tests pass (``build.sh``); every
-weighted shape runs as often as in the baseline (the model did the same work); the build's
-output passes the patch check's scoring again (``patch score``).
+Correctness of a trial: it builds and the repository's own tests pass (``build.sh``); its
+kernel is within tolerance of its reference at every shape the spec holds; the build's output
+passes the patch check's scoring again (``patch score``).
 
 One measurement serves every variant of a (baseline, trial) pair: ``benchmark`` asks once per
 weighted shape, and the answer is read from ``<workspace>/.inmodel/<key>/result.json``.
@@ -29,20 +31,16 @@ import sys
 import tarfile
 import tempfile
 from pathlib import Path
-from statistics import median
 
-# Captures per arm, in ABBA order. A ratio counts only beyond both arms' ranges summed: with
-# five captures an identical pair passes that by chance about once in five thousand shapes,
-# and a trial is judged at every weighted shape.
-REPEATS = int(os.environ.get("XE_FORGE_MODEL_REPEATS", "5"))
+from xe_forge.frontend.standalone import PACKAGE_FILE  # where a build's package is
 
 
 def provider(run_dir: Path, repo: Path) -> dict | None:
-    """The run's facts that let a kernel of ``repo`` be timed in the model, or None: the patch
-    that built ``repo`` into the stack, with a ``build`` script, its check's arguments and
-    record, the launcher and names.json. A run with several rows is not covered."""
+    """The run's facts that let a kernel of ``repo`` be built and checked: the patch that built
+    ``repo`` into the stack, with a ``build`` script, a ``kernel_check`` module, and its check's
+    arguments and record. None otherwise."""
     stack = run_dir / "stack.json"
-    if not stack.is_file() or (run_dir / "rows" / "capture.json").is_file():
+    if not stack.is_file():
         return None
     for d in reversed(json.loads(stack.read_text()).get("patches") or []):
         work = Path(d)
@@ -51,10 +49,8 @@ def provider(run_dir: Path, repo: Path) -> dict | None:
         )
         if not meta.get("build") or Path(str(meta.get("repo"))).name != repo.name:
             continue
-        need = [run_dir / "launcher" / "run.sh", run_dir / "names.json", work / "check-args.json",
-                work / "check.json", work / meta["build"]]  # fmt: skip
-        # A launcher that names its interpreter itself runs that build, never a trial's.
-        if all(p.is_file() for p in need) and "FRAMEWORK_PYTHON" in need[0].read_text():
+        need = [work / "check-args.json", work / "check.json", work / meta["build"]]
+        if all(p.is_file() for p in need) and meta.get("kernel_check") and meta.get("package"):
             return {"patch": work, "meta": meta}
     return None
 
@@ -136,7 +132,8 @@ def _build(facts: dict, src: Path, venv: Path, log: Path, clone: Path | None = N
     """Build ``src`` into ``venv`` with the patch's build script; why it failed, or None. The
     package must then import from this build, and no library it loads may come from
     ``clone`` (the repository the trees are made from): a build that links the clone's
-    library runs the same code for every trial."""
+    library runs the same code for every trial. The package's directory is written to
+    ``venv/PACKAGE_FILE``."""
     work, meta = facts["patch"], facts["meta"]
     env = dict(os.environ, SRC=str(src), VENV=str(venv))
     with open(log, "w") as f:
@@ -166,60 +163,120 @@ def _build(facts: dict, src: Path, venv: Path, log: Path, clone: Path | None = N
         ]
         if theirs:
             return f"{pkg} loads {theirs[0]} from {clone}, not from this build"
+    (venv / PACKAGE_FILE).write_text(str(got.parent))
     return None
 
 
-def _capture(run_dir: Path, out: Path, python: Path) -> Path | None:
-    """The run's launcher on this build, timeline only, read with the run's names.json."""
-    from xe_forge.frontend.cli import _tool
-
-    raw, cap = out / "raw", out / "capture.json"
-    if _tool(sys.executable, "capture", "run", str(run_dir / "launcher" / "run.sh"), "-o",
-             str(raw), "--timeline-only", FRAMEWORK_PYTHON=str(python)):  # fmt: skip
-        return None
-    if _tool(sys.executable, "capture", "parse", str(raw), "-o", str(cap), "--names",
-             str(run_dir / "names.json")):  # fmt: skip
-        return None
-    return cap
+def _shapes(spec: dict, record: dict) -> list[dict]:
+    """Every recorded variant's shapes in the spec, each with its tolerance and its weight
+    (0 for a variant the spec does not weigh)."""
+    weights = spec.get("weights") or {}
+    return [{"variant": v, "dims": s["dims"], "dtype": str(s.get("dtype")), "rtol": s["rtol"],
+             "atol": s["atol"], "weight": weights.get(v, 0.0)}
+            for v in record["variants"] for s in spec.get(v) or []]  # fmt: skip
 
 
-def _check_one(module: str, python: Path, kernel: str, shape: dict) -> tuple[int, str]:
-    """(exit code, what it said) of the engine's ``kernel_check`` on one shape."""
-    argv = [str(python), "-m", module, "--kernel", kernel, "--dims", json.dumps(shape["dims"]),
-            "--dtype", str(shape.get("dtype")), "--rtol", str(shape["rtol"]), "--atol",
-            str(shape["atol"])]  # fmt: skip
-    got = subprocess.run(argv, capture_output=True, text=True)
-    return got.returncode, (got.stdout + got.stderr).strip()[-1500:]
+def _standalone(facts: dict, mode: str, builds: list[Path], kernel: str, shapes: list[dict],
+                where: Path, *wrap: str, **extra: str) -> tuple[dict | None, str]:  # fmt: skip
+    """(result, what it said) of :mod:`xe_forge.frontend.standalone` in its own process under
+    this interpreter, with ``builds``' venvs, its kernel on the team the run's model ran on
+    (``facts["threads"]``); the result is None when it failed or outlived the external
+    command's timeout."""
+    from xe_forge.config import get_config
+
+    meta = facts["meta"]
+    extra = {"threads": str(facts.get("threads") or 0), **extra}
+    where.mkdir(parents=True, exist_ok=True)
+    (where / "shapes.json").write_text(json.dumps(shapes))
+    argv = [*wrap, sys.executable, "-m", "xe_forge.frontend.standalone", mode,
+            *[x for b in builds for x in ("--build", str(b))], "--package", str(meta["package"]),
+            "--module", str(meta["kernel_check"]), "--kernel", kernel,
+            "--shapes", str(where / "shapes.json"), "-o", str(where / "result.json"),
+            *[x for k, v in extra.items() for x in (f"--{k}", v)]]  # fmt: skip
+    try:
+        got = subprocess.run(argv, capture_output=True, text=True,
+                             timeout=get_config().external.timeout)  # fmt: skip
+    except subprocess.TimeoutExpired as exc:
+        said = f"{mode} did not finish in {exc.timeout} s (external.timeout)"
+        (where / "standalone.log").write_text(said + "\n")
+        return None, said
+    said = (got.stdout + got.stderr).strip()[-3000:]
+    (where / "standalone.log").write_text(said + "\n")
+    if got.returncode != 0 or not (where / "result.json").is_file():
+        return None, said
+    return json.loads((where / "result.json").read_text()), said
 
 
-def _numeric(facts: dict, pythons: dict, kernel: str, spec: dict, record: dict) -> str | None:
-    """The trial's kernel against its PyTorch reference at every recorded variant's shape and
-    tolerance (the engine's ``kernel_check``, patch.json): why it fails, or None. A shape the
-    baseline's kernel fails too says nothing of the trial: that raises (the check's fault)."""
-    module = facts["meta"].get("kernel_check")
-    if not module:
-        raise RuntimeError(
-            'patch.json names no "kernel_check": no kernel can be checked on its own'
+def _numeric(facts: dict, pkgs: dict, kernel: str, shapes: list[dict], where: Path) -> str | None:
+    """The trial's kernel against its PyTorch reference at every shape and tolerance, in one
+    process: why it fails, or None. A shape the baseline's kernel fails too says nothing of
+    the trial: that raises (the check's fault)."""
+    arm = "B" if "B" in pkgs else "A"
+    got, said = _standalone(facts, "check", [pkgs[arm]], kernel, shapes, where / f"check-{arm}")
+    if got is None:  # the process died: whose kernel killed it, the baseline's run says
+        base, base_said = _standalone(
+            facts, "check", [pkgs["A"]], kernel, shapes, where / "check-A"
         )
-    arm = "B" if "B" in pythons else "A"
-    for variant in record["variants"]:
-        for shape in spec.get(variant) or []:
-            code, said = _check_one(module, pythons[arm], kernel, shape)
-            if code == 0:
-                continue
-            if arm == "A" or _check_one(module, pythons["A"], kernel, shape)[0] != 0:
-                raise RuntimeError(f"the baseline's kernel fails its own check at {variant} "
-                                   f"{shape['dims']}, so the check is not judging it:\n{said}")  # fmt: skip
-            return (f"{variant} {shape['dims']}: not within rtol {shape['rtol']}, atol "
-                    f"{shape['atol']} of its reference, where the baseline's is:\n{said}")  # fmt: skip
-    return None
+        if arm == "A" or base is None:
+            raise RuntimeError(f"the baseline's kernel check did not finish:\n{base_said}")
+        if not all(s["ok"] for s in base["shapes"]):
+            raise RuntimeError("the baseline's kernel fails its own check, so the check is not "
+                               "judging it")  # fmt: skip
+        return f"the kernel check died on the trial's build, where the baseline's passes:\n{said}"
+    failed = [(s, r) for s, r in zip(shapes, got["shapes"], strict=True) if not r["ok"]]
+    if not failed:
+        return None
+    if arm == "B":
+        base, base_said = _standalone(facts, "check", [pkgs["A"]], kernel,
+                                      [s for s, _ in failed], where / "check-A")  # fmt: skip
+        if base is None:
+            raise RuntimeError(f"the baseline's kernel check did not finish:\n{base_said}")
+        bad = [s for (s, _), b in zip(failed, base["shapes"], strict=True) if not b["ok"]]
+    else:
+        bad = [s for s, _ in failed]
+    if bad:
+        raise RuntimeError(f"the baseline's kernel fails its own check at {bad[0]['variant']} "
+                           f"{bad[0]['dims']}, so the check is not judging it")  # fmt: skip
+    s, r = failed[0]
+    return (f"{s['variant']} {s['dims']}: not within rtol {s['rtol']}, atol {s['atol']} of its "
+            f"reference, where the baseline's is: {json.dumps(r)}"
+            + (f" ({len(failed)} shapes fail)" if len(failed) > 1 else ""))  # fmt: skip
+
+
+def _timed(facts: dict, pkgs: dict, kernel: str, shapes: list[dict], where: Path) -> dict | str:
+    """Per variant ``(baseline_us, trial_us, ratios)``, both arms timed in one process at each
+    weighted shape, twice with the slots swapped; or what the timer said when it failed on the
+    trial. Raises RuntimeError when it fails on the baseline alone too (the check module's or
+    the baseline's fault, not the trial's)."""
+    from xe_forge.core.executor import combine_swapped
+
+    b = pkgs.get("B", pkgs["A"])
+    ab, said = _standalone(facts, "time", [pkgs["A"], b], kernel, shapes, where / "time-AB")
+    ba = None
+    if ab is not None:
+        ba, said = _standalone(facts, "time", [b, pkgs["A"]], kernel, shapes, where / "time-BA")
+    if ab is None or ba is None:
+        if "B" in pkgs:  # whose failure: the baseline against itself says
+            aa, base_said = _standalone(facts, "time", [pkgs["A"], pkgs["A"]], kernel, shapes,
+                                        where / "time-AA")  # fmt: skip
+            if aa is not None:
+                return said
+            said = base_said
+        raise RuntimeError(f"timing the baseline's kernel on its own failed:\n{said}")
+    out = {}
+    for x, y in zip(ab["shapes"], ba["shapes"], strict=True):
+        a_us, b_us, ratios = combine_swapped((x["first_us"], x["second_us"], x["ratios"]),
+                                             (y["first_us"], y["second_us"], y["ratios"]))  # fmt: skip
+        out[x["variant"]] = {"baseline_us": round(a_us, 3), "trial_us": round(b_us, 3),
+                             "ratios": [round(r, 4) for r in ratios]}  # fmt: skip
+    return {"variants": out, "flush_note": ab.get("flush_note", ""), "rounds": ab.get("rounds"),
+            "iters": ab.get("benchmark_iters"), "warmup": ab.get("warmup_iters")}  # fmt: skip
 
 
 def measure(run_dir: Path, facts: dict, repo: Path, record: dict, baseline: Path,
-            trial: Path, where: Path, repeats: int = REPEATS, spec: dict | None = None) -> dict:  # fmt: skip
+            trial: Path, where: Path, spec: dict) -> dict:  # fmt: skip
     """The result of one (baseline, trial) pair at every variant of ``record``. Raises
-    RuntimeError on what is not the trial's (the baseline arm does not build or run)."""
-    from xe_forge.frontend import ir, manifest
+    RuntimeError on what is not the trial's (the baseline arm does not build or check)."""
     from xe_forge.frontend.prove import _score_arm
 
     same = not _changed(repo, trial)  # the tree it builds, not the files it holds
@@ -227,7 +284,7 @@ def measure(run_dir: Path, facts: dict, repo: Path, record: dict, baseline: Path
     if same:
         (where / "same").touch()
     arms = {"A": None} if same else {"A": None, "B": trial}
-    venvs = {}
+    venvs, pkgs = {}, {}
     for arm, overlay in arms.items():
         src, venv, log = where / arm / "src", where / arm / "venv", where / f"build-{arm}.log"
         _tree(repo, src, overlay)
@@ -237,44 +294,13 @@ def measure(run_dir: Path, facts: dict, repo: Path, record: dict, baseline: Path
         if why:
             return {"correctness": False, "verdict": "BUILD_FAILED",
                     "why": why, "log": log.read_text(errors="replace")[-3000:]}  # fmt: skip
-        venvs[arm] = venv / "bin" / "python"
-    # The kernel on its own first, against its reference at every shape: cheap, and a wrong
-    # kernel is refused before the model is run on it.
-    if spec is not None:
-        why = _numeric(facts, venvs, record.get("definition", ""), spec, record)
-        if why:
-            return {"correctness": False, "verdict": "NUMERIC_FAILED", "why": why}
-    times: dict[str, dict[str, list[float]]] = {a: {} for a in arms}
-    calls: dict[str, dict[str, int]] = {a: {} for a in arms}
-    caps: dict[str, list[Path]] = {a: [] for a in arms}
-    for r in range(1, repeats + 1):
-        for arm in (("A", "B") if r % 2 else ("B", "A")) if not same else ("A",):
-            cap_path = _capture(run_dir, where / f"{arm}-r{r}", venvs[arm])
-            if cap_path is None:
-                if arm == "A":
-                    raise RuntimeError(f"the baseline arm did not capture ({where / f'A-r{r}'})")
-                return {"correctness": False, "verdict": "MODEL_FAILED",
-                        "why": f"the model did not run or capture on the trial's build "
-                               f"({where / f'{arm}-r{r}'})"}  # fmt: skip
-            caps[arm].append(cap_path)
-            cap = ir.load(cap_path)
-            for variant, ref in record["variants"].items():
-                got = manifest.per_call(cap, ref)
-                if got is None:
-                    if arm == "A":
-                        raise RuntimeError(f"the baseline arm has no workload {ref}")
-                    return {"correctness": False, "verdict": "WORK_DIFFERS",
-                            "why": f"{variant} ({ref}) did not run on the trial's build"}  # fmt: skip
-                times[arm].setdefault(variant, []).append(got[0])
-                calls[arm].setdefault(variant, got[1])
-    for variant, n in calls.get("B", {}).items():
-        if n != calls["A"][variant]:
-            return {"correctness": False, "verdict": "WORK_DIFFERS",
-                    "why": f"{variant} ran {n} times on the trial's build, {calls['A'][variant]} "
-                           "on the baseline's: the model did not do the same work"}  # fmt: skip
-    model = None if same else _model(caps, record)
-    if model and model["slower"]:
-        return {"correctness": False, "verdict": "MODEL_SLOWER", "why": _model_text(model)}
+        venvs[arm], pkgs[arm] = venv / "bin" / "python", venv
+    kernel = record.get("definition", "")
+    shapes = _shapes(spec, record)
+    # The kernel against its reference first: a wrong kernel is never timed.
+    why = _numeric(facts, pkgs, kernel, shapes, where)
+    if why:
+        return {"correctness": False, "verdict": "NUMERIC_FAILED", "why": why}
     # The tokens only: the step report belongs to the patch check and prove, not to a trial.
     argv = [
         a for a in json.loads((facts["patch"] / "check-args.json").read_text()) if a != "--steps"
@@ -291,67 +317,25 @@ def measure(run_dir: Path, facts: dict, repo: Path, record: dict, baseline: Path
             "verdict": "OUTPUT_FAILED",
             "why": "; ".join(scored["problems"]) or "the model's output fails its check",
         }
-
-    def stats(xs):
-        m = median(xs)
-        return round(m, 3), round((max(xs) - min(xs)) / m, 4) if m else 0.0
-
-    variants = {}
-    for variant in record["variants"]:
-        a, sa = stats(times["A"][variant])
-        b, sb = stats(times["B" if not same else "A"][variant])
-        variants[variant] = {"baseline_us": a, "trial_us": b, "spread": round(sa + sb, 4)}
-    return {"correctness": True, "same": same, "variants": variants, "repeats": repeats,
-            "model": model}  # fmt: skip
-
-
-def _beyond(row: dict) -> bool:
-    """A compare row whose two arms differ by more than their captures' spreads together."""
-    sp = (row.get("spread_a") or 0.0) + (row.get("spread_b") or 0.0)
-    return bool(row.get("speedup")) and abs(row["speedup"] - 1) > sp
-
-
-def _model(caps: dict[str, list[Path]], record: dict) -> dict:
-    """The whole model on both builds, from the trial's own captures, as prove compares it:
-    its total, and every workload that moved beyond its spread. A kernel can make the model
-    slower outside its own time -- what it leaves in the caches, the threads, the clocks --
-    which its own time never shows. Slower: the total is, or the time the moved workloads
-    gained and lost sums to a loss (the kernel saves less than it costs elsewhere)."""
-    from xe_forge.frontend.compare import compare
-
-    try:
-        rows = compare(caps["A"], caps["B"])
-    except SystemExit as exc:  # the arms' captures ran different work
-        raise RuntimeError(str(exc)) from exc
-    total, own = rows[0], {ref.partition("@")[0] for ref in record["variants"].values()}
-    kernel = record.get("definition") or ""
-    moved = [r for r in rows[1:] if r["status"] == "matched" and _beyond(r)]
-    net = round(sum(r["delta_us"] for r in moved), 3)
-    others = sorted((r for r in moved if r["workload_id"] not in own and r["kernel"] != kernel),
-                    key=lambda r: r["delta_us"])  # fmt: skip
-    keep = ("workload_id", "kernel", "us_a", "us_b", "speedup")
-    return {
-        "baseline_us": total["us_a"], "trial_us": total["us_b"], "speedup": total["speedup"],
-        "spread": round((total["spread_a"] or 0.0) + (total["spread_b"] or 0.0), 4),
-        "net_us": net, "slower": (_beyond(total) and total["speedup"] < 1) or net < 0,
-        "others": [{k: r[k] for k in keep} for r in others],
-    }  # fmt: skip
-
-
-def _model_text(model: dict) -> str:
-    """The model's total and the other workloads that moved, most time lost first."""
-    lines = [f"the whole model: {model['baseline_us']} -> {model['trial_us']} us "
-             f"(x{model['speedup']}, spread {model['spread']}); the workloads that moved beyond "
-             f"their spread save {model['net_us']} us in all"]  # fmt: skip
-    for r in model["others"]:
-        lines.append(f"  {r['kernel'] or '-'} {r['workload_id']}: {r['us_a']} -> {r['us_b']} us "
-                     f"(x{r['speedup']}), not this kernel's own workload")  # fmt: skip
-    return "\n".join(lines)
+    # Timed at the shapes the benchmark asks for: the weighted ones, one shape per variant.
+    weighted = spec.get("weights") or {}
+    first, timed = set(), []
+    for s in shapes:
+        if (not weighted or s["variant"] in weighted) and s["variant"] not in first:
+            first.add(s["variant"])
+            timed.append(s)
+    got = _timed(facts, pkgs, kernel, timed, where)
+    if isinstance(got, str):
+        return {"correctness": False, "verdict": "TIMING_FAILED",
+                "why": f"timing the kernels on their own failed:\n{got}"}  # fmt: skip
+    return {"correctness": True, "same": same, **got}
 
 
 # The profile's events: where a kernel's cycles go, how many instructions retire in them, and
-# what misses. Sampled per symbol inside the model's own steps.
+# what misses. Sampled per symbol inside the kernel's own calls.
 EVENTS = os.environ.get("XE_FORGE_MODEL_EVENTS", "cycles,instructions,cache-misses,branch-misses")
+# How long the profiled calls run in all, each shape for its weight's share.
+PROFILE_SECONDS = os.environ.get("XE_FORGE_KERNEL_PROFILE_SECONDS", "10")
 _SAMPLE = re.compile(
     r"^\s*(\d+)\s+(\d+)\.(\d{9}):\s+(\d+)\s+(\S+?):\s+[0-9a-f]+\s+(.*)\s+\(([^()]*)\)\s*$"
 )
@@ -371,46 +355,29 @@ def _built(store: Path, trial: Path) -> Path | None:
         if mark.read_text() == want:
             arm = "A" if (mark.parent / "same").exists() else "B"
             venv = mark.parent / arm / "venv"
-            if (venv / "bin" / "python").exists():
+            if (venv / PACKAGE_FILE).is_file():
                 return venv
     return None
 
 
-def profile(run_dir: Path, facts: dict, repo: Path, trial: Path, where: Path, kernel: str) -> str:
-    """The model on this trial's build under ``perf record`` (:data:`EVENTS`), every sample in a
-    step of a timed window kept: per symbol, its events and instructions per cycle, the
-    kernel's own symbols first; per step type, its time per call (``profile.json`` holds each
-    step's symbols too). Raises RuntimeError when the build or the model does not run."""
+def _sample(facts: dict, pkg: Path, kernel: str, shapes: list[dict],
+            where: Path) -> tuple[dict, dict, str]:  # fmt: skip
+    """The kernel's calls at ``shapes`` under ``perf record``: per shape its time and calls
+    (restore and forward), per shape, symbol and event the samples' count inside its calls,
+    and what perf said."""
     import bisect
 
-    from xe_forge.skills.capture import _env, _launch
-
-    venv = _built(where.parent, trial)
-    if venv is None:
-        src, venv, log = where / "src", where / "venv", where / "build.log"
-        _tree(repo, src, trial)
-        if why := _build(facts, src, venv, log, clone=repo):
-            raise RuntimeError(f"{why}; see {log}")
-    raw, data = where / "raw", where / "perf.data"
-    raw.mkdir()
     perf = os.environ.get("PERF_BIN", "perf")
+    data = where / "perf.data"
     cmd = [perf, "record", "-q", "-e", EVENTS, "-k", "CLOCK_MONOTONIC", "-o", str(data), "--"]
-    env = dict(_env(), FRAMEWORK_PYTHON=str(venv / "bin" / "python"))
-    code = _launch(run_dir / "launcher" / "run.sh", raw, cmd, where / "launcher.log", env, where)
-    if code or not data.is_file() or not (raw / "host_timeline.json").is_file():
-        raise RuntimeError(
-            f"perf record or the model failed (exit {code}); see {where / 'launcher.log'}"
-        )
-    timeline = json.loads((raw / "host_timeline.json").read_text())
-    timed = [w for w in timeline.get("windows") or [] if w.get("timed")]
-    spans = sorted((s, e, name) for w in timed for name, s, e in w.get("nodes") or [])
+    got, said = _standalone(facts, "profile", [pkg], kernel, shapes, where, *cmd,
+                            seconds=PROFILE_SECONDS)  # fmt: skip
+    if got is None or not data.is_file():
+        raise RuntimeError(f"perf record or the kernel failed: {said[-600:]}")
+    spans = sorted((s, e, name) for name, s, e, _ in got["spans"])
     starts = [s for s, _, _ in spans]
-    steps: dict[str, dict] = {}
-    for s, e, name in spans:
-        st = steps.setdefault(name, {"us": 0.0, "calls": 0})
-        st["us"] += (e - s) / 1e3
-        st["calls"] += 1
-    counts: dict[str, dict[str, dict[str, float]]] = {}  # step -> symbol -> event -> count
+    steps = {name: {"us": (e - s) / 1e3, "calls": n} for name, s, e, n in got["spans"]}
+    counts: dict[str, dict[str, dict[str, float]]] = {}  # shape -> symbol -> event -> count
     proc = subprocess.Popen([perf, "script", "-i", str(data), "-F",
                              "tid,time,event,period,ip,sym,dso", "--ns"],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)  # fmt: skip
@@ -422,7 +389,7 @@ def profile(run_dir: Path, facts: dict, repo: Path, trial: Path, where: Path, ke
         t = int(m[2]) * 10**9 + int(m[3])
         i = bisect.bisect_right(starts, t) - 1
         if i < 0 or t > spans[i][1]:
-            continue  # outside every step: load, warm-up, between steps
+            continue  # outside every call: imports, inputs, warm-up
         dso = m[7] if m[7].startswith("[") else f"[{Path(m[7]).name}]"
         sym = counts.setdefault(spans[i][2], {}).setdefault(f"{m[6]} {dso}", {})
         ev = _event(m[5])
@@ -431,6 +398,24 @@ def profile(run_dir: Path, facts: dict, repo: Path, trial: Path, where: Path, ke
     if proc.wait() != 0:
         raise RuntimeError(f"perf script failed: {err.strip()[-300:]}")
     data.unlink()  # large, and the counts are kept
+    return steps, counts, err
+
+
+def profile(facts: dict, repo: Path, trial: Path, where: Path, kernel: str, spec: dict,
+            record: dict) -> str:  # fmt: skip
+    """This trial's kernel on its own under ``perf record`` (:data:`EVENTS`), at every weighted
+    shape for its weight's share of the time, every sample inside a call kept: per symbol its
+    events and instructions per cycle, the kernel's own symbols first; per shape its time per
+    call (``profile.json`` holds each shape's symbols too). Raises RuntimeError when the build
+    or the kernel does not run."""
+    venv = _built(where.parent, trial)
+    if venv is None:
+        src, venv, log = where / "src", where / "venv", where / "build.log"
+        _tree(repo, src, trial)
+        if why := _build(facts, src, venv, log, clone=repo):
+            raise RuntimeError(f"{why}; see {log}")
+    shapes = [s for s in _shapes(spec, record) if s["weight"] > 0] or _shapes(spec, record)
+    steps, counts, err = _sample(facts, venv, kernel, shapes, where)
     per_sym: dict[str, dict[str, float]] = {}
     for syms in counts.values():
         for sym, evs in syms.items():
@@ -440,13 +425,15 @@ def profile(run_dir: Path, facts: dict, repo: Path, trial: Path, where: Path, ke
     events = [e for e in EVENTS.split(",") if any(e in v for v in per_sym.values())]
     if not events:
         raise RuntimeError(
-            f"perf recorded no sample of {EVENTS} inside a step: {err.strip()[-300:]}"
+            f"perf recorded no sample of {EVENTS} inside a call: {err.strip()[-300:]}"
         )
     first = events[0]
     order = sorted(per_sym, key=lambda s: (kernel not in s, -per_sym[s].get(first, 0.0)))[:15]
     total = sum(v.get(first, 0.0) for v in per_sym.values()) or 1.0
-    lines = [f"In-model profile of {trial.name} ({', '.join(events)}; samples inside the model's "
-             "steps of its timed windows):", f"{'symbol':60s} {first + ' %':>10s} " +
+    lines = [f"Profile of {trial.name}'s {kernel} on its own ({', '.join(events)}; samples inside "
+             f"its calls at the spec's {len(shapes)} weighted shapes, each run for its weight's "
+             "share of the time):",
+             f"{'symbol':60s} {first + ' %':>10s} " +
              " ".join(f"{e:>14s}" for e in events) + "        IPC"]  # fmt: skip
     for sym in order:
         v = per_sym[sym]
@@ -454,21 +441,18 @@ def profile(run_dir: Path, facts: dict, repo: Path, trial: Path, where: Path, ke
         lines.append(f"{sym[:60]:60s} {100 * v.get(first, 0.0) / total:9.1f}% "
                      + " ".join(f"{v.get(e, 0.0):14.3g}" for e in events)
                      + (f" {ipc:10.2f}" if ipc is not None else ""))  # fmt: skip
-    lines.append("Steps (time per call under perf; profile.json holds each step's symbols):")
+    lines.append("Shapes (time per call under perf; profile.json holds each shape's symbols):")
     for name, st in sorted(steps.items(), key=lambda kv: -kv[1]["us"])[:10]:
-        lines.append(f"  {name}: {st['us'] / max(st['calls'], 1):.2f} us x {st['calls']}")
+        lines.append(f"  {name}: {st['us'] / st['calls']:.2f} us x {st['calls']}")
     text = "\n".join(lines) + "\n"
     (where / "profile.txt").write_text(text)
     (where / "profile.json").write_text(json.dumps(
-        {"events": events, "symbols": per_sym, "steps": steps, "by_step": counts}, indent=1))  # fmt: skip
+        {"events": events, "symbols": per_sym, "shapes": steps, "by_shape": counts}, indent=1))  # fmt: skip
     return text
 
 
 def answer(result: dict, variant: str) -> str:
     """One variant's answer in the external benchmark's contract."""
-    timer = (f"TIMER: in-model, the run's launcher on each build, {result.get('repeats')} "
-             "captures per arm in ABBA order, the kernel's time per call from the engine's "
-             "timeline (median)")  # fmt: skip
     if not result["correctness"]:
         # Free text indented: a log line reading "CORRECTNESS: ..." is never a field here.
         text = "\n".join(f"| {ln}" for ln in f"{result.get('why', '')}\n{result.get('log', '')}"
@@ -476,24 +460,24 @@ def answer(result: dict, variant: str) -> str:
         return f"{text}\nCORRECTNESS: fail\nVERDICT: {result['verdict']}\nDONE\n"
     v = result["variants"].get(variant)
     if v is None:
-        return (
-            f"CORRECTNESS: fail\nVERDICT: NO_SUCH_VARIANT\n{variant} is not in the record\nDONE\n"
-        )
-    model = result.get("model")
-    told = [f"| {ln}" for ln in _model_text(model).splitlines()] if model else []
-    lines = [
-        *told,
-        "CORRECTNESS: pass",
-        f"BASELINE_US: {v['baseline_us']}",
-        f"TRIAL_US: {v['trial_us']}",
-    ]
-    ratio = v["baseline_us"] / v["trial_us"] if v["trial_us"] else None
+        return (f"CORRECTNESS: fail\nVERDICT: NO_SUCH_VARIANT\n{variant} is not a timed variant "
+                "of the record\nDONE\n")  # fmt: skip
+    from xe_forge.config import noise_band
+
+    ratios, band = v["ratios"], noise_band()
+    speedup = sorted(ratios)[len(ratios) // 2]  # as the executor reads its rounds
+    timer = (f"TIMER: the kernel on its own, the baseline's and the trial's builds in one process, "
+             f"{result.get('rounds')} alternating rounds of {result.get('iters')} calls after "
+             f"{result.get('warmup')} warm-up calls each, twice with the slots swapped; per-round "
+             f"speedup {min(ratios):.3f}-{max(ratios):.3f}x.{result.get('flush_note', '')}")  # fmt: skip
+    lines = ["CORRECTNESS: pass", f"BASELINE_US: {v['baseline_us']}", f"TRIAL_US: {v['trial_us']}"]
+    agree = min(ratios) > 1 or max(ratios) < 1
     if result.get("same"):
         lines.append("VERDICT: SAME_SOURCE")
-    elif ratio is None or abs(ratio - 1) <= v["spread"]:
-        lines.append("VERDICT: INDISTINGUISHABLE")  # inside the captures' own spread
+    elif not agree or abs(speedup - 1.0) < band:
+        lines.append("VERDICT: INDISTINGUISHABLE")  # the rounds straddle 1, or inside the band
     else:
-        lines += [f"SPEEDUP: {ratio:.4f}", "VERDICT: MEASURED"]
+        lines += [f"SPEEDUP: {speedup:.4f}", "VERDICT: MEASURED"]
     return "\n".join([*lines, timer, "DONE"]) + "\n"
 
 
@@ -505,19 +489,33 @@ def _say(verdict: str, text: str, ok: bool = False) -> str:
     )
 
 
-# A failure that may not recur on the same code (the model did not run or capture) is not kept.
-TRANSIENT = {"MODEL_FAILED"}
+def _threads(run_dir: Path) -> int:
+    """The thread count the run's model ran on (its capture's ``runtime.threads``), or 0 for
+    OpenMP's default: a kernel is timed on the team the model gives it."""
+    try:
+        rt = json.loads((run_dir / "capture.json").read_text())["run"].get("runtime") or {}
+    except (OSError, ValueError, KeyError):
+        return 0
+    return int(rt.get("threads") or 0)
+
+
+# A failure that may not recur on the same code (the timer's process died) is not kept.
+TRANSIENT = {"TIMING_FAILED"}
+# What the timer's counts are: a measurement under other counts is another measurement.
+COUNTS = ("XE_FORGE_KERNEL_WARMUP", "XE_FORGE_KERNEL_ITERS", "XE_FORGE_KERNEL_ROUNDS")
 
 
 def run(args) -> int:
     import fcntl
     import shutil
 
+    import yaml
+
     run_dir, repo = Path(args.run_dir).resolve(), Path(args.repo).resolve()
     facts = provider(run_dir, repo)
     if facts is None:
-        print(f"inmodel: {run_dir} built no {repo.name} into its stack with a build script, or "
-              "its launcher does not run under $FRAMEWORK_PYTHON")  # fmt: skip
+        print(f"inmodel: {run_dir} built no {repo.name} into its stack with a build script and "
+              "a kernel_check module")  # fmt: skip
         return 1
     trial = Path(args.trial).resolve()
     try:
@@ -537,15 +535,22 @@ def run(args) -> int:
     store = Path(args.workspace).resolve() / ".inmodel"
     store.mkdir(parents=True, exist_ok=True)
     # One build or measurement at a time per workspace: a second caller (a retry, a parallel
-    # validate) waits for the first, rather than perturbing its captures or removing its tree.
+    # validate) waits for the first, rather than perturbing its timing or removing its tree.
     with open(store / "lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        if args.profile:  # the trial's build in the model, under perf
+        facts["threads"] = _threads(run_dir)
+        if args.profile:  # the trial's kernel on its own, under perf
+            if not (args.spec and args.record):
+                print("inmodel: a profile runs the kernel at the spec's shapes: pass --spec and "
+                      "--record")  # fmt: skip
+                return 1
             where = store / f"profile-{_digest(trial)[:16]}"
             shutil.rmtree(where, ignore_errors=True)
             where.mkdir(parents=True)
             try:
-                print(profile(run_dir, facts, repo, trial, where, args.kernel or ""), end="")
+                spec = yaml.safe_load(Path(args.spec).read_text())
+                record = json.loads(Path(args.record).read_text())
+                print(profile(facts, repo, trial, where, args.kernel or "", spec, record), end="")
             except (RuntimeError, ValueError, OSError, subprocess.CalledProcessError) as exc:
                 print(f"inmodel: profile failed: {exc}")
                 return 1
@@ -567,22 +572,25 @@ def run(args) -> int:
             verdict, _, text = why.partition(": ")
             print(_say(verdict, text), end="")
             return 1
+        if not args.spec:
+            print(_say("NO_SPEC", "a trial is checked and timed at the spec's shapes: pass --spec"),
+                  end="")  # fmt: skip
+            return 1
         record = json.loads(Path(args.record).read_text())
-        import yaml
-
-        spec = yaml.safe_load(Path(args.spec).read_text()) if args.spec else None
+        spec = yaml.safe_load(Path(args.spec).read_text())
         sources = [_digest(baseline), _digest(trial), head, _digest(Path(args.record)),
-                   _digest(Path(args.spec)) if args.spec else "",
-                   _digest(run_dir / "names.json"), _digest(run_dir / "launcher" / "run.sh"),
-                   _digest(facts["patch"] / facts["meta"]["build"]), str(REPEATS), "model"]  # fmt: skip
+                   _digest(Path(args.spec)), _digest(facts["patch"] / facts["meta"]["build"]),
+                   _digest(facts["patch"] / "check-args.json"), str(facts["meta"]["package"]),
+                   str(facts["meta"]["kernel_check"]), str(facts["threads"]),
+                   os.environ.get("OMP_NUM_THREADS", ""), os.environ.get("XE_FORGE_DEVICE", ""),
+                   *(os.environ.get(k, "") for k in COUNTS), "standalone"]  # fmt: skip
         where = store / hashlib.sha256("\0".join(sources).encode()).hexdigest()[:16]
         done = where / "result.json"
         if not done.is_file():
             shutil.rmtree(where, ignore_errors=True)  # a measurement that did not finish
             where.mkdir(parents=True)
             try:
-                result = measure(run_dir, facts, repo, record, baseline, trial, where, REPEATS,
-                                 spec)  # fmt: skip
+                result = measure(run_dir, facts, repo, record, baseline, trial, where, spec)
             except (RuntimeError, ValueError, OSError, subprocess.CalledProcessError) as exc:
                 print(f"inmodel: {exc}")  # no DONE: not the trial's, and nothing is recorded
                 return 1
@@ -591,4 +599,4 @@ def run(args) -> int:
         else:
             result = json.loads(done.read_text())
     print(answer(result, args.variant), end="")
-    return 0 if result["correctness"] else 1
+    return 0 if result["correctness"] and args.variant in result["variants"] else 1

@@ -633,9 +633,8 @@ def capture_rows(a, run_dir: Path, python: str) -> tuple[Path | None, str | None
         if run.get("launcher_sha256") != _sha256(launcher) or any(
             rt.get(k) != row[k] for k in rows.KEYS
         ):
-            env = {f"XF_{k.upper()}": str(row[k]) for k in rows.KEYS}
             if _tool(sys.executable, "capture", "run", str(launcher), "-o", str(raw),
-                     FRAMEWORK_PYTHON=python, **env):  # fmt: skip
+                     FRAMEWORK_PYTHON=python, **rows.env(row)):  # fmt: skip
                 print(f"run: row {i} {row} did not capture", file=sys.stderr)
                 return None, None
         if _tool(python, *parse):  # the interpreter the anchor was read under: its schemas
@@ -644,25 +643,32 @@ def capture_rows(a, run_dir: Path, python: str) -> tuple[Path | None, str | None
         caps.append(ir.load(path))
         if not rows.ran(caps[-1], row):
             got = {k: (caps[-1].run.get("runtime") or {}).get(k) for k in rows.KEYS}
-            env = " ".join(f"XF_{k.upper()}={row[k]}" for k in rows.KEYS)
+            env = " ".join(f"{k}={v}" for k, v in rows.env(row).items())
             return None, (f"run with {env} set, the launcher recorded runtime {got}: it must "
                           "run at those sizes and record them")  # fmt: skip
     merged = rows.merge(caps, a.rows)
     return ir.dump(merged, run_dir / "rows" / "capture.json"), None
 
 
-def recapture(run_dir: Path, out_dir: Path, python: str) -> int:
+def recapture(run_dir: Path, out_dir: Path, python: str, row: dict | None = None) -> int:
     """Re-run the cached launcher under ``python``'s venv, then parse; no agent. The tools
-    run here: the stack's interpreter need not import them."""
+    run here: the stack's interpreter need not import them. ``row``: at that row's batch and
+    lengths (``rows.env``); a capture not run at them is a failure."""
+    from xe_forge.frontend import ir, rows
     from xe_forge.frontend.prove import PARSE_REFUSED
 
     launcher = str(run_dir / "launcher" / "run.sh")
     code = _tool(sys.executable, "capture", "run", launcher, "-o", str(out_dir / "raw"),
-                 FRAMEWORK_PYTHON=python)  # fmt: skip
+                 FRAMEWORK_PYTHON=python, **(rows.env(row) if row else {}))  # fmt: skip
     if code:
         return code
     parse = ["capture", "parse", str(out_dir / "raw"), "-o", str(out_dir / "capture.json")]
-    return PARSE_REFUSED if _tool(sys.executable, *parse) else 0
+    if _tool(sys.executable, *parse):
+        return PARSE_REFUSED
+    if row and not rows.ran(ir.load(out_dir / "capture.json"), row):
+        print(f"prove: the launcher did not run at {row} ({out_dir})", file=sys.stderr)
+        return 1
+    return 0
 
 
 def name(
@@ -939,9 +945,10 @@ def inputs(manifest_path: Path, run_dir: Path, a, python, turns, repos) -> dict:
 
 
 def inmodel_flags(run_dir: Path, entry: dict, repo: Path, opts) -> list[str]:
-    """The workspace's flags that time its trials inside the model (``xe-forge-skill
-    inmodel``): for a kernel of a repository the run built into its stack with a build script,
-    on a host, under an agent CLI. None of them otherwise."""
+    """The workspace's flags that build each trial into the run's engine and check and time
+    its kernel there on its own (``xe-forge-skill inmodel``): for a kernel of a repository the
+    run built into its stack with a build script and a kernel_check module, on a host, under
+    an agent CLI. None of them otherwise."""
     from xe_forge import agent_cli as agents
     from xe_forge.frontend import inmodel
     from xe_forge.skills.capture import on_host
@@ -955,8 +962,9 @@ def inmodel_flags(run_dir: Path, entry: dict, repo: Path, opts) -> list[str]:
     bench = [*tool, "--record", str(entry["record"]), "--spec", "{spec}", "--baseline",
              "{baseline}", "--trial", "{trial}", "--variant", "{variant}", "--workspace",
              "{workspace}"]  # fmt: skip
-    prof = [*tool, "--profile", "--kernel", entry["name"], "--trial", "{trial}", "--workspace",
-            "{workspace}"]  # fmt: skip
+    prof = [*tool, "--profile", "--kernel", entry["name"], "--spec", str(Path(entry["spec"]).resolve()),
+            "--record", str(Path(entry["record"]).resolve()), "--trial", "{trial}",
+            "--workspace", "{workspace}"]  # fmt: skip
     flags = ["--external-benchmark", shlex.join(bench),
              "--external-validate", shlex.join([*tool, "--build-only", "--trial", "{trial}"]),
              "--external-profile", shlex.join(prof), "--repo-trials"]  # fmt: skip
@@ -1409,6 +1417,8 @@ def main(argv: list[str]) -> int:
     code, python = name_and_read(a, cap, run_dir, python, turns, repos)
     if code != 0:
         return code
+    if len(a.rows) <= 1:  # an earlier run of several rows in this directory is not this one
+        (run_dir / "rows" / "capture.json").unlink(missing_ok=True)
     if len(a.rows) > 1:  # analyze and every step after it read the merged capture
         merged, problem = capture_rows(a, run_dir, python)
         if problem:  # a launcher that ignores the rows' sizes goes back once to its agent
@@ -1427,8 +1437,6 @@ def main(argv: list[str]) -> int:
                   file=sys.stderr)  # fmt: skip
             return 1
         capture_path = merged
-        if a.prove:
-            print("run: --prove measures the anchor row only", file=sys.stderr)
     _collect_outputs(run_dir)
     path = analyze(capture_path, run_dir, a)
     path = analyze(capture_path, run_dir, a, inputs(path, run_dir, a, python, turns, repos))

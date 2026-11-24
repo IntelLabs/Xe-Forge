@@ -437,6 +437,63 @@ def test_rows_merge_scales_each_kernels_unitrace_time_like_its_counters():
     assert analyze._sol_parts(w, calib, analyze.context(merged)) is not None  # fully sampled
 
 
+def test_rows_merged_at_given_scales_move_the_total_with_any_row():
+    """A later measurement merges at the run's scales: a row that got faster moves the total,
+    and two arms of the same work count the same calls."""
+    from xe_forge.frontend import rows
+
+    anchor = {"batch": 8, "input_len": 64, "output_len": 4, "weight": 0.5}
+    other = {"batch": 1, "input_len": 64, "output_len": 4, "weight": 0.5}
+    run = [_row_capture(anchor, [90.0, 10.0]), _row_capture(other, [40.0, 10.0])]
+    k = rows.scales(run, [anchor, other])
+    assert k == [0.5, 1.0]
+    plain = rows.merge(run, [anchor, other])
+    assert (
+        rows.merge(run, [anchor, other], k).run["total_device_us"] == plain.run["total_device_us"]
+    )
+    faster = rows.merge([_row_capture(anchor, [90.0, 10.0]), _row_capture(other, [20.0, 5.0])],
+                        [anchor, other], k)  # fmt: skip
+    assert faster.run["total_device_us"] == 75.0  # 0.5 x 100 + 1.0 x 25
+    assert rows.merge(run, [anchor, other], [0.25, 1.0]).run["total_device_us"] == 75.0
+    assert [o.calls for o in faster.ops] == [o.calls for o in plain.ops]
+
+
+def test_rows_merged_at_given_scales_count_the_same_calls_in_any_op_order():
+    """A parse ranks ops by time, so two captures of the same work list them in different
+    orders; merged at given scales they still count the same calls, to the bit."""
+    import random
+
+    from xe_forge.frontend import ir, rows
+
+    plan = [{"batch": 1, "input_len": n, "output_len": 4, "weight": w}
+            for n, w in ((64, 0.35), (32, 0.4), (16, 0.25))]  # fmt: skip
+
+    def cap(row, seed):
+        ops = [ir.CapturedOp(id=f"op{j}", framework_op="aten::gelu",
+                             args=[ir.TensorArg([row["input_len"], 128 * (j % 3 + 1)], "bfloat16")],
+                             kernel_symbols={"gelu": 1.0 + j}, calls=7 + 13 * j, device_us=1.0 + j)
+               for j in range(12)]  # fmt: skip
+        random.Random(seed).shuffle(ops)
+        rt = {k: row[k] for k in ("batch", "input_len", "output_len")}
+        return ir.CaptureRun(run={"runtime": rt, "total_device_us": 78.0,
+                                  "attributed_device_us": 78.0}, ops=ops)  # fmt: skip
+
+    k = [0.35, 0.4 * 78 / 77.3, 0.25 * 78 / 91.7]
+    a = rows.merge([cap(r, 1) for r in plan], plan, k)
+    b = rows.merge([cap(r, 2) for r in plan], plan, k)
+    assert {w.workload_id: w.calls for w in a.workloads} == {
+        w.workload_id: w.calls for w in b.workloads}  # fmt: skip
+
+
+def test_rows_schedule_alternates_the_arms_and_is_abba_for_one_row():
+    from xe_forge.frontend import rows
+
+    assert [a for _, _, a in rows.schedule(2, 1)] == ["A", "B", "B", "A"]
+    assert list(rows.schedule(1, 2)) == [(1, 0, "A"), (1, 0, "B"), (1, 1, "B"), (1, 1, "A")]
+    assert rows.env({"batch": 2, "input_len": 8, "output_len": 4, "weight": 1}) == {
+        "XF_BATCH": "2", "XF_INPUT_LEN": "8", "XF_OUTPUT_LEN": "4"}  # fmt: skip
+
+
 def test_rows_file_puts_the_largest_row_first_and_refuses_a_bad_one(tmp_path):
     from xe_forge.frontend import rows
 
@@ -3718,3 +3775,68 @@ def test_naming_checks_a_declared_compute_cost_at_the_peak_it_measures(tmp_path,
     got = cli.name(tmp_path / "capture.json", tmp_path, "py", 5, tmp_path, 1.0, calib, cap=cap,
                    measure_peaks=measure_peaks)  # fmt: skip
     assert json.loads(got.read_text())["ops"]["K"]["cost"] == cost  # 10 us at int8's: kept
+
+
+def _prove_rows(tmp_path, monkeypatch, crash=False):
+    from xe_forge.frontend import agent, cli, compare, ir, prove, rows
+
+    _one_winner(tmp_path)
+    b = str(_exe(tmp_path / "b-python", "#!/bin/bash\n"))
+    monkeypatch.setattr(agent, "run", lambda *a: {"A": sys.executable, "B": b})
+
+    def tool(python, *argv, problems=None, **env):  # patch score: the tokens pass
+        Path(argv[argv.index("--out") + 1]).write_text(json.dumps({"pass": True, "worst": [0.0]}))
+        return 0
+
+    monkeypatch.setattr(cli, "_tool", tool)
+    anchor = {"batch": 1, "input_len": 512, "output_len": 32, "weight": 0.5}
+    other = {"batch": 1, "input_len": 4096, "output_len": 32, "weight": 0.5}
+    run = [_row_capture(anchor, [90.0, 10.0]), _row_capture(other, [300.0, 10.0])]
+    ir.dump(run[0], tmp_path / "capture.json")
+    ir.dump(run[1], tmp_path / "rows" / "02" / "capture.json")
+    ir.dump(rows.merge(run, [anchor, other]), tmp_path / "rows" / "capture.json")
+    order = []
+
+    def recapture(run_dir, out, python, *row):
+        arm = "A" if python == sys.executable else "B"
+        order.append((arm, f"{out.parent.name}/{out.name}", row))
+        if crash and arm == "B" and row:
+            return 1
+        at = row[0] if row else anchor
+        us = [90.0, 10.0] if at is anchor else [300.0, 10.0] if arm == "A" else [150.0, 10.0]
+        ir.dump(_row_capture(at, us), out / "capture.json")
+        return 0
+
+    totals = []
+
+    def comp(a, b):
+        ua, ub = (ir.load(p[0]).run["total_device_us"] for p in (a, b))
+        totals.append((ua, ub))
+        return [{"workload_id": "TOTAL", "us_a": ua, "us_b": ub, "speedup": round(ua / ub, 4),
+                 "spread_a": 0.0, "spread_b": 0.0}]  # fmt: skip
+
+    monkeypatch.setattr(compare, "compare", comp)
+    monkeypatch.setattr(compare, "write", lambda table, d: d / "compare.md")
+    got = prove.prove(tmp_path, recapture, sys.executable, 2, 5)
+    return got, order, totals, other
+
+
+def test_prove_times_every_row_on_both_arms_at_the_runs_scales(tmp_path, monkeypatch):
+    """Each arm runs every row in each repeat, the other rows at their sizes, merged at the
+    run's own scales: an arm faster at one row only is faster in the merged total."""
+    got, order, totals, other = _prove_rows(tmp_path, monkeypatch)
+    assert order == [
+        ("A", "A-r1/row01", ()), ("B", "B-r1/row01", ()),
+        ("B", "B-r1/row02", (other,)), ("A", "A-r1/row02", (other,)),
+        ("B", "B-r2/row01", ()), ("A", "A-r2/row01", ()),
+        ("A", "A-r2/row02", (other,)), ("B", "B-r2/row02", (other,)),
+    ]  # fmt: skip
+    k = 0.5 * 100.0 / 310.0  # the run's scale of row 2
+    assert totals[0] == (100.0, round(50.0 + k * 160.0, 1))  # merged arms, then each row's
+    assert totals[1:] == [(100.0, 100.0), (310.0, 160.0)] and "row 2 (batch 1, 4096 in" in got
+
+
+def test_prove_blames_the_patches_at_a_row_only_once_the_base_ran_it(tmp_path, monkeypatch):
+    got, order, _, other = _prove_rows(tmp_path, monkeypatch, crash=True)
+    assert order[-3:] == [("B", "B-r1/row02", (other,))] * 2 + [("A", "A-r1/row02", (other,))]
+    assert "FAIL: with the patches the model does not run where the base does" in got, got

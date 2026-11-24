@@ -387,7 +387,9 @@ def main():
 
     # -- inmodel --
     p_in = subparsers.add_parser(
-        "inmodel", help="A kernel trial built into the run's framework and timed in the model"
+        "inmodel",
+        help="A kernel trial built into the run's engine, its kernel checked and timed "
+        "there on its own",
     )
     p_in.add_argument("--run-dir", required=True, help="the xe-forge run's directory")
     p_in.add_argument("--repo", required=True, help="the kernel's repository, the stack built it")
@@ -400,8 +402,9 @@ def main():
     p_in.add_argument("--spec", help="the kernel's spec: each variant's shape and tolerance")
     p_in.add_argument("--workspace", default=".", help="where measurements are kept")
     p_in.add_argument("--profile", action="store_true",
-                      help="the trial's build in the model under perf: per symbol its events "
-                      "and instructions per cycle, per step its time per call")  # fmt: skip
+                      help="the trial's kernel on its own under perf at the spec's weighted "
+                      "shapes: per symbol its events and instructions per cycle, per shape its "
+                      "time per call")  # fmt: skip
     p_in.add_argument("--kernel", help="the kernel's symbol, listed first in a profile")
     p_in.add_argument("--build-only", action="store_true",
                       help="validate: the trial builds and the repository's tests pass")  # fmt: skip

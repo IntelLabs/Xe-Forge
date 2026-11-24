@@ -41,6 +41,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -262,6 +263,15 @@ def _build_problems(work: Path, meta: dict, repo: Path) -> list[str]:
                              capture_output=True, text=True)  # fmt: skip
         if got.returncode != 0:
             return [f"python -m {module} --help fails on the build: {got.stderr.strip()[-400:]}"]
+        # The run times every trial's kernel beside the baseline's, both builds in one
+        # process under this interpreter, through the module's check and prepare.
+        probe = subprocess.run([sys.executable, "-m", "xe_forge.frontend.standalone", "probe",
+                                "--build", str(venv),
+                                "--package", str(meta.get("package", "")), "--module", str(module)],
+                               capture_output=True, text=True)  # fmt: skip
+        if probe.returncode != 0:
+            return [f"{module} cannot be loaded beside another build to time its kernels: "
+                    f"{(probe.stdout + probe.stderr).strip()[-400:]}"]  # fmt: skip
     return []
 
 
