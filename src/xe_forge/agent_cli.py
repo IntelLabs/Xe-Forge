@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 from pathlib import Path
 
@@ -137,9 +138,11 @@ class Codex(Claude):
                 "resume", session, prompt]  # fmt: skip
 
     def interactive(self, kernel_name: str) -> str:
-        """The command a person runs in the workspace to start the loop."""
-        return (f'codex "Follow .claude/commands/optimize-kernel.md with $ARGUMENTS = '
-                f'{kernel_name}"')  # fmt: skip
+        """The command a person runs in the workspace to start the loop. Quoted for the shell,
+        which would otherwise expand ``$ARGUMENTS``, the command file's placeholder, to
+        nothing."""
+        task = f"Follow .claude/commands/optimize-kernel.md with $ARGUMENTS = {kernel_name}"
+        return f"codex {shlex.quote(task)}"
 
     def task(self, workspace: Path, kernel_name: str) -> str:
         text = (workspace / ".claude" / "commands" / "optimize-kernel.md").read_text()

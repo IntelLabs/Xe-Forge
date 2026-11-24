@@ -48,11 +48,25 @@ def test_dotenv_in_the_working_directory_is_loaded_and_the_shell_wins(tmp_path, 
 
 
 @pytest.mark.parametrize("name, says", [("claude", "claude /optimize-kernel k"),
-                                        ("codex", 'codex "Follow .claude/commands')])  # fmt: skip
+                                        ("codex", "codex 'Follow .claude/commands")])  # fmt: skip
 def test_each_agent_names_its_own_launch_command(name, says):
     from xe_forge import agent_cli
 
     assert agent_cli.get(name).interactive("k").startswith(says)
+
+
+@pytest.mark.parametrize("kernel", ["k", "it's"])
+def test_the_codex_launch_command_reaches_codex_as_printed(kernel):
+    """Pasted into a shell, the command hands codex the placeholder, not its expansion."""
+    import subprocess
+
+    from xe_forge import agent_cli
+
+    command = agent_cli.get("codex").interactive(kernel)
+    env = {k: v for k, v in os.environ.items() if k != "ARGUMENTS"}
+    got = subprocess.run(["sh", "-c", "printf %s " + command.removeprefix("codex ")], env=env,
+                         capture_output=True, text=True, check=True).stdout  # fmt: skip
+    assert got == f"Follow .claude/commands/optimize-kernel.md with $ARGUMENTS = {kernel}"
 
 
 @pytest.mark.parametrize("unitrace, vtune, kind", [(True, True, "UnitraceXPUProfiler"),
