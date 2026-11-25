@@ -54,8 +54,8 @@ class XPUDeviceInfo:
     raw_properties: dict[str, Any] = field(default_factory=dict)
 
 
-def query_xpu_via_torch() -> XPUDeviceInfo | None:
-    """Query XPU info using PyTorch XPU backend."""
+def query_xpu_via_torch(device_id: int | None = None) -> XPUDeviceInfo | None:
+    """Query XPU info using PyTorch XPU backend: device ``device_id``, else the current one."""
     try:
         import torch
 
@@ -68,7 +68,7 @@ def query_xpu_via_torch() -> XPUDeviceInfo | None:
             return None
 
         info = XPUDeviceInfo()
-        info.device_id = torch.xpu.current_device()
+        info.device_id = torch.xpu.current_device() if device_id is None else device_id
 
         # Get device name
         if hasattr(torch.xpu, "get_device_name"):
@@ -249,7 +249,7 @@ def get_xpu_config(device_id: int = 0) -> XPUDeviceInfo:
     info = None
 
     # Try PyTorch first (preferred)
-    result = query_xpu_via_torch()
+    result = query_xpu_via_torch(device_id)
     if result and result.name != "Unknown":
         logger.info(f"Got XPU info via torch.xpu: {result.name}")
         result.raw_properties["query_method"] = "torch.xpu"

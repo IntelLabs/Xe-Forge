@@ -23,13 +23,21 @@ implementation. A unique load_inline module name alone does not isolate device k
 import os
 
 import torch
+{%- if on_host %}
+
+# No XPU arch list: load_inline then builds generic SPIR-V (spir64), which the CPU
+# device's runtime compiles when the kernel is first run.
+os.environ.setdefault("TORCH_XPU_ARCH_LIST", "")
+{%- else %}
 
 # The XPU AOT arch list defaults to every architecture torch's runtime knows;
-# pin it to the device that is actually here (its PCI id, which ocloc accepts).
+# pin it to the device the kernel runs on (its PCI id, which ocloc accepts).
 os.environ.setdefault(
     "TORCH_XPU_ARCH_LIST",
-    os.environ.get("XE_FORGE_XPU_ARCH") or hex(torch.xpu.get_device_properties().device_id),
+    os.environ.get("XE_FORGE_XPU_ARCH")
+    or hex(torch.xpu.get_device_properties("{{ device }}").device_id),
 )
+{%- endif %}
 import torch.nn as nn
 from torch.utils.cpp_extension import load_inline
 
@@ -46,6 +54,18 @@ _CPP = r"""
 // at::Tensor {{ fn }}_forward(at::Tensor x, ...);
 """
 
+{%- if on_host %}
+_SYCL = r"""
+#include <torch/extension.h>
+#include <sycl/sycl.hpp>
+
+// TODO: the SYCL kernel(s) and the host-side entry point declared in _CPP above.
+// Run on one queue on the CPU device, created once (a function-local static
+// sycl::queue{sycl::cpu_selector_v}), and wait for it before returning. CPU tensors are
+// host memory the kernel reads and writes through their data pointers. Name every kernel
+// (parallel_for<class ...>).
+"""
+{%- else %}
 _SYCL = r"""
 #include <torch/extension.h>
 #include <c10/xpu/XPUStream.h>
@@ -54,6 +74,7 @@ _SYCL = r"""
 // TODO: the SYCL kernel(s) and the host-side entry point declared in _CPP above.
 // Use the caller's queue (c10::xpu::getCurrentXPUStream()), not a new sycl::queue.
 """
+{%- endif %}
 
 _mod = load_inline(
     name="{{ fn }}_ext",

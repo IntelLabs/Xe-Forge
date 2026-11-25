@@ -22,6 +22,7 @@ from xe_forge.agents.coordinator_tools import (
     make_retrieve_patterns_tool,
     make_status_tool,
 )
+from xe_forge.config import device_kind
 from xe_forge.models import DSL, StageResult
 
 logger = logging.getLogger(__name__)
@@ -129,7 +130,9 @@ class CoordinatorAgent(dspy.Module):
                     str(self.dsl.value if hasattr(self.dsl, "value") else self.dsl), "Triton"
                 ),
                 device_type=cfg.device_config.device,
-                device_description=_DEVICE_DESCRIPTIONS.get(cfg.device_config.device, "Intel XPU"),
+                device_description=_DEVICE_DESCRIPTIONS.get(
+                    device_kind(cfg.device_config.device), "Intel XPU"
+                ),
             )
             sig = sig.append_instructions(template_text)
         except Exception as e:

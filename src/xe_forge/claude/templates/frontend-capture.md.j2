@@ -1,8 +1,21 @@
-Capture one profiled run of {{ model }} in {{ framework }} on this machine's GPU, so the
+{% set on_host = on_host | default(false) %}{% set card = "host" if on_host else "card" %}Capture one profiled run of {{ model }} in {{ framework }} on this machine's {% if on_host %}CPUs -- the
+host is the device here, under the placement its launcher gave this job --{% else %}GPU{% endif %}, so the
 kernels it spends its time in can be named and optimized. The framework's interpreter is
 {{ python }}; {{ framework }} is installed there. Read its own code and docs for how to do
 this; nothing here knows that framework.
-
+{% set facts = framework_facts | default({}) or {} %}{% if framework_kb | default(none) %}
+{{ framework }} has its own knowledge base, {{ framework_kb }}: read {{ (facts.read_first | default(["README.md"])) | join(", ") }} there first.
+What it says about running a model, its launcher and its hooks overrides the search below.
+{% if patched | default([]) %}{{ python }} runs on what the patches made for it: {% for p in patched %}`{{ p.get("package") }}` from {{ p.get("repo") }}{% if not loop.last %}, {% endif %}{% endfor %} (each patch's patch.json).
+{% endif %}{% if facts.upstream is defined and not facts.upstream and not patched | default([]) %}It has no upstream release: a model runs on it only once its engine for that model is
+written and has passed its patch check. Only what a patch made runs here: never build,
+install or layer an engine yourself, even when its repository is already on this machine --
+an engine that has not passed its check is not one to measure. With no patched build for
+{{ model }} in {{ python }} ({{ framework }}'s package for it does not import), write
+{"unsupported": "model", "what": "{{ model }}", "reason": "no {{ framework }} engine for it yet"} as {{ answer }}
+and stop: the engine is established first (from that repository, when there is one), and you
+are run again on it.
+{% endif %}{% endif %}
 {% if framework_notes %}Constraints on this machine, from someone who has run this before. These are not
 guesses and not optional; a run that ignores one usually fails late, after the
 expensive part:
@@ -20,22 +33,22 @@ looking rather than waiting to be told. Where to look, in order:
    be missing exactly the page you need;
  - the repository itself, if you can reach it.
 
-What you are looking for first is a recipe or example for **{{ model }} on this card**. One
+What you are looking for first is a recipe or example for **{{ model }} on this {{ card }}**. One
 often exists, and it states the entry point, the precision and the settings the model needs
 to run at all -- which is most of what a launcher is.
 
-Failing that, take the nearest, in this order, and note that the same model on another card
+Failing that, take the nearest, in this order, and note that the same model on another device
 beats a different model on this one -- getting the call wrong stops the run, while a wrong
 memory setting is something you can measure and change:
 
  1. {{ model }} on another device. The entry point and the pipeline class are exactly
-    right. The precision and offloading are not: they were sized to that card's memory.
+    right. The precision and offloading are not: they were sized to that device's memory.
  2. another size of {{ model }}, on any device -- same family, so the call holds.
  3. another model of the same family, then any model of the same kind under this framework.
     Here only the convention carries: how a pipeline class is named, which settings exist.
 
 What transfers is the shape of the call. What does not is anything sized to a model or a
-card: the precision, the offloading, the resolution, the step count -- and the workload
+device: the precision, the offloading, the resolution, the step count -- and the workload
 above is what this run measures, so it is not a recipe's to set. Follow a neighbour's form
 and establish the numbers here. Say in "notes" which recipe you worked from and what you
 changed, so a reader knows which parts were borrowed.
@@ -107,16 +120,17 @@ capture or compilation, no prefix caching, nothing cached between requests; a wa
 first, outside what is measured.
 
 Before downloading or running anything large, decide whether this fits the device: the
-model's config (hub metadata, no weights), the device's memory, and how the framework runs
+model's config (hub metadata, no weights), the device's memory{% if on_host %} (on a host: the memory of the
+placement's memory nodes, `python -c "from xe_forge.core.topology import placement; print(placement())"`){% endif %}, and how the framework runs
 it at this workload. If it cannot run here -- it does not fit, or it is not a
 {% if workload == "vision" %}model that generates an image from a text prompt{% elif workload == "action" %}policy that turns camera images, an instruction and a robot state into actions{% else %}text decoder that runs on token ids{% endif %} --
 write {"fits": false, "reason": "<one line>"} as {{ answer }} and stop.
 
-Memory is the usual reason it does not fit, and there are two different answers to it.
+{% if not on_host %}Memory is the usual reason it does not fit, and there are two different answers to it.
 Weight offloading you may turn on yourself: it moves weights between host and device and
 changes neither the numbers the model computes nor the kernels it runs, only the copies
 around them. Say in "notes" that you did.
-
+{% endif %}
 {% if quantization != "auto" %}Run the weights at {{ quantization }}, which is what was asked for.
 {% else %}Run at the model's own precision.{% endif %} **Do not choose a precision to make a
 model fit.** A reduced precision changes what the model produces, and whether that is
@@ -127,8 +141,9 @@ reason saying so -- name the precision that would fit, so a person can decide an
 once: into {{ cache }}/models/<framework>/<model id with / as -->, reused when it is there.
 
 If the framework has no implementation of this architecture on this device (a generic
-fallback backend is none), or an op the model needs fails, runs on
-the CPU, or is emulated in plain torch in place of a kernel (a portable Triton kernel is a
+fallback backend is none), or an op the model needs fails, {% if on_host %}falls back to a reference path the
+framework marks as unoptimized,{% else %}runs on
+the CPU,{% endif %} or is emulated in plain torch in place of a kernel (a portable Triton kernel is a
 kernel), do not work around it: write {"unsupported": "model" or "op", "what": "<the
 architecture or op>", "reason": "<file:line where the framework shows it>"} as {{ answer }}
 and stop. A patch that adds it is established first, and you are run again on it. When
@@ -161,13 +176,30 @@ build of the stack is measured) and {{ python }} otherwise, and writes into $RAW
    compare their tokens may part only at a near-tie: where one first picks another token,
    the other's logprob of it is within 0.3 nat of its own pick (the patch check's
    tolerance); past that a sequence runs on another prefix and is not compared{% endif %};
- - for a framework that runs on PyTorch: its torch.profiler trace of exactly the generation
+{% if not on_host %} - for a framework that runs on PyTorch: its torch.profiler trace of exactly the generation
    (trace*.json.gz, record_shapes=True; `xe_forge.frontend.profile.profile_region(fn,
    raw_dir)` does this for a callable in this process -- a framework that runs the model in
    another process profiles it there, with its own profiler, into $RAW_DIR);
- - for any other framework: ops.json, every node that ran on the device:
+{% endif %}{% if on_host %} - host_timeline.json, whatever the framework is built on: the wall time of every node of its
+   graph, from `xe_forge.frontend.profile.HostTimeline(raw_dir, threads=<the threads the
+   framework computes with; where it has separate counts, for the prompt and for generation,
+   the one for the phase with most of the time, and both in meta.json's runtime>)`. Wrap each repeat of the workload in `with tl.window():`, call
+   `tl.node(name, start_ns, end_ns)` (`tl.now()` readings) for every node it runs, and
+   `tl.write()` at the end. Find the framework's own per-node hook (an evaluation callback, a
+   scheduler or graph-compute hook, a build option that times nodes) by reading its source;
+   name a node by the framework's op type, so the same op is one name everywhere, in both
+   passes. A hook may change how the framework schedules its nodes (one at a time, a sync
+   after each): that is allowed only because the cost is measured -- after the timed repeats,
+   run one more with the hook off, `with tl.window(timed=False):`, whose wall time `capture
+   run` prints against the timed one. Do not leave it out, and say in "notes" how far apart
+   the two are and why. Do not bind threads or
+   memory: the launcher of this job placed it. Record `profile.device_info(threads=...)` as
+   meta.json's "device" (it holds the placement);
+ - and ops.json, every node that ran:
+   {"<node>": {"framework_op": "<its type>", "kernels": ["<regex over the node names in
+   host_timeline.json>"], "args"{% else %} - for any other framework: ops.json, every node that ran on the device:
    {"<node>": {"framework_op": "<its type>", "kernels": ["<regex over the kernel names
-   unitrace reports>"], "args": [{"name", "shape", "dtype": <torch's name: float16, int8,
+   unitrace reports>"], "args"{% endif %}: [{"name", "shape", "dtype": <torch's name: float16, int8,
    ...>}], "call_site": "<node name>",
    "calls": <runs in one workload>}} with concrete shapes, read from the framework's own
    runtime API. args are every tensor the node reads or writes, constants (weights, scales,
@@ -175,17 +207,22 @@ build of the stack is measured) and {{ python }} otherwise, and writes into $RAW
    its role on the op (a port, a parameter) -- the same on every node of that type, never the
    tensor or node that feeds it. Which kernels a node ran is what you establish, not guess from names. When
    one kernel name serves several nodes (a library's GEMM for every matmul), give each node
-   "launches": [[start, end], ...] as well -- index ranges into raw/unitrace_launches.json,
+   "launches": [[start, end], ...] as well -- index ranges into {% if on_host %}raw/host_launches.json,
+   the last timed window's nodes in the order they ran, which `capture run` writes from the
+   timed pass: run it once, read that, and have the launcher write the ranges. A packed
+   weight (a block-quantized format) is an arg of dtype uint8 with the shape of its bytes,
+   and its element shape goes in "meta".{% else %}raw/unitrace_launches.json,
    the measured run's launches in device order, which `capture run` writes: run it once,
    read that, and have the launcher write the ranges. That file comes from the instrumented
    pass below, which XE_FORGE_TRACE_STEPS can make shorter than the workload asked for, so
-   count the ranges in that pass and not in the full run. The launcher is later run on rebuilt
+   count the ranges in that pass and not in the full run.{% endif %} The launcher is later run on rebuilt
    stacks whose kernels differ in name and count: what it establishes about this build (a
    kernel map) it keys to the build and establishes again on another, never failing on a
    kernel it has not seen.
 
 `capture run` runs your launcher twice: once plain, which is the measurement, and once under
-unitrace, which only names the kernels and reads the counters. For the second it sets
+{% if on_host %}`perf record` (task-clock, every thread), which only names the code each node ran: its samples are
+joined to the second pass's own host_timeline.json by time{% else %}unitrace, which only names the kernels and reads the counters{% endif %}. For the second it sets
 **XE_FORGE_TRACE_STEPS**, and your launcher has to read it.
 
 This workload repeats one thing many times -- {% if workload == "vision" %}{{ steps }} denoising steps over the same
@@ -201,8 +238,9 @@ timed pass keeps the whole workload, and that pass is the measurement. A few rep
 still run every kernel the full workload runs, because the shortened run is complete end to
 end -- it still {% if workload == "vision" %}encodes the prompt and decodes the image{% elif workload == "action" %}encodes what it sees and returns actions{% else %}prefills and samples{% endif %} -- so nothing goes
 unnamed; only the call counts fall. What falls with them is the thing that breaks this pass:
-unitrace puts a timing event on every launch and the driver's supply of them is finite, so a
-long workload can exhaust it part way through and lose the whole pass -- after the model has
+{% if on_host %}perf writes every sample of every thread, so a long workload makes a recording too large to read
+back{% else %}unitrace puts a timing event on every launch and the driver's supply of them is finite, so a
+long workload can exhaust it part way through and lose the whole pass{% endif %} -- after the model has
 been loaded and run.
 
 Do not shorten anything that runs once -- the prompt encode, the decode of the image, the
@@ -244,8 +282,10 @@ Check what its shutdown actually does rather than assuming the call is synchrono
 Then run, under any interpreter that imports xe_forge (PYTHONPATH is set):
   xe-forge-skill capture run launcher/run.sh -o raw
   xe-forge-skill capture parse raw -o capture.json
-`capture run` runs the launcher twice, the second time under unitrace, and records every
-kernel the device ran (raw/unitrace_kernels.json) with its counters. `capture parse` builds
+{% if on_host %}`capture run` runs the launcher twice, the second time under perf, and records the timed pass's
+nodes (raw/host_launches.json) and the code perf saw in each (raw/host_kernels.json: CPU time
+per symbol per node, and what ran between nodes).{% else %}`capture run` runs the launcher twice, the second time under unitrace, and records every
+kernel the device ran (raw/unitrace_kernels.json) with its counters.{% endif %} `capture parse` builds
 capture.json and checks it: exit 0 passes; exit 1 prints each PROBLEM. Fix the launcher and
 run both again until parse passes. Report the numbers it prints; do not edit raw/ or
 capture.json yourself.

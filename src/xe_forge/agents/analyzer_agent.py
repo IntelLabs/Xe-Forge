@@ -6,6 +6,7 @@ import logging
 
 import dspy
 
+from xe_forge.config import device_kind
 from xe_forge.knowledge.patterns import get_stage_for_issue, get_stage_for_issue_str
 from xe_forge.models import DSL, DetectedIssue, IssueType, KernelAnalysis, OptimizationStage
 
@@ -17,6 +18,7 @@ _DSL_NAMES: dict[str, str] = {
     "sycl": "SYCL/Sycl-tla",
     "cuda": "CUDA C++",
     "opencl": "OpenCL C",
+    "cpp": "C++ (torch extension)",
 }
 
 _DEVICE_DESCS: dict[str, str] = {
@@ -104,6 +106,16 @@ _OPENCL_SKIP_ISSUES: set[IssueType] = {
     IssueType.AUTOTUNE_KEY_MISSING,
     IssueType.AUTOTUNE_DUPLICATE_PARAMS,
     IssueType.PERSISTENT_NUM_PROGS_HARDCODED,
+}
+
+
+_CPP_DESCRIPTIONS: dict[IssueType, str] = {
+    IssueType.MISSING_BOUNDARY_CHECK: "loop tails not handled for sizes that are not a multiple of the vector or block width",
+    IssueType.UNCOALESCED_ACCESS: "the inner loop does not walk memory with unit stride — defeats vectorization and prefetch",
+    IssueType.SUBOPTIMAL_TILE_SIZE: "loop blocking not sized to the caches of the CPUs this run uses",
+    IssueType.SUBOPTIMAL_WARPS: "thread count or the split of work across threads suboptimal",
+    IssueType.HIGH_REGISTER_PRESSURE: "too many live values in the inner loop — spills to the stack",
+    IssueType.CACHE_EVICTION_RISK: "working set per thread larger than its share of the caches",
 }
 
 
@@ -218,6 +230,9 @@ def _build_issue_categories(dsl: DSL = DSL.TRITON) -> str:
     elif dsl == DSL.OPENCL:
         skip = _OPENCL_SKIP_ISSUES
         desc_overrides = _OPENCL_DESCRIPTIONS
+    elif dsl == DSL.CPP:
+        skip = _OPENCL_SKIP_ISSUES | {IssueType.NO_SWIZZLING}  # Triton launch APIs and GPU tiling
+        desc_overrides = _CPP_DESCRIPTIONS
     else:
         skip = set()
         desc_overrides = {}
@@ -330,7 +345,9 @@ class AnalyzerAgent:
                     str(self.dsl.value if hasattr(self.dsl, "value") else self.dsl), "Triton"
                 ),
                 device_type=cfg.device_config.device,
-                device_description=_DEVICE_DESCS.get(cfg.device_config.device, "Intel XPU"),
+                device_description=_DEVICE_DESCS.get(
+                    device_kind(cfg.device_config.device), "Intel XPU"
+                ),
                 issue_categories_block=issue_block,
             )
             sig = sig.append_instructions(template_instructions)

@@ -135,6 +135,12 @@ def collect(run_dir: Path, manifest: dict, runs: list[tuple[str, str]]) -> Path:
             n = len(seen.get("kv_args") or {})
             ran = f"checked on {n} named cache arguments" if n else "not checked: no op names it"
             lines[2] += f" KV cache {rt['kv_cache']} ({ran})."
+    analysis = run_dir / "analysis.json"
+    roofline = json.loads(analysis.read_text()).get("roofline") if analysis.is_file() else None
+    if roofline:  # the model as captured, before any patch here
+        from xe_forge.frontend.analyze import roofline_line
+
+        lines[1:1] = ["", roofline_line(roofline)]
     for entry in manifest["kernels"]:
         name = entry["name"]
         mine = [(v, r) for (k, v), r in attempted.items() if k == key_of(entry)]

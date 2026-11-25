@@ -18,6 +18,14 @@ from xe_forge.models import DSL, OptimizationStage
 logger = logging.getLogger(__name__)
 
 
+def _device_arg(text: str) -> str:
+    """``--device``: a device type, optionally with the index of one of several."""
+    kind, sep, index = text.partition(":")
+    if kind not in ("xpu", "cuda", "cpu") or (sep and not index.isdigit()):
+        raise argparse.ArgumentTypeError(f"{text!r}: xpu, cuda or cpu, optionally :<index>")
+    return text
+
+
 def _setup_dspy(config: Config) -> None:
     """Configure DSPy LM from the shared config. Used by all LLM-driven paths.
 
@@ -87,15 +95,15 @@ Examples:
     # Device and DSL configuration
     parser.add_argument(
         "--device",
-        type=str,
-        choices=["xpu", "cuda", "cpu"],
+        type=_device_arg,
         default=None,
-        help="Target device (default: xpu)",
+        help="Target device: xpu, cuda or cpu, with an index for one of several (xpu:1); "
+        "default xpu",
     )
     parser.add_argument(
         "--dsl",
         type=str,
-        choices=["triton", "gluon", "sycl", "cuda", "opencl"],
+        choices=["triton", "gluon", "sycl", "cuda", "opencl", "cpp"],
         default=None,
         help="Kernel DSL (default: triton)",
     )
@@ -207,6 +215,18 @@ Examples:
         type=str,
         help="Command template run instead of the built-in validator; placeholders: "
         "{kernel} {trial} {dsl} {stage} {workspace}",
+    )
+    host_group.add_argument(
+        "--external-profile",
+        type=str,
+        help="Command template that profiles a trial where the external benchmark times it; "
+        "placeholders: {trial} {workspace}",
+    )
+    host_group.add_argument(
+        "--repo-trials",
+        action="store_true",
+        help="Trials are directories of --kernel-repo's files at their repository paths; the "
+        "external benchmark builds the repository with them (in the model the kernel came from)",
     )
     host_group.add_argument(
         "--stack-python",
@@ -322,6 +342,10 @@ def _load_config(args) -> Config:
         os.environ["EXTERNAL_VALIDATE"] = args.external_validate
     if getattr(args, "stack_python", None):
         os.environ["STACK_PYTHON"] = args.stack_python
+    if getattr(args, "repo_trials", False):
+        os.environ["REPO_TRIALS"] = "true"
+    if getattr(args, "external_profile", None):
+        os.environ["EXTERNAL_PROFILE"] = args.external_profile
     if getattr(args, "dataset_record", None):
         os.environ["DATASET_RECORD"] = args.dataset_record
     if getattr(args, "lessons", None):

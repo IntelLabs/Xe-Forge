@@ -17,7 +17,7 @@ RESUMES = int(os.environ.get("XE_FORGE_AGENT_RESUMES", 5))
 def run(template: str, context: dict, cwd: Path, answer: str, python: str, max_turns: int) -> dict:
     """Run ``template`` as a session in ``cwd``; return the JSON it wrote to ``answer``."""
     from xe_forge import agent_cli as agents
-    from xe_forge.claude.generator import render
+    from xe_forge.claude.render import render
     from xe_forge.config import get_config
 
     backend, config = agents.get(), get_config()

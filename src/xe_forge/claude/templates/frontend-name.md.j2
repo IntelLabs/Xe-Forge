@@ -4,8 +4,15 @@ run by {{ framework }}; its config is config.json here. ops.json lists the ops t
 and calls, every kernel it launched with their device time, its arguments (name, shape and
 dtype, or value), its dims (the names a cost formula uses), every captured shape with its
 measured time per call ("shapes"), and its call site. The kernel
-repositories on this machine are in {{ repos }}.
-
+repositories on this machine are in {{ repos }}. On a host its "kernels" are the graph nodes the
+launcher timed, and "host" holds what perf sampled while each ran: CPU time per symbol and
+shared object, summed over every thread and every node of that name -- one symbol can serve
+several shapes, and its "us" and "calls" are the sampled pass's, which can be shorter than
+the measured run. The symbol, not the node name, is what to find in the source.
+{% if framework_kb | default(none) %}{% set facts = framework_facts | default({}) or {} %}
+{{ framework }} has its own knowledge base, {{ framework_kb }}: read {{ (facts.read_first | default(["README.md"])) | join(", ") }} there first.
+What it says about its ops' costs overrides the rules for "cost" below.
+{% endif %}
 For each key, find where the op is implemented -- the registration of its namespace, the
 kernels it launches, the source behind them -- by reading the framework and the
 repositories, not by guessing from names. A kernel whose source is in a repository that is
@@ -52,11 +59,17 @@ detached or modified checkout was put there on purpose: leave it. Then write nam
            "dims" in ops.json, scalar arguments included, with numbers from the config and
            the kernel; + - * / // ** and parentheses, min(...), max(...) and `a if X < 0 else
            b` (a scalar may be -1 for "none"). It must hold at every shape
-           under "shapes" in ops.json: on this card
+           under "shapes" in ops.json: on this device
            {%- if calibration %} ({{ calibration.bandwidth_gbs }} GB/s, matmul TFLOP/s
            {{ calibration.matmul_tflops }}){% endif %}, bytes / bandwidth and flops / peak
            may not exceed that shape's us_per_call (a kernel group: its kernels_per_call); a
-           cost that does is dropped;
+           cost that does is dropped. Flops are the operation's count, checked against the
+           peak of the op's floating dtype. When the kernel you read runs its
+           multiply-accumulates in another dtype (integer dot products on packed weights),
+           say so with `"compute": "<dtype>"` instead of scaling the flops: that dtype's peak
+           is measured before your costs are checked. It must be a dtype with a matmul to
+           measure (a floating dtype, int8, float8_e4m3fn); any other makes the cost invalid,
+           and the cost is dropped;
    "config_args": the op's integer scalar arguments that select a different path through its
             kernel -- a window, a mode, a flag; never a size that changes with each call --
             when they take more than one value: each value is then a configuration of its

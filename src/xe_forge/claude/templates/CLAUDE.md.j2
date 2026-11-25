@@ -12,13 +12,35 @@ At the start of every session, read `config.yaml` in the workspace root. It cont
   generated this workspace, `builtin` when they come from Xe-Forge's own executor
 - **`unitrace_enabled`** / **`unitrace_bin`** — unitrace device timing, ComputeBasic and EU stall profiling;
   prefer this over VTune when both are enabled
-- **`vtune_enabled`** / **`vtune_bin`** — VTune GPU profiling, if available this session
+- **`vtune_enabled`** / **`vtune_bin`** — VTune profiling, if available this session
+- **`perf_enabled`** / **`perf_bin`** — Linux perf profiling of a host run (the host's
+  default profiler; VTune is used there only when perf is disabled)
 - **`compiler_flags`** — extra flags to pass the target compiler when building this kernel,
   if the host set any
 
 All runtime behavior below is gated by these values; re-read `config.yaml` if anything looks off.
 
-{% if dsl == "sycl" %}
+{% if on_host %}
+## RESOURCE FEEDBACK
+
+This run is placed by its launcher on the CPUs and memory nodes `benchmark` and `profile`
+report (`PLACEMENT:`, `Placement:`); its calibration is that placement's. Read
+{% if dsl in ("cpp", "sycl") %}`knowledge_base/{{ dsl }}/cpu/` and {% endif %}`knowledge_base/common/cpu/` before choosing a
+threading, vectorization, blocking or memory-placement change, and to read the
+{{ host_tool }} counters and metrics the profile reports. Every one is reported as the tool
+named it, with no threshold applied: one missing from the profile, or listed as unknown,
+is unmeasured, not zero. Which events, metrics and analyses to ask `profile` for
+(`--analysis`, `--events`, `--metrics`, `--system-wide`, `--collector-arg`, `--window`) is
+your choice; `knowledge_base/common/cpu/` names useful ones and how to read them.
+
+After profiling, use this reasoning pattern:
+
+**Observation -> hypothesis -> proposed change -> expected metric change -> benchmark result**
+
+Cite the measured function, metrics and artifact path in the observation. State what
+would disprove the hypothesis. Record the benchmark result after testing the change,
+never as a prediction presented as a result.
+{% elif dsl == "sycl" %}
 ## RESOURCE FEEDBACK
 
 When profiling is enabled, read `knowledge_base/sycl/xpu/resource_feedback.yaml`
@@ -50,8 +72,18 @@ reset-plus-forward benchmark. Never infer end-to-end speedup from trace timings.
 
 ## RULES — NEVER VIOLATE
 
+{% if repo_trials | default(false) -%}
+1. **ONLY create** trial directories `t<N>/` and output directories, each holding only the
+   files of `{{ kernel_repo }}` the trial changes, at their repository paths
+   (`t<N>/src/kernels/cpu/kernels.cpp`). `benchmark` builds the repository with exactly
+   those files in place, checks its kernel against its reference at every shape and
+   scores the engine's tokens on that build, then times the kernel on its own against the
+   baseline's at every weighted shape. The whole engine is timed only at the end
+   (`--prove`), with every kernel's winner in it.
+{%- else -%}
 1. **ONLY create** kernel files (trial files `t<N>{{ ext }}` or output files){% if measurement == "host" %}, or a
    trial *directory* `t<N>/` holding a kernel that is split across sources{% endif %}.
+{%- endif %}
 2. **NEVER create** benchmark scripts, test scripts, helper utilities, or any other files.
 {%- if dataset or lessons %}
    There {{ "are exactly two exceptions" if dataset and lessons else "is exactly one exception" }}, and no others:
@@ -71,7 +103,11 @@ reset-plus-forward benchmark. Never infer end-to-end speedup from trace timings.
   use the diagnostic to repair the named implementation and rerun the mandatory tools.
   Never time or rank a failing candidate. For infrastructure failures, stop and report
   the error. Do NOT work around either failure with custom scripts.
-{%- if measurement == "host" %}
+{%- if repo_trials | default(false) %}
+5. A trial is the repository with **exactly the files its directory holds** put in place of
+   the repository's own, and nothing else: copy each file you change whole, from the
+   baseline, and edit the copy. A file the trial does not hold is the repository's.
+{%- elif measurement == "host" %}
 5. A trial is built from **exactly the files you name**, and nothing else. One file is one
    file; several files are a directory, passed as a directory to `validate`, `trial save`
    and `benchmark` alike. Naming a single file of a split kernel builds it against the
@@ -117,14 +153,14 @@ Do not leave a benchmark or diagnostic running in the background when returning 
 | **Analyze** (PyTorch sources only) | `xe-forge-skill analyze {{ analyze_file }}` |
 | **Validate** | `xe-forge-skill validate <kernel{% if measurement == "host" %}_file\|dir{% else %}_file{% endif %}> --dsl {{ dsl }}` |
 | **Benchmark** | `xe-forge-skill benchmark <baseline> <optimized> {{ benchmark_options }}{% if has_spec %} [--variant <name>]{% endif %} [--baseline-us <cached>] --kernel-name <kernel_name> --trial-id <trial_id>` (records the result) |
-| **Init trials** | `xe-forge-skill trial init <kernel_name> <baseline_file>{% if require_profiles %} --require-profiles ComputeBasic EuStallSampling{% endif %}` |
+| **Init trials** | `xe-forge-skill trial init <kernel_name> <baseline_file>{% if require_profiles %} --require-profiles {{ required_groups }}{% endif %}` |
 | **Save trial** | `xe-forge-skill trial save <kernel_name> <file{% if measurement == "host" %}\|dir{% endif %}> [--parent <id>] {% if require_profiles %}--strategy "<kernel metric value (trial)>"{% else %}[--strategy "..."]{% endif %}` |
 | **Record a validation failure** | `xe-forge-skill trial result <kernel_name> <trial_id> --validation fail` (only for a trial never benchmarked) |
 | **Check status** | `xe-forge-skill trial status <kernel_name>` |
 | **Best trial** | `xe-forge-skill trial best <kernel_name>` |
 | **Baseline time** | `xe-forge-skill trial baseline-us <kernel_name>` |
 | **Finalize** | `xe-forge-skill trial finalize <kernel_name> <output_file> --require-measured` |
-| **Profile** (only when `unitrace_enabled: true` or `vtune_enabled: true`) | `xe-forge-skill profile <kernel_file> {{ profile_options }}{% if require_profiles %} --trial-id <trial_id>{% endif %}{% if has_spec %} [--variant <name>]{% endif %}` |
+| **Profile** (only when {% if on_host %}`perf_enabled: true` or `vtune_enabled: true`{% else %}`unitrace_enabled: true` or `vtune_enabled: true`{% endif %}) | `xe-forge-skill profile <kernel_file> {{ profile_options }}{% if require_profiles %} --trial-id <trial_id>{% endif %}{% if has_spec %} [--variant <name>]{% endif %}` |
 {% if baseline_oracle %}
 There is no PyTorch reference. `--reference` names the baseline
 `test_kernels/{{ kernel_name }}{{ ext }}` -- the copy of the repository's kernel -- and it is
@@ -180,9 +216,14 @@ like.
 - **The profile is the map, not the territory.** `{{ kernel_locator_profile_path }}`
   names the real implementation file, its build target and its existing test/benchmark
   (or says plainly that one is missing). Trust it over guessing from the op's name.
+{%- if repo_trials | default(false) %}
+- **The benchmark is the model.** `benchmark` builds the repository with a trial and runs
+  the model on it; write no benchmark of your own.
+{%- else %}
 - **If no benchmark exists**, write one yourself, following the closest sibling pattern
   the profile points at, before starting the trial loop — an unmeasured op cannot be
   optimized, only guessed at.
+{%- endif %}
 - **What a trial may change — every win must port back.** The winner is delivered as a patch,
   so a trial may only change what a patch can carry:
   - anything inside the op — a different algorithm, fused or eliminated launches, new kernels
@@ -297,7 +338,13 @@ call is what is optimized. The library itself is never edited and no new kernel 
 {%- endif %}
 - Read `test_kernels/{{ kernel_name }}{{ ext }}` if it exists — that is the baseline to
   optimize.
-{%- if kernel_repo and target == "library" %} If it does not exist, write it before Step 2:
+{%- if repo_trials | default(false) %} If it does not exist, write it before Step 2: the
+  directory `test_kernels/{{ kernel_name }}/` holding unmodified copies, at their repository
+  paths, of the files of `{{ kernel_repo }}` the `kernel-locator` profile names as the
+  kernel's source -- copied, not rewritten: `benchmark` refuses a baseline whose files differ
+  from the repository (`VERDICT: BASELINE_NOT_REPOSITORY`). It builds the repository and
+  runs the model on it, so the baseline is the kernel the model ran.
+{%- elif kernel_repo and target == "library" %} If it does not exist, write it before Step 2:
   the library call as the section above describes, wrapped as a `Model`.
 {%- elif kernel_repo %} If it does not exist, write it before Step 2 as a self-contained copy
   of the kernel the `kernel-locator` profile names, in its own language, wrapped as a
@@ -346,8 +393,8 @@ call is what is optimized. The library itself is never edited and no new kernel 
   needs others than the run's defaults.
 {%- endif %}
 {%- else %}
-{%- if dsl == "sycl" %} If it contains `TODO` markers, this is a from-scratch task: it is
-  a working harness (`load_inline`, a `Model` wrapper) with the SYCL kernel and
+{%- if dsl in ("sycl", "cpp") %} If it contains `TODO` markers, this is a from-scratch task: it is
+  a working harness (`load_inline`, a `Model` wrapper) with the {{ "SYCL" if dsl == "sycl" else "C++" }} kernel and
   `Model.forward` left for you to write. Copy `get_inputs`/`get_init_inputs` and any
   dimension constants in from the reference above rather than importing them — this
   file is compiled and run on its own, with no access to sibling files (Rule 5). Fill
@@ -393,13 +440,16 @@ call is what is optimized. The library itself is never edited and no new kernel 
   on this part and by nothing else.
 
 ### Step 2: Initialize
-{% if baseline_oracle %}
+{% if repo_trials | default(false) %}
+Before initializing trials, check that the baseline is the repository and runs on its own
+at every shape, near the time per call it was captured at in the model:
+{% elif baseline_oracle %}
 Before initializing trials, check that the baseline builds, runs on the device and
 repeats deterministically -- it is the oracle, so nothing else checks it:
 {% elif reference_workload %}
 Before initializing trials, verify the generated baseline against the immutable reference:
 {% endif %}
-{%- if reference_workload %}
+{%- if reference_workload or repo_trials | default(false) %}
 ```bash
 xe-forge-skill benchmark test_kernels/{{ kernel_name }}{{ ext }} test_kernels/{{ kernel_name }}{{ ext }} {{ benchmark_options }}
 ```
@@ -408,7 +458,7 @@ does not establish numerical correctness. Do not create optimized trials before 
 The self-comparison is a baseline check, not an optimization or a speedup result.
 {% endif %}
 ```bash
-xe-forge-skill trial init {{ kernel_name }} test_kernels/{{ kernel_name }}{{ ext }}{% if require_profiles %} --require-profiles ComputeBasic EuStallSampling{% endif %}
+xe-forge-skill trial init {{ kernel_name }} test_kernels/{{ kernel_name }}{{ ext }}{% if require_profiles %} --require-profiles {{ required_groups }}{% endif %}
 ```
 
 ### Step 3: Trial Loop
@@ -418,7 +468,7 @@ For each trial:
 3. **Save** — `xe-forge-skill trial save {{ kernel_name }} <path> --parent <id> --strategy "description"`.
 4. **Benchmark** (MANDATORY every trial):
   - **Trial t0:** `xe-forge-skill benchmark test_kernels/{{ kernel_name }}{{ ext }} <saved_trial_file> {{ benchmark_options }} --kernel-name {{ kernel_name }} --trial-id <trial_id>`
-{%- if reference_workload %}
+{%- if reference_workload or repo_trials | default(false) %}
    - **Trials t1+:** the same command. The baseline is re-timed beside the trial in every run, so pass no `--baseline-us`.
 {%- else %}
    - **Trials t1+:** get the cached baseline via `xe-forge-skill trial baseline-us {{ kernel_name }}`, then the same command with `--baseline-us <cached>`
@@ -433,10 +483,29 @@ For each trial:
    named instead. That is not a half-recorded trial: a trial with both times and no ratio
    ranks **at parity**, above every measured regression.
 {%- endif %}
-6. **Profile** — if `unitrace_enabled: true` or `vtune_enabled: true` in `config.yaml`,
+{%- if profile_command | default(none) %}
+6. **Profile** (MANDATORY every trial) — `{{ profile_command }}` builds the trial and runs its
+  kernel on its own under perf, at the spec's weighted shapes, each for its weight's share of
+  the time: per symbol its cycles, instructions, IPC and misses inside the kernel's calls, the
+  kernel's own symbols first, and each shape's time per call. Profile the
+  baseline once before t0. Each next trial's `--strategy` cites the profiled measurement it
+  targets (symbol, event or IPC, value, trial), and after profiling state the kernel's
+  symbols' cycles and IPC beside its parent's. A profile is never a timing: `benchmark`'s
+  numbers are the only ones a trial is ranked on.
+{%- else %}
+6. **Profile** — if {% if on_host %}`perf_enabled: true` or `vtune_enabled: true`{% else %}`unitrace_enabled: true` or `vtune_enabled: true`{% endif %} in `config.yaml`,
   run `xe-forge-skill profile <kernel_file> {{ profile_options }}{% if require_profiles %} --trial-id <trial_id>{% endif %}`
   and use the output to guide the next trial.{% if has_spec %} Use the same `--variant` as the benchmark.{% endif %}
-{%- if require_profiles %}
+{%- if require_profiles and on_host %}
+  Pass the saved trial file. Every correct trial that differs from the baseline, including
+  the last before finalize, needs its perf counts (`--analysis stat`, the default; add
+  `--events`/`--metrics` as you choose, and run `record` beside it when you need the hot
+  symbols); `trial save` and `finalize` refuse otherwise. Re-run a failed collection once
+  with the same command; if it fails again it is final: report it as failed with its
+  artifacts. Each next trial's `--strategy` cites the profiled measurement it targets
+  (counter or metric, value, trial). After profiling, state the counts the trial meant to
+  move beside its parent's, under the same placement and window.
+{%- elif require_profiles %}
   Pass the saved trial file. Every correct trial that differs from the baseline, including
   the last before finalize, needs both collections; `trial save` and `finalize` refuse otherwise. Re-run a
   failed collection once with the same command; if it fails again it is final: report it as
@@ -447,6 +516,7 @@ For each trial:
   trials, the next trial targets that stall reason directly, or the summary says why it cannot.
 {%- endif %}
   If both are `false`, skip this step. Collection isolates forward calls from setup and warmup.
+{%- endif %}
 {% if reference_workload %}
   The profiler validates the trial against the immutable reference and restores buffers
   outside collection. Forward-only profile timings must not replace the benchmark's
@@ -558,6 +628,11 @@ worth more to the next one than a run that finished and said nothing.
   for every named kernel type passed to `parallel_for`, including unchanged helper kernels.
   Change that identity when the implementation changes. A distinct `load_inline` module
   name alone does not isolate device kernel names; collisions can corrupt either arm.
+{%- if on_host %}
+- **One queue on the CPU device, created once, and waited on before returning.** torch runs
+  CPU tensors on no SYCL queue, so the kernel owns one (a function-local static); the call is
+  timed until it returns, so work still queued when it returns is not measured.
+{%- else %}
 - **Use the caller's queue.** Do not create a `sycl::queue`. Obtain the one the framework
   already runs on; its entry point's API says how. A kernel
   that submits to its own queue runs correctly, out of order with everything around it, and
@@ -565,6 +640,7 @@ worth more to the next one than a run that finished and said nothing.
 - **Do not synchronize inside the kernel function.** No `queue.wait()`, no host-side barrier
   per call: the harness owns synchronization, and a wait inside the call is measured as part
   of the kernel.
+{%- endif %}
 - **Sub-group size is declared, not assumed.** Annotate with
   `[[sycl::reqd_sub_group_size(N)]]` and use a size this part actually supports; a
   sub-group reduction written for one width is silently wrong on another.
@@ -577,10 +653,12 @@ worth more to the next one than a run that finished and said nothing.
   large ones.
 - **Local memory is a resource, not free storage.** Every `local_accessor` byte reduces
   occupancy; a work-group size that fits at one tile size may not at the next.
+{%- if not on_host %}
 - **Register-file mode is a per-trial choice, recorded in the trial source** (e.g. the
   `sycl::ext::intel::experimental::grf_size` kernel property). When the profile shows a
   dominant stall reason or an occupancy change, at least one trial varies it or the
   optimization level against its parent, and `benchmark` decides.
+{%- endif %}
 - **Tile parameters are measured, not chosen.** A trial built on a work-group size,
   sub-group width, split count or elements-per-step tries at least two values as sibling
   trials from the same parent; a difference inside the measured noise band is no verdict.
@@ -614,6 +692,33 @@ worth more to the next one than a run that finished and said nothing.
 - **Port back to the `.cl` the profile names.** The trial's kernel string maps onto that
   file; the generator's host code changes only if a launch parameter it chooses changes.
 - The kernel must be self-contained — all helpers inline in the one source string.
+{% elif dsl == "cpp" %}
+{%- if not repo_trials | default(false) %}
+- **Give every implementation its own identity.** Baseline and trial extensions coexist in
+  one process: a distinct `load_inline` module name and a distinct C++ namespace for each
+  implementation, changed when the implementation changes.
+{%- else %}
+- **The kernel keeps the repository's interface.** Its signature, its name and how the
+  model calls it stay as they are: the model is what runs it.
+{%- endif %}
+- **The call is done when it returns.** It is timed until then; no work left running on
+  threads of its own after it returns.
+- **Compile flags are part of the trial.** The optimization level, the instruction set it
+  targets and the threading runtime are recorded in the trial source, and a trial that
+  changes one says so in its `--strategy`.
+- **Threads and placement are measured, not chosen.** The CPUs this run may use are the
+  launcher's; a trial built on a thread count, a work split or a memory-placement choice
+  tries at least two as sibling trials from the same parent.
+- **Vectorized access has preconditions.** Guard tails rather than assuming the shape
+  divides evenly by the vector or block width.
+- **Accumulate in a wider type**: reductions over `half`/`bfloat16` accumulate in `float`.
+{%- if compiler_flags %}
+- Pass `compiler_flags` from `config.yaml` on every compile; they are additional to the
+  flags a trial chooses, not a replacement for them.
+{%- endif %}
+{%- if not repo_trials | default(false) %}
+- The kernel must be self-contained — all helpers inline in the one source string.
+{%- endif %}
 {% elif dsl == "cuda" %}
 - Use the caller's stream; do not create one, and do not synchronize inside the kernel call.
 - Declare launch bounds rather than relying on the compiler's occupancy guess.

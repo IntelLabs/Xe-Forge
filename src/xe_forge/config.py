@@ -2,6 +2,7 @@
 Configuration Manager for Xe-Forge kernel optimization pipeline
 """
 
+import logging
 import math
 import os
 from dataclasses import dataclass, field, fields
@@ -12,6 +13,18 @@ from dotenv import load_dotenv
 
 from xe_forge.external import DEFAULT_TIMEOUT
 from xe_forge.models import OptimizationStage
+
+
+def device_kind(device) -> str:
+    """The type of a device name: ``xpu`` of ``xpu:1``. The index names one device of that
+    type; what is compared, chosen or looked up by type takes this."""
+    return str(device).split(":")[0]
+
+
+def device_index(device, default: int = 0) -> int:
+    """The index of a device name (1 of ``xpu:1``), else ``default``."""
+    _, sep, index = str(device).partition(":")
+    return int(index) if sep and index.isdigit() else default
 
 
 def noise_band() -> float:
@@ -203,6 +216,12 @@ class ExternalConfig:
     integration_repos: list[str] = field(default_factory=list)
     # The stack's interpreter; set, the port-back agent builds and tests the port there.
     stack_python: str | None = None
+    # Trials are directories of kernel_repo's files at their repository paths, built into the
+    # repository and timed by the benchmark command.
+    repo_trials: bool = False
+    # The command that profiles a trial where the benchmark times it; placeholders {trial}
+    # and {workspace}. With it the workspace's profile step runs it.
+    profile: str | None = None
     timeout: int = DEFAULT_TIMEOUT
 
 
@@ -217,8 +236,10 @@ class TrialConfig:
 
 @dataclass
 class ProfilerConfig:
-    """GPU profiler configuration (unitrace and/or VTune)"""
+    """Profiler configuration: unitrace and/or VTune on a GPU; perf, or VTune, on the host"""
 
+    perf_enabled: bool = True
+    perf_bin: str = "perf"
     vtune_enabled: bool = False
     vtune_bin: str = "vtune"
     unitrace_enabled: bool = False
@@ -339,6 +360,8 @@ class ConfigManager:
             benchmark=self._get_env("EXTERNAL_BENCHMARK", None),
             validate=self._get_env("EXTERNAL_VALIDATE", None),
             stack_python=self._get_env("STACK_PYTHON", None),
+            repo_trials=self._get_env("REPO_TRIALS", False, bool),
+            profile=self._get_env("EXTERNAL_PROFILE", None),
             dataset_record=self._get_env("DATASET_RECORD", None),
             lessons=self._get_env("LESSONS_DIR", None),
             kernel_repo=self._get_env("KERNEL_REPO", None),
@@ -357,6 +380,8 @@ class ConfigManager:
 
         # Profiler Configuration
         profiler_cfg = ProfilerConfig(
+            perf_enabled=self._get_env("PERF_ENABLED", True, bool),
+            perf_bin=self._get_env("PERF_BIN", "perf"),
             vtune_enabled=self._get_env("VTUNE_ENABLED", False, bool),
             vtune_bin=self._get_env("VTUNE_BIN", "vtune"),
             unitrace_enabled=self._get_env("UNITRACE_ENABLED", False, bool),
@@ -381,7 +406,7 @@ class ConfigManager:
 
     def _build_device_config(self, device_type: str, dsl: str) -> DeviceConfig:
         """Build device-specific configuration based on device type."""
-        if device_type == "cuda":
+        if device_kind(device_type) == "cuda":
             return CUDAConfig(
                 device=device_type,
                 dsl=dsl,
@@ -391,8 +416,19 @@ class ConfigManager:
                 preferred_tile_n=self._get_env("PREFERRED_TILE_N", 128, int),
                 preferred_tile_k=self._get_env("PREFERRED_TILE_K", 32, int),
             )
+        # XPU_DEVICE names one device of the requested type; it never replaces a device of
+        # another type, nor one the request already names.
+        named = self._get_env("XPU_DEVICE", "").strip()
+        device = device_type
+        if named and named != device_type:
+            if ":" not in device_type and device_kind(named) == device_type:
+                device = named
+            else:
+                logging.getLogger(__name__).warning(
+                    "XPU_DEVICE=%s ignored: the device asked for is %s", named, device_type
+                )
         return XPUConfig(
-            device=self._get_env("XPU_DEVICE", device_type),
+            device=device,
             dsl=dsl,
             grf_mode=self._get_env("GRF_MODE", "256"),
             default_num_warps=self._get_env("DEFAULT_NUM_WARPS", 32, int),

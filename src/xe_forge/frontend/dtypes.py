@@ -31,6 +31,18 @@ def canonical(name: str) -> str:
     return dtype
 
 
+def cost_compute(cost: dict, otherwise):
+    """The dtype a stated cost's flops run in: its declared ``compute``, else ``otherwise``.
+    A value that is not a dtype is returned as written: no peak is found for it, and that is
+    noted, where an unchecked names.json reaches a bound."""
+    if not cost.get("compute"):
+        return otherwise
+    try:
+        return canonical(cost["compute"])
+    except (TypeError, ValueError):
+        return str(cost["compute"])
+
+
 def parse_quantization(text: str | None) -> tuple[str | None, str | None]:
     """``auto`` | ``<dtype>`` | ``<scheme>`` | ``<scheme>:<dtype>`` -> (scheme, dtype).
 

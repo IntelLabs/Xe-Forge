@@ -23,7 +23,7 @@ from ai_bench.utils import count_torch_flop, import_from_path
 
 from xe_forge.config import checked_band, noise_band
 from xe_forge.core.dtype_utils import make_rand_tensor
-from xe_forge.core.reference_workload import ReferenceWorkload
+from xe_forge.core.reference_workload import PreparedCall, ReferenceWorkload
 from xe_forge.models import ExecutionResult
 
 logger = logging.getLogger(__name__)
@@ -32,6 +32,15 @@ logger = logging.getLogger(__name__)
 def _has_callable_attr(obj, attr_name):
     """Check if object has a callable attribute with the given name."""
     return hasattr(obj, attr_name) and callable(getattr(obj, attr_name))
+
+
+def _host_call(fn: Callable, model, inputs) -> PreparedCall:
+    """``fn`` on ``inputs`` as a call the host sampler times: the model's buffers restored,
+    untimed, before each forward."""
+    if isinstance(model, torch.nn.Module):
+        buffers = {name: b.detach().clone() for name, b in model.named_buffers()}
+        return PreparedCall(model, list(inputs), buffers)
+    return PreparedCall(fn, list(inputs))
 
 
 @dataclass
@@ -51,11 +60,24 @@ class ComparisonResult:
     verdict: str | None = None
 
 
+def combine_swapped(run_ab: tuple, run_ba: tuple) -> tuple[float, float, list[float]]:
+    """``(a_us, b_us, ratios)`` of two :meth:`KernelBenchExecutor.time_interleaved` runs, the
+    first with a in the first slot, the second with the slots swapped. A slot's bias multiplies
+    both rounds' ratios, and sqrt(r1 / r2) cancels it."""
+    (a1, b1, r1), (b2, a2, r2) = run_ab, run_ba
+    ratios = [(x / y) ** 0.5 for x, y in zip(r1, r2, strict=True)]
+    return (a1 * a2) ** 0.5, (b1 * b2) ** 0.5, ratios
+
+
 def no_change_message(speedup: float, band: float, original_us: float, optimized_us: float) -> str:
     """Feedback for a ratio inside the noise band: not a regression, not a win."""
     return (f"NO MEASURABLE CHANGE: {speedup:.3f}x, within {band:.0%} of the original "
             f"(Original: {original_us:.2f}μs, Optimized: {optimized_us:.2f}μs). Not a "
             "regression and not a win: try a change that moves the bottleneck.")  # fmt: skip
+
+
+# The host flush reads this many times the last-level cache of the CPUs a run may use.
+HOST_FLUSH_LLC_MULTIPLE = 2
 
 
 class KernelBenchExecutor:
@@ -100,6 +122,7 @@ class KernelBenchExecutor:
         self.atol = atol
         self._temp_dir = None
         self._module_counter = 0
+        self.flush_note = ""
 
     def time(
         self,
@@ -132,10 +155,11 @@ class KernelBenchExecutor:
     def time_forward(self, call, args: tuple) -> float:
         """Device time of ``call.forward`` alone; buffer restore and cache flush run untimed.
 
-        Off GPU this is :meth:`time` on the whole call (restore plus forward).
+        On a device other than a GPU or the host this is :meth:`time` on the whole call
+        (restore plus forward).
         """
         device = torch.device(self.device)
-        if device.type not in ("xpu", "cuda"):
+        if device.type not in ("xpu", "cuda", "cpu"):
             return self.time(call, args)
         for _ in range(self.warmup_iters):
             call(*args)
@@ -149,9 +173,12 @@ class KernelBenchExecutor:
 
         Buffer restore and a cache flush run untimed before each; a dummy matmul then
         fills the queue so the host has enqueued the end event before a short kernel
-        finishes, and launch latency is not timed as kernel time.
+        finishes, and launch latency is not timed as kernel time. On the host a call is
+        done when it returns, so each is timed by the host clock around it.
         """
         device = torch.device(self.device)
+        if device.type == "cpu":
+            return self._host_samples(call, args, iters)
         if not hasattr(self, "_flush"):
             self._flush = torch.empty(256 * 1024 * 1024, dtype=torch.int8, device=device)
             self._fill = torch.randn(1024, 1024, device=device)
@@ -171,6 +198,45 @@ class KernelBenchExecutor:
             end.record()
         torch.accelerator.synchronize()
         return [start.elapsed_time(end) * 1e3 for start, end in events]
+
+    def _host_samples(self, call, args: tuple, iters: int) -> list[float]:
+        """*iters* host timings of ``call.forward`` in microseconds, each after an untimed
+        restore and a read over twice the last-level cache of the CPUs this run may use
+        (none when that cache's size is unknown, as the result then says). A read evicts
+        without leaving the cache full of modified lines, which a model's call does not
+        find either: a write would make every miss of the timed call write one back too."""
+        import time
+
+        if not hasattr(self, "_host_flush"):
+            from xe_forge.core.topology import placement
+
+            llc = placement().get("llc_bytes")
+            if llc is None:
+                self.flush_note = (
+                    " The last-level cache size of these CPUs is unknown (not every cache "
+                    "slice's size is in sysfs): "
+                    "no cache flush ran before the timed calls, so inputs may be timed from cache."
+                )
+                self._host_flush = None
+            else:
+                # Written once here, so its pages exist; each flush then only reads it.
+                self._host_flush = torch.zeros(HOST_FLUSH_LLC_MULTIPLE * llc, dtype=torch.int8)
+                # A fact for the reader, not a correction: the flush is a parallel read on
+                # torch's pool, whose threads may still be awake when the timed call starts.
+                self.flush_note = (
+                    f" Before each timed call a {self._host_flush.numel()}-byte read flush ran on "
+                    f"torch's thread pool ({torch.get_num_threads()} threads), right before "
+                    "the call."
+                )
+        out = []
+        for _ in range(iters):
+            call.reset()
+            if self._host_flush is not None:
+                self._host_flush.sum(dtype=torch.int64)
+            t = time.perf_counter_ns()
+            call.forward(*args)
+            out.append((time.perf_counter_ns() - t) / 1e3)
+        return out
 
     def time_interleaved(self, call_a, args_a: tuple, call_b, args_b: tuple):
         """Time two calls in alternating rounds; returns ``(a_us, b_us, ratios)``.
@@ -247,6 +313,12 @@ class KernelBenchExecutor:
                 input_dtypes=input_dtypes,
             )
 
+            # On the host every timed call restores the module's buffers as they were before
+            # any forward, so they are saved before the one that checks for errors.
+            host = (
+                _host_call(fn, _model, inputs) if torch.device(self.device).type == "cpu" else None
+            )
+
             # Run once to check for errors
             try:
                 output = fn(*inputs)
@@ -256,8 +328,12 @@ class KernelBenchExecutor:
                     error_message=f"Kernel execution failed: {e}",
                 )
 
-            # Benchmark
-            time_us = self.time(fn, tuple(inputs))
+            # Benchmark. On the host, the forward alone after an untimed restore and cache
+            # flush, as on the reference path.
+            if host is not None:
+                time_us = self.time_forward(host, tuple(inputs))
+            else:
+                time_us = self.time(fn, tuple(inputs))
             logger.info(f"Execution time: {time_us:.2f} μs")
 
             # Calculate TFLOPS if flop count provided
@@ -545,14 +621,40 @@ class KernelBenchExecutor:
         original_time_us = original_result.execution_time_ms * 1000
         optimized_time_us = optimized_result.execution_time_ms * 1000
         speedup = original_time_us / optimized_time_us if optimized_time_us > 0 else 0.0
+        agree, note = True, ""
+        if torch.device(self.device).type == "cpu":
+            # As on the reference path: both arms in alternating rounds on the same inputs,
+            # twice with the slots swapped, so drift and slot bias land on both.
+            prep = {"kernel_name": kernel_name, "input_shapes": input_shapes, "dtype": dtype,
+                    "init_args": init_args, "input_dtypes": input_dtypes}  # fmt: skip
+            try:
+                original_time_us, optimized_time_us, ratios = self._host_swapped_ratios(
+                    original_code, optimized_code, inputs, prep
+                )
+            except Exception as exc:
+                return ComparisonResult(
+                    original_time_us=0.0,
+                    optimized_time_us=0.0,
+                    speedup=0.0,
+                    optimized_correct=False,
+                    feedback_message=f"FAILURE: timing the two kernels failed: {exc}",
+                )
+            speedup = sorted(ratios)[len(ratios) // 2]
+            agree = min(ratios) > 1 or max(ratios) < 1
+            note = (
+                f" Timed in {self.rounds} alternating rounds, twice with the slots swapped; "
+                f"per-round speedup {min(ratios):.3f}-{max(ratios):.3f}x."
+                + ("" if agree else " The rounds straddle 1.0.")
+                + self.flush_note
+            )
 
         # Check correctness
         original_correct = original_result.output_correct is not False
 
         # Slower only at the noise band's edge or past it: strictly inside it, neither a
-        # regression nor a win.
-        is_slower = speedup <= 1.0 - self.min_effect
-        within_noise = not is_slower and speedup < 1.0 + self.min_effect
+        # regression nor a win. Rounds that straddle 1.0 are neither.
+        is_slower = agree and speedup <= 1.0 - self.min_effect
+        within_noise = not is_slower and (not agree or speedup < 1.0 + self.min_effect)
 
         # Generate feedback message for CoVeR agent
         feedback_parts = []
@@ -591,7 +693,7 @@ class KernelBenchExecutor:
                     f"Correctness verified. Consider more aggressive optimizations."
                 )
 
-        feedback_message = " ".join(feedback_parts)
+        feedback_message = " ".join(feedback_parts) + note
 
         return ComparisonResult(
             original_time_us=original_time_us,
@@ -605,6 +707,33 @@ class KernelBenchExecutor:
             verdict="INDISTINGUISHABLE" if within_noise else None,
             feedback_message=feedback_message,
         )
+
+    def _host_swapped_ratios(self, a_code: str, b_code: str, inputs, prep: dict):
+        """:meth:`_swapped_ratios` for a kernel whose inputs the spec gives: per-round ``a/b``
+        speedups on the host, with the slot each arm is built and timed in cancelled, every
+        call reading the same input tensors. Returns ``(a_us, b_us, ratios)``."""
+        runs = []
+        for first, second in ((a_code, b_code), (b_code, a_code)):
+            calls = []
+            for code in (first, second):
+                module = self._compile_module(code)
+                if module is None:
+                    raise ValueError("Failed to compile kernel module")
+                fn, model, inputs = self.prepare_workload(module, inputs=inputs, **prep)
+                calls.append(_host_call(fn, model, inputs))
+            # Exact, as on the reference path: both arms read these tensors, so a call that
+            # writes them hands every later call, the other arm's too, inputs it did not get.
+            for call, code in zip(calls, (first, second), strict=True):
+                before = [x.clone() if isinstance(x, torch.Tensor) else x for x in inputs]
+                call(*inputs)
+                if any(isinstance(x, torch.Tensor) and not torch.equal(x, y)
+                       for x, y in zip(before, inputs, strict=True)):  # fmt: skip
+                    arm = "original" if code is a_code else "optimized"
+                    raise ValueError(f"the {arm} kernel writes its inputs, which both arms "
+                                     "share: mutating inputs requires a host benchmark with "
+                                     "resets")  # fmt: skip
+            runs.append(self.time_interleaved(calls[0], tuple(inputs), calls[1], tuple(inputs)))
+        return combine_swapped(*runs)
 
     def compare_reference_workload(
         self,
@@ -629,7 +758,8 @@ class KernelBenchExecutor:
                 )
                 workload.validate()
                 verdict, note = None, ""
-                if torch.device(self.device).type in ("xpu", "cuda"):
+                interleaved = torch.device(self.device).type in ("xpu", "cuda", "cpu")
+                if interleaved:
                     # Both arms, every time, in alternating rounds, twice with the slots
                     # swapped (see _swapped_ratios), so drift and slot bias land on both.
                     original_time, optimized_time, ratios = self._swapped_ratios(
@@ -667,9 +797,15 @@ class KernelBenchExecutor:
                     verdict=verdict,
                     feedback_message=(
                         "Reference outputs and updated buffers verified for two calls "
-                        "from restored initial buffers. On GPU, timing is forward only with "
-                        "fixed inputs (buffer restore and cache flush run untimed); off GPU it "
-                        "is reset plus forward." + note
+                        "from restored initial buffers. "
+                        + (
+                            "Timing is forward only with fixed inputs (buffer restore and "
+                            "cache flush run untimed)."
+                            if interleaved
+                            else "Timing is buffer restore plus forward."
+                        )
+                        + note
+                        + self.flush_note
                     ),
                 )
         except Exception as exc:
@@ -689,6 +825,10 @@ class KernelBenchExecutor:
         r1 = a/b and r2 = b/a measured with the slots swapped, that bias multiplies both,
         and sqrt(r1 / r2) cancels it. *first* is the prepared (a, b) workload; the swapped
         one is built here. Returns ``(a_us, b_us, ratios)``.
+
+        Every timed call reads the same input tensors. Two copies of one tensor can differ
+        in speed by where their pages landed, and a copy per arm would put that difference
+        on one arm; validation has already shown no arm writes its inputs.
         """
         swapped = ReferenceWorkload.prepare(
             self._compile_module,
@@ -701,11 +841,12 @@ class KernelBenchExecutor:
             spec_workload,
         )
         workloads = [first, swapped]
-        runs = []
+        runs, inputs = [], None
         for w in workloads:
             try:
-                call_a = w.prepare_call(w.original)
-                call_b = w.prepare_call(w.optimized)
+                call_a = w.prepare_call(w.original, inputs)
+                inputs = call_a.inputs
+                call_b = w.prepare_call(w.optimized, inputs)
                 runs.append(
                     self.time_interleaved(
                         call_a, tuple(call_a.inputs), call_b, tuple(call_b.inputs)
@@ -714,9 +855,7 @@ class KernelBenchExecutor:
             finally:
                 w.original.cpu()
                 w.optimized.cpu()
-        (a1, b1, r1), (b2, a2, r2) = runs
-        ratios = [(x / y) ** 0.5 for x, y in zip(r1, r2, strict=True)]
-        return (a1 * a2) ** 0.5, (b1 * b2) ** 0.5, ratios
+        return combine_swapped(*runs)
 
     def _compile_module(self, kernel_code: str):
         """Compile Triton kernel module from source code.

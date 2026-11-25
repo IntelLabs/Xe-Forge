@@ -13,35 +13,24 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
-
-from xe_forge.config import Config
+from xe_forge.claude.render import render
+from xe_forge.config import Config, device_kind
 from xe_forge.core.dataset_record import load_dataset_record
 from xe_forge.core.lessons import load_lessons_log
 from xe_forge.core.spec_loader import load_spec
-
-_TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 # Durable for the whole session, like dataset.profile_path: the kernel-locator agent
 # writes it once, and every later step reads it instead of re-exploring the repo.
 KERNEL_LOCATOR_PROFILE_PATH = "experiments/kernel_profile.md"
 
-_env = Environment(
-    loader=FileSystemLoader(str(_TEMPLATES_DIR)),
-    autoescape=select_autoescape(enabled_extensions=()),
-    keep_trailing_newline=True,
-    trim_blocks=False,
-    lstrip_blocks=False,
-    # A variable a template uses but the caller did not pass is an error, not a blank.
-    undefined=StrictUndefined,
-)
+
+def _profile_device_args(device) -> list[str]:
+    """The profile tool's ``--device``: given for the host and for one device of several, so
+    either is profiled where it runs rather than on the first device torch sees."""
+    return ["--device", str(device)] if device_kind(device) == "cpu" or ":" in str(device) else []
 
 
-def _render(template_name: str, **context: object) -> str:
-    return _env.get_template(template_name).render(**context)
-
-
-render = _render
+_render = render
 
 
 def generate_workspace(
@@ -59,7 +48,11 @@ def generate_workspace(
 
     dsl = config.device_config.dsl
     device = config.device_config.device
-    ext = _kernel_ext(dsl)
+    # Trials as the repository's own files, built into it and timed there: a baseline,
+    # a trial and the output are directories at the repository's paths, not one source file.
+    repo_trials = bool(config.external.repo_trials and config.external.kernel_repo
+                       and config.external.benchmark)  # fmt: skip
+    ext = "" if repo_trials else _kernel_ext(dsl)
     # What the session is told its numbers come from. The commands it runs are the
     # same either way -- the delegation happens inside xe-forge-skill -- but the
     # verdicts it may see, and so the rules it has to follow, are not.
@@ -126,19 +119,42 @@ def generate_workspace(
     if spec_path:
         profile_args.extend(["--spec", f"test_kernels/{kernel_name}.yaml"])
     profile_args.extend(variant_args)
-    if config.profiler.unitrace_enabled:
+    host = device_kind(device) == "cpu"
+    profile_args.extend(_profile_device_args(device))
+    unitrace = config.profiler.unitrace_enabled and not host  # unitrace profiles a GPU
+    if unitrace:
         profile_args.extend(["--unitrace-bin", config.profiler.unitrace_bin])
         profile_args.extend(["--metric-group", config.profiler.unitrace_metric_group])
-    require_profiles = (
-        config.profiler.unitrace_enabled and config.profiler.unitrace_metric_group == "all"
-    )
+    # A trial built into the repository has no single file to profile: the host's command does.
+    perf = config.profiler.perf_enabled and not repo_trials
+    vtune = config.profiler.vtune_enabled and not repo_trials
+    # The collections every saved trial must have: unitrace's two groups on a GPU, and on a
+    # host perf's counts, the host's default profile.
+    if host and perf:
+        required_groups = ["perf stat"]
+    elif unitrace and config.profiler.unitrace_metric_group == "all":
+        required_groups = ["ComputeBasic", "EuStallSampling"]
+    else:
+        required_groups = []
+    require_profiles = bool(required_groups)
     if require_profiles:
         profile_args.extend(["--kernel-name", kernel_name])
-    if config.profiler.vtune_enabled:
+    if vtune:
         profile_args.extend(["--vtune-bin", config.profiler.vtune_bin])
-    if config.profiler.unitrace_enabled != config.profiler.vtune_enabled:
-        profile_args.extend(["--tool", "unitrace" if config.profiler.unitrace_enabled else "vtune"])
+    if host and perf:  # the required collection is perf's, so perf is named, not auto
+        profile_args.extend(["--tool", "perf", "--perf-bin", config.profiler.perf_bin])
+    elif host and vtune:
+        profile_args.extend(["--tool", "vtune"])
+    elif not host and unitrace != vtune:
+        profile_args.extend(["--tool", "unitrace" if unitrace else "vtune"])
     profile_options = shlex.join(profile_args)
+    # Where a trial is built into the repository, it is profiled there too: the host's command, with
+    # the trial directory for the session to fill in.
+    profile_command = (
+        config.external.profile.replace("{trial}", "<trial dir>").replace("{workspace}", ".")
+        if repo_trials and config.external.profile
+        else None
+    )
 
     compiler_flags = config.engine.compiler_flags
     # Parsed the way a shell would, so a quoted flag (-DNAME='a b') reaches the
@@ -150,15 +166,17 @@ def generate_workspace(
     # With a kernel repo the baseline is a copy of the repo's kernel, never a from-scratch seed.
     if (
         not kernel_code
-        and dsl == "sycl"
+        and dsl in ("sycl", "cpp")
         and measurement == "builtin"
         and reference_code
         and not kernel_repo
     ):
         kernel_code = _render(
-            "sycl_torch_extension_seed.py.j2",
+            f"{dsl}_torch_extension_seed.py.j2",
             kernel_name=kernel_name,
             compiler_flag_list=compiler_flag_list,
+            device=device,
+            on_host=host,
         )
     (workspace / "CLAUDE.md").write_text(
         _render(
@@ -167,12 +185,21 @@ def generate_workspace(
             stack_check=bool(config.external.stack_python),
             dsl=dsl,
             device=device,
+            on_host=host,
+            host_tool=(
+                "perf"
+                if config.profiler.perf_enabled
+                else "VTune"
+                if config.profiler.vtune_enabled
+                else "profiler's"
+            ),
             kernel_name=kernel_name,
             ext=ext,
             measurement=measurement,
             benchmark_options=benchmark_options,
             profile_options=profile_options,
             require_profiles=require_profiles,
+            required_groups=shlex.join(required_groups),
             reference_workload=reference_workload,
             has_spec=bool(spec_path),
             variant=variant_type,
@@ -184,6 +211,8 @@ def generate_workspace(
             kernel_repo=kernel_repo,
             integration_repos=integration_repos,
             kernel_locator_profile_path=KERNEL_LOCATOR_PROFILE_PATH,
+            repo_trials=repo_trials,
+            profile_command=profile_command,
         )
     )
     (workspace / "config.yaml").write_text(
@@ -193,8 +222,10 @@ def generate_workspace(
             dsl=dsl,
             device=device,
             measurement=measurement,
-            vtune_enabled=config.profiler.vtune_enabled,
+            vtune_enabled=vtune,
             vtune_bin=config.profiler.vtune_bin,
+            perf_enabled=perf,
+            perf_bin=config.profiler.perf_bin,
             unitrace_enabled=config.profiler.unitrace_enabled,
             unitrace_bin=config.profiler.unitrace_bin,
             compiler_flags=compiler_flags,
@@ -209,6 +240,7 @@ def generate_workspace(
             dsl=dsl,
             weights=weights,
             require_profiles=require_profiles,
+            required_groups=shlex.join(required_groups),
             measurement=measurement,
             benchmark_options=benchmark_options,
             dataset=dataset,
@@ -216,6 +248,7 @@ def generate_workspace(
             kernel_repo=kernel_repo,
             integration_repos=integration_repos,
             kernel_locator_profile_path=KERNEL_LOCATOR_PROFILE_PATH,
+            repo_trials=repo_trials,
         )
     )
 
@@ -257,6 +290,7 @@ def generate_workspace(
                 profile_path=KERNEL_LOCATOR_PROFILE_PATH,
                 ext=ext,
                 stack_python=config.external.stack_python,
+                repo_trials=repo_trials,
             )
         )
 

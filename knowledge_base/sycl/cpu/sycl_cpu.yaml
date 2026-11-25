@@ -1,0 +1,48 @@
+patterns:
+  - id: sycl_cpu_execution_model
+    name: How a SYCL kernel maps onto a CPU device
+    stage: analysis
+    applies_to: [cpu, sycl, opencl]
+    description: |
+      On the CPU device (the OpenCL CPU runtime) a work-group runs on one thread, and the
+      work-items of a sub-group are lanes of one vector: the sub-group size is the vector
+      width the runtime compiled for. Local memory is ordinary memory in that thread's
+      cache; a work-group barrier serializes the work-items around it. The runtime's
+      own thread pool runs the work-groups, sized from the CPUs it sees.
+    rationale: |
+      A launch tuned for a GPU (many small work-groups, heavy use of local memory and
+      barriers) maps to many short tasks and serial barrier phases on a CPU. Enough
+      work-groups to keep every thread busy, each with enough work to amortize its
+      start, and vectorizable work-item code are what matter.
+    pattern_before: "A GPU-shaped nd_range with a small work-group and local-memory staging copied to the CPU device."
+    pattern_after: |
+      Work-groups sized so the count is a multiple of the placement's threads and each
+      does a block of work; work-item code with unit-stride accesses across the sub-group.
+
+  - id: sycl_cpu_build_target
+    name: Generic SPIR-V is compiled at first run; an x86 target compiles it ahead
+    stage: device_specific
+    applies_to: [cpu, sycl, build]
+    description: |
+      load_inline without an XPU arch list builds generic SPIR-V (spir64), which the CPU
+      runtime compiles for the host when the kernel first runs, so the first call is slow
+      and later ones are not. An ahead-of-time x86 target (`-fsycl-targets=spir64_x86_64`
+      with the CPU options it takes) moves that compile to the build.
+    rationale: |
+      The benchmark warms up before timing, so the first-run compile is not timed; it
+      still counts in a model's first call. Device-link flags are appended to
+      torch.utils.cpp_extension._SYCL_DLINK_FLAGS, as for any SYCL target.
+    pattern_before: "Time the first call of a JIT-compiled kernel."
+    pattern_after: "Rely on warmup, or build the x86 target ahead of time when start-up matters."
+
+  - id: sycl_cpu_host_memory
+    name: CPU tensors are host memory the kernel uses directly
+    stage: memory_access
+    applies_to: [cpu, sycl]
+    description: |
+      A CPU tensor's data pointer is ordinary host memory; the CPU device reads and writes
+      it in a kernel without a copy (system allocations are supported by the device:
+      `sycl-ls --verbose` lists usm_system_allocations). Copying inputs to a USM or buffer
+      allocation first adds a pass over the data.
+    pattern_before: "malloc_device plus memcpy of every input before the kernel."
+    pattern_after: "Pass the tensors' data pointers; wait on the queue before returning the outputs."

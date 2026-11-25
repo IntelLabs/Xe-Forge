@@ -60,6 +60,30 @@ def _variants(e: Entry) -> list[tuple]:
     return rows
 
 
+def per_call(capture: CaptureRun, ref: str) -> tuple[float, int] | None:
+    """(us per call, calls) of a record's variant ref -- ``workload_id``,
+    ``workload_id@AXIS=value`` or ``...#j`` -- in ``capture``: what :func:`build_spec`'s
+    ``captured_us`` holds for it, read from another capture of the same model. None when the
+    capture has no such workload or shape."""
+    wid, _, rest = ref.partition("@")
+    w = next((w for w in capture.workloads if w.workload_id == wid), None)
+    if w is None:
+        return None
+    if not rest:
+        h = {"device_us": w.device_us, "calls": w.calls}
+    else:
+        at, _, j = rest.partition("#")
+        axis, _, value = at.partition("=")
+        hist = (w.var_axes or {}).get(axis) or {}
+        h = next((v for k, v in hist.items() if str(k) == value), None)
+        if h is not None and j:
+            pts = h.get("points") or []
+            h = pts[int(j)] if int(j) < len(pts) else None
+    if not h or not h.get("calls"):
+        return None
+    return h["device_us"] / h["calls"], int(h["calls"])
+
+
 def build_spec(
     e: Entry, weights: dict[str, float] | None = None
 ) -> tuple[dict, dict[str, str]] | None:

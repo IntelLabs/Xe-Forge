@@ -103,12 +103,12 @@ passed to every per-kernel `xe-forge` run (for example `-- --no-unitrace`).
 | `--top` | 3 | Kernels to optimize |
 | `--at-roofline` | 0.8 | Efficiency of its bound at which a kernel is left alone |
 | `--min-gain` | 0.005 | Smallest share of device time worth optimizing |
-| `--calibration` | none (counter bounds only) | `xe-forge calibrate` output. Before naming, a matmul peak the capture's GEMMs and costs need and the file lacks is measured into it; a dtype that cannot be measured has no compute bound, is bounded by bandwidth alone, and is never stopped at roofline |
+| `--calibration` | none (counter bounds only) | `xe-forge calibrate` output. Before naming, a matmul peak the capture's GEMMs and costs need and the file lacks is measured into it, and so is the peak of a compute dtype the naming agent's costs declare, before those costs are checked; a dtype that cannot be measured has no compute bound, is bounded by bandwidth alone, and is never stopped at roofline |
 | `--name-coverage` | 0.99 | Share of device time whose ops the naming agent must place |
 | `--analyze-only` | off | Stop after the manifest (`kernels.yaml`) |
 | `--agent-max-turns` | `--max-turns` | Turn limit of every frontend agent |
 | `--prove` | off | Build the stack with the winning patches and measure them in the model |
-| `--prove-repeat` | 3 | Captures per arm in prove |
+| `--prove-repeat` | 3 | Captures per arm in prove; with `--rows`, every row in each |
 | `--fuse` | off | After optimizing, fuse chains of ops into one kernel |
 | `--fuse-top` | 2 | Fusions to optimize |
 | `--stack-check` | off | Each port-back agent builds and tests its port in the framework's stack (`--stack-python`) |
@@ -221,7 +221,7 @@ Hardware counters of one kernel. See [PROFILING.md](PROFILING.md).
 
 | Subcommand | Arguments and flags | What it does |
 |---|---|---|
-| `run` | `LAUNCHER -o RAW [--unitrace BIN] [--sampling-interval US] [--trace-steps N]` | Run a launcher (it writes into `$RAW_DIR`) timed, then under unitrace, into `raw/`. `--unitrace` defaults to `UNITRACE_BIN`, `--sampling-interval` to `XE_FORGE_SAMPLING_INTERVAL_US` (25), `--trace-steps` to `XE_FORGE_TRACE_STEPS` (2; 0 runs the full workload under unitrace too) |
+| `run` | `LAUNCHER -o RAW [--unitrace BIN] [--sampling-interval US] [--trace-steps N]` | Run a launcher (it writes into `$RAW_DIR`) timed, then under unitrace, into `raw/`. `--unitrace` defaults to `UNITRACE_BIN`, `--sampling-interval` to `XE_FORGE_SAMPLING_INTERVAL_US` (25), `--trace-steps` to `XE_FORGE_TRACE_STEPS` (2; 0 runs the full workload under unitrace too). On a host, `--timeline-only` keeps the launcher's timeline pass and skips the perf pass: the node times without the code they ran |
 | `parse` | `RAW -o CAPTURE_JSON [--names NAMES_JSON] [--min-known PCT]` | `raw/` to `capture.json`, checked against unitrace; `--names` applies a `names.json`; at least `--min-known` (90) % of op time must be in kernels unitrace saw |
 
 ### `patch check DIR`
@@ -242,8 +242,49 @@ tokens scored against transformers. `DIR` holds `patch.json` and `generate.sh`.
 | `--trust-remote-code` | off | Pass `trust_remote_code` |
 | `--prompt-file` | none | The run's prompt text |
 | `--precision` | `bfloat16` | Float dtype scored first: the run's declared compute |
+| `--quantization` | none | The run's declared quantization: `generate.sh` runs again with `XE_FORGE_QUANTIZATION` set, and its tokens are scored and reported |
+| `--quantized-gate` | none | `dequantized`: gate those tokens against the original model holding the weights the quantized run decodes to (`$OUT/dequantized.json`), in float32, and report each tensor's error against the checkpoint; for a framework that quantizes the weights itself |
 | `--no-reference` | off | Skip only the reference comparison (for image or video output) |
 | `--margin` | 0.1 | Non-text output: how much worse than the native run's worst the patched run's worst may be against a float32 reference, as a relative squared error (for PSNR, 10·log10(1 + margin) dB) |
+
+### `patch score DIR --python PY --out JSON`
+
+The output check of `patch check` alone: `generate.sh` runs under `PY`, another build of the
+patched stack, and its tokens are scored the same way. It takes the same flags as `patch check`.
+The record goes to `JSON` (an image or video comparison beside it, in a directory of the same
+name); the patch's `check.json`, `PR.md` and `quality.json` are left as they are. `generate.sh`
+must run the model under `$FRAMEWORK_PYTHON`, or another build cannot be scored. Exit 0
+passes, 1 fails, 2 could not judge (the reference failed, or that contract does not hold).
+`--prove` runs it on its patched arm, with the arguments saved in `patch-<n>/check-args.json`.
+
+`patch check --require-build`: patch.json must name a `"build"` script beside it that builds
+`$SRC` into `$VENV`; the run passes it when the framework's `framework.yaml` says
+`trial_build: true`.
+
+### `inmodel --run-dir RUN --repo REPO --trial DIR [--baseline DIR --record JSON --spec SPEC --variant V] [--build-only] [--profile --kernel K]`
+
+A kernel trial built into the run's own engine and checked and timed there on its own. For a
+repository the run's stack built with a `build` script and a `kernel_check` module
+(patch.json), on a host, `optimize` hands each workspace this as its external benchmark,
+validator and profiler (and `--repo-trials`), so a trial is a directory of the repository's
+files at their repository paths. It builds the repository with those files in place (the
+patch's `build.sh`, which also runs the repository's kernel tests), checks the trial's kernel
+against its reference at every shape of the spec in one process (the module's `check`), scores
+the build's output with `patch score` and the check's arguments, and then times the trial's
+kernel against the baseline's at every weighted shape: both builds' packages imported in one
+process (`python -m xe_forge.frontend.standalone`), each kernel prepared by its module's
+`prepare`, timed by the executor's host timer in alternating rounds, twice with the slots
+swapped, on the team the run's model ran on (its capture's `runtime.threads`). A build whose
+library binds a symbol once per process (`STB_GNU_UNIQUE`) is refused: two builds of it in one
+process would share it. A shape whose rounds straddle 1.0, or whose speedup is inside the noise band
+(`BENCHMARK_MIN_EFFECT`), is `INDISTINGUISHABLE`. The model is not run for timing; `--prove`
+times the whole engine. A shape the baseline's kernel fails too is the check's fault, not the
+trial's. The baseline must be the repository's files unchanged (`BASELINE_NOT_REPOSITORY`) at
+the commit the patch check judged (`REPOSITORY_MOVED`). One measurement serves every variant
+of a pair (`<workspace>/.inmodel/`). `--build-only` is the validator: the build and the tests
+alone. `--profile` runs the trial's kernel under `perf record` at the weighted shapes, each for
+its weight's share of `XE_FORGE_KERNEL_PROFILE_SECONDS`, and counts the samples inside its
+calls.
 
 ### `bound CAPTURE_JSON`
 
@@ -332,6 +373,11 @@ Bedrock credentials (`AWS_BEARER_TOKEN_BEDROCK`, or `AWS_ACCESS_KEY_ID` +
 | `BENCHMARK_MIN_EFFECT` | 0.02 | Relative difference below which two timings count as equal; a finite number above 0 | `xe-forge`, `benchmark` |
 | `XE_FORGE_BUILTIN_BENCHMARK` | off | `1`/`true`/`yes`/`on` = `benchmark --builtin-benchmark` | `benchmark` |
 | `XE_FORGE_BASELINE_SLACK` | 1.5 | How much slower than the captured kernel a baseline may run before it is not that kernel | `benchmark` |
+| `XE_FORGE_KERNEL_WARMUP` | the executor's (200) | Warm-up calls per arm of a trial's kernel timed on its own; on a GPU never fewer than 100 | `inmodel` |
+| `XE_FORGE_KERNEL_ITERS` | the executor's (200) | Timed calls per arm, split over the rounds | `inmodel` |
+| `XE_FORGE_KERNEL_ROUNDS` | the executor's (10) | Alternating rounds per slot order | `inmodel` |
+| `XE_FORGE_KERNEL_PROFILE_SECONDS` | 10 | How long a profiled trial's kernel runs in all | `inmodel` |
+| `XE_FORGE_MODEL_EVENTS` | `cycles,instructions,cache-misses,branch-misses` | perf events of a profiled trial's kernel | `inmodel` |
 | `XE_FORGE_BENCHMARK_TIMEOUT` | `EXTERNAL_TIMEOUT` | Seconds per shape before `benchmark` gives up on a hang | `benchmark` |
 | `MAX_ATTEMPTS_PER_STAGE` | 3 | Read but unused | `xe-forge` |
 | `VALIDATE_EACH_STAGE` | true | Read but unused | `xe-forge` |
@@ -358,7 +404,7 @@ Bedrock credentials (`AWS_BEARER_TOKEN_BEDROCK`, or `AWS_ACCESS_KEY_ID` +
 |---|---|---|---|
 | `DEVICE_TYPE` | `xpu` | `--device` | `xe-forge` |
 | `DSL` | `triton` | `--dsl` | `xe-forge` |
-| `XPU_DEVICE` | `DEVICE_TYPE` | Device name when the device is not `cuda`; set, it replaces `--device xpu`/`cpu` | `xe-forge` |
+| `XPU_DEVICE` | `DEVICE_TYPE` | Device name when the device is not `cuda`; used only when it is of the type `--device` asks for, so it never turns `--device cpu` into `xpu` (a warning says it was ignored) | `xe-forge` |
 | `DEFAULT_NUM_WARPS` | 32 (`cuda`: 4) | Default warps given to the optimizer | `xe-forge` |
 | `DEFAULT_NUM_STAGES` | 2 (`cuda`: 3) | Default pipeline stages | `xe-forge` |
 | `PREFERRED_TILE_M` | 256 (`cuda`: 128) | Preferred tile M | `xe-forge` |

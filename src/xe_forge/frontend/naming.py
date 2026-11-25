@@ -5,8 +5,9 @@ from __future__ import annotations
 import re
 
 from xe_forge.frontend import formula
-from xe_forge.frontend.calibrate import peak_of
+from xe_forge.frontend.calibrate import measurable, peak_of
 from xe_forge.frontend.calibrate import peaks as calib_peaks
+from xe_forge.frontend.dtypes import canonical, cost_compute
 from xe_forge.frontend.ir import CapturedOp, Naming
 
 
@@ -108,6 +109,17 @@ def validate(names, listing: dict, repos) -> list[str]:
                         out.append(
                             f"{where}.cost.{what}: {sorted(used - set(dims))} are not dims of the op"
                         )
+                if "compute" in cost:
+                    try:
+                        dtype = canonical(cost["compute"])
+                    except (TypeError, ValueError) as err:
+                        out.append(f"{where}.cost.compute: {err}")
+                    else:
+                        if not measurable(dtype):
+                            out.append(
+                                f"{where}.cost.compute: {dtype} has no matmul the calibration "
+                                "can measure, so it would leave the flops unbounded"
+                            )
         if kernel_level:
             return
         config = e.get("config_args")
@@ -198,6 +210,20 @@ def keep_valid(names, listing: dict, repos) -> tuple[dict | None, list[str]]:
     return names, problems
 
 
+def cost_dtypes(names: dict) -> set[str]:
+    """The compute dtypes the answer's costs with flops declare."""
+    out = set()
+    for e in (names.get("ops") or {}).values():
+        if not isinstance(e, dict):
+            continue
+        groups = e.get("kernels") if isinstance(e.get("kernels"), dict) else {}
+        for part in (e, *groups.values()):
+            cost = part.get("cost") if isinstance(part, dict) else None
+            if isinstance(cost, dict) and cost.get("flops") and cost.get("compute"):
+                out.add(cost_compute(cost, None))
+    return out
+
+
 def refuted(names: dict, listing: dict, calib: dict | None, noise: float) -> list[tuple]:
     """(key, kernel group or None, evidence) per stated cost a measured call contradicts."""
     bw, peaks = calib_peaks(calib)
@@ -212,7 +238,7 @@ def refuted(names: dict, listing: dict, calib: dict | None, noise: float) -> lis
                 us = sum(t for s, t in shape.get("kernels_per_call", {}).items() if sub in s)
             moved = formula.evaluate(cost.get("bytes", 0), shape["dims"])
             flops = formula.evaluate(cost.get("flops", 0), shape["dims"])
-            peak = peak_of(peaks, shape.get("dtype"))
+            peak = peak_of(peaks, cost_compute(cost, shape.get("dtype")))
             if moved is None or flops is None:
                 continue
             bound = max(moved / (bw * 1e3), flops / (peak * 1e6) if peak else 0.0)

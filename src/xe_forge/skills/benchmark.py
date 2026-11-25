@@ -176,10 +176,7 @@ def _run_builtin(args) -> int:
         if not correct:
             print(f"Error: {result.feedback_message}")
             return 1
-        gpu = args.device.split(":")[0] in ("xpu", "cuda")
-        print(
-            f"TIMER: {'device_forward_after_untimed_reset' if gpu else 'device_buffer_reset_plus_forward'}"
-        )
+        _say_timer(args.device.split(":")[0])
         print(f"Feedback: {result.feedback_message}")
         ratio = "none" if result.verdict else f"{result.speedup:.2f}x"
         print(
@@ -296,7 +293,23 @@ def _run_builtin(args) -> int:
                 print(f"VERDICT: {result.verdict}")
         if result.feedback_message:
             print(f"Feedback: {result.feedback_message}")
+    if args.device.split(":")[0] == "cpu":  # the host times these as it times the reference's
+        _say_timer("cpu")
     return 0
+
+
+def _say_timer(kind: str) -> None:
+    """The ``TIMER:`` line, and on the host the placement the timing was measured under."""
+    timer = {"xpu": "device_forward_after_untimed_reset",
+             "cuda": "device_forward_after_untimed_reset",
+             "cpu": "host_forward_after_untimed_reset"}.get(kind, "device_buffer_reset_plus_forward")  # fmt: skip
+    print(f"TIMER: {timer}")
+    if kind == "cpu":
+        import json
+
+        from xe_forge.frontend.profile import host_placement
+
+        print(f"PLACEMENT: {json.dumps(host_placement())}")
 
 
 def _builtin_opted_in(args) -> bool:

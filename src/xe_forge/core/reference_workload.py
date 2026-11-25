@@ -99,10 +99,12 @@ class ReferenceWorkload:
         finally:
             model.cpu()
 
-    def prepare_call(self, model: torch.nn.Module) -> PreparedCall:
-        """Prepare fixed inputs and explicit state restoration for repeated calls."""
+    def prepare_call(self, model: torch.nn.Module, inputs: Any = None) -> PreparedCall:
+        """Prepare fixed inputs and explicit state restoration for repeated calls. *inputs*,
+        when given, are already on the device and used as they are."""
         model.to(self.device)
-        inputs = _move_inputs(self.copy_inputs(), self.device)
+        if inputs is None:
+            inputs = _move_inputs(self.copy_inputs(), self.device)
         initial_buffers = {name: buffer.detach().clone() for name, buffer in model.named_buffers()}
         return PreparedCall(model, inputs, initial_buffers)
 
@@ -143,7 +145,8 @@ class ReferenceWorkload:
                     output_devices = _tensor_devices(output)
                     output_snapshot = _snapshot(output)
                     del output
-                    if not self._values_match(self.inputs, _snapshot(arguments)):
+                    # Exact: timed arms share one set of inputs, so any write is refused.
+                    if not self._values_match(self.inputs, _snapshot(arguments), exact=True):
                         raise ValueError("Mutating inputs requires a host benchmark with resets")
                     del arguments
                     buffers = _snapshot(dict(model.named_buffers()))

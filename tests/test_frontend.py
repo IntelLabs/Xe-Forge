@@ -398,6 +398,25 @@ def test_rows_merge_into_one_workload_spanning_every_rows_shapes():
     assert op.framework_meta["row"] == 2 and merged.run["runtime"]["rows"][1] == other
 
 
+def test_rows_merge_a_hosts_wall_times_at_the_rows_scales():
+    """A host's wall times sum over the rows as their device times do (here at 0.75 and
+    0.625), so the roofline's wall time is the merged workload's; one a row lacks is unknown."""
+    from xe_forge.frontend import rows
+
+    anchor = {"batch": 8, "input_len": 64, "output_len": 4, "weight": 0.75}
+    other = {"batch": 1, "input_len": 64, "output_len": 4, "weight": 0.25}
+    caps = [_row_capture(anchor, [90.0, 10.0]), _row_capture(other, [30.0, 10.0])]
+    caps[0].run["host"] = {"window_us": 220.0, "node_us": 150.0, "plain_us": 200.0, "threads": 4}
+    caps[1].run["host"] = {"window_us": 90.0, "node_us": 60.0, "plain_us": 80.0, "threads": 4}
+    host = rows.merge(caps, [anchor, other]).run["host"]
+    assert (host["plain_us"], host["window_us"], host["node_us"]) == (200.0, 221.25, 150.0)
+    assert host["threads"] == 4 and caps[0].run["host"]["plain_us"] == 200.0
+    caps[1].run["host"]["plain_us"] = None
+    host = rows.merge(caps, [anchor, other]).run["host"]
+    assert host["plain_us"] is None and "row 2" in host["plain_us_why"]
+    assert rows.merge(caps, [anchor, other], given=[0.75, 0.625]).run["host"]["node_us"] == 150.0
+
+
 def test_rows_merge_each_kernels_counters_by_its_scaled_time():
     from xe_forge.frontend import rows
 
@@ -435,6 +454,63 @@ def test_rows_merge_scales_each_kernels_unitrace_time_like_its_counters():
     w = next(w for w in merged.workloads if "gelu" in w.framework_meta["kernels"])
     calib = {"bandwidth_gbs": 1000.0}
     assert analyze._sol_parts(w, calib, analyze.context(merged)) is not None  # fully sampled
+
+
+def test_rows_merged_at_given_scales_move_the_total_with_any_row():
+    """A later measurement merges at the run's scales: a row that got faster moves the total,
+    and two arms of the same work count the same calls."""
+    from xe_forge.frontend import rows
+
+    anchor = {"batch": 8, "input_len": 64, "output_len": 4, "weight": 0.5}
+    other = {"batch": 1, "input_len": 64, "output_len": 4, "weight": 0.5}
+    run = [_row_capture(anchor, [90.0, 10.0]), _row_capture(other, [40.0, 10.0])]
+    k = rows.scales(run, [anchor, other])
+    assert k == [0.5, 1.0]
+    plain = rows.merge(run, [anchor, other])
+    assert (
+        rows.merge(run, [anchor, other], k).run["total_device_us"] == plain.run["total_device_us"]
+    )
+    faster = rows.merge([_row_capture(anchor, [90.0, 10.0]), _row_capture(other, [20.0, 5.0])],
+                        [anchor, other], k)  # fmt: skip
+    assert faster.run["total_device_us"] == 75.0  # 0.5 x 100 + 1.0 x 25
+    assert rows.merge(run, [anchor, other], [0.25, 1.0]).run["total_device_us"] == 75.0
+    assert [o.calls for o in faster.ops] == [o.calls for o in plain.ops]
+
+
+def test_rows_merged_at_given_scales_count_the_same_calls_in_any_op_order():
+    """A parse ranks ops by time, so two captures of the same work list them in different
+    orders; merged at given scales they still count the same calls, to the bit."""
+    import random
+
+    from xe_forge.frontend import ir, rows
+
+    plan = [{"batch": 1, "input_len": n, "output_len": 4, "weight": w}
+            for n, w in ((64, 0.35), (32, 0.4), (16, 0.25))]  # fmt: skip
+
+    def cap(row, seed):
+        ops = [ir.CapturedOp(id=f"op{j}", framework_op="aten::gelu",
+                             args=[ir.TensorArg([row["input_len"], 128 * (j % 3 + 1)], "bfloat16")],
+                             kernel_symbols={"gelu": 1.0 + j}, calls=7 + 13 * j, device_us=1.0 + j)
+               for j in range(12)]  # fmt: skip
+        random.Random(seed).shuffle(ops)
+        rt = {k: row[k] for k in ("batch", "input_len", "output_len")}
+        return ir.CaptureRun(run={"runtime": rt, "total_device_us": 78.0,
+                                  "attributed_device_us": 78.0}, ops=ops)  # fmt: skip
+
+    k = [0.35, 0.4 * 78 / 77.3, 0.25 * 78 / 91.7]
+    a = rows.merge([cap(r, 1) for r in plan], plan, k)
+    b = rows.merge([cap(r, 2) for r in plan], plan, k)
+    assert {w.workload_id: w.calls for w in a.workloads} == {
+        w.workload_id: w.calls for w in b.workloads}  # fmt: skip
+
+
+def test_rows_schedule_alternates_the_arms_and_is_abba_for_one_row():
+    from xe_forge.frontend import rows
+
+    assert [a for _, _, a in rows.schedule(2, 1)] == ["A", "B", "B", "A"]
+    assert list(rows.schedule(1, 2)) == [(1, 0, "A"), (1, 0, "B"), (1, 1, "B"), (1, 1, "A")]
+    assert rows.env({"batch": 2, "input_len": 8, "output_len": 4, "weight": 1}) == {
+        "XF_BATCH": "2", "XF_INPUT_LEN": "8", "XF_OUTPUT_LEN": "4"}  # fmt: skip
 
 
 def test_rows_file_puts_the_largest_row_first_and_refuses_a_bad_one(tmp_path):
@@ -1259,6 +1335,126 @@ def test_patch_check_passes_a_patch_that_generates_the_reference(tmp_path):
     assert (work / "PR.md").read_text() == pr  # a re-check replaces its numbers, never adds more
 
 
+def test_patch_check_reports_the_declared_quantization_without_gating_on_it(tmp_path):
+    # bf16 gaps of the first sequence are far over the tolerance for the quantized run's
+    # tokens too: the stub scores every token file alike. The port passes; the quantized
+    # run is a reported fact.
+    work, repos, fw, ref = _patch_dir(tmp_path, [[1, 2, 3, 4], [5, 6, 7, 8]])
+    (work / "generate.sh").write_text(
+        "if [ -n \"$XE_FORGE_QUANTIZATION\" ]; then echo '[[1, 2, 9, 9], [5, 6, 7, 8]]' "
+        '> "$OUT/tokens.json"; else echo \'[[1, 2, 3, 4], [5, 6, 7, 8]]\' > "$OUT/tokens.json"; fi\n'
+    )
+    code, out = _tool("patch", "check", str(work), "--repos", str(repos), "--framework-python",
+                      str(fw), "--reference-python", str(ref), "--model", "toy", "--batch", "2",
+                      "--input-len", "4", "--min-match", "4", "--quantization", "Q2:uint8")  # fmt: skip
+    assert code == 0, out
+    q = json.loads((work / "check.json").read_text())["quantized"]
+    assert q["quantization"] == "Q2:uint8" and q["tokens"][0] == [1, 2, 9, 9]
+    assert q["worst"] == [0, 0.2] and q["best_share"] == 0.875
+    assert "reported, not gated" in out
+    assert "| Q2:uint8: worst gap per sequence (nat) | [0, 0.2] |" in (work / "PR.md").read_text()
+
+
+def _torch_python() -> str:
+    """An interpreter with torch and safetensors, what a framework's reference has: this one,
+    or $XE_FORGE_TEST_TORCH_PYTHON; the test is skipped without one."""
+    for python in (sys.executable, os.environ.get("XE_FORGE_TEST_TORCH_PYTHON")):
+        if python and subprocess.run([python, "-c", "import torch, safetensors"],
+                                     capture_output=True).returncode == 0:  # fmt: skip
+            return python
+    pytest.skip("no interpreter with torch and safetensors (XE_FORGE_TEST_TORCH_PYTHON)")
+
+
+_TINY = """
+import torch
+from xe_forge.frontend.profile import Vocab
+V, D = 50, 16
+class Tiny(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        g = torch.Generator().manual_seed(0)
+        self.embed = torch.nn.Embedding(V, D)
+        self.head = torch.nn.Linear(D, V, bias=False)
+        with torch.no_grad():
+            self.embed.weight.copy_(torch.randn(V, D, generator=g))
+            self.head.weight.copy_(torch.randn(V, D, generator=g))
+    def get_input_embeddings(self):
+        return self.embed
+    def forward(self, x):
+        return self.head(self.embed(x))
+def vocab():
+    return Vocab(lambda text: [b % V for b in text.encode()], list(range(V)))
+def load(model, dtype, device):
+    return Tiny().to(device, dtype), vocab()
+"""
+
+_TINY_GENERATE = """
+import json, os, sys, torch
+from pathlib import Path
+sys.path.insert(0, os.getcwd())
+from reference import Tiny, vocab
+from xe_forge.frontend import profile
+m, out, mode = Tiny(), Path(os.environ["OUT"]), os.environ.get("MODE", "")
+if os.environ.get("XE_FORGE_QUANTIZATION"):
+    with torch.no_grad():  # the engine's own format: a coarse grid
+        m.head.weight.copy_((m.head.weight * 2).round() / 2)
+    if mode != "no-export":
+        from safetensors.torch import save_file
+        name = "nope.weight" if mode == "wrong-name" else "head.weight"
+        (out / "deq").mkdir()
+        save_file({name: m.head.weight.detach().clone()}, str(out / "deq" / "w.safetensors"))
+        (out / "dequantized.json").write_text(json.dumps({"weights": str(out / "deq")}))
+rows = profile.token_ids(vocab(), int(os.environ["BATCH"]), int(os.environ["INPUT_LEN"]),
+                         os.environ["PROMPT_FILE"])
+got = []
+for p in rows:
+    seq = list(p)
+    for _ in range(int(os.environ["OUTPUT_LEN"])):
+        logits = m(torch.tensor([seq]))[0, -1]
+        pick = int(logits.argmax())
+        if mode == "wrong-tokens" and os.environ.get("XE_FORGE_QUANTIZATION"):
+            pick = int(logits.argmin())
+        seq.append(pick)
+    got.append(seq[len(p):])
+(out / "tokens.json").write_text(json.dumps(got))
+"""
+
+
+@pytest.mark.parametrize("mode, code, says", [
+    ("", 0, "gated on its dequantized weights"),
+    ("wrong-tokens", 1, "tokens fall more than 0.3 nat below the original model holding"),
+    ("no-export", 1, "no $OUT/dequantized.json"),
+    ("wrong-name", 1, "nope.weight: not a tensor of the model"),
+])  # fmt: skip
+def test_patch_check_gates_quantized_tokens_on_the_frameworks_own_dequantized_weights(
+    tmp_path, monkeypatch, mode, code, says
+):
+    """A framework that quantizes the weights itself is judged against the model holding what
+    its quantized weights decode to; how far those are from the checkpoint is reported."""
+    torch_python = _torch_python()
+    work, repos, fw, _ = _patch_dir(tmp_path, [])
+    (work / "reference.py").write_text(_TINY)
+    (work / "generate_tiny.py").write_text(_TINY_GENERATE)
+    (work / "generate.sh").write_text(f'MODE={mode} "$FRAMEWORK_PYTHON" generate_tiny.py\n')
+    meta = json.loads((work / "patch.json").read_text())
+    (work / "patch.json").write_text(
+        json.dumps({**meta, "python": torch_python, "reference": "reference.py"})
+    )
+    monkeypatch.setenv("XE_FORGE_DEVICE", "cpu")
+    got, out = _tool("patch", "check", str(work), "--repos", str(repos), "--framework-python",
+                     str(fw), "--reference-python", torch_python, "--model", "tiny",
+                     "--batch", "2", "--input-len", "4", "--min-match", "4", "--precision",
+                     "float32", "--quantization", "Q1:grid", "--quantized-gate", "dequantized")  # fmt: skip
+    assert got == code and says in out, out
+    if code == 0:
+        q = json.loads((work / "check.json").read_text())["quantized"]
+        assert q["gated"] and q["worst"] == [0, 0] and q["export"]["tensors"] == 1
+        assert 0 < q["export"]["mean_rel_error"] < 1  # the grid's loss, reported
+        assert len(q["against_checkpoint"]["worst"]) == 2  # the same tokens, the checkpoint's
+        pr = (work / "PR.md").read_text()
+        assert "Q1:grid: judged against | the original model holding its dequantized" in pr
+
+
 @pytest.mark.parametrize("spoil, problem", [
     (lambda work, repo: (work / "PR.md").unlink(), "no PR.md"),
     (lambda work, repo: (repo / "model.py").write_text("ARCHS = ['Toy', 'Uncommitted']\n"),
@@ -1360,6 +1556,38 @@ def test_run_establishes_a_patch_then_captures_on_it(tmp_path, monkeypatch):
                     ("capture", "/patched/python"), ("capture", "/patched/python")]  # fmt: skip
     assert json.loads((tmp_path / "stack.json").read_text())["python"] == "/patched/python"
     assert checks[0][-2:] == ("--reference-python", "/ref/python")
+    # what --prove scores the tokens with again
+    saved = json.loads((tmp_path / "patch-1" / "check-args.json").read_text())
+    assert saved == list(checks[0][3:]) and saved[0] == "--repos"
+
+
+@pytest.mark.parametrize("framework, gated", [("native", True), ("fw", False)])
+def test_run_gates_the_quantized_tokens_of_a_framework_that_quantizes_itself(
+    tmp_path, monkeypatch, framework, gated
+):
+    from xe_forge.frontend import cli
+
+    answers = iter([{"unsupported": "model", "what": "Toy", "reason": "none"},
+                    {"notes": "written"}, {"launcher": "launcher/run.sh"}])  # fmt: skip
+    contexts = []
+
+    def agent(step, template, ctx, cwd, answer, python, turns):
+        contexts.append(ctx)
+        if step == "patch":
+            cwd.mkdir(parents=True, exist_ok=True)
+            (cwd / "patch.json").write_text('{"python": "/patched/python"}')
+        return next(answers)
+
+    checks = []
+    monkeypatch.setattr(cli, "_agent", agent)
+    monkeypatch.setattr(cli, "_tool", lambda py, *argv, **env: (argv[0] == "patch"
+                        and checks.append(argv)) or 0)  # fmt: skip
+    a = SimpleNamespace(model="m", framework=framework, workload="text", batch=1, input_len=4,
+                        output_len=2, quantization="q4:uint8")  # fmt: skip
+    assert cli.capture(a, "/fw/python", tmp_path, 5, tmp_path / "repos")[0] == 0
+    assert ("--quantized-gate" in checks[0]) is gated
+    assert ("--steps" in checks[0]) is gated and ("--require-build" in checks[0]) is gated
+    assert bool(contexts[0]["framework_kb"]) is gated  # what the agents are told to read
 
 
 def test_run_stops_on_a_precision_the_device_has_no_kernel_for(tmp_path, monkeypatch):
@@ -1718,6 +1946,33 @@ def test_summary_states_the_declared_precision_and_what_ran(tmp_path):
     assert "Precision" not in collect.collect(tmp_path, {"kernels": []}, []).read_text()
 
 
+def test_the_whole_model_is_put_against_its_roofline(tmp_path):
+    """Each bounded workload's bound summed over all the device time; an unbounded one adds
+    time and no bound, so the efficiency is never overstated."""
+    from xe_forge.frontend import analyze as an
+    from xe_forge.frontend import collect
+
+    def d(wid, us, eff):
+        return an.Decision(wid, True, 0.0, 0.0, calls=2, mean_us=us, eff=eff)
+
+    a = an.Analysis("r", 0.0, [], {"a": d("a", 300.0, 0.5), "b": d("b", 100.0, None)}, {})
+    r = a.roofline()
+    assert r == {"us": 800.0, "of": "device time", "attributed_us": 800.0, "bound_us": 300.0,
+                 "bounded_share": 0.75, "eff": 0.375}  # fmt: skip
+    assert an.roofline_line(r) == ("Model roofline: 0.8 ms (device time) against a bound of "
+                                   "0.3 ms, efficiency 37.5% (75.0% of the op time has a bound).")  # fmt: skip
+    # Launches no op claims are time the model took.
+    assert an.Analysis("r", 1000.0, [], a.decisions, {}).roofline()["eff"] == 0.3
+    # On a host: the wall time with the hook off, what runs between nodes included.
+    host = an.Analysis("r", 800.0, [], a.decisions, {}, wall_us=1200.0).roofline()
+    assert host["eff"] == 0.25 and host["of"] == "wall time, hook off"
+    none = an.Analysis("r", 0.0, [], {"b": d("b", 100.0, None)}, {}).roofline()
+    assert none["eff"] is None and "unknown" in an.roofline_line(none)
+    (tmp_path / "analysis.json").write_text(json.dumps(a.as_dict()))
+    text = collect.collect(tmp_path, {"kernels": []}, []).read_text()
+    assert text.splitlines()[2] == an.roofline_line(r)
+
+
 @pytest.mark.parametrize(
     "speedup, outcome, mergeable",
     [(1.12, "win", True), (1.02, "win", True), (1.01, "parity", False), (None, "parity", False)],
@@ -1850,6 +2105,169 @@ def test_a_patch_that_breaks_the_model_is_found_and_the_rest_still_proved(tmp_pa
     md = (tmp_path / "results" / "SUMMARY.md").read_text()
     assert "| `bad` | r | v | optimize | win (not proven in the model" in md and "| no |" in md
     assert "| `good` | r | v | optimize | win | 1.500x" in md
+
+
+def test_patch_score_scores_another_build_and_leaves_the_check_alone(tmp_path):
+    work, repos, fw, ref = _patch_dir(tmp_path, [[1, 2, 3, 4], [5, 6, 7, 8]])
+    # A build named "short" stops early: two tokens of the four the check scores.
+    (work / "generate.sh").write_text(
+        'case "$FRAMEWORK_PYTHON" in *short*) t="[[1, 2], [5, 6]]";; '
+        '*) t="[[1, 2, 3, 4], [5, 6, 7, 8]]";; esac\necho "$t" > "$OUT/tokens.json"\n'
+    )
+    argv = ["--repos", str(repos), "--framework-python", str(fw), "--reference-python", str(ref),
+            "--model", "toy", "--batch", "2", "--input-len", "4", "--min-match", "4"]  # fmt: skip
+    out = tmp_path / "b.json"
+    for name in ("b-python", "b-short-python"):
+        (tmp_path / name).symlink_to(sys.executable)
+    good, short = str(tmp_path / "b-python"), str(tmp_path / "b-short-python")
+    code, said = _tool("patch", "score", str(work), *argv, "--python", good, "--out", str(out))
+    assert code == 0 and "patch score: PASS" in said, said
+    rec = json.loads(out.read_text())
+    assert rec["worst"] == [0, 0.2] and rec["package_file"].endswith("json/__init__.py")
+    assert not (work / "check.json").exists()  # the check's own record is not touched
+    code, said = _tool("patch", "score", str(work), *argv, "--python", short, "--out", str(out))
+    assert code == 1 and "patch score: FAIL tokens fall" in said, said
+    assert json.loads(out.read_text())["pass"] is False
+    # A script that names its own interpreter cannot score another build: nothing is judged.
+    (work / "generate.sh").write_text(f"{sys.executable} -c 'print(1)' > \"$OUT/tokens.json\"\n")
+    code, said = _tool("patch", "score", str(work), *argv, "--python", good, "--out", str(out))
+    assert code == 2 and "does not run under $FRAMEWORK_PYTHON" in said, said
+    assert json.loads(out.read_text())["unscored"] is True
+
+
+def _one_winner(tmp_path):
+    res = tmp_path / "results" / "k__v"
+    (res / "output").mkdir(parents=True)
+    (res / "output" / "upstream.patch").write_text("diff\n")
+    (tmp_path / "results" / "summary.json").write_text(json.dumps([
+        {"kernel": "k", "variant": "v", "outcome": "win", "speedup": 1.5, "result": str(res),
+         "patches": ["output/upstream.patch"]}]))  # fmt: skip
+    (tmp_path / "launcher").mkdir()
+    (tmp_path / "launcher" / "run.sh").write_text("#!/bin/bash\n")
+    work = tmp_path / "patch-1"
+    work.mkdir()
+    (work / "check-args.json").write_text(json.dumps(["--model", "m", "--batch", "1"]))
+    (tmp_path / "stack.json").write_text(json.dumps({"python": "/p", "patches": [str(work)]}))
+    return work
+
+
+def _prove_with_scores(tmp_path, monkeypatch, scores, repeat=2, check=None):
+    """prove on one winner over a patched framework; ``scores[arm]``: the record ``patch
+    score`` writes for that arm, with its exit, or None for none written; ``check``: the
+    patch's check.json."""
+    from xe_forge.frontend import agent, cli, compare, prove
+
+    work = _one_winner(tmp_path)
+    if check is not None:
+        (work / "check.json").write_text(json.dumps(check))
+    b = str(_exe(tmp_path / "b-python", "#!/bin/bash\n"))
+    monkeypatch.setattr(agent, "run", lambda *a: {"A": sys.executable, "B": b})
+    calls, order = [], []
+
+    def tool(python, *argv, problems=None, **env):
+        arm = "B" if argv[argv.index("--python") + 1] == b else "A"
+        calls.append((python, arm, argv))
+        rec = scores.get(arm)
+        if rec is None:
+            return 1
+        Path(argv[argv.index("--out") + 1]).write_text(json.dumps(rec))
+        if not rec.get("pass"):
+            problems.append("tokens fall more than 0.3 nat")
+        return rec.get("exit", 0 if rec.get("pass") else 1)
+
+    def recapture(run_dir, out, python):
+        order.append("A" if python == sys.executable else "B")
+        out.mkdir(parents=True)
+        (out / "capture.json").write_text("{}")
+        return 0
+
+    monkeypatch.setattr(cli, "_tool", tool)
+    t = {"speedup": 1.2, "spread_a": 0.01, "spread_b": 0.01, "us_a": 120, "us_b": 100}
+    monkeypatch.setattr(compare, "compare", lambda a, b: [t])
+    monkeypatch.setattr(compare, "write", lambda table, d: d / "compare.md")
+    got = prove.prove(tmp_path, recapture, sys.executable, repeat, 5)
+    row = json.loads((tmp_path / "results" / "summary.json").read_text())[0]
+    return got, calls, order, row, work
+
+
+def test_prove_scores_the_patched_frameworks_tokens_on_arm_b(tmp_path, monkeypatch):
+    """A winning kernel on a patched framework is proved on its tokens as well as its time."""
+    got, calls, order, row, work = _prove_with_scores(
+        tmp_path, monkeypatch, {"B": {"pass": True, "worst": [0.1]}}
+    )
+    python, arm, argv = calls[0]
+    assert python == sys.executable and arm == "B" and len(calls) == 1
+    assert argv[:3] == ("patch", "score", str(work))
+    assert argv[3:7] == ("--model", "m", "--batch", "1")  # the check's own arguments
+    assert "x1.2" in got and "tokens on arm B pass their check again" in got, got
+    assert order == ["A", "B", "B", "A"]  # ABBA
+    assert row["outcome"] == "win"
+
+
+def test_prove_fails_the_patches_whose_tokens_fail_where_the_base_passes(tmp_path, monkeypatch):
+    got, calls, order, row, _ = _prove_with_scores(
+        tmp_path, monkeypatch, {"B": {"pass": False}, "A": {"pass": True}}
+    )
+    assert [c[1] for c in calls] == ["B", "A"] and not order  # nothing timed
+    assert "FAIL" in got and "with the patches the output fails" in got, got
+    assert "not proven in the model" in row["outcome"] and not row["mergeable"]
+
+
+def test_prove_never_blames_the_patches_for_a_base_that_fails_too(tmp_path, monkeypatch):
+    scores = {"B": {"pass": False}, "A": {"pass": False}}
+    got, _, order, row, _ = _prove_with_scores(tmp_path, monkeypatch, scores)
+    assert "arm A fails the output check as well" in got and not order, got
+    assert row["outcome"] == "win"  # not marked
+
+
+@pytest.mark.parametrize("a", [None, {"pass": False, "unscored": True, "exit": 2},
+                               {"pass": False, "exit": 3}])  # fmt: skip
+def test_a_base_that_cannot_be_judged_leaves_the_patches_failure_standing(tmp_path, monkeypatch, a):
+    got, _, order, row, _ = _prove_with_scores(
+        tmp_path, monkeypatch, {"B": {"pass": False}, "A": a}
+    )
+    assert "FAIL" in got and "arm A, without them, could not be judged" in got and not order, got
+    assert "arm A fails the output check as well" not in got
+    assert not row["mergeable"]
+
+
+@pytest.mark.parametrize("scores, says", [
+    ({"B": None}, "patch score wrote no record"),  # the tool died before judging
+    ({"B": {"pass": False, "unscored": True, "exit": 2}}, "not scored again on arm B"),
+])  # fmt: skip
+def test_prove_times_the_patches_when_their_output_could_not_be_judged(tmp_path, monkeypatch,
+                                                                     scores, says):  # fmt: skip
+    got, calls, order, row, _ = _prove_with_scores(tmp_path, monkeypatch, scores)
+    assert says in got and "x1.2" in got and len(calls) == 1, got
+    assert order and row["outcome"] == "win"
+
+
+def test_prove_reports_the_quantized_tokens_beside_the_checks(tmp_path, monkeypatch):
+    q = {"quantization": "Q2:uint8", "worst": [0.9]}
+    scores = {"B": {"pass": True, "worst": [0.1], "quantized": q}}
+    check = {"quantized": {"worst": [0.4]}}
+    got, *_ = _prove_with_scores(tmp_path, monkeypatch, scores, check=check)
+    assert "Q2:uint8 (reported, not gated): worst [0.9] nat, the check's [0.4]" in got, got
+
+
+def test_prove_says_when_a_patched_frameworks_tokens_were_not_scored_again(tmp_path, monkeypatch):
+    from xe_forge.frontend import agent, compare, prove
+
+    work = _one_winner(tmp_path)
+    (work / "check-args.json").unlink()
+    b = str(_exe(tmp_path / "b-python", "#!/bin/bash\n"))
+    monkeypatch.setattr(agent, "run", lambda *a: {"A": sys.executable, "B": b})
+
+    def recapture(run_dir, out, python):
+        out.mkdir(parents=True)
+        (out / "capture.json").write_text("{}")
+        return 0
+
+    t = {"speedup": 1.2, "spread_a": 0.01, "spread_b": 0.01, "us_a": 120, "us_b": 100}
+    monkeypatch.setattr(compare, "compare", lambda a, b: [t])
+    monkeypatch.setattr(compare, "write", lambda table, d: d / "compare.md")
+    got = prove.prove(tmp_path, recapture, sys.executable, 1, 5)
+    assert "x1.2" in got and "output not scored again" in got, got
 
 
 # ── fuse ────────────────────────────────────────────────────────────────────
@@ -2352,6 +2770,52 @@ def test_a_cost_is_not_refuted_by_another_dtypes_peak():
     # flops / the float32 peak is 100 us > 60 us measured; bfloat16 has no peak of its own
     assert naming.refuted(names, shapes("bfloat16"), calib, 0.05) == []
     assert naming.refuted(names, shapes("float32"), calib, 0.05)
+
+
+def _cost_workload(cost):
+    from xe_forge.frontend.ir import Naming, Workload
+
+    return Workload(workload_id="c", family="other", dims={}, dtypes=["float32", "uint8"],
+                    layout=[], attrs={"cost": cost}, var_axes={}, calls=1, device_us=100.0,
+                    share=1.0, ops=[], naming=Naming("kernel"))  # fmt: skip
+
+
+def test_a_cost_bound_uses_its_declared_compute_dtype():
+    calib = {"bandwidth_gbs": 1000.0, "matmul_tflops": {"float32": 1.0, "int8": 10.0}}
+    cost = {"bytes": "1000", "flops": "10000000"}  # 10 us at the float32 peak, 1 at int8's
+    _, as_float = analyze.cost_bound(_cost_workload(cost), calib, {})
+    _, as_int8 = analyze.cost_bound(_cost_workload({**cost, "compute": "int8"}), calib, {})
+    assert as_float == pytest.approx(0.1) and as_int8 == pytest.approx(0.01)
+
+
+def test_a_declared_compute_dtype_without_a_peak_is_noted_unpeaked():
+    ctx = {}
+    w = _cost_workload({"bytes": "1000", "flops": "1000", "compute": "int8"})
+    assert analyze.cost_bound(w, {"bandwidth_gbs": 1.0, "matmul_tflops": {"float32": 1.0}}, ctx)
+    assert ctx["unpeaked"] == {"int8"}
+
+
+def test_a_declared_compute_dtype_is_calibrated_and_refutes_with_its_peak():
+    from xe_forge.frontend import naming
+    from xe_forge.frontend.ir import CaptureRun
+
+    w = _cost_workload({"bytes": "1", "flops": "1", "compute": "int8"})
+    assert "int8" in analyze.peak_dtypes(CaptureRun(run={}, ops=[], workloads=[w]))
+    calib = {"bandwidth_gbs": 1000.0, "matmul_tflops": {"float32": 10.0, "int8": 100.0}}
+    names = {"ops": {"K": {"cost": {"bytes": "1000000", "flops": "1000000000",
+                                    "compute": "int8"}}}}  # fmt: skip
+    shapes = {"K": {"shapes": [{"us_per_call": 60.0, "dims": {}, "dtype": "float32"}]}}
+    assert naming.refuted(names, shapes, calib, 0.05) == []  # 10 us at int8's peak, not 100
+
+
+def test_an_unknown_compute_dtype_is_a_naming_problem(tmp_path):
+    from xe_forge.frontend import naming
+
+    names = {"ops": {"K": {"route": "aten", "cost": {"bytes": "1", "compute": "nope"}}}}
+    problems = naming.validate(names, {"K": {"dims": {}}}, tmp_path)
+    assert any("cost.compute" in p for p in problems)
+    kept, _ = naming.keep_valid(names, {"K": {"dims": {}}}, tmp_path)
+    assert kept["ops"]["K"] == {"route": "aten"}  # the cost goes, the naming stays
 
 
 @pytest.mark.parametrize("route", ["library", "kernel"])
@@ -3268,3 +3732,130 @@ def test_a_calibration_of_another_device_than_the_capture_is_noted():
     note = other_device(calib, {"device": {"type": "gpu", "name": "card-b"}})
     assert "xpu card-a" in note and "gpu card-b" in note
     assert other_device(calib, {"device": {"type": "gpu", "name": "card-a"}}) is None
+
+
+def test_a_compute_dtype_without_a_matmul_to_measure_is_a_naming_problem(tmp_path):
+    from xe_forge.frontend import naming
+
+    names = {"ops": {"K": {"route": "aten", "cost": {"bytes": "1", "compute": "uint8"}}}}
+    problems = naming.validate(names, {"K": {"dims": {}}}, tmp_path)
+    assert any("no matmul the calibration can measure" in p for p in problems)
+
+
+def test_the_declared_compute_dtypes_are_those_of_costs_with_flops():
+    from xe_forge.frontend import naming
+
+    names = {"ops": {
+        "A": {"cost": {"bytes": "1", "flops": "1", "compute": "int8"}},
+        "B": {"cost": {"bytes": "1", "compute": "float8_e4m3fn"}},  # no flops: no peak read
+        "C": {"kernels": {"k": {"cost": {"bytes": "1", "flops": "1", "compute": "bf16"}}}},
+    }}  # fmt: skip
+    assert naming.cost_dtypes(names) == {"int8", "bfloat16"}
+
+
+def test_calibration_measures_the_declared_compute_dtypes_too(tmp_path, monkeypatch):
+    import xe_forge.frontend.cli as fcli
+
+    path, cap = _calib_cap(tmp_path)
+    asked = []
+
+    def call(cmd, env, timeout):
+        asked.append(sorted(cmd[cmd.index("--dtypes") + 1 :]))
+        out = Path(cmd[cmd.index("-o") + 1])
+        out.write_text(json.dumps({"matmul_tflops": dict.fromkeys(asked[-1], 50.0)}))
+        return 0
+
+    monkeypatch.setattr(fcli.subprocess, "call", call)
+    fcli.calibrate_missing(path, cap, tmp_path / "run", also={"int8", "uint8"})
+    assert asked == [["bfloat16", "float16", "int8"]]  # uint8 has no matmul to measure
+
+
+def test_naming_checks_a_declared_compute_cost_at_the_peak_it_measures(tmp_path, monkeypatch):
+    from xe_forge.frontend import cli
+    from xe_forge.frontend.ir import CapturedOp, CaptureRun, TensorArg
+
+    calib = tmp_path / "calibration.json"
+    calib.write_text(json.dumps({"bandwidth_gbs": 1000.0, "matmul_tflops": {"float32": 10.0}}))
+    op = CapturedOp(id="o", framework_op="K", args=[TensorArg([4, 4], "float32")], calls=1,
+                    device_us=60.0, kernel_symbols={"k": 60.0})  # fmt: skip
+    cap = CaptureRun(run={}, ops=[op])
+    cost = {"bytes": "1000000", "flops": "1000000000", "compute": "int8"}  # 100 us at float32's
+    monkeypatch.setattr(
+        cli, "_agent", lambda *a, **k: {"ops": {"K": {"route": "aten", "cost": dict(cost)}}}
+    )
+
+    def measure_peaks(dtypes):
+        assert dtypes == {"int8"}
+        calib.write_text(
+            json.dumps({"bandwidth_gbs": 1000.0, "matmul_tflops": {"float32": 10.0, "int8": 100.0}})
+        )
+        return calib
+
+    got = cli.name(tmp_path / "capture.json", tmp_path, "py", 5, tmp_path, 1.0, calib, cap=cap,
+                   measure_peaks=measure_peaks)  # fmt: skip
+    assert json.loads(got.read_text())["ops"]["K"]["cost"] == cost  # 10 us at int8's: kept
+
+
+def _prove_rows(tmp_path, monkeypatch, crash=False):
+    from xe_forge.frontend import agent, cli, compare, ir, prove, rows
+
+    _one_winner(tmp_path)
+    b = str(_exe(tmp_path / "b-python", "#!/bin/bash\n"))
+    monkeypatch.setattr(agent, "run", lambda *a: {"A": sys.executable, "B": b})
+
+    def tool(python, *argv, problems=None, **env):  # patch score: the tokens pass
+        Path(argv[argv.index("--out") + 1]).write_text(json.dumps({"pass": True, "worst": [0.0]}))
+        return 0
+
+    monkeypatch.setattr(cli, "_tool", tool)
+    anchor = {"batch": 1, "input_len": 512, "output_len": 32, "weight": 0.5}
+    other = {"batch": 1, "input_len": 4096, "output_len": 32, "weight": 0.5}
+    run = [_row_capture(anchor, [90.0, 10.0]), _row_capture(other, [300.0, 10.0])]
+    ir.dump(run[0], tmp_path / "capture.json")
+    ir.dump(run[1], tmp_path / "rows" / "02" / "capture.json")
+    ir.dump(rows.merge(run, [anchor, other]), tmp_path / "rows" / "capture.json")
+    order = []
+
+    def recapture(run_dir, out, python, *row):
+        arm = "A" if python == sys.executable else "B"
+        order.append((arm, f"{out.parent.name}/{out.name}", row))
+        if crash and arm == "B" and row:
+            return 1
+        at = row[0] if row else anchor
+        us = [90.0, 10.0] if at is anchor else [300.0, 10.0] if arm == "A" else [150.0, 10.0]
+        ir.dump(_row_capture(at, us), out / "capture.json")
+        return 0
+
+    totals = []
+
+    def comp(a, b):
+        ua, ub = (ir.load(p[0]).run["total_device_us"] for p in (a, b))
+        totals.append((ua, ub))
+        return [{"workload_id": "TOTAL", "us_a": ua, "us_b": ub, "speedup": round(ua / ub, 4),
+                 "spread_a": 0.0, "spread_b": 0.0}]  # fmt: skip
+
+    monkeypatch.setattr(compare, "compare", comp)
+    monkeypatch.setattr(compare, "write", lambda table, d: d / "compare.md")
+    got = prove.prove(tmp_path, recapture, sys.executable, 2, 5)
+    return got, order, totals, other
+
+
+def test_prove_times_every_row_on_both_arms_at_the_runs_scales(tmp_path, monkeypatch):
+    """Each arm runs every row in each repeat, the other rows at their sizes, merged at the
+    run's own scales: an arm faster at one row only is faster in the merged total."""
+    got, order, totals, other = _prove_rows(tmp_path, monkeypatch)
+    assert order == [
+        ("A", "A-r1/row01", ()), ("B", "B-r1/row01", ()),
+        ("B", "B-r1/row02", (other,)), ("A", "A-r1/row02", (other,)),
+        ("B", "B-r2/row01", ()), ("A", "A-r2/row01", ()),
+        ("A", "A-r2/row02", (other,)), ("B", "B-r2/row02", (other,)),
+    ]  # fmt: skip
+    k = 0.5 * 100.0 / 310.0  # the run's scale of row 2
+    assert totals[0] == (100.0, round(50.0 + k * 160.0, 1))  # merged arms, then each row's
+    assert totals[1:] == [(100.0, 100.0), (310.0, 160.0)] and "row 2 (batch 1, 4096 in" in got
+
+
+def test_prove_blames_the_patches_at_a_row_only_once_the_base_ran_it(tmp_path, monkeypatch):
+    got, order, _, other = _prove_rows(tmp_path, monkeypatch, crash=True)
+    assert order[-3:] == [("B", "B-r1/row02", (other,))] * 2 + [("A", "A-r1/row02", (other,))]
+    assert "FAIL: with the patches the model does not run where the base does" in got, got

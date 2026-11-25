@@ -55,8 +55,8 @@ class CUDADeviceInfo(DeviceInfo):
     recommended_tile_k: int = 32
 
 
-def query_cuda_via_torch() -> CUDADeviceInfo | None:
-    """Query CUDA device info using PyTorch."""
+def query_cuda_via_torch(device_id: int | None = None) -> CUDADeviceInfo | None:
+    """Query CUDA device info using PyTorch: device ``device_id``, else the current one."""
     try:
         import torch
 
@@ -69,7 +69,7 @@ def query_cuda_via_torch() -> CUDADeviceInfo | None:
             return None
 
         info = CUDADeviceInfo()
-        info.device_id = torch.cuda.current_device()
+        info.device_id = torch.cuda.current_device() if device_id is None else device_id
         info.name = torch.cuda.get_device_name(info.device_id)
 
         props = torch.cuda.get_device_properties(info.device_id)
@@ -137,6 +137,13 @@ def _set_cuda_recommendations(info: CUDADeviceInfo) -> CUDADeviceInfo:
     return info
 
 
+def _kind_and_index(device: str, device_id: int) -> tuple[str, int]:
+    """("xpu", 1) of "xpu:1"; a name without an index keeps ``device_id``."""
+    from xe_forge.config import device_index, device_kind
+
+    return device_kind(device), device_index(device, device_id)
+
+
 def query_device(device_type: str, device_id: int = 0) -> DeviceInfo:
     """Query device info, dispatching to the appropriate backend.
 
@@ -147,8 +154,9 @@ def query_device(device_type: str, device_id: int = 0) -> DeviceInfo:
     Returns:
         DeviceInfo (or a subclass) with hardware details and recommendations.
     """
+    device_type, device_id = _kind_and_index(device_type, device_id)
     if device_type == "cuda":
-        result = query_cuda_via_torch()
+        result = query_cuda_via_torch(device_id)
         if result:
             return result
         logger.warning("CUDA query failed, using defaults")
@@ -179,6 +187,7 @@ def get_device_config_for_pipeline(
 
     Dispatches to XPU or CUDA-specific logic based on device_type.
     """
+    device_type, device_id = _kind_and_index(device_type, device_id)
     if device_type == "xpu":
         from xe_forge.core.xpu_query import get_xpu_config_for_pipeline
 
@@ -218,7 +227,7 @@ def _get_cuda_config_for_pipeline(
     """Get CUDA configuration for the optimization pipeline."""
     from xe_forge.core.xpu_query import extract_mnk_from_shapes
 
-    info = query_cuda_via_torch()
+    info = query_cuda_via_torch(device_id)
     if info is None:
         info = CUDADeviceInfo()
 
@@ -259,6 +268,7 @@ def format_device_config_for_llm(device_config: dict[str, Any], device_type: str
 
     Dispatches to device-specific formatting.
     """
+    device_type, _ = _kind_and_index(device_type, 0)
     if device_type == "xpu":
         from xe_forge.core.xpu_query import format_xpu_config_for_llm
 

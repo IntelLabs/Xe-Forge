@@ -19,6 +19,7 @@ _DSL_NAMES: dict[str, str] = {
     "sycl": "SYCL/Sycl-tla",
     "cuda": "CUDA C++",
     "opencl": "OpenCL C",
+    "cpp": "C++ (torch extension)",
 }
 
 
@@ -27,7 +28,9 @@ class PromptLibrary:
 
     def __init__(self, dsl: str = "triton", device_type: str = "xpu"):
         self.dsl = dsl
-        self.device_type = device_type
+        from xe_forge.config import device_kind
+
+        self.device_type = device_kind(device_type)  # the prompts are per type, not per device
 
     def device_description(self) -> str:
         return _DEVICE_DESCRIPTIONS.get(self.device_type, self.device_type.upper())
@@ -112,6 +115,10 @@ class PromptLibrary:
         if self.dsl == "opencl":
             return [
                 "Must be a Python file holding the OpenCL C source and its launch",
+            ]
+        if self.dsl == "cpp":
+            return [
+                "Must be a Python file holding the C++ source, built with load_inline",
             ]
         return []
 

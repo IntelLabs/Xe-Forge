@@ -19,12 +19,13 @@
   <!-- Frameworks -->
   <rect class="band" x="12" y="46" width="976" height="64" rx="8"/>
   <text class="l" x="24" y="74">Frameworks</text><text class="ls" x="24" y="92">xe-forge run</text>
-  <rect class="ok"   x="200" y="58" width="120" height="40" rx="5"/><text class="t" x="260" y="76">vLLM</text><text class="s" x="260" y="91">text</text>
-  <rect class="ok"   x="330" y="58" width="120" height="40" rx="5"/><text class="t" x="390" y="76">SGLang</text><text class="s" x="390" y="91">text</text>
-  <rect class="ok"   x="460" y="58" width="120" height="40" rx="5"/><text class="t" x="520" y="76">llama.cpp</text><text class="s" x="520" y="91">text</text>
-  <rect class="ok"   x="590" y="58" width="120" height="40" rx="5"/><text class="t" x="650" y="76">OpenVINO</text><text class="s" x="650" y="91">text</text>
-  <rect class="ok"   x="720" y="58" width="120" height="40" rx="5"/><text class="t" x="780" y="76">vLLM-Omni</text><text class="s" x="780" y="91">vision</text>
-  <rect class="part" x="850" y="58" width="120" height="40" rx="5"/><text class="t" x="910" y="76">RLDX-1</text><text class="s" x="910" y="91">action</text>
+  <rect class="ok" x="200" y="58" width="104" height="40" rx="5"/><text class="t" x="252" y="76">vLLM</text><text class="s" x="252" y="91">text</text>
+  <rect class="ok" x="311" y="58" width="104" height="40" rx="5"/><text class="t" x="363" y="76">SGLang</text><text class="s" x="363" y="91">text</text>
+  <rect class="ok" x="422" y="58" width="104" height="40" rx="5"/><text class="t" x="474" y="76">llama.cpp</text><text class="s" x="474" y="91">text</text>
+  <rect class="ok" x="533" y="58" width="104" height="40" rx="5"/><text class="t" x="585" y="76">OpenVINO</text><text class="s" x="585" y="91">text</text>
+  <rect class="ok" x="644" y="58" width="104" height="40" rx="5"/><text class="t" x="696" y="76">vLLM-Omni</text><text class="s" x="696" y="91">vision</text>
+  <rect class="part" x="755" y="58" width="104" height="40" rx="5"/><text class="t" x="807" y="76">RLDX-1</text><text class="s" x="807" y="91">action</text>
+  <rect class="ok" x="866" y="58" width="104" height="40" rx="5"/><text class="t" x="918" y="76">native</text><text class="s" x="918" y="91">text</text>
 
   <!-- Engines -->
   <rect class="band" x="12" y="120" width="976" height="64" rx="8"/>
@@ -37,20 +38,22 @@
   <!-- Kernel languages -->
   <rect class="band" x="12" y="194" width="976" height="64" rx="8"/>
   <text class="l" x="24" y="222">Kernel languages</text><text class="ls" x="24" y="240">--dsl, or the call route</text>
-  <rect class="ok" x="200" y="206" width="120" height="40" rx="5"/><text class="t" x="260" y="231">Triton</text>
-  <rect class="ok" x="330" y="206" width="120" height="40" rx="5"/><text class="t" x="390" y="231">Gluon</text>
-  <rect class="ok" x="460" y="206" width="120" height="40" rx="5"/><text class="t" x="520" y="231">SYCL</text>
-  <rect class="ok" x="590" y="206" width="120" height="40" rx="5"/><text class="t" x="650" y="231">CUDA</text>
-  <rect class="ok" x="720" y="206" width="120" height="40" rx="5"/><text class="t" x="780" y="231">OpenCL</text>
-  <rect class="ok" x="850" y="206" width="120" height="40" rx="5"/><text class="t" x="910" y="224">library calls</text><text class="s" x="910" y="239">the call route</text>
+  <rect class="ok" x="200" y="206" width="104" height="40" rx="5"/><text class="t" x="252" y="231">Triton</text>
+  <rect class="ok" x="311" y="206" width="104" height="40" rx="5"/><text class="t" x="363" y="231">Gluon</text>
+  <rect class="ok" x="422" y="206" width="104" height="40" rx="5"/><text class="t" x="474" y="231">SYCL</text>
+  <rect class="ok" x="533" y="206" width="104" height="40" rx="5"/><text class="t" x="585" y="231">CUDA</text>
+  <rect class="ok" x="644" y="206" width="104" height="40" rx="5"/><text class="t" x="696" y="231">OpenCL</text>
+  <rect class="ok" x="755" y="206" width="104" height="40" rx="5"/><text class="t" x="807" y="224">C++</text><text class="s" x="807" y="239">host</text>
+  <rect class="ok" x="866" y="206" width="104" height="40" rx="5"/><text class="t" x="918" y="224">library calls</text><text class="s" x="918" y="239">the call route</text>
 
   <!-- Measurement -->
   <rect class="band" x="12" y="268" width="976" height="64" rx="8"/>
   <text class="l" x="24" y="296">Measurement</text><text class="ls" x="24" y="314">code, not agents</text>
-  <rect class="ok" x="200" y="280" width="185" height="40" rx="5"/><text class="t" x="292" y="298">benchmark</text><text class="s" x="292" y="313">correct, then timed</text>
-  <rect class="ok" x="395" y="280" width="185" height="40" rx="5"/><text class="t" x="487" y="298">unitrace</text><text class="s" x="487" y="313">kernels, counters, stalls</text>
-  <rect class="ok" x="590" y="280" width="185" height="40" rx="5"/><text class="t" x="682" y="298">VTune</text><text class="s" x="682" y="313">counters</text>
-  <rect class="ok" x="785" y="280" width="185" height="40" rx="5"/><text class="t" x="877" y="298">torch profiler</text><text class="s" x="877" y="313">ops and their kernels</text>
+  <rect class="ok" x="200" y="280" width="146" height="40" rx="5"/><text class="t" x="273" y="298">benchmark</text><text class="s" x="273" y="313">correct, then timed</text>
+  <rect class="ok" x="356" y="280" width="146" height="40" rx="5"/><text class="t" x="429" y="298">unitrace</text><text class="s" x="429" y="313">kernels, counters</text>
+  <rect class="ok" x="512" y="280" width="146" height="40" rx="5"/><text class="t" x="585" y="298">VTune</text><text class="s" x="585" y="313">counters</text>
+  <rect class="ok" x="668" y="280" width="146" height="40" rx="5"/><text class="t" x="741" y="298">perf</text><text class="s" x="741" y="313">host samples</text>
+  <rect class="ok" x="824" y="280" width="146" height="40" rx="5"/><text class="t" x="897" y="298">torch profiler</text><text class="s" x="897" y="313">ops, kernels</text>
 
   <!-- Devices -->
   <rect class="band" x="12" y="342" width="976" height="104" rx="8"/>
@@ -63,9 +66,10 @@
   <text class="t" x="487" y="376">NVIDIA GPU (cuda)</text>
   <text class="s" x="487" y="396">Triton, CUDA</text>
   <text class="s" x="487" y="414">kernels; no xe-forge run</text>
-  <rect class="plan" x="590" y="354" width="185" height="80" rx="5"/>
+  <rect class="ok"   x="590" y="354" width="185" height="80" rx="5"/>
   <text class="t" x="682" y="376">CPU</text>
-  <text class="s" x="682" y="396">planned</text>
+  <text class="s" x="682" y="396">C++, SYCL</text>
+  <text class="s" x="682" y="414">kernels and xe-forge run</text>
   <rect class="plan" x="785" y="354" width="185" height="80" rx="5"/>
   <text class="t" x="877" y="376">NPU</text>
   <text class="s" x="877" y="396">planned</text>

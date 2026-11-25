@@ -1,6 +1,6 @@
 Optimize `$ARGUMENTS` into a {{ dsl | upper }} kernel.
 
-Resolve the argument to a file in `test_kernels/` — it could be a full filename, partial
+Resolve the argument to a {% if repo_trials | default(false) %}baseline directory{% else %}file{% endif %} in `test_kernels/` — it could be a full filename, partial
 name, or just a number. Glob to find the match; if ambiguous, pick the closest and say which
 you picked. Nobody is watching this session, so never stop to ask.
 
@@ -27,8 +27,9 @@ unitrace_enabled, vtune_enabled). Follow the CLAUDE.md workflow exactly — ever
    Then dispatch the `kernel-locator` agent **once** and read the
    `{{ kernel_locator_profile_path }}` it writes. This kernel already exists in
    `{{ kernel_repo }}`; the profile says how it is registered, built, tested and
-   benchmarked today. If no benchmark exists, write one yourself first, following the
-   sibling pattern the profile points at, before starting the trial loop.
+   benchmarked today.{% if repo_trials | default(false) %} `benchmark` builds a trial into the engine and times its
+   kernel there: write no benchmark of your own.{% else %} If no benchmark exists, write one yourself first, following the
+   sibling pattern the profile points at, before starting the trial loop.{% endif %}
 {%- endif %}
 {%- if lessons %}
    Read every `*.md` under `{{ lessons.dir }}` too — what earlier runs measured on this
@@ -38,7 +39,7 @@ unitrace_enabled, vtune_enabled). Follow the CLAUDE.md workflow exactly — ever
 3. Read relevant `knowledge_base/` files. Ignore their `expected_speedup` fields; `benchmark`
    on this part is what settles whether a pattern is worth anything.
 4. Complete the baseline correctness gate in CLAUDE.md Step 2 before initializing:
-   `xe-forge-skill trial init <kernel_name> <baseline_file>{% if require_profiles %} --require-profiles ComputeBasic EuStallSampling{% endif %}`.
+   `xe-forge-skill trial init <kernel_name> <baseline_file>{% if require_profiles %} --require-profiles {{ required_groups }}{% endif %}`.
 5. Run trials. For EACH trial you MUST:
    - Validate with `xe-forge-skill validate --dsl {{ dsl }}`
    - Save with `xe-forge-skill trial save`

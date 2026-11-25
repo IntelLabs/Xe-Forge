@@ -14,7 +14,7 @@ from xe_forge.frontend import formula
 from xe_forge.frontend.calibrate import peak_of
 from xe_forge.frontend.calibrate import peaks as calib_peaks
 from xe_forge.frontend.canonical import resolve_dims
-from xe_forge.frontend.dtypes import storage_bytes
+from xe_forge.frontend.dtypes import cost_compute, storage_bytes
 from xe_forge.frontend.ir import CaptureRun, Naming, Workload
 from xe_forge.models import DSL
 
@@ -62,6 +62,7 @@ class Analysis:
     entries: list[Entry]
     decisions: dict[str, Decision]
     options: dict
+    wall_us: float | None = None  # a host's workload wall time, its per-node hook off
 
     def as_dict(self) -> dict:
         return {
@@ -82,7 +83,38 @@ class Analysis:
                 for e in self.entries
             ],
             "decisions": {k: asdict(v) for k, v in self.decisions.items()},
+            "roofline": self.roofline(),
         }
+
+    def roofline(self) -> dict:
+        """The whole model against its roofline: the bound of every workload that has one,
+        summed, over the time the model took -- on a host the workload's wall time with the
+        per-node hook off, which holds what runs between nodes too (barriers, dispatch); else
+        all the device time, unattributed launches included. A workload with no bound adds
+        time and no bound, so the efficiency is never overstated; ``bounded_share`` says how
+        much of the attributed time is bounded at all."""
+        attributed = sum(d.mean_us * d.calls for d in self.decisions.values())
+        known = [d for d in self.decisions.values() if d.eff is not None]
+        bounded = sum(d.mean_us * d.calls for d in known)
+        bound = sum(d.mean_us * d.calls * d.eff for d in known)
+        took = self.wall_us or max(self.total_device_us or 0.0, attributed)
+        return {
+            "us": round(took, 1),
+            "of": "wall time, hook off" if self.wall_us else "device time",
+            "attributed_us": round(attributed, 1),
+            "bound_us": round(bound, 1) if known else None,
+            "bounded_share": round(bounded / attributed, 4) if attributed else None,
+            "eff": round(bound / took, 4) if known and took else None,
+        }
+
+
+def roofline_line(r: dict) -> str:
+    """One line of ``Analysis.roofline()``, for the run's output and SUMMARY.md."""
+    if r.get("eff") is None:
+        return "Model roofline: unknown (no workload has a bound)."
+    return (f"Model roofline: {r['us'] / 1e3:.1f} ms ({r['of']}) against a bound of "
+            f"{r['bound_us'] / 1e3:.1f} ms, efficiency {r['eff']:.1%} "
+            f"({r['bounded_share']:.1%} of the op time has a bound).")  # fmt: skip
 
 
 AT_ROOFLINE = 0.8
@@ -168,7 +200,8 @@ def cost_bound(
     bw, peaks = calib_peaks(calib)
     if not bw or "bytes" not in cost:
         return None
-    dtype = next((d for d in w.dtypes if d.startswith(("bfloat", "float"))), None)
+    float_dtype = next((d for d in w.dtypes if d.startswith(("bfloat", "float"))), None)
+    dtype = cost_compute(cost, float_dtype)
     # No dtype to look up is no peak either, and noted like one the calibration lacks.
     peak = peak_of(peaks, dtype or UNKNOWN_DTYPE, ctx) if cost.get("flops") else None
 
@@ -286,14 +319,17 @@ def _sol_parts(w: Workload, calib: dict | None, ctx: dict | None) -> tuple | Non
 
 def peak_dtypes(capture: CaptureRun) -> set[str]:
     """The dtypes whose matmul peak a bound of this capture may read: every dtype of its ops'
-    arguments and its workloads (a GEMM's compute dtype included) that has a matmul to
-    measure."""
+    arguments and its workloads (a GEMM's and a stated cost's compute dtype included) that has
+    a matmul to measure."""
     from xe_forge.frontend.calibrate import measurable
 
     out = {a.dtype for op in capture.ops for a in op.args if a}
     for w in capture.workloads:
         out |= set(w.dtypes)
         out |= {p.get("compute") for p in w.attrs.get("parts") or [w.attrs]}
+        cost = w.attrs.get("cost") or {}
+        if cost.get("flops"):
+            out.add(cost_compute(cost, None))
     return {d for d in out if d and measurable(d)}
 
 
@@ -459,6 +495,7 @@ def analyze(
     return Analysis(
         run_id=capture.run.get("id", ""),
         total_device_us=capture.run.get("total_device_us", 0.0),
+        wall_us=(capture.run.get("host") or {}).get("plain_us"),
         entries=entries,
         decisions=decisions,
         options={

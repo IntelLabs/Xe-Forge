@@ -419,6 +419,26 @@ def setup(a, run_dir: Path, turns: int) -> str | None:
     return got["python"]
 
 
+def framework_kb(framework: str) -> tuple[Path | None, dict]:
+    """(the framework's own knowledge base directory, its framework.yaml facts): what the
+    agents are told to read first and the facts their instructions act on. None and {} for a
+    framework with none, whose agents find their way from its own docs and code."""
+    import yaml
+
+    if not framework or not framework.replace("-", "_").replace(".", "_").isidentifier():
+        return None, {}
+    # KNOWLEDGE_DIR first (a relative one read from the checkout, where its .env is), then
+    # the checkout's own knowledge base.
+    given = Path(os.environ.get("KNOWLEDGE_DIR") or "")
+    roots = [given if given.is_absolute() else SRC_DIR.parent / given] if str(given) != "." else []
+    for root in [*roots, SRC_DIR.parent / "knowledge_base"]:
+        kb = (root / "frameworks" / framework).resolve()
+        if kb.is_dir():
+            facts = kb / "framework.yaml"
+            return kb, (yaml.safe_load(facts.read_text()) or {}) if facts.is_file() else {}
+    return None, {}
+
+
 def capture(
     a, python: str, run_dir: Path, turns: int, repos: Path, refused: list | None = None
 ) -> tuple[int, str]:
@@ -433,16 +453,26 @@ def capture(
 
     # runtime_keys: the launcher must record exactly the fields the reuse check reads back,
     # or a good capture is refused for a field it never wrote.
+    from xe_forge.skills.capture import on_host
+
+    dev = getattr(a, "device", None) or os.environ.get("XE_FORGE_DEVICE") or ""
     context = {"model": a.model, "framework": a.framework, "cache": CACHE,
+               "device": dev, "on_host": on_host(a),
                "workload": a.workload, "runtime_keys": WORKLOADS[a.workload],
                "framework_notes": getattr(a, "framework_note", []) or [],
                **workload(a), "inputs": getattr(a, "inputs", None) or {},
                "precision": getattr(a, "precision", "auto"),
                "quantization": getattr(a, "quantization", "auto"),
                "kv_cache": getattr(a, "kv_cache", "auto"), "refused": refused or []}  # fmt: skip
+    kb, facts = framework_kb(a.framework)
+    context.update(framework_kb=str(kb) if kb else None, framework_facts=facts)
+    print(f"capture: {a.framework}'s knowledge base: {kb or 'none'}", flush=True)
     stack = run_dir / "stack.json"
     for _ in range(3):
         rounds = json.loads(stack.read_text())["patches"] if stack.is_file() else []
+        # What the patches made, so the capture agent runs on them: their patch.json.
+        context["patched"] = [json.loads((Path(r) / "patch.json").read_text())
+                              for r in rounds if (Path(r) / "patch.json").is_file()]  # fmt: skip
         work = run_dir / f"patch-{len(rounds) + 1}"  # after the stack: a resume never overwrites
         # A resume into a patch that was asked on this stack and workload: the capture agent
         # is not asked again what it already answered.
@@ -507,6 +537,16 @@ def capture(
             check += ["--prompt-file", context["inputs"]["prompts"]["file"]]
         if str(context["precision"]).startswith(("float", "bfloat")):  # declared, not auto
             check += ["--precision", context["precision"]]
+        if context["quantization"] not in (None, "", "auto"):  # scored and reported, not gated
+            check += ["--quantization", context["quantization"]]
+            if facts.get("quantized_gate"):  # unless the framework quantizes it itself
+                check += ["--quantized-gate", str(facts["quantized_gate"])]
+        if facts.get("trial_build"):  # its kernels' trials are built with the patch's script
+            check += ["--require-build"]
+        if facts.get("step_dump") and a.workload == "text":  # its steps against the reference's
+            check += ["--steps"]
+        # --prove scores the tokens again on its patched build, with these same arguments.
+        (work / "check-args.json").write_text(json.dumps(check[3:]) + "\n")
         redo: list = []
         code = _tool(python, *check, problems=redo)  # the gate is the tool's, not the agent's word
         if code != 0 and done:
@@ -545,8 +585,13 @@ def name_and_read(a, cap, run_dir: Path, python: str, turns: int, repos: Path) -
                 if _tool(python, "capture", "parse", str(run_dir / "raw"), "-o", str(capture_path)):
                     return 1, python
                 cap = ir.load(capture_path)
+
+            def measure_peaks(dtypes, cap=cap):
+                a.calibration = calibrate_missing(a.calibration, cap, run_dir, dtypes)
+                return a.calibration
+
             name(capture_path, run_dir, python, turns, repos, a.name_coverage, a.calibration,
-                 cap=cap)  # fmt: skip
+                 cap=cap, measure_peaks=measure_peaks if a.calibration else None)  # fmt: skip
             if not names.is_file():
                 print("run: no names.json; the ops stay unnamed", file=sys.stderr)
                 return 0, python
@@ -588,9 +633,8 @@ def capture_rows(a, run_dir: Path, python: str) -> tuple[Path | None, str | None
         if run.get("launcher_sha256") != _sha256(launcher) or any(
             rt.get(k) != row[k] for k in rows.KEYS
         ):
-            env = {f"XF_{k.upper()}": str(row[k]) for k in rows.KEYS}
             if _tool(sys.executable, "capture", "run", str(launcher), "-o", str(raw),
-                     FRAMEWORK_PYTHON=python, **env):  # fmt: skip
+                     FRAMEWORK_PYTHON=python, **rows.env(row)):  # fmt: skip
                 print(f"run: row {i} {row} did not capture", file=sys.stderr)
                 return None, None
         if _tool(python, *parse):  # the interpreter the anchor was read under: its schemas
@@ -599,25 +643,32 @@ def capture_rows(a, run_dir: Path, python: str) -> tuple[Path | None, str | None
         caps.append(ir.load(path))
         if not rows.ran(caps[-1], row):
             got = {k: (caps[-1].run.get("runtime") or {}).get(k) for k in rows.KEYS}
-            env = " ".join(f"XF_{k.upper()}={row[k]}" for k in rows.KEYS)
+            env = " ".join(f"{k}={v}" for k, v in rows.env(row).items())
             return None, (f"run with {env} set, the launcher recorded runtime {got}: it must "
                           "run at those sizes and record them")  # fmt: skip
     merged = rows.merge(caps, a.rows)
     return ir.dump(merged, run_dir / "rows" / "capture.json"), None
 
 
-def recapture(run_dir: Path, out_dir: Path, python: str) -> int:
+def recapture(run_dir: Path, out_dir: Path, python: str, row: dict | None = None) -> int:
     """Re-run the cached launcher under ``python``'s venv, then parse; no agent. The tools
-    run here: the stack's interpreter need not import them."""
+    run here: the stack's interpreter need not import them. ``row``: at that row's batch and
+    lengths (``rows.env``); a capture not run at them is a failure."""
+    from xe_forge.frontend import ir, rows
     from xe_forge.frontend.prove import PARSE_REFUSED
 
     launcher = str(run_dir / "launcher" / "run.sh")
     code = _tool(sys.executable, "capture", "run", launcher, "-o", str(out_dir / "raw"),
-                 FRAMEWORK_PYTHON=python)  # fmt: skip
+                 FRAMEWORK_PYTHON=python, **(rows.env(row) if row else {}))  # fmt: skip
     if code:
         return code
     parse = ["capture", "parse", str(out_dir / "raw"), "-o", str(out_dir / "capture.json")]
-    return PARSE_REFUSED if _tool(sys.executable, *parse) else 0
+    if _tool(sys.executable, *parse):
+        return PARSE_REFUSED
+    if row and not rows.ran(ir.load(out_dir / "capture.json"), row):
+        print(f"prove: the launcher did not run at {row} ({out_dir})", file=sys.stderr)
+        return 1
+    return 0
 
 
 def name(
@@ -629,8 +680,11 @@ def name(
     coverage: float,
     calibration: Path | None = None,
     cap=None,
+    measure_peaks=None,
 ) -> Path | None:
-    """Run the naming agent over the costliest ops; the written names.json, or None."""
+    """Run the naming agent over the costliest ops; the written names.json, or None.
+    ``measure_peaks(dtypes)``: measures the compute dtypes the answer's costs declare into the
+    calibration and returns its path, so the costs are checked at their own peak."""
     from xe_forge.frontend import ir, naming
     from xe_forge.frontend.canonical import _named_dims as named_dims
     from xe_forge.frontend.canonical import arg_label
@@ -673,6 +727,8 @@ def name(
             ],
             "call_site": top.call_site,
             **({"gemm": top.framework_meta["gemm"]} if top.framework_meta.get("gemm") else {}),
+            # On a host: the code perf saw each node run, CPU time per symbol, by node name.
+            **({"host": top.framework_meta["host"]} if top.framework_meta.get("host") else {}),
             "dims": named_dims(top),
             "shapes": _shapes(ops),  # what the namer reads; its costs are checked on all
         }
@@ -683,9 +739,12 @@ def name(
     from xe_forge.models import DSL
 
     calib = json.loads(calibration.read_text()) if calibration else None
+    kb, facts = framework_kb(cap.run.get("framework") or "")
     context = {
         "model": model.get("name"),
         "framework": cap.run.get("framework"),
+        "framework_kb": str(kb) if kb else None,
+        "framework_facts": facts,
         "coverage": f"{covered:.0%}",
         "repos": repos,
         "routes": naming.ROUTES,
@@ -721,6 +780,8 @@ def name(
     # A stated cost is a lower bound, so one above a measured call is wrong.
     from xe_forge.frontend.analyze import NOISE
 
+    if measure_peaks and (declared := naming.cost_dtypes(answer)):
+        calib = json.loads(measure_peaks(declared).read_text())
     every = {k: {"shapes": _shapes(by_key[k], top=None)} for k in listing}
     wrong = naming.refuted(answer, every, calib, NOISE)
     for k, sub, why in wrong:
@@ -748,9 +809,10 @@ def _stamp(cap) -> dict:
 CALIBRATE_TIMEOUT = int(os.environ.get("XE_FORGE_CALIBRATE_TIMEOUT", 1800))
 
 
-def calibrate_missing(path: Path, cap, run_dir: Path) -> Path:
+def calibrate_missing(path: Path, cap, run_dir: Path, also=()) -> Path:
     """Measure into the calibration at ``path`` the matmul peaks the capture's bounds read
-    and it lacks, so naming, analyze and the tools they start bound each dtype at its own.
+    (and ``also``'s) and it lacks, so naming, analyze and the tools they start bound each
+    dtype at its own.
     The calibration file the run reads from here: ``path``, or a copy in ``run_dir`` when
     ``path`` cannot be written."""
     import tempfile
@@ -779,7 +841,8 @@ def calibrate_missing(path: Path, cap, run_dir: Path) -> Path:
     calib = json.loads(path.read_text())
     if note := calibrate.other_device(calib, cap.run):
         print(f"run: NOTE {note}", file=sys.stderr)
-    merged = calibrate.complete(calib, peak_dtypes(cap), measure)
+    wanted = peak_dtypes(cap) | {d for d in also if calibrate.measurable(d)}
+    merged = calibrate.complete(calib, wanted, measure)
     if merged is calib:
         return path
     print(f"run: matmul TFLOP/s now {merged['matmul_tflops']}", flush=True)
@@ -837,6 +900,7 @@ def analyze(capture_path: Path, out_dir: Path, a: argparse.Namespace, weights=No
                         at_roofline=getattr(a, "at_roofline", an.AT_ROOFLINE))  # fmt: skip
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "analysis.json").write_text(json.dumps(result.as_dict(), indent=1) + "\n")
+    print(f"analyze: {an.roofline_line(result.roofline())}")
     path = manifest.emit(result, cap, capture_path, out_dir, weights)
     enabled = [e for e in result.entries if e.enabled]
     if cap.run.get("counters"):
@@ -880,7 +944,41 @@ def inputs(manifest_path: Path, run_dir: Path, a, python, turns, repos) -> dict:
 # ── optimize ───────────────────────────────────────────────────────────────
 
 
-def xe_forge_command(entry: dict, variant: str, repo: Path, workspace: Path, opts) -> list[str]:
+def inmodel_flags(run_dir: Path, entry: dict, repo: Path, opts) -> list[str]:
+    """The workspace's flags that build each trial into the run's engine and check and time
+    its kernel there on its own (``xe-forge-skill inmodel``): for a kernel of a repository the
+    run built into its stack with a build script and a kernel_check module, on a host, under
+    an agent CLI. None of them otherwise."""
+    from xe_forge import agent_cli as agents
+    from xe_forge.frontend import inmodel
+    from xe_forge.skills.capture import on_host
+
+    if not (on_host(opts) and agents.BACKENDS.get(opts.engine) and entry.get("record")):
+        return []
+    if inmodel.provider(run_dir.resolve(), repo) is None:
+        return []
+    tool = [sys.executable, "-m", "xe_forge.skills", "inmodel", "--run-dir",
+            str(run_dir.resolve()), "--repo", str(repo)]  # fmt: skip
+    bench = [*tool, "--record", str(entry["record"]), "--spec", "{spec}", "--baseline",
+             "{baseline}", "--trial", "{trial}", "--variant", "{variant}", "--workspace",
+             "{workspace}"]  # fmt: skip
+    prof = [*tool, "--profile", "--kernel", entry["name"], "--spec", str(Path(entry["spec"]).resolve()),
+            "--record", str(Path(entry["record"]).resolve()), "--trial", "{trial}",
+            "--workspace", "{workspace}"]  # fmt: skip
+    flags = ["--external-benchmark", shlex.join(bench),
+             "--external-validate", shlex.join([*tool, "--build-only", "--trial", "{trial}"]),
+             "--external-profile", shlex.join(prof), "--repo-trials"]  # fmt: skip
+    # The op as PyTorch, the engine's own reference for this kernel: the workspace's semantics.
+    ref = repo / "reference" / f"{entry['name']}.py"
+    if ref.is_file() and not entry.get("reference"):
+        flags += ["--reference", str(ref)]
+    return flags
+
+
+def xe_forge_command(entry: dict, variant: str, repo: Path, workspace: Path, opts,
+                     inmodel: list[str] | None = None) -> list[str]:  # fmt: skip
+    from xe_forge.skills.capture import on_host
+
     cmd = [
         sys.executable, "-m", "xe_forge.cli",
         "--engine", opts.engine,
@@ -893,8 +991,9 @@ def xe_forge_command(entry: dict, variant: str, repo: Path, workspace: Path, opt
         "--kernel-repo", str(repo),
         "--spec", entry["spec"],
         "--variant", variant,
-        "--unitrace",  # device timing, ComputeBasic and EU stall per trial; --no-unitrace wins
     ]  # fmt: skip
+    if not on_host(opts):  # a host profiles with perf, as its workspace says
+        cmd.append("--unitrace")  # device timing, ComputeBasic and EU stall; --no-unitrace wins
     if entry.get("record"):
         cmd += ["--dataset-record", entry["record"]]
     if entry.get("target") == "library":
@@ -907,12 +1006,13 @@ def xe_forge_command(entry: dict, variant: str, repo: Path, workspace: Path, opt
         cmd += ["--stack-python", opts.stack_python]
     if entry["dsl"] == "sycl" and opts.compiler_flags:
         cmd += ["--compiler-flags", opts.compiler_flags.replace("{kernel_repo}", str(repo))]
-    return cmd + list(opts.passthrough)
+    return cmd + list(inmodel or []) + list(opts.passthrough)
 
 
 def optimize(manifest_path: Path, run_dir: Path, opts) -> list[tuple[str, str]]:
     """One Xe-Forge run per enabled (kernel, variant), in sequence; returns the pairs."""
     from xe_forge.frontend import manifest
+    from xe_forge.skills.capture import on_host
 
     data = manifest.load(manifest_path)
     repos_dir = Path(opts.kernel_repos).resolve() if opts.kernel_repos else REPO_DIR.parent
@@ -926,7 +1026,8 @@ def optimize(manifest_path: Path, run_dir: Path, opts) -> list[tuple[str, str]]:
     rest = list(opts.passthrough)
     unitrace = rest[rest.index("--unitrace-bin") + 1] if "--unitrace-bin" in rest[:-1] else (
         os.environ.get("UNITRACE_BIN", "unitrace"))  # fmt: skip
-    if "--no-unitrace" not in rest and shutil.which(unitrace) is None:
+    on_gpu = not on_host(opts)
+    if on_gpu and "--no-unitrace" not in rest and shutil.which(unitrace) is None:
         raise SystemExit(f"optimize: profiling needs unitrace ({unitrace!r} not found); "
                          "set UNITRACE_BIN, or pass -- --no-unitrace")  # fmt: skip
 
@@ -950,7 +1051,8 @@ def optimize(manifest_path: Path, run_dir: Path, opts) -> list[tuple[str, str]]:
                 status_path.write_text(json.dumps(status, indent=1) + "\n")
                 print(f"optimize: {entry['name']} ({variant}): {status['skipped']}")
                 continue
-            cmd = xe_forge_command(entry, variant, repo, workspace, opts)
+            cmd = xe_forge_command(entry, variant, repo, workspace, opts,
+                                   inmodel_flags(run_dir, entry, repo, opts))  # fmt: skip
             log = manifest.sidecar(workspace, ".log")
             print(
                 f"optimize: {entry['name']} ({variant}) -> {workspace}\n  {shlex.join(cmd)}",
@@ -1315,6 +1417,8 @@ def main(argv: list[str]) -> int:
     code, python = name_and_read(a, cap, run_dir, python, turns, repos)
     if code != 0:
         return code
+    if len(a.rows) <= 1:  # an earlier run of several rows in this directory is not this one
+        (run_dir / "rows" / "capture.json").unlink(missing_ok=True)
     if len(a.rows) > 1:  # analyze and every step after it read the merged capture
         merged, problem = capture_rows(a, run_dir, python)
         if problem:  # a launcher that ignores the rows' sizes goes back once to its agent
@@ -1333,8 +1437,6 @@ def main(argv: list[str]) -> int:
                   file=sys.stderr)  # fmt: skip
             return 1
         capture_path = merged
-        if a.prove:
-            print("run: --prove measures the anchor row only", file=sys.stderr)
     _collect_outputs(run_dir)
     path = analyze(capture_path, run_dir, a)
     path = analyze(capture_path, run_dir, a, inputs(path, run_dir, a, python, turns, repos))
@@ -1350,7 +1452,8 @@ def main(argv: list[str]) -> int:
         print(f"run: {a.workload} workload -- a missing-op patch is checked against the "
               "framework's own torch path (patch-*/quality.json, with the op gain), but an "
               "optimized kernel is not: it is kept on a per-kernel tolerance, and --prove "
-              "compares time only. A kernel can pass its tolerance and still shift the "
+              "compares time, and the patch against its torch path again, which a kernel "
+              "both paths run does not change. A kernel can pass its tolerance and still shift the "
               "output over the denoising steps, so look at the images or actions before "
               "using any patch from this run.")  # fmt: skip
     if a.analyze_only:
