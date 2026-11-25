@@ -552,6 +552,52 @@ def test_an_arm_that_writes_its_inputs_is_refused_even_within_tolerance():
     assert not result.optimized_correct and "Mutating inputs" in result.feedback_message
 
 
+def test_a_shared_input_written_by_an_arm_is_refused_before_it_is_timed():
+    from xe_forge.core.executor import KernelBenchExecutor
+
+    plain = (
+        "import torch\n"
+        "class Model(torch.nn.Module):\n"
+        "    def forward(self, x):\n"
+        "        return x * 2\n"
+    )
+    # Correct on its own clone of the inputs, and writes them after computing its output.
+    writes = plain.replace("return x * 2", "y = x * 2\n        x.add_(1.0)\n        return y")
+    ex = KernelBenchExecutor(device="cpu", warmup_iters=1, benchmark_iters=2, rounds=2)
+    got = ex.compare_kernels(plain, writes, kernel_name="Model", input_shapes=[(4,)])
+    assert (
+        not got.optimized_correct and "optimized kernel writes its inputs" in got.feedback_message
+    )
+    assert ex.compare_kernels(
+        plain, plain, kernel_name="Model", input_shapes=[(4,)]
+    ).optimized_correct
+
+
+def test_a_host_call_restores_the_buffers_from_before_the_error_check(monkeypatch):
+    from xe_forge.core.executor import KernelBenchExecutor
+
+    stateful = (
+        "import torch\n"
+        "class Model(torch.nn.Module):\n"
+        "    def __init__(self):\n"
+        "        super().__init__()\n"
+        "        self.register_buffer('n', torch.zeros(1))\n"
+        "    def forward(self, x):\n"
+        "        self.n += 1\n"
+        "        return x * self.n\n"
+    )
+    ex = KernelBenchExecutor(device="cpu", warmup_iters=1, benchmark_iters=2, rounds=2)
+    seen = {}
+
+    def time_forward(call, args):
+        seen["n"] = float(call.initial_buffers["n"])
+        return 1.0
+
+    monkeypatch.setattr(ex, "time_forward", time_forward)
+    assert ex.execute(stateful, "Model", [(4,)]).success
+    assert seen["n"] == 0.0  # as initialized, not as the error-check forward left it
+
+
 def test_perf_record_reports_its_samples_and_says_when_there_are_none(tmp_path, monkeypatch):
     from xe_forge.core import profiler
 

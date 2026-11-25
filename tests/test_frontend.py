@@ -398,6 +398,25 @@ def test_rows_merge_into_one_workload_spanning_every_rows_shapes():
     assert op.framework_meta["row"] == 2 and merged.run["runtime"]["rows"][1] == other
 
 
+def test_rows_merge_a_hosts_wall_times_at_the_rows_scales():
+    """A host's wall times sum over the rows as their device times do (here at 0.75 and
+    0.625), so the roofline's wall time is the merged workload's; one a row lacks is unknown."""
+    from xe_forge.frontend import rows
+
+    anchor = {"batch": 8, "input_len": 64, "output_len": 4, "weight": 0.75}
+    other = {"batch": 1, "input_len": 64, "output_len": 4, "weight": 0.25}
+    caps = [_row_capture(anchor, [90.0, 10.0]), _row_capture(other, [30.0, 10.0])]
+    caps[0].run["host"] = {"window_us": 220.0, "node_us": 150.0, "plain_us": 200.0, "threads": 4}
+    caps[1].run["host"] = {"window_us": 90.0, "node_us": 60.0, "plain_us": 80.0, "threads": 4}
+    host = rows.merge(caps, [anchor, other]).run["host"]
+    assert (host["plain_us"], host["window_us"], host["node_us"]) == (200.0, 221.25, 150.0)
+    assert host["threads"] == 4 and caps[0].run["host"]["plain_us"] == 200.0
+    caps[1].run["host"]["plain_us"] = None
+    host = rows.merge(caps, [anchor, other]).run["host"]
+    assert host["plain_us"] is None and "row 2" in host["plain_us_why"]
+    assert rows.merge(caps, [anchor, other], given=[0.75, 0.625]).run["host"]["node_us"] == 150.0
+
+
 def test_rows_merge_each_kernels_counters_by_its_scaled_time():
     from xe_forge.frontend import rows
 

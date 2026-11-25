@@ -92,6 +92,21 @@ def _signature(op: ir.CapturedOp) -> tuple:
             repr(op.scalars), op.call_site, op.calls)  # fmt: skip
 
 
+def _host(caps: list[ir.CaptureRun], scales: list[float]) -> dict:
+    """The anchor's host record with each wall-clock time the rows' sum at ``scales``, as their
+    device times are; a time some row did not measure is unknown, and the record says which."""
+    host = copy.deepcopy(caps[0].run["host"])
+    for key in ("window_us", "node_us", "plain_us"):
+        got = [(c.run.get("host") or {}).get(key) for c in caps]
+        if any(g is None for g in got):
+            host[key] = None
+            missing = [str(r) for r, g in enumerate(got, 1) if g is None]
+            host[f"{key}_why"] = f"row {', '.join(missing)} did not measure it"
+        else:
+            host[key] = round(sum(s * g for s, g in zip(scales, got, strict=True)), 3)
+    return host
+
+
 def merge(caps: list[ir.CaptureRun], rows: list[dict],
           given: list[float] | None = None) -> ir.CaptureRun:  # fmt: skip
     """One capture of ``rows`` (anchor first, its capture first): row r's calls and times
@@ -108,9 +123,11 @@ def merge(caps: list[ir.CaptureRun], rows: list[dict],
     attributed = 0.0
     counters: dict[str, list[dict]] = {}
     traced: dict[str, dict] = {}
+    used: list[float] = []
     for r, (cap, row) in enumerate(zip(caps, rows, strict=True), 1):
         scale = (given[r - 1] if given is not None
                  else row["weight"] * total / (cap.run["total_device_us"] or 1.0))  # fmt: skip
+        used.append(scale)
         attributed += scale * cap.run.get("attributed_device_us", 0.0)
         for name, c in (cap.run.get("counters") or {}).items():
             counters.setdefault(name, []).append(
@@ -136,6 +153,8 @@ def merge(caps: list[ir.CaptureRun], rows: list[dict],
     run["counters"] = {k: c for k, v in counters.items() if (c := combine(v))}
     if traced:
         run["unitrace_kernels"] = traced
+    if run.get("host"):
+        run["host"] = _host(caps, used)
     run["attributed_pct"] = round(100 * attributed / total, 2) if total else 0.0
     merged = ir.CaptureRun(run=run, ops=ops)
     merged.workloads = canonical.workloads(ops, total, naming.name_op)

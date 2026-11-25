@@ -313,6 +313,12 @@ class KernelBenchExecutor:
                 input_dtypes=input_dtypes,
             )
 
+            # On the host every timed call restores the module's buffers as they were before
+            # any forward, so they are saved before the one that checks for errors.
+            host = (
+                _host_call(fn, _model, inputs) if torch.device(self.device).type == "cpu" else None
+            )
+
             # Run once to check for errors
             try:
                 output = fn(*inputs)
@@ -324,8 +330,8 @@ class KernelBenchExecutor:
 
             # Benchmark. On the host, the forward alone after an untimed restore and cache
             # flush, as on the reference path.
-            if torch.device(self.device).type == "cpu":
-                time_us = self.time_forward(_host_call(fn, _model, inputs), tuple(inputs))
+            if host is not None:
+                time_us = self.time_forward(host, tuple(inputs))
             else:
                 time_us = self.time(fn, tuple(inputs))
             logger.info(f"Execution time: {time_us:.2f} μs")
@@ -715,6 +721,17 @@ class KernelBenchExecutor:
                     raise ValueError("Failed to compile kernel module")
                 fn, model, inputs = self.prepare_workload(module, inputs=inputs, **prep)
                 calls.append(_host_call(fn, model, inputs))
+            # Exact, as on the reference path: both arms read these tensors, so a call that
+            # writes them hands every later call, the other arm's too, inputs it did not get.
+            for call, code in zip(calls, (first, second), strict=True):
+                before = [x.clone() if isinstance(x, torch.Tensor) else x for x in inputs]
+                call(*inputs)
+                if any(isinstance(x, torch.Tensor) and not torch.equal(x, y)
+                       for x, y in zip(before, inputs, strict=True)):  # fmt: skip
+                    arm = "original" if code is a_code else "optimized"
+                    raise ValueError(f"the {arm} kernel writes its inputs, which both arms "
+                                     "share: mutating inputs requires a host benchmark with "
+                                     "resets")  # fmt: skip
             runs.append(self.time_interleaved(calls[0], tuple(inputs), calls[1], tuple(inputs)))
         return combine_swapped(*runs)
 
