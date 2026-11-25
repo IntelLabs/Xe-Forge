@@ -16,7 +16,7 @@ and what the patch check gates, never a test of the name. The pages record what 
 | `openvino` | text | run through optimize | [openvino.md](openvino.md) |
 | `vllm-omni` | vision | run | [vllm-omni.md](vllm-omni.md) |
 | `RLDX-1` | action | being brought up | none yet |
-| `native` | text | being brought up: the engine is written for the model | [native.md](native.md) |
+| `native` | text | run end to end: the engine is written for the model | [native.md](native.md) |
 
 A page is named by the string passed to `--framework`.
 

@@ -30,8 +30,9 @@
 
 \row{0}{Frameworks}{xe-forge run}
 \foreach \n/\w [count=\i] in {vLLM/text, SGLang/text, llama.cpp/text, OpenVINO/text, vLLM-Omni/vision}
-  \node[ok] at (3.6+2.9*\i-2.9, 0) {\n\\[-2pt]{\scriptsize \w}};
-\node[part] at (3.6+2.9*5, 0) {RLDX-1\\[-2pt]{\scriptsize action}};
+  \node[ok=24mm] at (3.3+2.8*\i-2.8, 0) {\n\\[-2pt]{\scriptsize \w}};
+\node[part=24mm] at (3.3+2.8*5, 0) {RLDX-1\\[-2pt]{\scriptsize action}};
+\node[ok=24mm] at (3.3+2.8*6, 0) {native\\[-2pt]{\scriptsize text}};
 
 \row{-1.8}{Engines}{who writes the trials}
 \foreach \n/\w [count=\i] in {claude/agent CLI, codex/agent CLI, dspy/LLM endpoint, dspy-agent/LLM endpoint}
@@ -39,13 +40,14 @@
 
 \row{-3.6}{Kernel languages}{\texttt{--dsl}, or the call route}
 \foreach \n [count=\i] in {Triton, Gluon, SYCL, CUDA, OpenCL}
-  \node[ok] at (3.6+2.9*\i-2.9, -3.6) {\n};
-\node[ok] at (3.6+2.9*5, -3.6) {library calls\\[-2pt]{\scriptsize the call route}};
+  \node[ok=24mm] at (3.3+2.8*\i-2.8, -3.6) {\n};
+\node[ok=24mm] at (3.3+2.8*5, -3.6) {C++\\[-2pt]{\scriptsize host}};
+\node[ok=24mm] at (3.3+2.8*6, -3.6) {library calls\\[-2pt]{\scriptsize the call route}};
 
 \row{-5.4}{Measurement}{code, not agents}
-\foreach \n/\w [count=\i] in {benchmark/correct then timed, unitrace/kernels counters stalls,
-                              VTune/counters, torch profiler/ops and their kernels}
-  \node[ok=40mm] at (4.4+4.35*\i-4.35, -5.4) {\n\\[-2pt]{\scriptsize \w}};
+\foreach \n/\w [count=\i] in {benchmark/correct then timed, unitrace/kernels counters,
+                              VTune/counters, perf/host samples, torch profiler/ops kernels}
+  \node[ok=33mm] at (4.0+3.6*\i-3.6, -5.4) {\n\\[-2pt]{\scriptsize \w}};
 
 \fill[band, rounded corners=4pt] (-0.3,-8.3) rectangle (21.4,-6.5);
 \node[label] at (0,-7.4) {Devices\\[-1pt]{\mdseries\scriptsize\color{black!65}\texttt{--device}}};
@@ -53,7 +55,8 @@
   {Intel GPU (xpu)\\{\scriptsize Triton, Gluon, SYCL, OpenCL}\\{\scriptsize kernels and xe-forge run}};
 \node[part=40mm, minimum height=15mm] at (8.75, -7.4)
   {NVIDIA GPU (cuda)\\{\scriptsize Triton, CUDA}\\{\scriptsize kernels; no xe-forge run}};
-\node[plan=40mm, minimum height=15mm] at (13.1, -7.4) {CPU\\{\scriptsize planned}};
+\node[ok=40mm, minimum height=15mm]   at (13.1, -7.4)
+  {CPU\\{\scriptsize C++, SYCL}\\{\scriptsize kernels and xe-forge run}};
 \node[plan=40mm, minimum height=15mm] at (17.45, -7.4) {NPU\\{\scriptsize planned}};
 
 \node[ok=6mm, minimum height=4mm] (a) at (2.5,-9.1) {};

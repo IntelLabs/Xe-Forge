@@ -92,7 +92,7 @@ See [docs/FRAMEWORK.md](docs/FRAMEWORK.md) and the [per-framework pages](docs/fr
 ## What it works with
 
 <p align="center">
-  <img src="assets/support.svg" alt="Frameworks, engines, kernel languages, measurement and devices Xe-Forge works with; Intel GPU works, NVIDIA GPU for kernels only, CPU and NPU planned" width="900"/>
+  <img src="assets/support.svg" alt="Frameworks, engines, kernel languages, measurement and devices Xe-Forge works with; Intel GPU works, NVIDIA GPU for kernels only, CPU works, NPU planned" width="900"/>
 </p>
 
 The per-framework pages are in [docs/frameworks/](docs/frameworks/README.md).
