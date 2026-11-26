@@ -8,7 +8,7 @@
 # ///
 """Generate roofline performance plots from a CSV of kernel measurements.
 
-This is a standalone script — it does NOT import the xe-forge package, so it
+This is a standalone script — it does NOT import the x-forge package, so it
 can be run on any machine that has the measurement CSV (e.g. copy results off
 an XPU box and plot locally).
 
@@ -68,7 +68,7 @@ from dataclasses import dataclass, field
 
 
 # ---------------------------------------------------------------------------
-# The roof: peak half-precision throughput and DRAM bandwidth, as `xe-forge
+# The roof: peak half-precision throughput and DRAM bandwidth, as `x-forge
 # calibrate` measured them on the device, or given with --peak-tflops /
 # --peak-bandwidth.
 # ---------------------------------------------------------------------------
@@ -223,7 +223,7 @@ def _resolve_hardware(args) -> Hardware:
     bandwidth = args.peak_bandwidth if args.peak_bandwidth is not None else bandwidth
     if not tflops or not bandwidth:
         raise SystemExit(
-            "error: give --calibration <calibration.json> (from `xe-forge calibrate`), "
+            "error: give --calibration <calibration.json> (from `x-forge calibrate`), "
             "or both --peak-tflops and --peak-bandwidth"
         )
     return Hardware(name, tflops, bandwidth)
@@ -589,7 +589,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-t", "--title", default="Roofline", help="Plot title")
     p.add_argument(
         "--calibration",
-        help="calibration.json from `xe-forge calibrate`: the roof measured on the device",
+        help="calibration.json from `x-forge calibrate`: the roof measured on the device",
     )
     p.add_argument("--peak-tflops", type=float, help="Override peak compute (TFLOPS)")
     p.add_argument("--peak-bandwidth", type=float, help="Override peak DRAM bandwidth (GB/s)")

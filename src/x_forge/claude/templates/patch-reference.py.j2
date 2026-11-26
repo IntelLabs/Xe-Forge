@@ -1,0 +1,87 @@
+import json, os, sys, torch
+from x_forge.frontend import profile
+model_id, batch, input_len, n, trust = sys.argv[1], *map(int, sys.argv[2:5]), sys.argv[5] == "1"
+got = json.load(open(sys.argv[6]))
+prompt_file, dtype, draws = sys.argv[7] or None, sys.argv[8], int(sys.argv[10])
+rows = [int(i) for i in sys.argv[9].split(",")] if sys.argv[9] else range(min(len(got), batch))
+dev = profile.device()
+if profile.device_type() == "cpu" and os.environ.get("X_FORGE_DEVICE", "").split(":")[0] != "cpu":
+    sys.exit("the reference interpreter sees no GPU")
+ref_path = sys.argv[11] if len(sys.argv) > 11 else ""
+if ref_path:  # the agent's runner: load(model, dtype, device) -> (model, tokenizer or Vocab)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("xf_reference", ref_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    m, tok = mod.load(model_id, getattr(torch, dtype), dev)
+    m, source = m.eval(), [ref_path, ""]
+else:
+    import transformers
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(model_id, trust_remote_code=trust)
+    m = AutoModelForCausalLM.from_pretrained(model_id, dtype=getattr(torch, dtype), trust_remote_code=trust)
+    source = [transformers.__version__, transformers.__file__]
+    try:
+        m = m.to(dev).eval()
+    except RuntimeError as e:  # float32 that does not fit the GPU runs on the CPU
+        if dtype != "float32" or "out of memory" not in str(e).lower():
+            raise
+        m, dev = m.to("cpu").eval(), "cpu"
+export = sys.argv[12] if len(sys.argv) > 12 else ""
+facts = None
+if export:  # the framework's dequantized weights in place of the checkpoint's: each must be one of its tensors
+    import glob
+    from safetensors.torch import load_file
+    sd, errs, bad = m.state_dict(), {}, []
+    for f in sorted(glob.glob(os.path.join(export, "*.safetensors"))):
+        for k, v in load_file(f).items():
+            if k not in sd:
+                bad.append(f"{k}: not a tensor of the model")
+            elif tuple(v.shape) != tuple(sd[k].shape):
+                bad.append(f"{k}: shape {list(v.shape)}, the model's {list(sd[k].shape)}")
+            elif not torch.isfinite(v).all():
+                bad.append(f"{k}: not finite")
+            else:
+                o = sd[k].float().cpu()
+                errs[k] = float((v.float() - o).norm() / max(float(o.norm()), 1e-30))
+                sd[k] = v.to(sd[k].device, sd[k].dtype)
+    bad += [] if errs else [f"{export} holds no tensor"]
+    bad += [f"{k}: relative error {e:.3g} against the checkpoint, further from it than zeros"
+            for k, e in errs.items() if e > 1]
+    if bad:
+        print(json.dumps({"export_problems": bad}))
+        sys.exit(3)
+    m.load_state_dict(sd, strict=True)
+    worst = sorted(errs.items(), key=lambda kv: -kv[1])[:5]
+    facts = {"tensors": len(errs), "mean_rel_error": sum(errs.values()) / len(errs),
+             "worst": [[k, round(e, 6)] for k, e in worst]}
+vocab = tok if hasattr(tok, "ordinary") else profile.hf_vocab(tok)
+prompts = profile.token_ids(vocab, batch, input_len, prompt_file)
+def logits(x):  # transformers' output, a tuple's first item, or the tensor itself
+    out = m(input_ids=x, use_cache=False) if not ref_path else m(x)
+    out = getattr(out, "logits", out)
+    return out[0] if isinstance(out, (tuple, list)) else out
+seed = [None]  # draw k > 0: the embeddings times (1 + 1e-6 * N(0, 1)), seeded k
+def perturb(mod, inp, out):
+    if seed[0] is None:
+        return out
+    z = torch.randn(out.shape, generator=torch.Generator().manual_seed(seed[0]))
+    return out * (1 + 1e-6 * z.to(out.device, out.dtype))
+embed = getattr(m, "get_input_embeddings", None)
+if embed is not None:
+    embed().register_forward_hook(perturb)
+else:  # nothing to perturb: one clean forward, no spread
+    draws = 1
+gaps = {}
+for i in rows:
+    p, g = prompts[i], got[i][:n]  # one row, the whole sequence's logits: no batch, no slice
+    gaps[i] = []
+    for k in range(draws):
+        seed[0] = k or None
+        with torch.no_grad():
+            x = torch.tensor([p + g], device=dev)
+            lp = logits(x)[0, len(p) - 1:-1].float().log_softmax(-1)
+        best = lp.max(-1).values
+        gaps[i].append((best - lp[torch.arange(len(g), device=dev),
+                                  torch.tensor(g, device=dev)]).tolist())
+print(json.dumps({"gaps": gaps, "device": dev, "transformers": source, "export": facts}))

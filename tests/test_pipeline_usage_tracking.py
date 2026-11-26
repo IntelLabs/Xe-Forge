@@ -2,8 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from xe_forge.models import DSL, KernelAnalysis
-from xe_forge.pipeline import XeForgePipeline
+from x_forge.models import DSL, KernelAnalysis
+from x_forge.pipeline import XForgePipeline
 
 
 class DummyTracker:
@@ -55,7 +55,7 @@ class StubOptimizer:
 
 
 def _make_pipeline():
-    pipeline = object.__new__(XeForgePipeline)
+    pipeline = object.__new__(XForgePipeline)
     pipeline.config = SimpleNamespace(
         optimization=SimpleNamespace(target_dtype=None),
         device_config=SimpleNamespace(device="xpu", dsl=DSL.TRITON),
@@ -75,8 +75,8 @@ def _make_pipeline():
 
 def test_optimize_sets_token_usage_and_exits_tracker(monkeypatch):
     usage_ctx = DummyUsageContext({"prompt_tokens": 10, "completion_tokens": 2})
-    monkeypatch.setattr("xe_forge.pipeline.dspy.track_usage", lambda: usage_ctx)
-    monkeypatch.setattr("xe_forge.pipeline.get_device_config_for_pipeline", lambda **kwargs: {})
+    monkeypatch.setattr("x_forge.pipeline.dspy.track_usage", lambda: usage_ctx)
+    monkeypatch.setattr("x_forge.pipeline.get_device_config_for_pipeline", lambda **kwargs: {})
 
     pipeline = _make_pipeline()
 
@@ -93,8 +93,8 @@ def test_optimize_sets_token_usage_and_exits_tracker(monkeypatch):
 
 def test_optimize_exits_tracker_when_exception_raised(monkeypatch):
     usage_ctx = DummyUsageContext({"prompt_tokens": 0, "completion_tokens": 0})
-    monkeypatch.setattr("xe_forge.pipeline.dspy.track_usage", lambda: usage_ctx)
-    monkeypatch.setattr("xe_forge.pipeline.get_device_config_for_pipeline", lambda **kwargs: {})
+    monkeypatch.setattr("x_forge.pipeline.dspy.track_usage", lambda: usage_ctx)
+    monkeypatch.setattr("x_forge.pipeline.get_device_config_for_pipeline", lambda **kwargs: {})
 
     pipeline = _make_pipeline()
     pipeline.analyzer = StubAnalyzer(raises=RuntimeError("boom"))
@@ -112,8 +112,8 @@ def test_optimize_exits_tracker_when_exception_raised(monkeypatch):
 
 def test_optimize_coordinator_path_also_exits_tracker(monkeypatch):
     usage_ctx = DummyUsageContext({"prompt_tokens": 7, "completion_tokens": 3})
-    monkeypatch.setattr("xe_forge.pipeline.dspy.track_usage", lambda: usage_ctx)
-    monkeypatch.setattr("xe_forge.pipeline.get_device_config_for_pipeline", lambda **kwargs: {})
+    monkeypatch.setattr("x_forge.pipeline.dspy.track_usage", lambda: usage_ctx)
+    monkeypatch.setattr("x_forge.pipeline.get_device_config_for_pipeline", lambda **kwargs: {})
 
     pipeline = _make_pipeline()
     pipeline.coordinator = StubCoordinator()

@@ -38,7 +38,7 @@ constraints:
   severity: critical
   description: |
     Inspect the active harness before adding device transfers inside forward().
-    Xe-Forge's KernelBenchExecutor moves models to the configured device;
+    X-Forge's KernelBenchExecutor moves models to the configured device;
     prepare_workload also moves tensor inputs. External harnesses may differ.
     Use registered parameters and buffers for model state that must follow module
     conversions; ordinary tensor attributes do not automatically follow them.

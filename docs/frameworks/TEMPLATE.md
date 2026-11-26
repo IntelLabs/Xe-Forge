@@ -10,10 +10,10 @@ Which `--workload` values it runs (`text`, `vision`, `action`), and what kind of
 
 ## 3. Command
 
-One complete command a person can copy, using only flags in `xe-forge run --help`:
+One complete command a person can copy, using only flags in `x-forge run --help`:
 
 ```
-xe-forge run --framework <framework> --model <hub id> \
+x-forge run --framework <framework> --model <hub id> \
     --framework-source <repository URL>@<tag> \
     --batch 4 --input-len 512 --output-len 32 --prompt-file <text file> \
     --calibration <calibration.json> --kernel-repos <repos> --top 3 --prove \
@@ -30,7 +30,7 @@ xe-forge run --framework <framework> --model <hub id> \
 
 ## 4. What the setup agent builds
 
-What `<venv>/xe-forge-setup.json` records: the source and how it was installed, what was
+What `<venv>/x-forge-setup.json` records: the source and how it was installed, what was
 dropped (`dropped`) and why, the `env` and `prepend` additions, and the `notes` handed to the
 capture agent. Say "generic" when nothing beyond the project's own install docs was needed.
 
@@ -49,4 +49,4 @@ paths the eager capture does not run, outputs the checks cannot judge. Only what
 
 The status from the [index](README.md), in one line.
 
-Last checked: <date>, Xe-Forge <short HEAD sha>
+Last checked: <date>, X-Forge <short HEAD sha>

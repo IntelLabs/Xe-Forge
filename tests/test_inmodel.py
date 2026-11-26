@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from xe_forge.frontend import inmodel
+from x_forge.frontend import inmodel
 
 
 def _git(repo, *a):
@@ -87,7 +87,7 @@ def _run(tmp_path, build=True):
 
 def test_a_variant_reads_its_time_per_call_as_the_spec_was_given_it():
     """per_call is the inverse of the spec's captured_us, for every form of record ref."""
-    from xe_forge.frontend import analyze, manifest
+    from x_forge.frontend import analyze, manifest
 
     w = SimpleNamespace(
         workload_id="gemm/1", dims={"N": 8}, device_us=0.0, calls=0, naming=None,
@@ -123,7 +123,7 @@ def test_only_a_repository_the_stack_built_with_a_build_script_and_a_check_is_a_
 
 
 def test_the_optimize_command_is_unchanged_without_the_facts(tmp_path):
-    from xe_forge.frontend import cli
+    from x_forge.frontend import cli
 
     run_dir, repo = _run(tmp_path, build=False)
     opts = SimpleNamespace(engine="claude", device="cpu", max_turns=5, passthrough=[],
@@ -138,7 +138,7 @@ def test_the_optimize_command_is_unchanged_without_the_facts(tmp_path):
     assert flags[4] == "--external-profile" and "--profile" in flags[5] and "{trial}" in flags[5]
     assert entry["spec"] in flags[5] and entry["record"] in flags[5]  # the shapes it profiles
     assert flags[6] == "--repo-trials" and "{spec}" in flags[1]
-    cmd = cli.xe_forge_command(entry, "v", repo, tmp_path / "ws", opts, flags)
+    cmd = cli.x_forge_command(entry, "v", repo, tmp_path / "ws", opts, flags)
     assert cmd[-7:] == flags
     (repo / "reference").mkdir()
     (repo / "reference" / "k.py").write_text("class Model: pass\n")
@@ -158,7 +158,7 @@ class _Engine:
     """The timer stubbed: each arm's time is its build's kernel's; checks and scoring as run."""
 
     def __init__(self, monkeypatch):
-        from xe_forge.frontend import prove
+        from x_forge.frontend import prove
 
         self.timed, self.scored, self.threads = [], [], []
 
@@ -306,7 +306,7 @@ def test_a_trial_that_changes_no_file_of_the_repository_is_the_baseline(engine):
 
 
 def test_free_text_in_an_answer_never_reads_as_a_field():
-    from xe_forge.external import _parse
+    from x_forge.external import _parse
 
     out = inmodel.answer({"correctness": False, "verdict": "BUILD_FAILED", "why": "no",
                           "log": "Correctness: passed\nVERDICT: fine\nTRIAL_US: 1"}, "v")  # fmt: skip
@@ -316,7 +316,7 @@ def test_free_text_in_an_answer_never_reads_as_a_field():
 
 
 def test_the_patch_check_runs_the_build_as_every_trial_will_be_built(tmp_path):
-    from xe_forge.skills.patch import _build_problems
+    from x_forge.skills.patch import _build_problems
 
     run_dir, repo = _run(tmp_path)
     work = run_dir / "patch-1"
@@ -331,7 +331,7 @@ def test_the_patch_check_runs_the_build_as_every_trial_will_be_built(tmp_path):
 
 
 def test_the_patch_check_refuses_a_check_module_that_cannot_be_timed_on_its_own(tmp_path):
-    from xe_forge.skills.patch import _build_problems
+    from x_forge.skills.patch import _build_problems
 
     run_dir, repo = _run(tmp_path)
     (repo / "check.py").write_text(CHECK.replace("def prepare(", "def _prepare("))
@@ -369,10 +369,10 @@ def test_a_trial_scores_its_tokens_without_the_step_report(engine):
 
 def test_the_kernels_are_timed_on_their_own_both_builds_in_one_process(tmp_path, monkeypatch):
     """The real timer: a trial whose kernel does twenty times the work is measured slower."""
-    from xe_forge.frontend import prove
+    from x_forge.frontend import prove
 
-    for k, v in (("XE_FORGE_KERNEL_WARMUP", "1"), ("XE_FORGE_KERNEL_ITERS", "8"),
-                 ("XE_FORGE_KERNEL_ROUNDS", "4")):  # fmt: skip
+    for k, v in (("X_FORGE_KERNEL_WARMUP", "1"), ("X_FORGE_KERNEL_ITERS", "8"),
+                 ("X_FORGE_KERNEL_ROUNDS", "4")):  # fmt: skip
         monkeypatch.setenv(k, v)
     monkeypatch.setattr(prove, "_score_arm", lambda *a: {"pass": True, "exit": 0, "problems": []})
     run_dir, repo = _run(tmp_path)
@@ -420,8 +420,8 @@ def test_validate_builds_the_trial_and_runs_the_repositorys_tests(engine):
 
 
 def test_the_workspace_speaks_of_repository_files_when_trials_run_in_the_engine(tmp_path):
-    from xe_forge.claude.generator import generate_workspace
-    from xe_forge.config import ConfigManager
+    from x_forge.claude.generator import generate_workspace
+    from x_forge.config import ConfigManager
 
     cfg = ConfigManager().config
     cfg.device_config.device, cfg.device_config.dsl = "cpu", "cpp"
@@ -450,7 +450,7 @@ def test_a_kernel_is_timed_on_the_team_the_model_ran_on(engine):
 
 def test_a_timing_failure_the_baseline_shares_is_not_the_trials(tmp_path, monkeypatch):
     """The real timer: a check module whose prepare fails for the baseline too is its fault."""
-    from xe_forge.frontend import prove
+    from x_forge.frontend import prove
 
     monkeypatch.setattr(prove, "_score_arm", lambda *a: {"pass": True, "exit": 0, "problems": []})
     run_dir, repo = _run(tmp_path)

@@ -1,0 +1,483 @@
+"""
+Configuration Manager for X-Forge kernel optimization pipeline
+"""
+
+import logging
+import math
+import os
+from dataclasses import dataclass, field, fields
+from pathlib import Path
+from typing import Any
+
+from dotenv import load_dotenv
+
+from x_forge.external import DEFAULT_TIMEOUT
+from x_forge.models import OptimizationStage
+
+
+def device_kind(device) -> str:
+    """The type of a device name: ``xpu`` of ``xpu:1``. The index names one device of that
+    type; what is compared, chosen or looked up by type takes this."""
+    return str(device).split(":")[0]
+
+
+def device_index(device, default: int = 0) -> int:
+    """The index of a device name (1 of ``xpu:1``), else ``default``."""
+    _, sep, index = str(device).partition(":")
+    return int(index) if sep and index.isdigit() else default
+
+
+def noise_band() -> float:
+    """The smallest speed change reported as one (``BENCHMARK_MIN_EFFECT``)."""
+    raw = os.environ.get("BENCHMARK_MIN_EFFECT", "0.02")
+    try:
+        band = float(raw)
+    except ValueError:
+        raise ValueError(f"BENCHMARK_MIN_EFFECT must be a number, not {raw!r}") from None
+    return checked_band(band)
+
+
+def checked_band(band: float) -> float:
+    """``band``, if a noise band can be it: with none, both of its inclusive edges are 1.0,
+    so an unchanged time would be a slowdown and a win at once."""
+    if not (math.isfinite(band) and band > 0):
+        raise ValueError(f"the noise band (BENCHMARK_MIN_EFFECT) must be finite and above 0, "
+                         f"not {band}")  # fmt: skip
+    return band
+
+
+@dataclass
+class LLMConfig:
+    """LLM configuration"""
+
+    model: str = "openai/gpt-4o"
+    temperature: float = 0.1
+    max_tokens: int = 8192
+    api_base: str | None = None
+    api_key: str | None = None
+
+
+@dataclass
+class AgentConfig:
+    """Agent configuration"""
+
+    max_iterations: int = 5
+    use_cover: bool = True
+    strategy: str = "cover"  # cover, react, coordinator
+
+
+@dataclass
+class OptimizationConfig:
+    """Optimization pipeline configuration"""
+
+    enabled_stages: list[OptimizationStage] = field(
+        default_factory=lambda: [
+            OptimizationStage.ANALYSIS,
+            OptimizationStage.ALGORITHMIC,
+            OptimizationStage.DTYPE_FIX,
+            OptimizationStage.FUSION,
+            OptimizationStage.MEMORY_ACCESS,
+            OptimizationStage.TENSOR_DESCRIPTORS,
+            OptimizationStage.PERSISTENT_KERNEL,
+            OptimizationStage.DEVICE_SPECIFIC,
+            OptimizationStage.AUTOTUNING,
+        ]
+    )
+    max_attempts_per_stage: int = 3
+    validate_each_stage: bool = True
+
+    # Correctness validation settings
+    require_correctness: bool = True  # If False, skip output comparison
+    correctness_rtol: float = 1e-2  # Relative tolerance for correctness check
+    correctness_atol: float = 1e-5  # Absolute tolerance for correctness check
+
+    target_speedup: float = 2.0  # Minimum acceptable speedup
+    target_dtype: str | None = None  # "float16", "bfloat16", etc.
+
+
+@dataclass
+class DeviceConfig:
+    """Base device configuration."""
+
+    device: str = "xpu"
+    dsl: str = "triton"
+    default_num_warps: int = 32
+    default_num_stages: int = 2
+    preferred_tile_m: int = 256
+    preferred_tile_n: int = 256
+    preferred_tile_k: int = 32
+
+
+@dataclass
+class XPUConfig(DeviceConfig):
+    """Intel XPU specific configuration."""
+
+    device: str = "xpu"
+    grf_mode: str = "256"
+    default_num_warps: int = 32
+    default_num_stages: int = 2
+    preferred_tile_m: int = 256
+    preferred_tile_n: int = 256
+    preferred_tile_k: int = 32
+    group_size_m: int = 4
+
+
+@dataclass
+class CUDAConfig(DeviceConfig):
+    """NVIDIA CUDA specific configuration."""
+
+    device: str = "cuda"
+    default_num_warps: int = 4
+    default_num_stages: int = 3
+    preferred_tile_m: int = 128
+    preferred_tile_n: int = 128
+    preferred_tile_k: int = 32
+
+
+@dataclass
+class KnowledgeConfig:
+    """Knowledge base configuration.
+
+    Set enabled=True and point knowledge_dir at a directory containing
+    the YAML pattern files to load the knowledge base at startup.
+    When enabled=False (default) the pipeline relies entirely on the
+    LLM's built-in knowledge — no YAML files are required.
+    """
+
+    enabled: bool = False
+    knowledge_dir: str = "./knowledge_base"
+    # auto_load kept for backward compatibility; ignored when enabled=False
+    auto_load: bool = True
+
+
+@dataclass
+class LoggingConfig:
+    """Logging configuration"""
+
+    level: str = "INFO"
+    log_dir: str = "./outputs/logs"
+    kernel_dir: str = "./outputs/kernels"
+    save_intermediate: bool = True
+
+
+@dataclass
+class EngineConfig:
+    """Engine selection configuration"""
+
+    engine: str = "dspy"  # "dspy", "claude", "codex" or "dspy-agent"
+    auto_launch: bool = False  # Claude engine: auto-launch claude CLI
+    workspace: str = "./"  # Claude engine: workspace directory
+    git_init: bool = False  # Claude engine: initialize workspace as git repo
+    max_turns: int = 80  # Claude engine: turn limit for one headless session
+    # "kernel" or "library" (tune how the repository calls a library such as oneDNN).
+    target: str = "kernel"
+    # Name, ``module:attr`` reference, or entry point of a build backend
+    # (see x_forge.core.build_backend). None keeps the default ai_bench path.
+    build_backend: str | None = None
+    # Extra flags for the target compiler (e.g. icpx for SYCL); rendered into the
+    # generated workspace for Claude's own build step. x_forge never compiles it itself.
+    compiler_flags: str | None = None
+
+
+@dataclass
+class ExternalConfig:
+    """Commands a host supplies for correctness and timing.
+
+    X-Forge's own answers to "is it correct" and "how fast is it" come from
+    random tensors and an unfloored wall-clock measurement. A host with real
+    workload data and a calibrated timer supplies a command instead; see
+    :mod:`x_forge.external` for the contract it must print and for why the
+    default is worth replacing.
+
+    ``dataset_record`` is the third of the same kind: a JSON file describing the
+    data behind the spec's benchmark variants, so the session can read the real
+    workload distribution instead of inferring one from the shapes it was given.
+    See :mod:`x_forge.core.dataset_record`.
+
+    ``lessons`` is the fourth: a directory outside the workspace where sessions
+    record what they measured, so a run can start from what earlier runs on this
+    part found instead of rediscovering it. See :mod:`x_forge.core.lessons`.
+
+    ``kernel_repo`` the path to an external repository holding a kernel
+    this session did not write. Unlike the others, no host-supplied structured record
+    describes it -- the `kernel-locator` agent explores the repository itself and
+    writes what it found, once, before the first trial.
+
+    All are None by default, which keeps the built-in build and measurement path.
+    """
+
+    benchmark: str | None = None
+    validate: str | None = None
+    dataset_record: str | None = None
+    lessons: str | None = None
+    kernel_repo: str | None = None
+    # Repositories a kernel from kernel_repo is wired into (e.g. vLLM). With one, a winner
+    # may change the op's interface and call sites: the port patches those repos too.
+    integration_repos: list[str] = field(default_factory=list)
+    # The stack's interpreter; set, the port-back agent builds and tests the port there.
+    stack_python: str | None = None
+    # Trials are directories of kernel_repo's files at their repository paths, built into the
+    # repository and timed by the benchmark command.
+    repo_trials: bool = False
+    # The command that profiles a trial where the benchmark times it; placeholders {trial}
+    # and {workspace}. With it the workspace's profile step runs it.
+    profile: str | None = None
+    timeout: int = DEFAULT_TIMEOUT
+
+
+@dataclass
+class TrialConfig:
+    """Trial tree management configuration"""
+
+    enabled: bool = True
+    trials_dir: str = "./trials"
+    max_trials: int = 10
+
+
+@dataclass
+class ProfilerConfig:
+    """Profiler configuration: unitrace and/or VTune on a GPU; perf, or VTune, on the host"""
+
+    perf_enabled: bool = True
+    perf_bin: str = "perf"
+    vtune_enabled: bool = False
+    vtune_bin: str = "vtune"
+    unitrace_enabled: bool = False
+    unitrace_bin: str = "unitrace"
+    unitrace_metric_group: str = "all"
+    warmup_iters: int = 5
+    profile_iters: int = 20
+
+
+@dataclass
+class Config:
+    """Master configuration"""
+
+    llm: LLMConfig = field(default_factory=LLMConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
+    optimization: OptimizationConfig = field(default_factory=OptimizationConfig)
+    device_config: DeviceConfig = field(default_factory=XPUConfig)
+    knowledge: KnowledgeConfig = field(default_factory=KnowledgeConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
+    engine: EngineConfig = field(default_factory=EngineConfig)
+    trial: TrialConfig = field(default_factory=TrialConfig)
+    profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
+    external: ExternalConfig = field(default_factory=ExternalConfig)
+
+    @property
+    def xpu(self) -> XPUConfig:
+        """Backward compatibility accessor."""
+        if isinstance(self.device_config, XPUConfig):
+            return self.device_config
+        raise AttributeError("Current device config is not XPUConfig")
+
+
+class ConfigManager:
+    """Centralized configuration manager that loads from .env and allows overrides"""
+
+    def __init__(self, env_path: Path | None = None):
+        if env_path:
+            load_dotenv(env_path)
+        else:
+            load_dotenv(verbose=True)
+        self.config = self._load_config()
+
+    def _get_env(self, key: str, default: Any = None, cast_type: type = str) -> Any:
+        """Get environment variable with type casting"""
+        value = os.getenv(key, default)
+        if value is None:
+            return default
+        if cast_type is bool:
+            return str(value).lower() in ("true", "1", "yes", "on")
+        if cast_type is list:
+            return [x.strip() for x in str(value).split(",")]
+        return cast_type(value)
+
+    def _load_config(self) -> Config:
+        """Load configuration from environment variables"""
+
+        # LLM Configuration
+        llm = LLMConfig(
+            model=self._get_env("LLM_MODEL", "openai/gpt-4o"),
+            temperature=self._get_env("LLM_TEMPERATURE", 0.1, float),  # GPT need 1.0
+            max_tokens=self._get_env("LLM_MAX_TOKENS", 8192, int),  # 16k for gpt
+            api_base=self._get_env("OPENAI_API_BASE"),
+            api_key=self._get_env("OPENAI_API_KEY"),
+        )
+
+        # Agent Configuration
+        agent = AgentConfig(
+            max_iterations=self._get_env("AGENT_MAX_ITERATIONS", 5, int),
+            use_cover=self._get_env("USE_COVER", True, bool),
+            strategy=self._get_env("AGENT_STRATEGY", "cover"),
+        )
+
+        # Optimization Configuration
+        optimization = OptimizationConfig(
+            max_attempts_per_stage=self._get_env("MAX_ATTEMPTS_PER_STAGE", 3, int),
+            validate_each_stage=self._get_env("VALIDATE_EACH_STAGE", True, bool),
+            require_correctness=self._get_env("REQUIRE_CORRECTNESS", True, bool),
+            correctness_rtol=self._get_env("CORRECTNESS_RTOL", 1e-2, float),
+            correctness_atol=self._get_env("CORRECTNESS_ATOL", 1e-5, float),
+            target_speedup=self._get_env("TARGET_SPEEDUP", 2.0, float),
+            target_dtype=self._get_env("TARGET_DTYPE", None),
+        )
+
+        # Device Configuration
+        device_type = self._get_env("DEVICE_TYPE", "xpu")
+        dsl = self._get_env("DSL", "triton")
+        device_cfg = self._build_device_config(device_type, dsl)
+
+        # Knowledge Configuration
+        knowledge = KnowledgeConfig(
+            enabled=self._get_env("KNOWLEDGE_BASE_ENABLED", False, bool),
+            knowledge_dir=self._get_env("KNOWLEDGE_DIR", "./knowledge_base"),
+            auto_load=self._get_env("AUTO_LOAD_KNOWLEDGE", True, bool),
+        )
+
+        # Logging Configuration
+        logging_cfg = LoggingConfig(
+            level=self._get_env("LOG_LEVEL", "INFO"),
+            log_dir=self._get_env("LOG_DIR", "./outputs/logs"),
+            kernel_dir=self._get_env("KERNEL_DIR", "./outputs/kernels"),
+            save_intermediate=self._get_env("SAVE_INTERMEDIATE", True, bool),
+        )
+
+        # Engine Configuration
+        engine_cfg = EngineConfig(
+            engine=self._get_env("ENGINE", "dspy"),
+            auto_launch=self._get_env("AUTO_LAUNCH", False, bool),
+            workspace=self._get_env("WORKSPACE", "./"),
+            git_init=self._get_env("WORKSPACE_GIT_INIT", False, bool),
+            max_turns=self._get_env("MAX_TURNS", 80, int),
+            target=self._get_env("TARGET", "kernel"),
+            build_backend=self._get_env("BUILD_BACKEND", None),
+            compiler_flags=self._get_env("COMPILER_FLAGS", None),
+        )
+
+        # External correctness/timing commands
+        external_cfg = ExternalConfig(
+            benchmark=self._get_env("EXTERNAL_BENCHMARK", None),
+            validate=self._get_env("EXTERNAL_VALIDATE", None),
+            stack_python=self._get_env("STACK_PYTHON", None),
+            repo_trials=self._get_env("REPO_TRIALS", False, bool),
+            profile=self._get_env("EXTERNAL_PROFILE", None),
+            dataset_record=self._get_env("DATASET_RECORD", None),
+            lessons=self._get_env("LESSONS_DIR", None),
+            kernel_repo=self._get_env("KERNEL_REPO", None),
+            integration_repos=[
+                p for p in self._get_env("INTEGRATION_REPOS", "").split(os.pathsep) if p
+            ],
+            timeout=self._get_env("EXTERNAL_TIMEOUT", DEFAULT_TIMEOUT, int),
+        )
+
+        # Trial Configuration
+        trial_cfg = TrialConfig(
+            enabled=self._get_env("TRIALS_ENABLED", True, bool),
+            trials_dir=self._get_env("TRIALS_DIR", "./trials"),
+            max_trials=self._get_env("MAX_TRIALS", 10, int),
+        )
+
+        # Profiler Configuration
+        profiler_cfg = ProfilerConfig(
+            perf_enabled=self._get_env("PERF_ENABLED", True, bool),
+            perf_bin=self._get_env("PERF_BIN", "perf"),
+            vtune_enabled=self._get_env("VTUNE_ENABLED", False, bool),
+            vtune_bin=self._get_env("VTUNE_BIN", "vtune"),
+            unitrace_enabled=self._get_env("UNITRACE_ENABLED", False, bool),
+            unitrace_bin=self._get_env("UNITRACE_BIN", "unitrace"),
+            unitrace_metric_group=self._get_env("UNITRACE_METRIC_GROUP", "all"),
+            warmup_iters=self._get_env("VTUNE_WARMUP", 5, int),
+            profile_iters=self._get_env("VTUNE_ITERS", 20, int),
+        )
+
+        return Config(
+            llm=llm,
+            agent=agent,
+            optimization=optimization,
+            device_config=device_cfg,
+            knowledge=knowledge,
+            logging=logging_cfg,
+            engine=engine_cfg,
+            trial=trial_cfg,
+            profiler=profiler_cfg,
+            external=external_cfg,
+        )
+
+    def _build_device_config(self, device_type: str, dsl: str) -> DeviceConfig:
+        """Build device-specific configuration based on device type."""
+        if device_kind(device_type) == "cuda":
+            return CUDAConfig(
+                device=device_type,
+                dsl=dsl,
+                default_num_warps=self._get_env("DEFAULT_NUM_WARPS", 4, int),
+                default_num_stages=self._get_env("DEFAULT_NUM_STAGES", 3, int),
+                preferred_tile_m=self._get_env("PREFERRED_TILE_M", 128, int),
+                preferred_tile_n=self._get_env("PREFERRED_TILE_N", 128, int),
+                preferred_tile_k=self._get_env("PREFERRED_TILE_K", 32, int),
+            )
+        # XPU_DEVICE names one device of the requested type; it never replaces a device of
+        # another type, nor one the request already names.
+        named = self._get_env("XPU_DEVICE", "").strip()
+        device = device_type
+        if named and named != device_type:
+            if ":" not in device_type and device_kind(named) == device_type:
+                device = named
+            else:
+                logging.getLogger(__name__).warning(
+                    "XPU_DEVICE=%s ignored: the device asked for is %s", named, device_type
+                )
+        return XPUConfig(
+            device=device,
+            dsl=dsl,
+            grf_mode=self._get_env("GRF_MODE", "256"),
+            default_num_warps=self._get_env("DEFAULT_NUM_WARPS", 32, int),
+            default_num_stages=self._get_env("DEFAULT_NUM_STAGES", 2, int),
+            preferred_tile_m=self._get_env("PREFERRED_TILE_M", 256, int),
+            preferred_tile_n=self._get_env("PREFERRED_TILE_N", 256, int),
+            preferred_tile_k=self._get_env("PREFERRED_TILE_K", 32, int),
+            group_size_m=self._get_env("GROUP_SIZE_M", 4, int),
+        )
+
+    def override(self, **kwargs) -> "ConfigManager":
+        """Override configuration values programmatically"""
+        # Map legacy "xpu_*" keys to device_config
+        _section_aliases = {"xpu": "device_config"}
+        sections = sorted((f.name for f in fields(self.config)), key=len, reverse=True)
+        for key, value in kwargs.items():
+            # A section name may itself hold "_" (device_config): match the longest prefix.
+            section = next((s for s in sections if key.startswith(s + "_")), None)
+            if section is None:
+                alias, _, attr = key.partition("_")
+                section = _section_aliases.get(alias)
+            else:
+                attr = key[len(section) + 1 :]
+            section_obj = getattr(self.config, section, None) if section else None
+            if section_obj is not None and hasattr(section_obj, attr):
+                setattr(section_obj, attr, value)
+        return self
+
+    def get(self) -> Config:
+        """Get the loaded configuration"""
+        return self.config
+
+
+# Global config instance
+_config_manager: ConfigManager | None = None
+
+
+def get_config(env_path: Path | None = None, reload: bool = False) -> Config:
+    """Get global configuration instance"""
+    global _config_manager
+    if _config_manager is None or reload:
+        _config_manager = ConfigManager(env_path)
+    return _config_manager.get()
+
+
+def override_config(**kwargs) -> Config:
+    """Override configuration values"""
+    global _config_manager
+    if _config_manager is None:
+        _config_manager = ConfigManager()
+    _config_manager.override(**kwargs)
+    return _config_manager.get()

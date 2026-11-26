@@ -19,9 +19,9 @@
   </defs>
   <rect width="960" height="650" fill="#FFFFFF"/>
 
-  <!-- xe-forge run -->
+  <!-- x-forge run -->
   <rect class="lane" x="12" y="14" width="790" height="372" rx="10"/>
-  <text class="h" x="26" y="38">xe-forge run: a model in its framework</text>
+  <text class="h" x="26" y="38">x-forge run: a model in its framework</text>
 
   <rect class="agent" x="315" y="50" width="160" height="46" rx="5"/>
   <text class="t" x="395" y="70">patch</text><text class="s" x="395" y="86">adds a missing op</text>
@@ -62,9 +62,9 @@
   <path class="f" d="M95,276 V308"/>
   <path class="d" d="M395,120 V98"/>
 
-  <!-- xe-forge: one kernel -->
+  <!-- x-forge: one kernel -->
   <rect class="lane" x="12" y="410" width="936" height="150" rx="10"/>
-  <text class="h" x="26" y="434">xe-forge: one kernel</text>
+  <text class="h" x="26" y="434">x-forge: one kernel</text>
 
   <rect class="io"    x="30"  y="450" width="130" height="56" rx="5"/>
   <text class="t" x="95" y="474">kernel, spec,</text><text class="t" x="95" y="492">reference</text>

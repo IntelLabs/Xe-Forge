@@ -6,7 +6,7 @@ import pytest
 dspy = pytest.importorskip("dspy")
 litellm = pytest.importorskip("litellm")
 
-from xe_forge.llm_setup import configure_dspy, is_bedrock  # noqa: E402
+from x_forge.llm_setup import configure_dspy, is_bedrock  # noqa: E402
 
 BEDROCK = "bedrock/us.anthropic.claude-sonnet-5-5"
 
@@ -81,3 +81,13 @@ def test_bedrock_request_routes_offline(configured, monkeypatch):
     lm = configured(_llm(BEDROCK))
     assert litellm.get_llm_provider(lm.model)[1] == "bedrock"
     assert lm("ping", mock_response="pong") == ["pong"]
+
+
+def test_a_variable_with_the_old_prefix_stops_the_tool(monkeypatch):
+    import x_forge
+
+    monkeypatch.setenv("XE_FORGE_DEVICE", "cpu")
+    with pytest.raises(SystemExit, match="XE_FORGE_DEVICE -> X_FORGE_DEVICE"):
+        x_forge.load_env()
+    monkeypatch.delenv("XE_FORGE_DEVICE")
+    x_forge.load_env()

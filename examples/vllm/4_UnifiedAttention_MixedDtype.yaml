@@ -4,7 +4,7 @@
 # storage type (float8_e4m3fn or int8).  This avoids the bf16→quant cast
 # inside Model.forward() and lets the optimizer see the true memory layout.
 #
-# Requires mixed-dtype support in xe-forge (get_input_dtypes).
+# Requires mixed-dtype support in x-forge (get_input_dtypes).
 
 # --- FP8 per-tensor KV cache ---
 # query: bfloat16, key/value caches: float8_e4m3fn

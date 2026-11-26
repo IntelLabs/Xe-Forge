@@ -1,19 +1,19 @@
 # Reference
 
-Every flag of `xe-forge` and `xe-forge-skill`, and every environment variable Xe-Forge reads.
+Every flag of `x-forge` and `x-forge-skill`, and every environment variable X-Forge reads.
 Each command prints the same list with `--help`.
 
-Where a flag and a variable set the same thing, the flag wins: `xe-forge` writes the flag into
-the environment before it loads the configuration (`src/xe_forge/cli.py`). A variable already
+Where a flag and a variable set the same thing, the flag wins: `x-forge` writes the flag into
+the environment before it loads the configuration (`src/x_forge/cli.py`). A variable already
 set in the shell wins over the same variable in `.env`, which is loaded without overriding
-(`src/xe_forge/config.py`).
+(`src/x_forge/config.py`).
 
-`xe-forge` and `xe-forge-skill` load `.env` before anything reads the environment: the one
+`x-forge` and `x-forge-skill` load `.env` before anything reads the environment: the one
 in the working directory or above it, then the one at the repository root.
 
-## `xe-forge`: optimize one kernel
+## `x-forge`: optimize one kernel
 
-`xe-forge [flags]`. With `run`, `optimize` or `calibrate` as its first word it runs that
+`x-forge [flags]`. With `run`, `optimize` or `calibrate` as its first word it runs that
 command instead (below).
 
 | Flag | Default | What it does |
@@ -63,14 +63,14 @@ Delegate building, correctness and timing to a project that owns them.
 | `--external-benchmark` | `EXTERNAL_BENCHMARK` (built-in) | Command run instead of the built-in benchmark. Placeholders: `{kernel}` `{baseline}` `{trial}` `{spec}` `{variant}` `{device}` `{dsl}` `{workspace}` |
 | `--external-validate` | `EXTERNAL_VALIDATE` (built-in) | Command run instead of the built-in validator. Placeholders: `{kernel}` `{trial}` `{dsl}` `{stage}` `{workspace}` |
 | `--stack-python` | `STACK_PYTHON` (none) | Interpreter of the stack the kernel serves; the port-back agent builds its port beside that stack, tests it there and records the verdict |
-| `--dataset-record` | `DATASET_RECORD` (none) | JSON record of the data behind the spec's variants, rendered into the workspace (`xe_forge.core.dataset_record`) |
-| `--lessons DIR` | `LESSONS_DIR` (none) | Directory outside the workspace where sessions record what they measured; each session reads all of it (`xe_forge.core.lessons`) |
+| `--dataset-record` | `DATASET_RECORD` (none) | JSON record of the data behind the spec's variants, rendered into the workspace (`x_forge.core.dataset_record`) |
+| `--lessons DIR` | `LESSONS_DIR` (none) | Directory outside the workspace where sessions record what they measured; each session reads all of it (`x_forge.core.lessons`) |
 | `--kernel-repo PATH` | `KERNEL_REPO` (none) | External repository holding the kernel; the kernel-locator agent explores it before the first trial |
 
-## `xe-forge run`: optimize a model in its framework
+## `x-forge run`: optimize a model in its framework
 
-`xe-forge run -o DIR --framework NAME --model ID [flags] [-- FLAGS]`. Everything after `--` is
-passed to every per-kernel `xe-forge` run (for example `-- --no-unitrace`).
+`x-forge run -o DIR --framework NAME --model ID [flags] [-- FLAGS]`. Everything after `--` is
+passed to every per-kernel `x-forge` run (for example `-- --no-unitrace`).
 
 | Flag | Default | What it does |
 |---|---|---|
@@ -79,7 +79,7 @@ passed to every per-kernel `xe-forge` run (for example `-- --no-unitrace`).
 | `--model` | required | Hugging Face id or local path |
 | `--framework-python` | none | The framework's interpreter, already installed. Without it the setup agent builds a venv, which later runs reuse |
 | `--framework-source URL[@REF]` | the framework's upstream, latest release | Repository and tag, branch or commit the setup agent builds from. Not with `--framework-python` |
-| `--framework-venv DIR` | `$XE_FORGE_CACHE/frameworks/<framework>-<hash of the source>` | Where the setup agent builds. Not with `--framework-python` |
+| `--framework-venv DIR` | `$X_FORGE_CACHE/frameworks/<framework>-<hash of the source>` | Where the setup agent builds. Not with `--framework-python` |
 | `--framework-note TEXT` | none | A constraint the capture agent cannot discover, handed to it verbatim. Repeatable |
 | `--reference-python` | the framework's interpreter | GPU torch + transformers, for a patch's reference tokens |
 | `--workload` | `text` | `text`, `vision` or `action` |
@@ -103,7 +103,7 @@ passed to every per-kernel `xe-forge` run (for example `-- --no-unitrace`).
 | `--top` | 3 | Kernels to optimize |
 | `--at-roofline` | 0.8 | Efficiency of its bound at which a kernel is left alone |
 | `--min-gain` | 0.005 | Smallest share of device time worth optimizing |
-| `--calibration` | none (counter bounds only) | `xe-forge calibrate` output. Before naming, a matmul peak the capture's GEMMs and costs need and the file lacks is measured into it, and so is the peak of a compute dtype the naming agent's costs declare, before those costs are checked; a dtype that cannot be measured has no compute bound, is bounded by bandwidth alone, and is never stopped at roofline |
+| `--calibration` | none (counter bounds only) | `x-forge calibrate` output. Before naming, a matmul peak the capture's GEMMs and costs need and the file lacks is measured into it, and so is the peak of a compute dtype the naming agent's costs declare, before those costs are checked; a dtype that cannot be measured has no compute bound, is bounded by bandwidth alone, and is never stopped at roofline |
 | `--name-coverage` | 0.99 | Share of device time whose ops the naming agent must place |
 | `--analyze-only` | off | Stop after the manifest (`kernels.yaml`) |
 | `--agent-max-turns` | `--max-turns` | Turn limit of every frontend agent |
@@ -113,36 +113,36 @@ passed to every per-kernel `xe-forge` run (for example `-- --no-unitrace`).
 | `--fuse-top` | 2 | Fusions to optimize |
 | `--stack-check` | off | Each port-back agent builds and tests its port in the framework's stack (`--stack-python`) |
 
-`run` also takes every `xe-forge optimize` flag except the manifest.
+`run` also takes every `x-forge optimize` flag except the manifest.
 
-## `xe-forge optimize`: optimize the kernels of a manifest
+## `x-forge optimize`: optimize the kernels of a manifest
 
-`xe-forge optimize MANIFEST [flags] [-- FLAGS]`. Runs one `xe-forge` per enabled kernel of a
+`x-forge optimize MANIFEST [flags] [-- FLAGS]`. Runs one `x-forge` per enabled kernel of a
 `kernels.yaml` from `run --analyze-only`, in that run's directory; `--` as for `run`.
 
 | Flag | Default | What it does |
 |---|---|---|
 | `MANIFEST` | required | `kernels.yaml` |
-| `--engine` | `XE_FORGE_AGENT`, else `claude` | `claude` or `codex`: the agent CLI of every agent; `dspy-agent`: for the kernels only |
-| `--device` | `XE_FORGE_DEVICE`, else the first device torch sees | Device; exported as `XE_FORGE_DEVICE` to every step |
+| `--engine` | `X_FORGE_AGENT`, else `claude` | `claude` or `codex`: the agent CLI of every agent; `dspy-agent`: for the kernels only |
+| `--device` | `X_FORGE_DEVICE`, else the first device torch sees | Device; exported as `X_FORGE_DEVICE` to every step |
 | `--max-turns` | 80 | Turn limit of one kernel session |
 | `--only NAME ...` | every enabled kernel | Kernels to run |
 | `--kernel-repos` | the directory holding this checkout | Directory of the kernel repositories |
-| `--compiler-flags` | `XE_FORGE_SYCL_FLAGS` | Compile flags for `sycl` entries; `{kernel_repo}` expands to the entry's repository |
+| `--compiler-flags` | `X_FORGE_SYCL_FLAGS` | Compile flags for `sycl` entries; `{kernel_repo}` expands to the entry's repository |
 
-## `xe-forge calibrate`: measure the device's ceilings
+## `x-forge calibrate`: measure the device's ceilings
 
 | Flag | Default | What it does |
 |---|---|---|
-| `-o`, `--output` | `$XE_FORGE_CACHE/calibration/<device name>.json` | Output file |
+| `-o`, `--output` | `$X_FORGE_CACHE/calibration/<device name>.json` | Output file |
 | `--read-bytes` | 1073741824 (1 GiB) | Bytes read by the bandwidth test; must exceed the device's caches |
 | `--matmul-n` | 8192 | Square matmul size |
 | `--iters` | 20 | Iterations per measurement |
 | `--dtypes DTYPE ...` | all | Matmul dtypes to measure |
 
-## `xe-forge-skill`: the tools agents call
+## `x-forge-skill`: the tools agents call
 
-`xe-forge-skill <tool> ...`. A tool's verdict is its exit code. `--trials-dir` defaults to
+`x-forge-skill <tool> ...`. A tool's verdict is its exit code. `--trials-dir` defaults to
 `./trials` wherever it appears.
 
 ### `analyze PYTORCH_FILE`
@@ -169,13 +169,13 @@ Correctness and timing of a trial against the baseline.
 | `--reference` | none | Semantic reference; without `--spec` its `get_inputs()` / `get_init_inputs()` make the inputs |
 | `--variant` | every weighted variant when the spec has `weights`, else its `default_variant` | Spec variant |
 | `--baseline-us` | none | Cached baseline time, in microseconds |
-| `--device` | `XE_FORGE_DEVICE`, else the first device torch sees | Device; exported as `XE_FORGE_DEVICE` to every step |
+| `--device` | `X_FORGE_DEVICE`, else the first device torch sees | Device; exported as `X_FORGE_DEVICE` to every step |
 | `--dsl` | `triton` | As for `validate` |
 | `--triton-baseline` | off | The baseline is a Triton kernel |
 | `--external-benchmark` | `EXTERNAL_BENCHMARK` | Host command to benchmark with instead |
 | `--kernel-name` | none | Trial tree to record the result in |
 | `--trial-id` | none | Saved trial the optimized file is; records the result |
-| `--builtin-benchmark` | `XE_FORGE_BUILTIN_BENCHMARK` (off) | Measure with the built-in executor; required when no host benchmark is configured |
+| `--builtin-benchmark` | `X_FORGE_BUILTIN_BENCHMARK` (off) | Measure with the built-in executor; required when no host benchmark is configured |
 
 ### `trial`
 
@@ -203,7 +203,7 @@ Hardware counters of one kernel. See [PROFILING.md](PROFILING.md).
 | `--tool` | `auto` | `auto` (unitrace `ComputeBasic` first, then VTune), `unitrace` or `vtune` |
 | `--unitrace-bin` | `unitrace` | unitrace binary (does not read `UNITRACE_BIN`) |
 | `--metric-group` | `ComputeBasic` | `ComputeBasic`, `EuStallSampling` or `all` (both, in sequential runs) |
-| `--sampling-interval-us` | `XE_FORGE_SAMPLING_INTERVAL_US` (25) | unitrace sampling interval |
+| `--sampling-interval-us` | `X_FORGE_SAMPLING_INTERVAL_US` (25) | unitrace sampling interval |
 | `--assembly` | off | Capture IGC shader dumps (disables persistent JIT caches during collection) |
 | `--parent-profile` | none | Retained unitrace artifact directory to compare kernel resources against |
 | `--vtune-bin` | `vtune` | VTune binary |
@@ -221,7 +221,7 @@ Hardware counters of one kernel. See [PROFILING.md](PROFILING.md).
 
 | Subcommand | Arguments and flags | What it does |
 |---|---|---|
-| `run` | `LAUNCHER -o RAW [--unitrace BIN] [--sampling-interval US] [--trace-steps N]` | Run a launcher (it writes into `$RAW_DIR`) timed, then under unitrace, into `raw/`. `--unitrace` defaults to `UNITRACE_BIN`, `--sampling-interval` to `XE_FORGE_SAMPLING_INTERVAL_US` (25), `--trace-steps` to `XE_FORGE_TRACE_STEPS` (2; 0 runs the full workload under unitrace too). On a host, `--timeline-only` keeps the launcher's timeline pass and skips the perf pass: the node times without the code they ran |
+| `run` | `LAUNCHER -o RAW [--unitrace BIN] [--sampling-interval US] [--trace-steps N]` | Run a launcher (it writes into `$RAW_DIR`) timed, then under unitrace, into `raw/`. `--unitrace` defaults to `UNITRACE_BIN`, `--sampling-interval` to `X_FORGE_SAMPLING_INTERVAL_US` (25), `--trace-steps` to `X_FORGE_TRACE_STEPS` (2; 0 runs the full workload under unitrace too). On a host, `--timeline-only` keeps the launcher's timeline pass and skips the perf pass: the node times without the code they ran |
 | `parse` | `RAW -o CAPTURE_JSON [--names NAMES_JSON] [--min-known PCT]` | `raw/` to `capture.json`, checked against unitrace; `--names` applies a `names.json`; at least `--min-known` (90) % of op time must be in kernels unitrace saw |
 
 ### `patch check DIR`
@@ -242,7 +242,7 @@ tokens scored against transformers. `DIR` holds `patch.json` and `generate.sh`.
 | `--trust-remote-code` | off | Pass `trust_remote_code` |
 | `--prompt-file` | none | The run's prompt text |
 | `--precision` | `bfloat16` | Float dtype scored first: the run's declared compute |
-| `--quantization` | none | The run's declared quantization: `generate.sh` runs again with `XE_FORGE_QUANTIZATION` set, and its tokens are scored and reported |
+| `--quantization` | none | The run's declared quantization: `generate.sh` runs again with `X_FORGE_QUANTIZATION` set, and its tokens are scored and reported |
 | `--quantized-gate` | none | `dequantized`: gate those tokens against the original model holding the weights the quantized run decodes to (`$OUT/dequantized.json`), in float32, and report each tensor's error against the checkpoint; for a framework that quantizes the weights itself |
 | `--no-reference` | off | Skip only the reference comparison (for image or video output) |
 | `--margin` | 0.1 | Non-text output: how much worse than the native run's worst the patched run's worst may be against a float32 reference, as a relative squared error (for PSNR, 10·log10(1 + margin) dB) |
@@ -272,7 +272,7 @@ patch's `build.sh`, which also runs the repository's kernel tests), checks the t
 against its reference at every shape of the spec in one process (the module's `check`), scores
 the build's output with `patch score` and the check's arguments, and then times the trial's
 kernel against the baseline's at every weighted shape: both builds' packages imported in one
-process (`python -m xe_forge.frontend.standalone`), each kernel prepared by its module's
+process (`python -m x_forge.frontend.standalone`), each kernel prepared by its module's
 `prepare`, timed by the executor's host timer in alternating rounds, twice with the slots
 swapped, on the team the run's model ran on (its capture's `runtime.threads`). A build whose
 library binds a symbol once per process (`STB_GNU_UNIQUE`) is refused: two builds of it in one
@@ -283,7 +283,7 @@ trial's. The baseline must be the repository's files unchanged (`BASELINE_NOT_RE
 the commit the patch check judged (`REPOSITORY_MOVED`). One measurement serves every variant
 of a pair (`<workspace>/.inmodel/`). `--build-only` is the validator: the build and the tests
 alone. `--profile` runs the trial's kernel under `perf record` at the weighted shapes, each for
-its weight's share of `XE_FORGE_KERNEL_PROFILE_SECONDS`, and counts the samples inside its
+its weight's share of `X_FORGE_KERNEL_PROFILE_SECONDS`, and counts the samples inside its
 calls.
 
 ### `bound CAPTURE_JSON`
@@ -292,7 +292,7 @@ Each workload's efficiency against its bound.
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--calibration` | none | `xe-forge calibrate` output |
+| `--calibration` | none | `x-forge calibrate` output |
 | `--min-share` | 0.005 | Smallest share of device time listed |
 | `--json` | off | Rows as JSON |
 | `--names` | none | A draft `names.json` to apply first, to a capture parsed without `--names` (exit 2 otherwise) |
@@ -322,7 +322,7 @@ with a `why` passes.
 
 ## Environment variables
 
-Commands: `xe-forge` is the
+Commands: `x-forge` is the
 kernel pipeline (also each kernel run that `run` / `optimize` starts); "agents" means every
 command that starts an agent session, which builds its endpoint from the LLM variables.
 Read but unused means the code loads the value and nothing uses it.
@@ -331,144 +331,144 @@ Read but unused means the code loads the value and nothing uses it.
 
 | Variable | Default | What it does | Read by |
 |---|---|---|---|
-| `LLM_MODEL` | `openai/gpt-4o` | Model, LiteLLM style; `bedrock/<id>` routes to AWS Bedrock. Passed to claude / codex without the provider prefix | `xe-forge`, agents |
-| `OPENAI_API_BASE` | none | Endpoint URL; claude gets it as `ANTHROPIC_BASE_URL`, codex as `openai_base_url` | `xe-forge`, agents |
-| `OPENAI_API_KEY` | none | API key; claude gets it as `ANTHROPIC_AUTH_TOKEN`, codex as `CODEX_API_KEY` | `xe-forge`, agents |
-| `LLM_TEMPERATURE` | 0.1 | Sampling temperature (dspy, dspy-agent) | `xe-forge` |
-| `LLM_MAX_TOKENS` | 8192 | Token limit of one completion (dspy, dspy-agent) | `xe-forge` |
-| `AWS_REGION_NAME`, `AWS_REGION` | `us-east-1` | Bedrock region, the first one set | `xe-forge` |
+| `LLM_MODEL` | `openai/gpt-4o` | Model, LiteLLM style; `bedrock/<id>` routes to AWS Bedrock. Passed to claude / codex without the provider prefix | `x-forge`, agents |
+| `OPENAI_API_BASE` | none | Endpoint URL; claude gets it as `ANTHROPIC_BASE_URL`, codex as `openai_base_url` | `x-forge`, agents |
+| `OPENAI_API_KEY` | none | API key; claude gets it as `ANTHROPIC_AUTH_TOKEN`, codex as `CODEX_API_KEY` | `x-forge`, agents |
+| `LLM_TEMPERATURE` | 0.1 | Sampling temperature (dspy, dspy-agent) | `x-forge` |
+| `LLM_MAX_TOKENS` | 8192 | Token limit of one completion (dspy, dspy-agent) | `x-forge` |
+| `AWS_REGION_NAME`, `AWS_REGION` | `us-east-1` | Bedrock region, the first one set | `x-forge` |
 
 Bedrock credentials (`AWS_BEARER_TOKEN_BEDROCK`, or `AWS_ACCESS_KEY_ID` +
-`AWS_SECRET_ACCESS_KEY`) are read by LiteLLM, not by Xe-Forge (`src/xe_forge/llm_setup.py`).
+`AWS_SECRET_ACCESS_KEY`) are read by LiteLLM, not by X-Forge (`src/x_forge/llm_setup.py`).
 
 ### Engine and agents
 
 | Variable | Default | What it does | Read by |
 |---|---|---|---|
-| `ENGINE` | `dspy` | `--engine` | `xe-forge` |
-| `TARGET` | `kernel` | `--target` | `xe-forge` |
-| `WORKSPACE` | `./` | `--workspace` | `xe-forge` |
-| `WORKSPACE_GIT_INIT` | false | Initialize the generated workspace as a git repository | `xe-forge` |
-| `AUTO_LAUNCH` | false | `--auto-launch` | `xe-forge` |
-| `MAX_TURNS` | 80 | `--max-turns` | `xe-forge` |
-| `XE_FORGE_AGENT` | `claude` | Agent CLI of the frontend agents, `claude` or `codex`; default of `--engine` for `run` / `optimize` | `run`, `optimize` |
-| `XE_FORGE_AGENT_TIMEOUT` | 21600 (6 h) | Seconds one frontend agent session may run | `run` |
-| `XE_FORGE_AGENT_RESUMES` | 5 | Times a frontend agent session is resumed before it fails | `run` |
-| `AGENT_STRATEGY` | `cover` | dspy optimizer: `cover`, `react` or `coordinator` | `xe-forge` |
-| `AGENT_MAX_ITERATIONS` | 5 | dspy optimizer iterations per stage | `xe-forge` |
-| `TRITON_OPT_DUMP_DIR` | `./outputs/kernels` | Where the dspy agents dump kernels they generate | `xe-forge` |
-| `USE_COVER` | true | Read but unused | `xe-forge` |
+| `ENGINE` | `dspy` | `--engine` | `x-forge` |
+| `TARGET` | `kernel` | `--target` | `x-forge` |
+| `WORKSPACE` | `./` | `--workspace` | `x-forge` |
+| `WORKSPACE_GIT_INIT` | false | Initialize the generated workspace as a git repository | `x-forge` |
+| `AUTO_LAUNCH` | false | `--auto-launch` | `x-forge` |
+| `MAX_TURNS` | 80 | `--max-turns` | `x-forge` |
+| `X_FORGE_AGENT` | `claude` | Agent CLI of the frontend agents, `claude` or `codex`; default of `--engine` for `run` / `optimize` | `run`, `optimize` |
+| `X_FORGE_AGENT_TIMEOUT` | 21600 (6 h) | Seconds one frontend agent session may run | `run` |
+| `X_FORGE_AGENT_RESUMES` | 5 | Times a frontend agent session is resumed before it fails | `run` |
+| `AGENT_STRATEGY` | `cover` | dspy optimizer: `cover`, `react` or `coordinator` | `x-forge` |
+| `AGENT_MAX_ITERATIONS` | 5 | dspy optimizer iterations per stage | `x-forge` |
+| `TRITON_OPT_DUMP_DIR` | `./outputs/kernels` | Where the dspy agents dump kernels they generate | `x-forge` |
+| `USE_COVER` | true | Read but unused | `x-forge` |
 
 ### Correctness, trials and timing
 
 | Variable | Default | What it does | Read by |
 |---|---|---|---|
-| `REQUIRE_CORRECTNESS` | true | false = `--no-correctness` | `xe-forge` |
-| `CORRECTNESS_RTOL` | 1e-2 | Relative tolerance when the spec gives none | `xe-forge` |
-| `CORRECTNESS_ATOL` | 1e-5 | Absolute tolerance when the spec gives none | `xe-forge` |
-| `TARGET_DTYPE` | none | `--target-dtype` | `xe-forge` |
-| `TRIALS_ENABLED` | true | false = `--no-trials` | `xe-forge` |
-| `TRIALS_DIR` | `./trials` | `--trials-dir` | `xe-forge` |
-| `MAX_TRIALS` | 10 | `--max-trials` | `xe-forge` |
-| `BENCHMARK_MIN_EFFECT` | 0.02 | Relative difference below which two timings count as equal; a finite number above 0 | `xe-forge`, `benchmark` |
-| `XE_FORGE_BUILTIN_BENCHMARK` | off | `1`/`true`/`yes`/`on` = `benchmark --builtin-benchmark` | `benchmark` |
-| `XE_FORGE_BASELINE_SLACK` | 1.5 | How much slower than the captured kernel a baseline may run before it is not that kernel | `benchmark` |
-| `XE_FORGE_KERNEL_WARMUP` | the executor's (200) | Warm-up calls per arm of a trial's kernel timed on its own; on a GPU never fewer than 100 | `inmodel` |
-| `XE_FORGE_KERNEL_ITERS` | the executor's (200) | Timed calls per arm, split over the rounds | `inmodel` |
-| `XE_FORGE_KERNEL_ROUNDS` | the executor's (10) | Alternating rounds per slot order | `inmodel` |
-| `XE_FORGE_KERNEL_PROFILE_SECONDS` | 10 | How long a profiled trial's kernel runs in all | `inmodel` |
-| `XE_FORGE_MODEL_EVENTS` | `cycles,instructions,cache-misses,branch-misses` | perf events of a profiled trial's kernel | `inmodel` |
-| `XE_FORGE_BENCHMARK_TIMEOUT` | `EXTERNAL_TIMEOUT` | Seconds per shape before `benchmark` gives up on a hang | `benchmark` |
-| `MAX_ATTEMPTS_PER_STAGE` | 3 | Read but unused | `xe-forge` |
-| `VALIDATE_EACH_STAGE` | true | Read but unused | `xe-forge` |
-| `TARGET_SPEEDUP` | 2.0 | Read but unused | `xe-forge` |
+| `REQUIRE_CORRECTNESS` | true | false = `--no-correctness` | `x-forge` |
+| `CORRECTNESS_RTOL` | 1e-2 | Relative tolerance when the spec gives none | `x-forge` |
+| `CORRECTNESS_ATOL` | 1e-5 | Absolute tolerance when the spec gives none | `x-forge` |
+| `TARGET_DTYPE` | none | `--target-dtype` | `x-forge` |
+| `TRIALS_ENABLED` | true | false = `--no-trials` | `x-forge` |
+| `TRIALS_DIR` | `./trials` | `--trials-dir` | `x-forge` |
+| `MAX_TRIALS` | 10 | `--max-trials` | `x-forge` |
+| `BENCHMARK_MIN_EFFECT` | 0.02 | Relative difference below which two timings count as equal; a finite number above 0 | `x-forge`, `benchmark` |
+| `X_FORGE_BUILTIN_BENCHMARK` | off | `1`/`true`/`yes`/`on` = `benchmark --builtin-benchmark` | `benchmark` |
+| `X_FORGE_BASELINE_SLACK` | 1.5 | How much slower than the captured kernel a baseline may run before it is not that kernel | `benchmark` |
+| `X_FORGE_KERNEL_WARMUP` | the executor's (200) | Warm-up calls per arm of a trial's kernel timed on its own; on a GPU never fewer than 100 | `inmodel` |
+| `X_FORGE_KERNEL_ITERS` | the executor's (200) | Timed calls per arm, split over the rounds | `inmodel` |
+| `X_FORGE_KERNEL_ROUNDS` | the executor's (10) | Alternating rounds per slot order | `inmodel` |
+| `X_FORGE_KERNEL_PROFILE_SECONDS` | 10 | How long a profiled trial's kernel runs in all | `inmodel` |
+| `X_FORGE_MODEL_EVENTS` | `cycles,instructions,cache-misses,branch-misses` | perf events of a profiled trial's kernel | `inmodel` |
+| `X_FORGE_BENCHMARK_TIMEOUT` | `EXTERNAL_TIMEOUT` | Seconds per shape before `benchmark` gives up on a hang | `benchmark` |
+| `MAX_ATTEMPTS_PER_STAGE` | 3 | Read but unused | `x-forge` |
+| `VALIDATE_EACH_STAGE` | true | Read but unused | `x-forge` |
+| `TARGET_SPEEDUP` | 2.0 | Read but unused | `x-forge` |
 
 ### Host integration
 
 | Variable | Default | What it does | Read by |
 |---|---|---|---|
-| `BUILD_BACKEND` | none | `--build-backend` | `xe-forge` |
-| `EXTERNAL_BENCHMARK` | none | `--external-benchmark` | `xe-forge`, `benchmark` |
-| `EXTERNAL_VALIDATE` | none | `--external-validate` | `xe-forge`, `validate` |
-| `EXTERNAL_TIMEOUT` | 1800 | Seconds a host command (and each benchmark shape) may run | `xe-forge`, `benchmark` |
-| `STACK_PYTHON` | none | `--stack-python` | `xe-forge` |
-| `DATASET_RECORD` | none | `--dataset-record` | `xe-forge` |
-| `LESSONS_DIR` | none | `--lessons` | `xe-forge` |
-| `KERNEL_REPO` | none | `--kernel-repo` | `xe-forge` |
-| `INTEGRATION_REPOS` | none | `--integration-repo`, paths joined with `:` | `xe-forge` |
-| `COMPILER_FLAGS` | none | `--compiler-flags` | `xe-forge` |
+| `BUILD_BACKEND` | none | `--build-backend` | `x-forge` |
+| `EXTERNAL_BENCHMARK` | none | `--external-benchmark` | `x-forge`, `benchmark` |
+| `EXTERNAL_VALIDATE` | none | `--external-validate` | `x-forge`, `validate` |
+| `EXTERNAL_TIMEOUT` | 1800 | Seconds a host command (and each benchmark shape) may run | `x-forge`, `benchmark` |
+| `STACK_PYTHON` | none | `--stack-python` | `x-forge` |
+| `DATASET_RECORD` | none | `--dataset-record` | `x-forge` |
+| `LESSONS_DIR` | none | `--lessons` | `x-forge` |
+| `KERNEL_REPO` | none | `--kernel-repo` | `x-forge` |
+| `INTEGRATION_REPOS` | none | `--integration-repo`, paths joined with `:` | `x-forge` |
+| `COMPILER_FLAGS` | none | `--compiler-flags` | `x-forge` |
 
 ### Device and DSL
 
 | Variable | Default | What it does | Read by |
 |---|---|---|---|
-| `DEVICE_TYPE` | `xpu` | `--device` | `xe-forge` |
-| `DSL` | `triton` | `--dsl` | `xe-forge` |
-| `XPU_DEVICE` | `DEVICE_TYPE` | Device name when the device is not `cuda`; used only when it is of the type `--device` asks for, so it never turns `--device cpu` into `xpu` (a warning says it was ignored) | `xe-forge` |
-| `DEFAULT_NUM_WARPS` | 32 (`cuda`: 4) | Default warps given to the optimizer | `xe-forge` |
-| `DEFAULT_NUM_STAGES` | 2 (`cuda`: 3) | Default pipeline stages | `xe-forge` |
-| `PREFERRED_TILE_M` | 256 (`cuda`: 128) | Preferred tile M | `xe-forge` |
-| `PREFERRED_TILE_N` | 256 (`cuda`: 128) | Preferred tile N | `xe-forge` |
-| `PREFERRED_TILE_K` | 32 | Preferred tile K | `xe-forge` |
-| `GRF_MODE` | `256` | Triton GRF mode suggested on XPU | `xe-forge` |
-| `GROUP_SIZE_M` | 4 | GEMM group size suggested on XPU | `xe-forge` |
-| `SYCL_TLA_DIR` | none | sycl-tla checkout whose headers SYCL kernels compile against | `xe-forge` |
-| `MKL_INCLUDE` | `$MKLROOT/include` | MKL headers for SYCL kernels | `xe-forge` |
-| `MKLROOT` | none | Set by oneAPI's environment script; used when `MKL_INCLUDE` is unset | `xe-forge` |
-| `XE_FORGE_SYCL_FLAGS` | none | Default of `optimize --compiler-flags` | `run`, `optimize` |
-| `XE_FORGE_XPU_ARCH` | the device id torch reports | AOT target of the generated SYCL torch-extension seed | the generated workspace |
-| `XE_FORGE_OPENCL_OPTIONS` | `-cl-std=CL3.0 -O2` | OpenCL C compile options | `xe_forge.opencl` (opencl kernels) |
-| `XE_FORGE_SPIRV_OPTIONS` | `--spirv-ext=+all,-SPV_KHR_untyped_pointers` | `llvm-spirv` options | `xe_forge.opencl` (opencl kernels) |
-| `XE_FORGE_OPENCL_CACHE` | `$XE_FORGE_CACHE/opencl` | OpenCL build cache | `xe_forge.opencl` (opencl kernels) |
-| `XE_FORGE_CLANG_DIR` | none | Directory searched first for `clang` / `llvm-spirv` | `xe_forge.opencl` (opencl kernels) |
-| `CMPLR_ROOT` | none | Set by oneAPI's environment script; searched after `XE_FORGE_CLANG_DIR` | `xe_forge.opencl` (opencl kernels) |
+| `DEVICE_TYPE` | `xpu` | `--device` | `x-forge` |
+| `DSL` | `triton` | `--dsl` | `x-forge` |
+| `XPU_DEVICE` | `DEVICE_TYPE` | Device name when the device is not `cuda`; used only when it is of the type `--device` asks for, so it never turns `--device cpu` into `xpu` (a warning says it was ignored) | `x-forge` |
+| `DEFAULT_NUM_WARPS` | 32 (`cuda`: 4) | Default warps given to the optimizer | `x-forge` |
+| `DEFAULT_NUM_STAGES` | 2 (`cuda`: 3) | Default pipeline stages | `x-forge` |
+| `PREFERRED_TILE_M` | 256 (`cuda`: 128) | Preferred tile M | `x-forge` |
+| `PREFERRED_TILE_N` | 256 (`cuda`: 128) | Preferred tile N | `x-forge` |
+| `PREFERRED_TILE_K` | 32 | Preferred tile K | `x-forge` |
+| `GRF_MODE` | `256` | Triton GRF mode suggested on XPU | `x-forge` |
+| `GROUP_SIZE_M` | 4 | GEMM group size suggested on XPU | `x-forge` |
+| `SYCL_TLA_DIR` | none | sycl-tla checkout whose headers SYCL kernels compile against | `x-forge` |
+| `MKL_INCLUDE` | `$MKLROOT/include` | MKL headers for SYCL kernels | `x-forge` |
+| `MKLROOT` | none | Set by oneAPI's environment script; used when `MKL_INCLUDE` is unset | `x-forge` |
+| `X_FORGE_SYCL_FLAGS` | none | Default of `optimize --compiler-flags` | `run`, `optimize` |
+| `X_FORGE_XPU_ARCH` | the device id torch reports | AOT target of the generated SYCL torch-extension seed | the generated workspace |
+| `X_FORGE_OPENCL_OPTIONS` | `-cl-std=CL3.0 -O2` | OpenCL C compile options | `x_forge.opencl` (opencl kernels) |
+| `X_FORGE_SPIRV_OPTIONS` | `--spirv-ext=+all,-SPV_KHR_untyped_pointers` | `llvm-spirv` options | `x_forge.opencl` (opencl kernels) |
+| `X_FORGE_OPENCL_CACHE` | `$X_FORGE_CACHE/opencl` | OpenCL build cache | `x_forge.opencl` (opencl kernels) |
+| `X_FORGE_CLANG_DIR` | none | Directory searched first for `clang` / `llvm-spirv` | `x_forge.opencl` (opencl kernels) |
+| `CMPLR_ROOT` | none | Set by oneAPI's environment script; searched after `X_FORGE_CLANG_DIR` | `x_forge.opencl` (opencl kernels) |
 
 The SYCL compile goes through the `ai_bench` dependency, which reads `AIBENCH_SYCL_COMPILER`
 (default `icpx`), `AIBENCH_SYCL_FLAGS` (replaces its default flags) and `AIBENCH_SYCL_TARGET`
-(used only when torch reports no XPU device). Its `AIBENCH_SYCL_INCLUDE` is ignored: Xe-Forge
+(used only when torch reports no XPU device). Its `AIBENCH_SYCL_INCLUDE` is ignored: X-Forge
 passes the include directories itself.
 
 ### Profiling
 
 | Variable | Default | What it does | Read by |
 |---|---|---|---|
-| `UNITRACE_ENABLED` | false | `--unitrace` | `xe-forge` |
-| `UNITRACE_BIN` | `unitrace` | unitrace binary | `xe-forge`, `run`, `optimize`; `capture run` |
-| `UNITRACE_METRIC_GROUP` | `all` | Metric group the workspace's profile step collects | `xe-forge` |
-| `VTUNE_ENABLED` | false | `--vtune` | `xe-forge` |
-| `VTUNE_BIN` | `vtune` | `--vtune-bin` | `xe-forge` |
-| `XE_FORGE_SAMPLING_INTERVAL_US` | 25 | unitrace sampling interval in microseconds; too coarse misses short kernels, too fine stops unitrace partway with no records | `profile`, `capture run` |
-| `XE_FORGE_TRACE_STEPS` | 2 | Default of `capture run --trace-steps` | `capture run` |
-| `VTUNE_WARMUP` | 5 | Read but unused | `xe-forge` |
-| `VTUNE_ITERS` | 20 | Read but unused | `xe-forge` |
+| `UNITRACE_ENABLED` | false | `--unitrace` | `x-forge` |
+| `UNITRACE_BIN` | `unitrace` | unitrace binary | `x-forge`, `run`, `optimize`; `capture run` |
+| `UNITRACE_METRIC_GROUP` | `all` | Metric group the workspace's profile step collects | `x-forge` |
+| `VTUNE_ENABLED` | false | `--vtune` | `x-forge` |
+| `VTUNE_BIN` | `vtune` | `--vtune-bin` | `x-forge` |
+| `X_FORGE_SAMPLING_INTERVAL_US` | 25 | unitrace sampling interval in microseconds; too coarse misses short kernels, too fine stops unitrace partway with no records | `profile`, `capture run` |
+| `X_FORGE_TRACE_STEPS` | 2 | Default of `capture run --trace-steps` | `capture run` |
+| `VTUNE_WARMUP` | 5 | Read but unused | `x-forge` |
+| `VTUNE_ITERS` | 20 | Read but unused | `x-forge` |
 
 ### Knowledge base, logs and cache
 
 | Variable | Default | What it does | Read by |
 |---|---|---|---|
-| `KNOWLEDGE_BASE_ENABLED` | false | Load the YAML knowledge base (dspy engine) | `xe-forge` |
-| `KNOWLEDGE_DIR` | `./knowledge_base` | Knowledge base directory | `xe-forge` |
-| `AUTO_LOAD_KNOWLEDGE` | true | Read but unused | `xe-forge` |
-| `LOG_LEVEL` | `INFO` | Pipeline log level | `xe-forge` |
-| `LOG_DIR` | `./outputs/logs` | Pipeline logs | `xe-forge` |
-| `KERNEL_DIR` | `./outputs/kernels` | Saved kernels | `xe-forge` |
-| `SAVE_INTERMEDIATE` | true | Save each stage's kernel | `xe-forge` |
-| `XE_FORGE_DEVICE` | the first device torch sees | Device of `run`, `optimize`, `calibrate`, `benchmark` and the processes they start; set from `--device` | `run`, `optimize`, `calibrate`, `benchmark` |
-| `XE_FORGE_CACHE` | `~/.cache/xe_forge` | Cache root: framework venvs, calibrations, OpenCL builds | `run`, `calibrate`, `xe_forge.opencl` |
+| `KNOWLEDGE_BASE_ENABLED` | false | Load the YAML knowledge base (dspy engine) | `x-forge` |
+| `KNOWLEDGE_DIR` | `./knowledge_base` | Knowledge base directory | `x-forge` |
+| `AUTO_LOAD_KNOWLEDGE` | true | Read but unused | `x-forge` |
+| `LOG_LEVEL` | `INFO` | Pipeline log level | `x-forge` |
+| `LOG_DIR` | `./outputs/logs` | Pipeline logs | `x-forge` |
+| `KERNEL_DIR` | `./outputs/kernels` | Saved kernels | `x-forge` |
+| `SAVE_INTERMEDIATE` | true | Save each stage's kernel | `x-forge` |
+| `X_FORGE_DEVICE` | the first device torch sees | Device of `run`, `optimize`, `calibrate`, `benchmark` and the processes they start; set from `--device` | `run`, `optimize`, `calibrate`, `benchmark` |
+| `X_FORGE_CACHE` | `~/.cache/x_forge` | Cache root: framework venvs, calibrations, OpenCL builds | `run`, `calibrate`, `x_forge.opencl` |
 
-### Set by Xe-Forge for the programs it starts
+### Set by X-Forge for the programs it starts
 
 | Variable | Set by | For |
 |---|---|---|
 | `RAW_DIR` | `capture run` | The launcher: where it writes its output |
-| `XE_FORGE_TRACE_STEPS` | `capture run` | The launcher, during the unitrace pass only |
+| `X_FORGE_TRACE_STEPS` | `capture run` | The launcher, during the unitrace pass only |
 | `PTI_ENABLE_COLLECTION` | `profile` | unitrace: collect only around the profiled iterations |
 | `ZE_FLAT_DEVICE_HIERARCHY=FLAT` | `profile`, `capture run` | Level Zero, under unitrace |
-| `TORCH_EXTENSIONS_DIR` | `xe-forge --workspace` | torch extension builds, when unset |
+| `TORCH_EXTENSIONS_DIR` | `x-forge --workspace` | torch extension builds, when unset |
 | `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL` | agents | claude, from the LLM variables, when unset |
 | `CODEX_API_KEY` | agents | codex, from `OPENAI_API_KEY`, when unset |
 | `FRAMEWORK_PYTHON`, `XF_BATCH`, `XF_INPUT_LEN`, `XF_OUTPUT_LEN` | `run` | the launcher: the framework's interpreter and the text workload |
-| `XE_FORGE_NATIVE` | `patch check` | `generate.sh`: run the framework's own path, the reference arm |
+| `X_FORGE_NATIVE` | `patch check` | `generate.sh`: run the framework's own path, the reference arm |
 
 The framework launchers `capture run` and `patch check` start get the environment without
 `ANTHROPIC_*` and `OPENAI_*` variables.

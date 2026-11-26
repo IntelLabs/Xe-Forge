@@ -5,7 +5,7 @@
 #     "PyYAML>=6.0.0",
 # ]
 # ///
-"""Convert an xe-forge kernel spec (YAML) into a roofline CSV.
+"""Convert an x-forge kernel spec (YAML) into a roofline CSV.
 
 The spec only carries *problem shapes* and a FLOP formula — there are no
 measured kernel times in it. So this emits, for each bench variant, its

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from xe_forge.core import topology
+from x_forge.core import topology
 
 
 def _host(root, sockets=2, cores=2, smt=2, llc="1024K"):
@@ -98,7 +98,7 @@ def _cpu_device(cpus="0-3", mems="0", llc=1 << 20):
 
 
 def test_a_calibration_from_another_placement_is_named_and_not_merged():
-    from xe_forge.frontend import calibrate
+    from x_forge.frontend import calibrate
 
     one, two = _cpu_device("0-3", "0"), _cpu_device("0-7", "0-1")
     assert calibrate._identity(one) != calibrate._identity(two)
@@ -115,9 +115,9 @@ def test_a_calibration_from_another_placement_is_named_and_not_merged():
 def test_host_calibration_measures_both_first_touches_and_refuses_a_cache_sized_read(monkeypatch):
     import torch
 
-    from xe_forge.frontend import calibrate, profile
+    from x_forge.frontend import calibrate, profile
 
-    monkeypatch.setenv("XE_FORGE_DEVICE", "cpu")
+    monkeypatch.setenv("X_FORGE_DEVICE", "cpu")
     monkeypatch.setattr(profile, "device_info", lambda: _cpu_device(llc=1 << 20))
     monkeypatch.setattr(torch, "get_num_threads", lambda: 2)
     monkeypatch.setattr(torch, "set_num_threads", lambda n: None)
@@ -143,7 +143,7 @@ HOTSPOTS_TSV = "Function\tCPU Time\tModule\nmy_kernel\t1.5\text.so\nomp_wait\t0.
 
 
 def test_vtune_reports_are_read_as_vtune_printed_them():
-    from xe_forge.core.profiler import parse_vtune_summary, parse_vtune_table
+    from x_forge.core.profiler import parse_vtune_summary, parse_vtune_table
 
     rows = parse_vtune_summary(SUMMARY_TSV)
     assert rows[:3] == [
@@ -164,7 +164,7 @@ def _host_report(sections, window=None, **kw):
 
 
 def test_a_host_profile_reports_every_metric_and_no_recommendation():
-    from xe_forge.core.profiler import ProfileResult, parse_vtune_summary, parse_vtune_table
+    from x_forge.core.profiler import ProfileResult, parse_vtune_summary, parse_vtune_table
 
     window = {"window": "all", "iters": 50, "forward_s": 0.03, "window_s": 0.04,
               "window_max_s": 0.05}  # fmt: skip
@@ -185,7 +185,7 @@ def test_a_host_profile_reports_every_metric_and_no_recommendation():
 
 
 def test_a_failed_section_and_a_missing_window_are_unknown_not_empty():
-    from xe_forge.core.profiler import ProfileResult
+    from x_forge.core.profiler import ProfileResult
 
     host = _host_report([{"title": "Hotspots by function", "error": "the hotspots report failed: x"}],
                  {"iters": 3}, unmeasured={"cycles": "<not supported>"})  # fmt: skip
@@ -197,7 +197,7 @@ def test_a_failed_section_and_a_missing_window_are_unknown_not_empty():
 
 @pytest.mark.parametrize("window", ["each", "all"])
 def test_the_window_brackets_the_timed_calls(window):
-    from xe_forge.core.profile_runner import _timed_calls
+    from x_forge.core.profile_runner import _timed_calls
 
     events = []
 
@@ -223,7 +223,7 @@ def test_perf_collection_is_switched_over_its_control_descriptors():
     import os
     import threading
 
-    from xe_forge.core.profile_runner import Collection
+    from x_forge.core.profile_runner import Collection
 
     control_r, control_w = os.pipe()
     ack_r, ack_w = os.pipe()
@@ -281,7 +281,7 @@ PERF_REPORT = """\
 
 
 def test_perf_output_is_read_as_perf_printed_it():
-    from xe_forge.core.profiler import parse_perf_report, parse_perf_stat
+    from x_forge.core.profiler import parse_perf_report, parse_perf_stat
 
     rows, unmeasured = parse_perf_stat(PERF_STAT)
     assert rows[0]["event"] == "cycles" and rows[0]["counter-value"] == "100.000000"
@@ -295,7 +295,7 @@ def test_perf_output_is_read_as_perf_printed_it():
 
 
 def test_perf_runs_bounded_and_drops_only_the_events_it_refuses(tmp_path, monkeypatch):
-    from xe_forge.core import profiler
+    from x_forge.core import profiler
 
     kernel = tmp_path / "k.py"
     kernel.write_text("x = 1\n")
@@ -346,8 +346,8 @@ def _profile_args(**kw):
 
 
 def test_the_host_is_profiled_with_perf_first_and_vtune_on_request(monkeypatch):
-    from xe_forge.core import profiler
-    from xe_forge.skills import profile
+    from x_forge.core import profiler
+    from x_forge.skills import profile
 
     seen = []
 
@@ -384,9 +384,9 @@ def test_the_host_is_profiled_with_perf_first_and_vtune_on_request(monkeypatch):
 def test_a_host_workspace_is_seeded_and_told_the_host_rules(tmp_path, dsl):
     import ast
 
-    from xe_forge.claude.generator import generate_workspace
-    from xe_forge.config import Config
-    from xe_forge.models import DSL
+    from x_forge.claude.generator import generate_workspace
+    from x_forge.config import Config
+    from x_forge.models import DSL
 
     config = Config()
     config.device_config.dsl, config.device_config.device = dsl, "cpu"
@@ -405,7 +405,7 @@ def test_a_host_workspace_is_seeded_and_told_the_host_rules(tmp_path, dsl):
 def test_host_knowledge_is_loaded_for_each_host_language():
     from pathlib import Path
 
-    from xe_forge.knowledge.loader import _collect_yaml_files
+    from x_forge.knowledge.loader import _collect_yaml_files
 
     kb = Path(__file__).resolve().parents[1] / "knowledge_base"
     for dsl in ("cpp", "sycl"):
@@ -422,7 +422,7 @@ def test_a_second_hardware_thread_counts_only_when_its_core_is_already_placed(tm
 
 
 def test_the_thread_count_is_part_of_a_host_calibrations_identity():
-    from xe_forge.frontend import calibrate
+    from x_forge.frontend import calibrate
 
     eight, one = {**_cpu_device(), "threads": 8}, {**_cpu_device(), "threads": 1}
     assert calibrate._identity(eight) != calibrate._identity(one)
@@ -432,9 +432,9 @@ def test_the_thread_count_is_part_of_a_host_calibrations_identity():
 def test_one_thread_has_no_second_first_touch_to_measure(monkeypatch):
     import torch
 
-    from xe_forge.frontend import calibrate, profile
+    from x_forge.frontend import calibrate, profile
 
-    monkeypatch.setenv("XE_FORGE_DEVICE", "cpu")
+    monkeypatch.setenv("X_FORGE_DEVICE", "cpu")
     monkeypatch.setattr(profile, "device_info", lambda: _cpu_device(llc=1 << 20))
     monkeypatch.setattr(torch, "get_num_threads", lambda: 1)
     monkeypatch.setattr(torch, "set_num_threads", lambda n: None)
@@ -444,8 +444,8 @@ def test_one_thread_has_no_second_first_touch_to_measure(monkeypatch):
 
 
 def test_an_unknown_cache_size_is_said_in_the_result(monkeypatch):
-    import xe_forge.core.topology as topo
-    from xe_forge.core.executor import KernelBenchExecutor
+    import x_forge.core.topology as topo
+    from x_forge.core.executor import KernelBenchExecutor
 
     class Call:
         def reset(self):
@@ -463,8 +463,8 @@ def test_an_unknown_cache_size_is_said_in_the_result(monkeypatch):
 
 
 def test_a_host_workspace_profiles_the_host(tmp_path):
-    from xe_forge.claude.generator import generate_workspace
-    from xe_forge.config import Config
+    from x_forge.claude.generator import generate_workspace
+    from x_forge.config import Config
 
     config = Config()
     config.device_config.dsl, config.device_config.device = "cpp", "cpu"
@@ -475,7 +475,7 @@ def test_a_host_workspace_profiles_the_host(tmp_path):
         generate_workspace(ws, config, "scale", "", reference_code="x = 1\n")
         return next(
             line for line in (ws / "CLAUDE.md").read_text().splitlines()
-            if "xe-forge-skill profile" in line
+            if "x-forge-skill profile" in line
         )  # fmt: skip
 
     line = profile_line("both")  # the required collection is perf's, so perf is named
@@ -486,14 +486,14 @@ def test_a_host_workspace_profiles_the_host(tmp_path):
 
 
 def test_a_unitrace_group_is_refused_on_the_host():
-    from xe_forge.skills import profile
+    from x_forge.skills import profile
 
     with pytest.raises(SystemExit, match="--analysis"):
         profile.run(_profile_args(metric_group="all"))
 
 
 def test_a_calibration_note_names_the_threads_and_a_long_cpu_list_fits_a_file_name():
-    from xe_forge.frontend import calibrate
+    from x_forge.frontend import calibrate
 
     def device(threads, cpus="0-3"):
         return {"type": "cpu", "name": "Test CPU", "threads": threads,
@@ -516,8 +516,8 @@ def test_an_unknown_cache_slice_makes_the_cache_size_unknown(tmp_path):
 
 
 def test_the_benchmark_says_where_the_flush_ran(monkeypatch):
-    import xe_forge.core.topology as topo
-    from xe_forge.core.executor import KernelBenchExecutor
+    import x_forge.core.topology as topo
+    from x_forge.core.executor import KernelBenchExecutor
 
     class Call:
         def reset(self):
@@ -533,7 +533,7 @@ def test_the_benchmark_says_where_the_flush_ran(monkeypatch):
 
 
 def test_an_arm_that_writes_its_inputs_is_refused_even_within_tolerance():
-    from xe_forge.core.executor import KernelBenchExecutor
+    from x_forge.core.executor import KernelBenchExecutor
 
     reference = (
         "import torch\n"
@@ -553,7 +553,7 @@ def test_an_arm_that_writes_its_inputs_is_refused_even_within_tolerance():
 
 
 def test_a_shared_input_written_by_an_arm_is_refused_before_it_is_timed():
-    from xe_forge.core.executor import KernelBenchExecutor
+    from x_forge.core.executor import KernelBenchExecutor
 
     plain = (
         "import torch\n"
@@ -574,7 +574,7 @@ def test_a_shared_input_written_by_an_arm_is_refused_before_it_is_timed():
 
 
 def test_a_host_call_restores_the_buffers_from_before_the_error_check(monkeypatch):
-    from xe_forge.core.executor import KernelBenchExecutor
+    from x_forge.core.executor import KernelBenchExecutor
 
     stateful = (
         "import torch\n"
@@ -599,7 +599,7 @@ def test_a_host_call_restores_the_buffers_from_before_the_error_check(monkeypatc
 
 
 def test_perf_record_reports_its_samples_and_says_when_there_are_none(tmp_path, monkeypatch):
-    from xe_forge.core import profiler
+    from x_forge.core import profiler
 
     kernel = tmp_path / "k.py"
     kernel.write_text("x = 1\n")
@@ -627,8 +627,8 @@ def test_perf_record_reports_its_samples_and_says_when_there_are_none(tmp_path, 
 
 
 def test_an_event_spec_with_commas_is_passed_whole(monkeypatch):
-    from xe_forge.core import profiler
-    from xe_forge.skills import profile
+    from x_forge.core import profiler
+    from x_forge.skills import profile
 
     seen = []
 
@@ -644,8 +644,8 @@ def test_an_event_spec_with_commas_is_passed_whole(monkeypatch):
 
 
 def test_a_perf_only_host_workspace_is_told_to_profile(tmp_path):
-    from xe_forge.claude.generator import generate_workspace
-    from xe_forge.config import Config
+    from x_forge.claude.generator import generate_workspace
+    from x_forge.config import Config
 
     config = Config()
     config.device_config.dsl, config.device_config.device = "cpp", "cpu"
@@ -654,7 +654,7 @@ def test_a_perf_only_host_workspace_is_told_to_profile(tmp_path):
     text = (tmp_path / "ws" / "CLAUDE.md").read_text()
     assert "`perf_enabled: true` or `vtune_enabled: true`" in text
     assert "`unitrace_enabled: true` or" not in text
-    line = next(x for x in text.splitlines() if "xe-forge-skill profile" in x)
+    line = next(x for x in text.splitlines() if "x-forge-skill profile" in x)
     assert "--tool perf" in line
     # Every saved trial needs its perf counts, recorded against the trial.
     assert "--require-profiles 'perf stat'" in text and "--kernel-name scale" in line
@@ -665,9 +665,9 @@ def test_a_perf_only_host_workspace_is_told_to_profile(tmp_path):
 
 
 def test_a_host_calibration_measures_float8_only_when_asked(monkeypatch):
-    from xe_forge.frontend import calibrate
+    from x_forge.frontend import calibrate
 
-    monkeypatch.setenv("XE_FORGE_DEVICE", "cpu")
+    monkeypatch.setenv("X_FORGE_DEVICE", "cpu")
     rec = calibrate.measure(read_bytes=4 << 20, n=8, iters=1)
     assert "float8_e4m3fn" not in rec["matmul_tflops"]  # not a value, not an unmeasured
     assert "--dtypes float8_e4m3fn" in rec["not_requested"]["matmul_tflops.float8_e4m3fn"]
@@ -676,7 +676,7 @@ def test_a_host_calibration_measures_float8_only_when_asked(monkeypatch):
 
 
 def test_a_trial_tree_can_require_perf_counts(tmp_path):
-    from xe_forge.core.trial_manager import TrialManager
+    from x_forge.core.trial_manager import TrialManager
 
     baseline = tmp_path / "base.py"
     baseline.write_text("x = 1\n")
@@ -688,11 +688,11 @@ def test_a_trial_tree_can_require_perf_counts(tmp_path):
         )
 
 
-# ── `xe-forge run` on a host: the launcher's timeline, perf's symbols joined to it ──
+# ── `x-forge run` on a host: the launcher's timeline, perf's symbols joined to it ──
 
 HOST_LAUNCHER = """#!{python}
 import json, os, time
-from xe_forge.frontend import profile
+from x_forge.frontend import profile
 raw = os.environ["RAW_DIR"]
 tl = profile.HostTimeline(raw, threads=4)
 for timed in {windows}:
@@ -753,10 +753,10 @@ def _host_capture(tmp_path, windows=(True, True, False), empty=False):
     launcher = exe(tmp_path / "run.sh", HOST_LAUNCHER.format(python=sys.executable,
                                                             windows=list(windows)))  # fmt: skip
     perf = exe(tmp_path / "perf", PERF_STUB.format(python=sys.executable, empty=empty))
-    env = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path), XE_FORGE_DEVICE="cpu")
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path), X_FORGE_DEVICE="cpu")
 
     def tool(*argv):
-        r = subprocess.run([sys.executable, "-m", "xe_forge.skills", *argv], capture_output=True,
+        r = subprocess.run([sys.executable, "-m", "x_forge.skills", *argv], capture_output=True,
                            text=True, env=env)  # fmt: skip
         return r.returncode, r.stdout + r.stderr
 
@@ -826,8 +826,8 @@ def test_a_host_capture_with_no_sample_in_a_node_fails(tmp_path):
 
 
 def test_perf_samples_outside_the_timed_windows_are_not_counted():
-    from xe_forge.core.profiler import parse_perf_script
-    from xe_forge.skills.capture import join_samples
+    from x_forge.core.profiler import parse_perf_script
+    from x_forge.skills.capture import join_samples
 
     timeline = {"windows": [
         {"timed": False, "start_ns": 0, "end_ns": 100, "nodes": []},
@@ -857,19 +857,19 @@ def test_a_launcher_imports_the_host_api_where_there_is_no_torch(tmp_path):
 
     code = (
         "import sys; sys.modules['torch'] = None; sys.modules['ai_bench'] = None\n"
-        "from xe_forge.frontend import profile\n"
+        "from x_forge.frontend import profile\n"
         f"tl = profile.HostTimeline({str(tmp_path)!r}, threads=2)\n"
         "with tl.window():\n    tl.node('A', tl.now(), tl.now())\n"
         "tl.write(); print(profile.device_info(threads=2)['threads'])\n"
     )
-    env = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path), XE_FORGE_DEVICE="cpu")
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path), X_FORGE_DEVICE="cpu")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
     assert out.returncode == 0, out.stderr[-800:]
     assert out.stdout.strip() == "2" and (tmp_path / "host_timeline.json").is_file()
 
 
 def test_a_window_left_open_is_named_not_a_traceback(tmp_path):
-    from xe_forge.skills.capture import _still_open
+    from x_forge.skills.capture import _still_open
 
     assert _still_open({"windows": [{"timed": True, "start_ns": 0, "end_ns": 5}]}) is None
     why = _still_open({"windows": [{"timed": True, "start_ns": 0, "end_ns": None}]})
@@ -877,7 +877,7 @@ def test_a_window_left_open_is_named_not_a_traceback(tmp_path):
 
 
 def test_a_cpp_symbol_with_parentheses_keeps_its_name():
-    from xe_forge.core.profiler import parse_perf_line
+    from x_forge.core.profiler import parse_perf_line
 
     line = "  7 1.000000001:  250000  7f00 std::function<void (int)>::operator()(int) const (/a/libx.so)"
     assert parse_perf_line(line) == (7, 1_000_000_001, 250000,
@@ -896,7 +896,7 @@ def test_a_node_the_perf_pass_never_named_is_a_problem(tmp_path):
     del kernels["nodes"]["RMS_NORM"]
     (raw / "host_kernels.json").write_text(json.dumps(kernels))
     manifest = json.loads((raw / "MANIFEST.json").read_text())
-    from xe_forge.skills.capture import _sha256
+    from x_forge.skills.capture import _sha256
 
     manifest["host_kernels.json"] = _sha256(raw / "host_kernels.json")
     (raw / "MANIFEST.json").write_text(json.dumps(manifest))
@@ -907,7 +907,7 @@ def test_a_node_the_perf_pass_never_named_is_a_problem(tmp_path):
 def test_a_host_device_record_needs_no_torch(monkeypatch):
     import builtins
 
-    from xe_forge.frontend import profile
+    from x_forge.frontend import profile
 
     real = builtins.__import__
 
@@ -916,7 +916,7 @@ def test_a_host_device_record_needs_no_torch(monkeypatch):
             raise ImportError("no torch here")
         return real(name, *a, **k)
 
-    monkeypatch.setenv("XE_FORGE_DEVICE", "cpu")
+    monkeypatch.setenv("X_FORGE_DEVICE", "cpu")
     monkeypatch.setattr(builtins, "__import__", no_torch)
     info = profile.device_info(threads=8)
     assert info["type"] == "cpu" and info["torch"] is None and info["threads"] == 8
@@ -926,19 +926,19 @@ def test_a_host_device_record_needs_no_torch(monkeypatch):
 def test_host_optimize_runs_no_unitrace(tmp_path):
     from types import SimpleNamespace
 
-    from xe_forge.frontend.cli import xe_forge_command
+    from x_forge.frontend.cli import x_forge_command
 
     entry = {"dsl": "cpp", "name": "k", "spec": "s.yaml"}
     opts = SimpleNamespace(engine="claude", device="cpu", max_turns=1, passthrough=[],
                            compiler_flags=None)  # fmt: skip
-    assert "--unitrace" not in xe_forge_command(entry, "v", tmp_path, tmp_path, opts)
+    assert "--unitrace" not in x_forge_command(entry, "v", tmp_path, tmp_path, opts)
     opts.device = "xpu"
-    assert "--unitrace" in xe_forge_command(entry, "v", tmp_path, tmp_path, opts)
+    assert "--unitrace" in x_forge_command(entry, "v", tmp_path, tmp_path, opts)
 
 
 def test_the_run_templates_speak_of_the_host_on_a_host(tmp_path, monkeypatch):
-    from xe_forge.claude.generator import render
-    from xe_forge.frontend import cli
+    from x_forge.claude.generator import render
+    from x_forge.frontend import cli
 
     ctx = {
         "model": "m",
@@ -968,7 +968,7 @@ def test_the_run_templates_speak_of_the_host_on_a_host(tmp_path, monkeypatch):
     assert "unitrace" not in capture and "GPU" not in capture
     patch = render("frontend-patch.md.j2", **ctx)
     assert "GPU" not in patch and "--quantization q2:uint8" in patch
-    assert "XE_FORGE_QUANTIZATION" in patch
+    assert "X_FORGE_QUANTIZATION" in patch
     gpu = render("frontend-capture.md.j2", **{**ctx, "device": "xpu", "on_host": False})
     assert "HostTimeline" not in gpu and "unitrace" in gpu
     # A framework without a knowledge base: upstream is cloned, the quantized run reported.
@@ -1005,7 +1005,7 @@ def test_the_run_templates_speak_of_the_host_on_a_host(tmp_path, monkeypatch):
     [("cpu", "xpu", "cpu"), ("cpu", "", "cpu"), ("xpu", "xpu:1", "xpu:1"), ("xpu", "", "xpu")],
 )
 def test_a_named_device_of_another_type_does_not_replace_device(monkeypatch, device, named, want):
-    from xe_forge.config import ConfigManager
+    from x_forge.config import ConfigManager
 
     monkeypatch.setenv("DEVICE_TYPE", device)
     monkeypatch.setenv("XPU_DEVICE", named)
@@ -1013,7 +1013,7 @@ def test_a_named_device_of_another_type_does_not_replace_device(monkeypatch, dev
 
 
 def test_a_named_device_the_request_already_names_is_kept(monkeypatch, caplog):
-    from xe_forge.config import ConfigManager
+    from x_forge.config import ConfigManager
 
     monkeypatch.setenv("DEVICE_TYPE", "xpu:1")
     monkeypatch.setenv("XPU_DEVICE", "xpu:0")

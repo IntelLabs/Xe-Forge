@@ -1,4 +1,4 @@
-% How Xe-Forge works. Build: tectonic how-it-works.tex (or pdflatex), then
+% How X-Forge works. Build: tectonic how-it-works.tex (or pdflatex), then
 %   dvisvgm --pdf how-it-works.pdf -o how-it-works.svg
 \documentclass[tikz,border=8pt]{standalone}
 \usepackage[T1]{fontenc}
@@ -25,7 +25,7 @@
 \begin{document}
 \begin{tikzpicture}[node distance=6mm and 5mm]
 
-% ---- xe-forge run: a model in its framework ----
+% ---- x-forge run: a model in its framework ----
 \node[io]    (model)  {model in its\\framework};
 \node[agent, right=of model]  (setup)  {setup\\\scriptsize builds the venv};
 \node[agent, right=of setup]  (cap)    {capture\\\scriptsize writes a launcher};
@@ -51,9 +51,9 @@
   \node[lane, fit=(model)(setup)(cap)(trace)(name)(an)(inp)(opt)(fuse)(prove)(sum)(patch)]
        (runlane) {};
 \end{scope}
-\node[title] at (runlane.north west) {xe-forge run};
+\node[title] at (runlane.north west) {x-forge run};
 
-% ---- xe-forge: one kernel ----
+% ---- x-forge: one kernel ----
 \node[io,    below=26mm of sum.south west, anchor=north west] (k) {kernel, spec,\\reference};
 \node[agent, right=of k]   (trial) {trial\\\scriptsize agent writes it};
 \node[code,  right=of trial] (val) {validate\\\scriptsize static checks};
@@ -69,7 +69,7 @@
 \begin{scope}[on background layer]
   \node[lane, fit=(k)(trial)(val)(bench)(prof)(best), inner ysep=9mm] (klane) {};
 \end{scope}
-\node[title] at (klane.north west) {xe-forge (one kernel)};
+\node[title] at (klane.north west) {x-forge (one kernel)};
 
 \draw[back] (opt.south) to[out=-90, in=90] node[note, right, pos=0.4] {for each kernel} (trial.north);
 

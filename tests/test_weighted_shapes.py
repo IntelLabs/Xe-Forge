@@ -11,8 +11,8 @@ import re
 import pytest
 import yaml
 
-from xe_forge.core.spec_loader import load_spec
-from xe_forge.skills import benchmark, inputs
+from x_forge.core.spec_loader import load_spec
+from x_forge.skills import benchmark, inputs
 
 SPEC = {"default_variant": "dec", "weights": {"dec": 0.75, "pre": 0.25},
         "ci": [{"dims": {"ROWS": 1}}], "dec": [{"dims": {"ROWS": 4}}],
@@ -209,9 +209,9 @@ def _manifest(tmp_path):
     """One kernel serving two configurations (N=896 and N=4864), each at 4 and 2048 rows."""
     from types import SimpleNamespace
 
-    from xe_forge.frontend import ir, manifest
-    from xe_forge.frontend.analyze import Entry
-    from xe_forge.frontend.ir import CaptureRun, Naming, Workload
+    from x_forge.frontend import ir, manifest
+    from x_forge.frontend.analyze import Entry
+    from x_forge.frontend.ir import CaptureRun, Naming, Workload
 
     def w(wid, n, dec, pre):
         return Workload(workload_id=wid, family="gemm", dims={"M": "var", "N": n, "K": 896},
@@ -263,9 +263,9 @@ def test_a_fusion_spec_carries_no_captured_time(tmp_path):
 def test_entries_sharing_a_name_are_keyed_by_their_spec_stem(tmp_path):
     from types import SimpleNamespace
 
-    from xe_forge.frontend import ir, manifest
-    from xe_forge.frontend.analyze import Entry
-    from xe_forge.frontend.ir import CaptureRun, Naming, Workload
+    from x_forge.frontend import ir, manifest
+    from x_forge.frontend.analyze import Entry
+    from x_forge.frontend.ir import CaptureRun, Naming, Workload
 
     def w(wid, small, big):
         return Workload(workload_id=wid, family="gemm", dims={"M": "var", "N": 64, "K": 64},
@@ -326,7 +326,7 @@ GOOD = {"bench-t4-w0": _g("bench-t4-w0", "bench-t2048-w0", w=0.5),
      ({k: {**g, "weight": 0.4} for k, g in GOOD.items()}, "sum to 0.8000")],
 )  # fmt: skip
 def test_inputs_check_holds_every_configuration(tmp_path, shapes, problem):
-    from xe_forge.frontend import manifest as m
+    from x_forge.frontend import manifest as m
 
     manifest, analysis, cap = _manifest(tmp_path)
     path = manifest.emit(analysis, cap, tmp_path / "capture.json", tmp_path / "out")
@@ -341,7 +341,7 @@ def test_inputs_check_holds_every_configuration(tmp_path, shapes, problem):
 def test_run_optimizes_a_kernel_only_on_shapes_that_pass(tmp_path, monkeypatch, good):
     from types import SimpleNamespace
 
-    from xe_forge.frontend import cli
+    from x_forge.frontend import cli
 
     manifest, analysis, cap = _manifest(tmp_path)
     path = manifest.emit(analysis, cap, tmp_path / "capture.json", tmp_path / "out")
@@ -355,8 +355,8 @@ def test_run_optimizes_a_kernel_only_on_shapes_that_pass(tmp_path, monkeypatch, 
 
 @pytest.mark.parametrize("weighted", [True, False])
 def test_a_weighted_spec_benchmarks_every_shape_without_a_variant(tmp_path, weighted):
-    from xe_forge.claude.generator import generate_workspace
-    from xe_forge.config import Config
+    from x_forge.claude.generator import generate_workspace
+    from x_forge.config import Config
 
     spec = dict(SPEC) if weighted else {k: v for k, v in SPEC.items() if k != "weights"}
     (tmp_path / "spec.yaml").write_text(yaml.safe_dump(spec))

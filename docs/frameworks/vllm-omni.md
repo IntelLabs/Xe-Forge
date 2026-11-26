@@ -13,7 +13,7 @@ over their denoising steps at a resolution.
 ## 3. Command
 
 ```
-xe-forge run --framework vllm-omni --model <hub id> --workload vision \
+x-forge run --framework vllm-omni --model <hub id> --workload vision \
     --framework-source https://github.com/vllm-project/vllm-omni@<tag> \
     --steps 28 --height 1024 --width 1024 --prompt "<prompt>" \
     --calibration <calibration.json> --kernel-repos <repos> --top 3 --prove \
@@ -35,7 +35,7 @@ The capture agent may turn on weight offloading when a model does not fit the de
 lowers the precision to make one fit. A model vLLM-Omni has no pipeline for, or an op it runs
 only on the CPU or in plain torch on this device, goes to the patch step first: the patch adds
 the pipeline or the op, and `patch check` compares its output with the framework's own torch
-path for that op (`XE_FORGE_NATIVE=1`), stage by stage ([FRAMEWORK.md](../FRAMEWORK.md#output-quality-checks)).
+path for that op (`X_FORGE_NATIVE=1`), stage by stage ([FRAMEWORK.md](../FRAMEWORK.md#output-quality-checks)).
 
 ## 5. Kernel repositories
 
@@ -54,4 +54,4 @@ vLLM-Omni runs on vLLM, so most kernels are in the repositories on the [vllm](vl
 
 Run (the models in [RESULTS.md](../RESULTS.md#vision-models)).
 
-Last checked: 2026-11-17, Xe-Forge 05c492a
+Last checked: 2026-11-17, X-Forge 05c492a

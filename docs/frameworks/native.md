@@ -2,7 +2,7 @@
 
 ## 1. What it is
 
-A model's own inference engine, written by Xe-Forge's patch agent for that model: a C++ core,
+A model's own inference engine, written by X-Forge's patch agent for that model: a C++ core,
 C++ kernels on the host and SYCL kernels on an Intel GPU, behind one small kernel interface.
 It has no upstream; its knowledge base is
 [knowledge_base/frameworks/native/](../../knowledge_base/frameworks/native/README.md), and
@@ -15,7 +15,7 @@ its contract is that directory's `contract.md`.
 ## 3. Command
 
 ```
-xe-forge run --framework native --model <hub id or checkpoint dir> --device cpu \
+x-forge run --framework native --model <hub id or checkpoint dir> --device cpu \
     --framework-python <python with torch and transformers> \
     --batch 1 --input-len 512 --output-len 32 --prompt-file <text file> \
     [--quantization <scheme>] \
@@ -27,7 +27,7 @@ xe-forge run --framework native --model <hub id or checkpoint dir> --device cpu 
   torch and transformers; the engine's binding is layered over it in its own venv, and the
   reference of the patch check runs under it.
 - `--device cpu` runs the host kernels; `--device xpu` (or `xpu:N`) the SYCL ones. On a GPU,
-  export `XE_FORGE_TRACE_STEPS=0` so the device trace covers every decode step.
+  export `X_FORGE_TRACE_STEPS=0` so the device trace covers every decode step.
 - `--quantization` (optional; without it the checkpoint runs as stored): the engine quantizes the weights itself. The quantized tokens are gated
   against the original model holding the weights the quantized form decodes to, and how far
   each tensor is from the checkpoint is reported (`patch check --quantized-gate`).
@@ -47,7 +47,7 @@ The engine's own repository, `native-<model>` under `--kernel-repos`: the host k
 them there. On a host, each trial is a directory of the repository's files: the engine is
 built with them (`build.sh`, with its kernel tests), its kernel checked against its
 reference at every shape and timed on its own against the baseline's at every weighted shape,
-both builds in one process (`xe-forge-skill inmodel`), and its tokens scored again on that
+both builds in one process (`x-forge-skill inmodel`), and its tokens scored again on that
 build. `--prove` scores them once more on the build with every winning kernel and times the
 whole engine at every workload.
 

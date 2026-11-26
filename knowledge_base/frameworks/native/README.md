@@ -2,7 +2,7 @@
 
 A model's own inference engine, written for it: a C++ core, C++ kernels on the host, SYCL
 kernels on an Intel GPU, behind one small kernel interface. It is a framework like any other
-to Xe-Forge's run. The capture agent finds no engine for the model and reports it unsupported;
+to X-Forge's run. The capture agent finds no engine for the model and reports it unsupported;
 the patch agent writes the engine in its own repository (`contract.md`); `patch check` gates
 its tokens; the run then captures it, names its ops, puts it against the roofline, and
 optimizes its kernels in that repository like any other kernel repository.

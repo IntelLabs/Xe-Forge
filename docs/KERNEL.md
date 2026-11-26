@@ -1,12 +1,12 @@
 # Optimizing one kernel
 
-`xe-forge` takes one kernel, or a PyTorch op with no kernel yet, and returns an optimized
+`x-forge` takes one kernel, or a PyTorch op with no kernel yet, and returns an optimized
 kernel or a patch against the repository the kernel came from. Every flag and environment
 variable named below is in [REFERENCE.md](REFERENCE.md).
 
 ```bash
-xe-forge -i kernel.py -s kernel.yaml -o kernel_optimized.py
-xe-forge -i kernel.py -s kernel.yaml --engine claude --workspace ws/kernel --auto-launch
+x-forge -i kernel.py -s kernel.yaml -o kernel_optimized.py
+x-forge -i kernel.py -s kernel.yaml --engine claude --workspace ws/kernel --auto-launch
 ```
 
 ## Inputs
@@ -107,7 +107,7 @@ The variant run is `--variant`, else the spec's `default_variant`, else `bench-g
 
 `claude`, `codex` and `dspy-agent` are the workspace engines. The LLM settings
 (`LLM_MODEL`, `OPENAI_API_BASE`, `OPENAI_API_KEY`) reach the agent CLIs as their own
-variables ([REFERENCE.md](REFERENCE.md#set-by-xe-forge-for-the-programs-it-starts)).
+variables ([REFERENCE.md](REFERENCE.md#set-by-x-forge-for-the-programs-it-starts)).
 
 A workspace holds:
 
@@ -128,7 +128,7 @@ claude-session.log              the headless session's output (agent-session.log
 ## DSLs and their stages
 
 `--stages` (dspy engine) picks stages by name; the plan is filtered to those the DSL
-supports (`src/xe_forge/dsl_registry.py`). An unknown name is skipped with a warning.
+supports (`src/x_forge/dsl_registry.py`). An unknown name is skipped with a warning.
 
 | Stage | What it does | triton | gluon | sycl | opencl | cuda |
 |---|---|---|---|---|---|---|
@@ -144,12 +144,12 @@ supports (`src/xe_forge/dsl_registry.py`). An unknown name is skipped with a war
 | `discovery` | Optimizations no other stage covers | yes | yes | yes | yes | yes |
 
 An OpenCL kernel is a Python file holding the OpenCL C source as a string, built and
-launched through `xe_forge.opencl`. Adding a DSL: [DSL.md](DSL.md).
+launched through `x_forge.opencl`. Adding a DSL: [DSL.md](DSL.md).
 
 ## Trials and the benchmark gate
 
-In a workspace, the session saves each attempt as a trial (`xe-forge-skill trial save`)
-and measures it with `xe-forge-skill benchmark --trial-id`, which records the result in
+In a workspace, the session saves each attempt as a trial (`x-forge-skill trial save`)
+and measures it with `x-forge-skill benchmark --trial-id`, which records the result in
 the tree. `trial finalize --require-measured` keeps only results the tool recorded.
 
 - `benchmark` measures with the host's command (`--external-benchmark`) or, when asked by
@@ -167,7 +167,7 @@ the tree. `trial finalize --require-measured` keeps only results the tool record
   divided by their sum; a negative or non-finite weight, or a zero sum, fails. `--baseline-us`
   is refused, since each shape's baseline is timed afresh.
 - **Baseline against captured time.** For every shape run, weighted or one `--variant`,
-  when `captured_us` names it and the baseline runs there more than `XE_FORGE_BASELINE_SLACK` times
+  when `captured_us` names it and the baseline runs there more than `X_FORGE_BASELINE_SLACK` times
   slower than the captured time, `benchmark` fails with
   `VERDICT: BASELINE_NOT_CAPTURED_KERNEL` and prints both times. The baseline is then not
   the kernel the model ran, and every trial would be scored against the wrong thing; make
@@ -201,7 +201,7 @@ Rules:
    baseline passes before it creates a trial; with a baseline oracle, that the baseline
    builds, runs and repeats deterministically.
 3. A host result with no correctness verdict is never a pass, and `DONE` must be the last
-   line the host command prints (`src/xe_forge/external.py` has the contract).
+   line the host command prints (`src/x_forge/external.py` has the contract).
 4. `--no-correctness` switches checking off for the dspy engine only. A workspace always
    checks.
 
@@ -237,8 +237,8 @@ winner may then change the op's interface and its call sites there.
 
 ## Port-back output
 
-The port-back agent clones each repository privately (`xe-forge-skill upstream clone`),
-commits the change there, writes `output/PR.md`, and runs `xe-forge-skill upstream patch`,
+The port-back agent clones each repository privately (`x-forge-skill upstream clone`),
+commits the change there, writes `output/PR.md`, and runs `x-forge-skill upstream patch`,
 which writes:
 
 - `output/upstream.patch` (and `output/upstream-<name>.patch` for each further clone)

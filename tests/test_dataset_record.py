@@ -14,9 +14,9 @@ import json
 
 import pytest
 
-from xe_forge.claude.generator import generate_workspace
-from xe_forge.config import Config
-from xe_forge.core.dataset_record import (
+from x_forge.claude.generator import generate_workspace
+from x_forge.config import Config
+from x_forge.core.dataset_record import (
     DEFAULT_PROFILE_PATH,
     INPUT_FIDELITIES,
     load_dataset_record,
@@ -111,7 +111,7 @@ def test_workspace_with_record_states_the_boundary(tmp_path):
     assert "inspection is not a measurement" in claude_md.lower()
     assert "special-case" in claude_md
     # CLAUDE.md rule 3 is still rendered: benchmark is the only source of a timing.
-    assert "`xe-forge-skill benchmark` is the\n   only source of a timing" in claude_md
+    assert "`x-forge-skill benchmark` is the\n   only source of a timing" in claude_md
 
 
 def test_profile_is_the_only_new_writable_file(tmp_path):

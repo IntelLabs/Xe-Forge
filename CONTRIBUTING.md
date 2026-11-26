@@ -2,7 +2,7 @@
 
 ### License
 
-Xe-Forge is licensed under the terms in [LICENSE](LICENSE) (Apache License 2.0). By contributing to the project, you agree to the license and copyright terms therein and release your contribution under these terms.
+X-Forge is licensed under the terms in [LICENSE](LICENSE) (Apache License 2.0). By contributing to the project, you agree to the license and copyright terms therein and release your contribution under these terms.
 
 ### Sign your work
 

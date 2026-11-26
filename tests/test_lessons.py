@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import pytest
 
-from xe_forge.claude.generator import generate_workspace
-from xe_forge.config import Config
-from xe_forge.core.lessons import lessons_filename, load_lessons_log
+from x_forge.claude.generator import generate_workspace
+from x_forge.config import Config
+from x_forge.core.lessons import lessons_filename, load_lessons_log
 
 
 def _workspace(tmp_path, lessons_dir=None, *, name="moe_double_gemm"):
@@ -108,7 +108,7 @@ def test_workspace_with_ledger_states_the_boundary(tmp_path):
     assert "never a substitute for one" in claude_md
     assert "no prediction" in claude_md
     # CLAUDE.md rule 3 is still rendered: benchmark is the only source of a timing.
-    assert "`xe-forge-skill benchmark` is the\n   only source of a timing" in claude_md
+    assert "`x-forge-skill benchmark` is the\n   only source of a timing" in claude_md
 
 
 def test_recording_happens_even_when_the_run_went_badly(tmp_path):
