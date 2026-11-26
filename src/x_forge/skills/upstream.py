@@ -29,6 +29,7 @@ from pathlib import Path
 UPSTREAM = Path("upstream")
 OUTPUT = Path("output")
 BASE_REF = "refs/x-forge/base"  # the commit a clone was made at; the agent commits on top
+OLD_BASE_REF = "refs/xe-forge/base"  # where clones made before the rename to X-Forge keep it
 MEASURED = "<!-- Measured by x-forge; everything below this line is generated. -->"
 
 
@@ -108,9 +109,17 @@ def _clone(args) -> None:
 
 
 def _base(clone: Path) -> str:
-    """The commit ``clone`` was made at (its HEAD, for a clone made before the ref existed)."""
+    """The commit ``clone`` was made at (its HEAD, for a clone made before the ref existed).
+    A clone whose base is still under the ref's name from before X-Forge is refused: its HEAD
+    holds the agent's commits, so taking it as the base would port nothing."""
     ref = _git("-C", str(clone), "rev-parse", "--verify", "-q", BASE_REF, check=False)
-    return ref.stdout.strip() or _git("-C", str(clone), "rev-parse", "HEAD").stdout.strip()
+    if ref.stdout.strip():
+        return ref.stdout.strip()
+    old = _git("-C", str(clone), "rev-parse", "--verify", "-q", OLD_BASE_REF, check=False)
+    if old.stdout.strip():
+        raise SystemExit(f"{clone} keeps its base under {OLD_BASE_REF}, the name before X-Forge; "
+                         f"run: git -C {clone} update-ref {BASE_REF} {OLD_BASE_REF}")  # fmt: skip
+    return _git("-C", str(clone), "rev-parse", "HEAD").stdout.strip()
 
 
 def _best_trial(kernel_name: str, trials_dir: str) -> dict | None:

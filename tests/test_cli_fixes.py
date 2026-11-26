@@ -509,3 +509,22 @@ def test_a_framework_interpreter_renders_the_build_check_without_the_pipeline(tm
                          env=env)  # fmt: skip
     assert out.returncode == 0, out.stderr
     assert "cannot import" not in out.stdout
+
+
+def test_a_clone_with_its_base_under_the_old_ref_is_refused_not_ported_empty(tmp_path):
+    import subprocess
+
+    from x_forge.skills import upstream
+
+    def git(*a):
+        return subprocess.run(["git", "-C", str(tmp_path), *a], check=True,
+                              capture_output=True, text=True).stdout.strip()  # fmt: skip
+
+    git("init", "-q")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base")
+    git("update-ref", upstream.OLD_BASE_REF, "HEAD")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "port")
+    with pytest.raises(SystemExit, match=f"update-ref {upstream.BASE_REF} {upstream.OLD_BASE_REF}"):
+        upstream._base(tmp_path)
+    git("update-ref", upstream.BASE_REF, upstream.OLD_BASE_REF)
+    assert upstream._base(tmp_path) == git("rev-parse", "HEAD~1")
