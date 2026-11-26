@@ -332,6 +332,7 @@ Read but unused means the code loads the value and nothing uses it.
 | Variable | Default | What it does | Read by |
 |---|---|---|---|
 | `LLM_MODEL` | `openai/gpt-4o` | Model, LiteLLM style; `bedrock/<id>` routes to AWS Bedrock. Passed to claude / codex without the provider prefix | `x-forge`, agents |
+| `LLM_FAST_MODEL` | unset: `LLM_MODEL` | Model of the helper agents: `tool-runner` (runs `x-forge-skill`, reports its output and summarises profiles) and `code-explorer` (finds code for a frontend session, read-only). Named like `LLM_MODEL` and served by the same endpoint; each agent CLI gets it in its own form (claude: the agent's `model`, codex: its agent file's `model`). Cheaper per call; a weaker model summarises profiles less well | agents |
 | `OPENAI_API_BASE` | none | Endpoint URL; claude gets it as `ANTHROPIC_BASE_URL`, codex as `openai_base_url` | `x-forge`, agents |
 | `OPENAI_API_KEY` | none | API key; claude gets it as `ANTHROPIC_AUTH_TOKEN`, codex as `CODEX_API_KEY` | `x-forge`, agents |
 | `LLM_TEMPERATURE` | 0.1 | Sampling temperature (dspy, dspy-agent) | `x-forge` |

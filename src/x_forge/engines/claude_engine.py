@@ -7,6 +7,7 @@ import os
 import subprocess
 from pathlib import Path
 
+from x_forge.agent_cli import bare
 from x_forge.engines.base import BaseEngine
 from x_forge.models import OptimizationResult, OptimizationStage
 
@@ -31,9 +32,7 @@ def claude_env(config) -> dict[str, str]:
     if llm.api_key:
         env.setdefault("ANTHROPIC_AUTH_TOKEN", llm.api_key)
     if llm.model:
-        # litellm prefixes a provider ("openai/gpt-4o"); the CLI wants the
-        # bare model id.
-        env.setdefault("ANTHROPIC_MODEL", llm.model.split("/")[-1])
+        env.setdefault("ANTHROPIC_MODEL", bare(llm.model))
     env.setdefault("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "1")
     # Headless claude stops a backgrounded command at its own ceiling, before a build or
     # the benchmark's watchdog (EXTERNAL_TIMEOUT per shape) can report; every session,
@@ -202,7 +201,8 @@ class ClaudeEngine(BaseEngine):
 
         max_turns = self.config.engine.max_turns
         log_path = workspace / self.log_name
-        cmd = backend.start(backend.task(workspace, kernel_name), max_turns, self.config)
+        cmd = backend.start(backend.task(workspace, kernel_name), max_turns, self.config,
+                            backend.agent_args(workspace))  # fmt: skip
 
         print(f"\nLaunching {backend.name} in {workspace} (max {max_turns} turns)...")
         print(f"  session log: {log_path}")

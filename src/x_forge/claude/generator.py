@@ -13,6 +13,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from x_forge.agent_cli import agent_models
 from x_forge.claude.render import render
 from x_forge.config import Config, device_kind
 from x_forge.core.dataset_record import load_dataset_record
@@ -257,6 +258,7 @@ def generate_workspace(
     (agent_dir / "tool-runner.md").write_text(
         _render(
             "tool-runner.md.j2",
+            models=agent_models(config),
             measurement=measurement,
             benchmark_options=benchmark_options,
             reference_workload=reference_workload,

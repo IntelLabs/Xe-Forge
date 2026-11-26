@@ -673,6 +673,14 @@ def test_agent_resumes_after_non_ascii_and_kills_detached_work(tmp_path, monkeyp
     while _alive(pid) and time.monotonic() < deadline:
         time.sleep(0.2)
     assert not _alive(pid), "the session's detached work outlived the step"
+    # Every session can hand code-finding to code-explorer, in its CLI's own form, and only
+    # that session: no .claude/agents/ that sessions under its directory would load as well.
+    assert not (tmp_path / "work/.claude").exists()
+    assert (tmp_path / "work/.codex/agents/code-explorer.toml").is_file() == (backend == "codex")
+    if backend == "claude":
+        agents = json.loads((tmp_path / "work/session-agents.json").read_text())
+        assert set(agents) == {"code-explorer"} and agents["code-explorer"]["tools"] == [
+            "Glob", "Grep", "Read"]  # fmt: skip
 
 
 ONESHOT_STUB = """\
