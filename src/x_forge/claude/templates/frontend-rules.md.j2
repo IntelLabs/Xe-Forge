@@ -9,3 +9,9 @@ with the ANTHROPIC_* and OPENAI_* variables unset, so no log carries them, and n
 the environment or any credential. Long builds and exports are expected: this session ends
 when you stop and anything still running is killed, so wait for all of it, and stop only
 once {{ answer }} is written.
+
+Everything a command prints stays in this session and is read again on every later step,
+so print only what you need. Find the lines first (`grep -n`), then read that range
+(`sed -n A,Bp`, about 150 lines at most) instead of a whole file; send the output of a build,
+a run or a test to a file and read its tail or grep it for errors; read JSON through a short
+script that prints the fields you need, not the whole file.

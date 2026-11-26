@@ -13,6 +13,29 @@ from pathlib import Path
 TIMEOUT = int(os.environ.get("X_FORGE_AGENT_TIMEOUT", 6 * 3600))
 RESUMES = int(os.environ.get("X_FORGE_AGENT_RESUMES", 5))
 
+# The steps whose agent waits on the model itself -- a framework run, a patch check, an
+# arm build -- for longer than the 5-minute prompt cache lives. Each such wait used to
+# end with the whole context written to the cache again: in the LTX-2.5 A2V run, 11
+# rewrites of up to 450k tokens in the port, capture and prove agents, $8.67 of writes.
+# A 1-hour cache costs 8 instead of 5 per million tokens written, so it pays only where
+# those waits happen (a net $6.75 there); on steps that call the model every few seconds
+# (naming, inputs) it would only raise every write by 60%.
+LONG_WAITS = {"frontend-capture.md.j2", "frontend-patch.md.j2", "frontend-build-arms.md.j2"}
+
+
+def cache_env(template: str) -> dict[str, str]:
+    """The prompt-cache setting for one step's agent.
+
+    ``X_FORGE_PROMPT_CACHE_1H``: unset or ``auto`` = the 1-hour cache for LONG_WAITS only;
+    ``1`` = for every step; ``0`` = for none (the CLI's 5-minute default).
+    """
+    mode = os.environ.get("X_FORGE_PROMPT_CACHE_1H", "auto").strip().lower()
+    on = mode in ("1", "true", "yes", "all") or (mode == "auto" and template in LONG_WAITS)
+    if not on:
+        return {}
+    # The first is read on Bedrock, the second elsewhere; setting both is harmless.
+    return {"ENABLE_PROMPT_CACHING_1H_BEDROCK": "1", "ENABLE_PROMPT_CACHING_1H": "1"}
+
 
 def run(template: str, context: dict, cwd: Path, answer: str, python: str, max_turns: int) -> dict:
     """Run ``template`` as a session in ``cwd``; return the JSON it wrote to ``answer``."""
@@ -27,6 +50,8 @@ def run(template: str, context: dict, cwd: Path, answer: str, python: str, max_t
     path.unlink(missing_ok=True)
     (cwd / "session.log").unlink(missing_ok=True)
     env = backend.env(config)  # lifts headless claude's background ceiling to TIMEOUT
+    if backend.name == "claude":
+        env.update(cache_env(template))
     prompt = render(template, **{"python": python, "answer": answer, **context}) + render(
         "frontend-rules.md.j2", python=python, answer=answer, venv=context.get("venv")
     )

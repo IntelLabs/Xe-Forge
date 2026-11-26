@@ -3859,3 +3859,33 @@ def test_prove_blames_the_patches_at_a_row_only_once_the_base_ran_it(tmp_path, m
     got, order, _, other = _prove_rows(tmp_path, monkeypatch, crash=True)
     assert order[-3:] == [("B", "B-r1/row02", (other,))] * 2 + [("A", "A-r1/row02", (other,))]
     assert "FAIL: with the patches the model does not run where the base does" in got, got
+
+
+def test_the_one_hour_prompt_cache_is_for_the_steps_that_wait(monkeypatch):
+    """A 1-hour cache write costs 8 per million tokens, a 5-minute one 5. It pays only where
+    the agent waits on the model longer than 5 minutes (capture, patch, the prove arms), so
+    the other steps keep the CLI's default -- and the switch can force either."""
+    from x_forge.frontend.agent import LONG_WAITS, cache_env
+
+    on = {"ENABLE_PROMPT_CACHING_1H_BEDROCK": "1", "ENABLE_PROMPT_CACHING_1H": "1"}
+    monkeypatch.delenv("X_FORGE_PROMPT_CACHE_1H", raising=False)
+    for template in LONG_WAITS:
+        assert cache_env(template) == on, template
+    for template in ("frontend-name.md.j2", "frontend-inputs.md.j2"):
+        assert cache_env(template) == {}, template
+    monkeypatch.setenv("X_FORGE_PROMPT_CACHE_1H", "1")
+    assert cache_env("frontend-name.md.j2") == on
+    monkeypatch.setenv("X_FORGE_PROMPT_CACHE_1H", "0")
+    assert cache_env("frontend-capture.md.j2") == {}
+    # Every LONG_WAITS name is a template that exists, so a rename cannot switch it off.
+    templates = Path(__file__).resolve().parents[1] / "src" / "x_forge" / "claude" / "templates"
+    assert all((templates / t).is_file() for t in LONG_WAITS)
+
+
+def test_every_frontend_agent_is_told_to_keep_its_context_small():
+    """Each printed line is re-read on every later step: in the LTX-2.5 A2V port, whole-file
+    reads of 12-25k characters grew the context to 456k tokens."""
+    from x_forge.claude.render import render
+
+    rules = render("frontend-rules.md.j2", python="py", answer="a.json")
+    assert "grep -n" in rules and "sed -n A,Bp" in rules and "tail" in rules
