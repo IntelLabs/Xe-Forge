@@ -1,7 +1,7 @@
 [project]
-name = "xe-forge"
-version = "0.4.0"
-description = "Multi-stage kernel optimization for GPU computing"
+name = "x-forge"
+version = "0.5.0"
+description = "Agentic inference optimization: models, native inference engines and kernels, on GPUs and CPUs"
 authors = [{ name = "Intel Labs" }]
 requires-python = ">=3.11"
 dependencies = [
@@ -28,8 +28,8 @@ nvidia = [
 wandb = ["weave>=0.52.24"]
 
 [project.scripts]
-xe-forge = "xe_forge.cli:main"
-xe-forge-skill = "xe_forge.skills:main"
+x-forge = "x_forge.cli:main"
+x-forge-skill = "x_forge.skills:main"
 
 [dependency-groups]
 dev = [
@@ -70,7 +70,7 @@ name = "pytorch-cuda"
 url = "https://download.pytorch.org/whl/cu128"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/xe_forge"]
+packages = ["src/x_forge"]
 
 [tool.hatch.metadata]
 allow-direct-references = true
@@ -100,7 +100,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["xe_forge"]
+known-first-party = ["x_forge"]
 
 [tool.ruff.format]
 quote-style = "double"

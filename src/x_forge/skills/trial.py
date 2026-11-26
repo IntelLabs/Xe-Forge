@@ -1,0 +1,100 @@
+"""x-forge-skill trial: Trial tree management."""
+
+import sys
+
+
+def run(args):
+    from x_forge.core.trial_manager import TrialManager
+
+    mgr = TrialManager(args.trials_dir)
+
+    match args.trial_command:
+        case "init":
+            mgr.init(
+                args.kernel_name,
+                args.baseline_file,
+                triton_baseline=args.triton_baseline,
+                required_profile_groups=tuple(getattr(args, "require_profiles", None) or ()),
+            )
+            print(f"Initialized trial tree for '{args.kernel_name}'")
+
+        case "save":
+            trial_id = mgr.save_trial(
+                args.kernel_name,
+                args.trial_file,
+                parent=args.parent,
+                strategy=args.strategy,
+            )
+            print(f"Saved trial {trial_id}")
+
+        case "result":
+            trial = mgr.record_result(
+                args.kernel_name,
+                args.trial_id,
+                validation=args.validation,
+                correctness=args.correctness,
+                speedup=args.speedup,
+                baseline_us=args.baseline_us,
+                triton_us=args.kernel_us,
+                verdict=getattr(args, "verdict", None),
+            )
+            status_icon = {"completed": "+", "failed": "X", "partial": "~", "saved": "?"}
+            icon = status_icon.get(trial["status"], "?")
+            # `speedup=None` reads like a missing measurement; it is a withheld one.
+            # Print the gate that withheld it so the loop is not tempted to fill it in.
+            if trial["speedup"] is None and trial["status"] == "completed":
+                outcome = f"speedup=none ({trial.get('verdict') or 'gated'}; ranks as parity)"
+            else:
+                outcome = f"speedup={trial['speedup']}"
+            print(f"[{icon}] {args.trial_id}: correctness={trial['correctness']}, {outcome}")
+
+        case "status":
+            print(mgr.get_status(args.kernel_name))
+
+        case "best":
+            best = mgr.get_best(args.kernel_name)
+            if best:
+                speedup = best.get("speedup")
+                print(f"best_trial: {best['id']}")
+                if speedup is None:
+                    print(f"speedup: none ({best.get('verdict') or 'gated'}; parity)")
+                else:
+                    print(f"speedup: {speedup}")
+                print(f"strategy: {best.get('strategy')}")
+                print(f"file: {best.get('file_path')}")
+            else:
+                print("No correct trials yet.")
+                sys.exit(1)
+
+        case "baseline-us":
+            val = mgr.get_baseline_us(args.kernel_name)
+            if val:
+                print(",".join(f"{v:.2f}" for v in val))
+            else:
+                print("No baseline_us cached yet.", file=sys.stderr)
+                sys.exit(1)
+
+        case "finalize":
+            best_id = mgr.finalize(
+                args.kernel_name,
+                args.output_file,
+                require_measured=getattr(args, "require_measured", False),
+            )
+            if best_id:
+                print(f"Finalized {best_id} -> {args.output_file}")
+            else:
+                # Two different outcomes, and a loop that cannot tell them apart will
+                # retry the wrong thing: nothing was ever correct, or the best correct
+                # trial was slower than the baseline and was refused.
+                print(
+                    "Nothing finalized: no correct trial, or the best one was a "
+                    "regression"
+                    + (
+                        ", or no correct trial was recorded by `benchmark`"
+                        if getattr(args, "require_measured", False)
+                        else ""
+                    )
+                    + ". Run `trial status` to see which.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)

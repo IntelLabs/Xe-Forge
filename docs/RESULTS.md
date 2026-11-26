@@ -1,6 +1,6 @@
 # Results
 
-Measurements of Xe-Forge on an Intel Arc Pro B70. The paper,
+Measurements of X-Forge (published as Xe-Forge) on an Intel Arc Pro B70. The paper,
 [Xe-Forge: Multi-Stage LLM-Powered Kernel Optimization for Intel GPU](https://arxiv.org/abs/2605.26118)
 (arXiv:2605.26118), describes an earlier version of the kernel pipeline: its architecture, the
 Chain-of-Verification-and-Refinement (CoVeR) agent design and the Intel GPU knowledge base, with
@@ -24,7 +24,7 @@ Three attention variants from [vLLM](https://github.com/vllm-project/vllm) -- `B
 drawn from production models (Gemma2/3-27B, gpt-oss 20B, Llama3.1-8B, Llama3.3-70B, Llama4
 Scout, Qwen2.5/3), covering prefill, decode, chunked prefill, sliding-window, and fp8/int8
 KV-cache and weight-quantized setups. Each configuration's original kernel (circle) is lifted
-to its Xe-Forge-optimized counterpart (star), for a **geometric-mean 2.8x speedup** across the
+to its X-Forge-optimized counterpart (star), for a **geometric-mean 2.8x speedup** across the
 suite. Relative gains are largest on memory-bound configs lifted off near-zero baselines (up to
 **35x** for Qwen3-30B-A3B-Instruct), while the highest absolute throughput comes from the
 compute-bound Gemma3-27B prefill kernel, which reaches the **160 TFLOPS** peak on Intel Arc Pro
@@ -48,7 +48,7 @@ Optimized Triton kernels surpass both PyTorch eager and `torch.compile` baseline
 ## Vision models
 
 Ten diffusion models captured, named, analyzed, optimized and proved under vLLM-Omni with
-`xe-forge run --workload vision`. Three had no pipeline in the framework at all; three needed a
+`x-forge run --workload vision`. Three had no pipeline in the framework at all; three needed a
 missing XPU op first. Each kernel was kept only if it was faster and `torch.allclose` against
 the baseline at the spec's tolerance.
 

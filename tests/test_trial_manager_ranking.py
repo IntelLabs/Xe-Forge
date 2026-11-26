@@ -1,7 +1,7 @@
 """How the trial tree orders a gated comparison against a measured one.
 
 A host may gate its comparison -- report both arms' times and withhold the ratio because
-the difference was below what the part can resolve (see :mod:`xe_forge.external`). These
+the difference was below what the part can resolve (see :mod:`x_forge.external`). These
 tests pin the consequences of that, because the failure they guard against is silent: the
 run ends, a file is written, and the kernel in it is the slow one.
 """
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from xe_forge.core.trial_manager import TrialManager
+from x_forge.core.trial_manager import TrialManager
 
 
 @pytest.fixture
@@ -215,8 +215,8 @@ def test_finalize_refuses_to_replace_a_directory_holding_the_trials(mgr, tmp_pat
 )
 def test_the_claude_engine_returns_only_what_finalize_would_keep(tmp_path, result, kept):
     """A session whose best trial is a regression returns no kernel, as finalize writes none."""
-    from xe_forge.config import Config
-    from xe_forge.engines.claude_engine import ClaudeEngine
+    from x_forge.config import Config
+    from x_forge.engines.claude_engine import ClaudeEngine
 
     config = Config()
     config.trial.trials_dir = str(tmp_path / "trials")
@@ -235,8 +235,8 @@ def test_the_claude_engine_returns_only_what_finalize_would_keep(tmp_path, resul
 
 def test_the_claude_engine_returns_no_reported_win_baseline_copy_or_edited_trial(tmp_path):
     """Both engines accept only what `finalize --require-measured` would keep."""
-    from xe_forge.config import Config
-    from xe_forge.engines.claude_engine import ClaudeEngine
+    from x_forge.config import Config
+    from x_forge.engines.claude_engine import ClaudeEngine
 
     config = Config()
     config.trial.trials_dir = str(tmp_path / "trials")

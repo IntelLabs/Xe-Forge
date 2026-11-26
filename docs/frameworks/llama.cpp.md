@@ -13,7 +13,7 @@ as GGUF.
 ## 3. Command
 
 ```
-xe-forge run --framework llama.cpp --model <hub id> \
+x-forge run --framework llama.cpp --model <hub id> \
     --framework-python <venv>/bin/python --reference-python <torch venv>/bin/python \
     --batch 4 --input-len 512 --output-len 32 --prompt-file <text file> \
     --calibration <calibration.json> --kernel-repos <repos> --top 3 --prove \
@@ -25,9 +25,9 @@ xe-forge run --framework llama.cpp --model <hub id> \
 - `--reference-python`: an interpreter with GPU torch and transformers. The llama.cpp venv
   has neither, and `patch check` scores tokens against transformers.
 - The SYCL backend needs the oneAPI runtime libraries (oneMKL, oneDNN, TBB) on the library
-  path before the run starts; Xe-Forge does not set them.
+  path before the run starts; X-Forge does not set them.
 - `--model` is a Hugging Face id. The capture agent converts it with llama.cpp's
-  `convert_hf_to_gguf.py` into `$XE_FORGE_CACHE/models/llama.cpp/`, reused when it is there.
+  `convert_hf_to_gguf.py` into `$X_FORGE_CACHE/models/llama.cpp/`, reused when it is there.
 
 ## 4. What the setup agent builds
 
@@ -53,4 +53,4 @@ eagerly (llama.cpp's own `GGML_SYCL_ENABLE_GRAPH=0`) and clears the KV cache bef
 
 Run through prove; compiled-runtime support still being generalized.
 
-Last checked: 2026-11-17, Xe-Forge 05c492a
+Last checked: 2026-11-17, X-Forge 05c492a

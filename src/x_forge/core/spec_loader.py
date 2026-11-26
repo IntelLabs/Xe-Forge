@@ -1,0 +1,520 @@
+"""
+Spec Loader - Load KernelBench YAML specs for testing.
+
+Parses YAML spec files to get:
+- Input shapes and dtypes
+- FLOP calculations
+- Test configurations (ci, bench-gpu, bench-cpu, bench-xpu)
+- Per-variant correctness tolerances (rtol, atol)
+"""
+
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import ClassVar
+
+import yaml
+from ai_bench.harness.core import (
+    InitKey,
+    InKey,
+    SpecKey,
+    VKey,
+    get_atol,
+    get_rtol,
+    get_torch_dtype,
+)
+from ai_bench.utils import eval_eq
+
+from x_forge.core.dtype_utils import make_rand_tensor
+
+V_BENCH_XPU = "bench-xpu"
+
+__all__ = [
+    "V_BENCH_XPU",
+    "InKey",
+    "InitKey",
+    "InputSpec",
+    "KernelSpec",
+    "SpecKey",
+    "VKey",
+    "VariantSpec",
+    "eval_eq",
+    "get_atol",
+    "get_rtol",
+    "get_test_config_from_spec",
+    "get_torch_dtype",
+    "load_spec",
+    "load_spec_from_string",
+    "parse_spec",
+]
+
+
+@dataclass
+class InputSpec:
+    """Specification for a single input tensor."""
+
+    name: str
+    shape_vars: list[str]  # e.g., ["K", "M"]
+    dtype: str  # e.g., "float16"
+
+
+@dataclass
+class VariantSpec:
+    """Specification for a test variant."""
+
+    params: list[str]  # Input parameter names
+    dims: dict[str, int]  # Dimension values
+    flop_formula: str | None = None  # e.g., "2*M*N*K"
+    dtype: str | None = None  # Override dtype
+    rtol: float | None = None  # Relative tolerance for correctness
+    atol: float | None = None  # Absolute tolerance for correctness
+    bytes_formula: str | None = None  # e.g., "2*(M*K + K*N + M*N)"
+
+
+@dataclass
+class KernelSpec:
+    """Complete kernel specification."""
+
+    inputs: dict[str, InputSpec]
+    inits: list[dict] = field(default_factory=list)
+    ci: list[VariantSpec] = field(default_factory=list)
+    bench_cpu: list[VariantSpec] = field(default_factory=list)
+    bench_gpu: list[VariantSpec] = field(default_factory=list)
+    bench_xpu: list[VariantSpec] = field(default_factory=list)
+
+    # Stores all variant keys (base families, numbered, and arbitrary names)
+    # keyed by their exact YAML key so callers can request them by name.
+    _named_variants: dict[str, list[VariantSpec]] = field(default_factory=dict, repr=False)
+
+    # Optional default variant declared in the YAML spec.
+    default_variant: str | None = None
+
+    # Optional {variant: weight}, summing to 1: the shapes a trial is scored on together,
+    # each by the share of the kernel's time it stands for (see skills/benchmark.py).
+    weights: dict[str, float] = field(default_factory=dict)
+
+    # Optional {variant: us}: the kernel's own device time per call at that shape, as the
+    # model ran it (the frontend's capture); the baseline is checked against it.
+    captured_us: dict[str, float] = field(default_factory=dict)
+
+    # Base-prefix → attribute name for the four standard families.
+    _VARIANT_MAP_KEYS: ClassVar[dict[str, str]] = {
+        "ci": "ci",
+        "bench-cpu": "bench_cpu",
+        "bench-gpu": "bench_gpu",
+        "bench-xpu": "bench_xpu",
+    }
+
+    def _variants(self, variant_type: str) -> list:
+        """
+        Return the list of VariantSpec objects for *variant_type*.
+
+        Handles three cases:
+          1. Exact named key stored in _named_variants  (e.g. "bench-gpu-3")
+          2. Base family key mapped via _VARIANT_MAP_KEYS (e.g. "bench-gpu")
+          3. Unknown key → empty list
+        """
+        # 1. Exact named key (covers bench-gpu-N and the bare bench-gpu)
+        if variant_type in self._named_variants:
+            return self._named_variants[variant_type]
+
+        # 2. Standard family fallback
+        attr = self._VARIANT_MAP_KEYS.get(variant_type)
+        if attr is not None:
+            return getattr(self, attr)
+
+        return []
+
+    def resolve_variant(self, cli_variant: str | None = None, fallback: str = "bench-gpu") -> str:
+        """Resolve which variant to use.
+
+        Priority order:
+          1. Explicit CLI ``--variant`` value (when not None).
+          2. ``default_variant`` declared in the YAML spec.
+          3. ``fallback``: ``bench-gpu``, or the DSL's own family (``bench-xpu`` for sycl).
+        """
+        if cli_variant is not None:
+            return cli_variant
+        if self.default_variant is not None:
+            return self.default_variant
+        return fallback
+
+    def get_variant(self, variant_type: str = "bench-gpu") -> VariantSpec | None:
+        """Get first variant of specified type."""
+        vl = self._variants(variant_type)
+        return vl[0] if vl else None
+
+    def get_input_shapes(
+        self,
+        variant_type: str = "bench-gpu",
+        variant_index: int = 0,
+    ) -> list[tuple[int, ...]]:
+        """Get input shapes for a variant."""
+        vl = self._variants(variant_type)
+        if not vl or variant_index >= len(vl):
+            return []
+
+        variant = vl[variant_index]
+        shapes = []
+        for param in variant.params:
+            if param in self.inputs:
+                input_spec = self.inputs[param]
+                shape = tuple(variant.dims[dim] for dim in input_spec.shape_vars)
+                shapes.append(shape)
+        return shapes
+
+    def get_dtype(
+        self,
+        variant_type: str = "bench-gpu",
+        variant_index: int = 0,
+    ):
+        """Get torch dtype for variant (single dtype, for backward compat).
+
+        Returns the variant-level override when present, otherwise the first
+        input's dtype.  Use ``get_input_dtypes`` when per-input resolution is
+        needed.
+        """
+        vl = self._variants(variant_type)
+
+        # Variant-level dtype override
+        if vl and variant_index < len(vl):
+            variant = vl[variant_index]
+            if variant.dtype:
+                return get_torch_dtype(variant.dtype)
+
+        # Fall back to first input dtype
+        if self.inputs:
+            first_input = next(iter(self.inputs.values()))
+            return get_torch_dtype(first_input.dtype)
+
+        return get_torch_dtype("float32")
+
+    def get_input_dtypes(
+        self,
+        variant_type: str = "bench-gpu",
+        variant_index: int = 0,
+    ) -> list:
+        """Get per-input torch dtypes for a variant.
+
+        When the variant declares a dtype override, every input uses that
+        dtype.  Otherwise each input uses its own declared dtype from the
+        ``inputs:`` section.
+        """
+        vl = self._variants(variant_type)
+
+        variant_dtype_override = None
+        if vl and variant_index < len(vl):
+            variant = vl[variant_index]
+            if variant.dtype:
+                variant_dtype_override = get_torch_dtype(variant.dtype)
+
+        if variant_dtype_override is not None:
+            params = vl[variant_index].params if vl else list(self.inputs.keys())
+            return [variant_dtype_override] * len(params)
+
+        dtypes = []
+        params = (
+            vl[variant_index].params
+            if (vl and variant_index < len(vl))
+            else list(self.inputs.keys())
+        )
+        for param in params:
+            if param in self.inputs:
+                dtypes.append(get_torch_dtype(self.inputs[param].dtype))
+            else:
+                dtypes.append(get_torch_dtype("float32"))
+        return dtypes
+
+    def get_flop(
+        self,
+        variant_type: str = "bench-gpu",
+        variant_index: int = 0,
+    ) -> float | None:
+        """Calculate FLOP count for variant."""
+        return self._eval_formula("flop_formula", variant_type, variant_index)
+
+    def get_bytes(
+        self,
+        variant_type: str = "bench-gpu",
+        variant_index: int = 0,
+    ) -> float | None:
+        """Calculate bytes moved per call for variant."""
+        return self._eval_formula("bytes_formula", variant_type, variant_index)
+
+    def get_reference_workload(self, variant_type: str = "bench-gpu") -> dict:
+        """Keyword arguments a reference's get_init_inputs/get_inputs build the variant from."""
+        variant = self.get_variant(variant_type)
+        if variant is None:
+            raise ValueError(f"Unknown spec variant: {variant_type}")
+        workload = dict(variant.dims)
+        if variant.dtype:
+            workload["dtype"] = get_torch_dtype(variant.dtype)
+        return workload
+
+    def _eval_formula(self, attr: str, variant_type: str, variant_index: int) -> float | None:
+        vl = self._variants(variant_type)
+        if not vl or variant_index >= len(vl):
+            return None
+
+        variant = vl[variant_index]
+        raw = getattr(variant, attr)
+        if not raw:
+            return None
+
+        if isinstance(raw, (int, float)):
+            return float(raw)
+
+        # Substitute dimension values into formula, then evaluate via ai_bench
+        formula = str(raw)
+        for key in sorted(variant.dims.keys(), key=len, reverse=True):
+            formula = formula.replace(key, str(variant.dims[key]))
+        return eval_eq(formula)
+
+    def get_rtol(
+        self,
+        variant_type: str = "bench-gpu",
+        variant_index: int = 0,
+    ) -> float | None:
+        """Get relative tolerance from variant spec."""
+        vl = self._variants(variant_type)
+        if not vl or variant_index >= len(vl):
+            return None
+        return vl[variant_index].rtol
+
+    def get_atol(
+        self,
+        variant_type: str = "bench-gpu",
+        variant_index: int = 0,
+    ) -> float | None:
+        """Get absolute tolerance from variant spec."""
+        vl = self._variants(variant_type)
+        if not vl or variant_index >= len(vl):
+            return None
+        return vl[variant_index].atol
+
+    def create_inputs(
+        self,
+        variant_type: str = "bench-gpu",
+        variant_index: int = 0,
+        device: str = "xpu",
+    ) -> list:
+        """Create input tensors for a variant, respecting per-input dtypes."""
+        shapes = self.get_input_shapes(variant_type, variant_index)
+        dtypes = self.get_input_dtypes(variant_type, variant_index)
+        return [
+            make_rand_tensor(shape, dt, device) for shape, dt in zip(shapes, dtypes, strict=True)
+        ]
+
+    def get_init_args(
+        self,
+        variant_type: str = "bench-gpu",
+        variant_index: int = 0,
+    ) -> list:
+        """Resolve Model __init__ arguments from the inits section."""
+        if not self.inits:
+            return []
+
+        vl = self._variants(variant_type)
+        if not vl or variant_index >= len(vl):
+            return []
+
+        variant = vl[variant_index]
+        args = []
+        for init_entry in self.inits:
+            for _param_name, dim_var in init_entry.items():
+                if dim_var in variant.dims:
+                    args.append(variant.dims[dim_var])
+                else:
+                    try:
+                        args.append(int(dim_var))
+                    except (ValueError, TypeError):
+                        try:
+                            args.append(float(dim_var))
+                        except (ValueError, TypeError):
+                            args.append(dim_var)
+        return args
+
+    def get_dims(
+        self,
+        variant_type: str = "bench-gpu",
+        variant_index: int = 0,
+    ) -> dict[str, int]:
+        """Get raw dimension values for a variant."""
+        vl = self._variants(variant_type)
+        if not vl or variant_index >= len(vl):
+            return {}
+        return dict(vl[variant_index].dims)
+
+    def get_raw_variant(
+        self,
+        variant_type: str = "bench-gpu",
+        variant_index: int = 0,
+    ) -> dict | None:
+        """Get variant as a raw dict compatible with ai_bench.harness.core functions."""
+        vl = self._variants(variant_type)
+        if not vl or variant_index >= len(vl):
+            return None
+        v = vl[variant_index]
+        raw: dict = {VKey.PARAMS: v.params, VKey.DIMS: v.dims}
+        if v.flop_formula is not None:
+            raw[VKey.FLOP] = v.flop_formula
+        if v.dtype is not None:
+            raw[VKey.TYPE] = v.dtype
+        if v.rtol is not None:
+            raw[VKey.RTOL] = v.rtol
+        if v.atol is not None:
+            raw[VKey.ATOL] = v.atol
+        return raw
+
+    def list_variant_keys(self) -> list[str]:
+        """Return all available variant keys (named + standard families)."""
+        keys = list(self._named_variants.keys())
+        for base_key, attr in self._VARIANT_MAP_KEYS.items():
+            if getattr(self, attr) and base_key not in self._named_variants:
+                keys.append(base_key)
+        return sorted(keys)
+
+
+def load_spec(path: str | Path) -> KernelSpec:
+    """Load kernel spec from YAML file."""
+    with open(path) as f:
+        data = yaml.safe_load(f)
+    return parse_spec(data)
+
+
+def load_spec_from_string(yaml_string: str) -> KernelSpec:
+    """Load kernel spec from YAML string."""
+    data = yaml.safe_load(yaml_string)
+    return parse_spec(data)
+
+
+def _parse_variant_entry(vd: dict) -> VariantSpec:
+    """Parse a single variant dict into a VariantSpec."""
+    return VariantSpec(
+        params=vd.get(VKey.PARAMS, []),
+        dims=vd.get(VKey.DIMS, {}),
+        flop_formula=vd.get(VKey.FLOP),
+        dtype=vd.get(VKey.TYPE),
+        rtol=get_rtol(vd) if VKey.RTOL in vd else None,
+        atol=get_atol(vd) if VKey.ATOL in vd else None,
+        bytes_formula=vd.get("bytes"),
+    )
+
+
+def parse_spec(data: dict) -> KernelSpec:
+    """Parse spec dictionary into KernelSpec.
+
+    Handles both the canonical base keys (ci, bench-gpu, bench-cpu, bench-xpu)
+    and numbered variants such as bench-gpu-0, bench-gpu-1, bench-gpu-17, etc.
+    All keys are stored in _named_variants so _variants() can look them up by
+    their exact name.
+    """
+    inputs: dict[str, InputSpec] = {}
+    if SpecKey.INS in data:
+        for name, input_data in data[SpecKey.INS].items():
+            inputs[name] = InputSpec(
+                name=name,
+                shape_vars=input_data.get(InKey.SHAPE, []),
+                dtype=input_data.get(InKey.TYPE, "float32"),
+            )
+
+    inits = data.get(SpecKey.INITS, [])
+
+    # Known base family keys → KernelSpec attribute names
+    BASE_FAMILY_KEYS = {
+        SpecKey.V_CI: "ci",
+        SpecKey.V_BENCH_CPU: "bench_cpu",
+        SpecKey.V_BENCH_GPU: "bench_gpu",
+        V_BENCH_XPU: "bench_xpu",
+    }
+
+    # Non-variant scalar/dict keys that should never be treated as variants.
+    NON_VARIANT_KEYS = {SpecKey.INS, SpecKey.INITS, "default_variant", "weights", "captured_us"}
+
+    ci: list[VariantSpec] = []
+    bench_cpu: list[VariantSpec] = []
+    bench_gpu: list[VariantSpec] = []
+    bench_xpu: list[VariantSpec] = []
+    named_variants: dict[str, list[VariantSpec]] = {}
+
+    for key, value in data.items():
+        if key in NON_VARIANT_KEYS:
+            continue
+        if not isinstance(value, list):
+            continue  # skip scalar keys
+
+        parsed = [_parse_variant_entry(vd) for vd in value]
+        if len(parsed) > 1:
+            # Every tool reads entry 0; the rest would be silently untimed.
+            logging.getLogger(__name__).warning(
+                "spec variant %r has %d entries and only the first is used; give each its "
+                "own variant key (%s-1, %s-2, ...)", key, len(parsed), key, key)  # fmt: skip
+
+        if key in BASE_FAMILY_KEYS:
+            # Standard family key — populate both the attribute and named_variants
+            attr_name = BASE_FAMILY_KEYS[key]
+            if attr_name == "ci":
+                ci = parsed
+            elif attr_name == "bench_cpu":
+                bench_cpu = parsed
+            elif attr_name == "bench_gpu":
+                bench_gpu = parsed
+            elif attr_name == "bench_xpu":
+                bench_xpu = parsed
+            named_variants[key] = parsed
+        else:
+            # Any other list key is treated as a variant (numbered or custom).
+            named_variants[key] = parsed
+
+    default_variant = data.get("default_variant")
+
+    return KernelSpec(
+        inputs=inputs,
+        inits=inits,
+        ci=ci,
+        bench_cpu=bench_cpu,
+        bench_gpu=bench_gpu,
+        bench_xpu=bench_xpu,
+        _named_variants=named_variants,
+        default_variant=default_variant,
+        weights=_numbers(data, "weights"),
+        captured_us=_numbers(data, "captured_us"),
+    )
+
+
+def _numbers(data: dict, key: str) -> dict[str, float]:
+    """``data[key]`` as {name: number}, {} when absent or null; ValueError unless it is a
+    mapping of numbers; ``captured_us`` times must also be finite and above 0 (weights are
+    checked where they are scored)."""
+    import math
+
+    got = data.get(key)
+    if got is None:
+        return {}
+    if not isinstance(got, dict):
+        raise ValueError(f"spec {key} must map variant names to numbers, not {got!r}")
+    bad = {k: v for k, v in got.items()
+           if isinstance(v, bool) or not isinstance(v, int | float)
+           or (key == "captured_us" and not (math.isfinite(v) and v > 0))}  # fmt: skip
+    if bad:
+        what = "finite and above 0" if key == "captured_us" else "numbers"
+        raise ValueError(f"spec {key} must be {what}: {bad}")
+    return {str(k): float(v) for k, v in got.items()}
+
+
+def get_test_config_from_spec(
+    spec_path: str | Path,
+    variant_type: str | None = None,
+    variant_index: int = 0,
+) -> dict:
+    """Load spec and return test configuration dict for optimizer."""
+    spec = load_spec(spec_path)
+    variant_type = spec.resolve_variant(variant_type)
+    return {
+        "input_shapes": spec.get_input_shapes(variant_type, variant_index),
+        "flop": spec.get_flop(variant_type, variant_index),
+        "dtype": spec.get_dtype(variant_type, variant_index),
+        "input_dtypes": spec.get_input_dtypes(variant_type, variant_index),
+        "rtol": spec.get_rtol(variant_type, variant_index),
+        "atol": spec.get_atol(variant_type, variant_index),
+    }

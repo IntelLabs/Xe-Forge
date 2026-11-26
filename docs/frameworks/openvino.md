@@ -13,7 +13,7 @@ weights.
 ## 3. Command
 
 ```
-xe-forge run --framework openvino --model <hub id of an OpenVINO IR> \
+x-forge run --framework openvino --model <hub id of an OpenVINO IR> \
     --framework-source https://github.com/openvinotoolkit/openvino@<release tag> \
     --batch 4 --input-len 512 --output-len 32 --prompt-file <text file> \
     --calibration <calibration.json> --kernel-repos <repos> --top 3 \
@@ -24,7 +24,7 @@ xe-forge run --framework openvino --model <hub id of an OpenVINO IR> \
   `--framework-source`.
 - `--model` is a pre-converted IR (a hub repository of `.xml` and `.bin`), or a checkpoint the
   capture agent converts with OpenVINO's own tools into
-  `$XE_FORGE_CACHE/models/openvino/`.
+  `$X_FORGE_CACHE/models/openvino/`.
 - The precision is the IR's: leave `--precision` and `--quantization` at `auto` unless the run
   is meant to declare them.
 
@@ -53,4 +53,4 @@ unitrace's timeline. Generation is a hand-written greedy loop over the compiled 
 
 Run through optimize.
 
-Last checked: 2026-11-17, Xe-Forge 05c492a
+Last checked: 2026-11-17, X-Forge 05c492a

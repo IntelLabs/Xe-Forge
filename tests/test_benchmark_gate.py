@@ -1,6 +1,6 @@
 """Which of the two measurements answered, and what happens when neither was asked for.
 
-`xe-forge-skill benchmark` has two paths. One delegates to a command the host
+`x-forge-skill benchmark` has two paths. One delegates to a command the host
 supplied, which times the real workload on whatever timer the host calibrated. The
 other generates tensors from the spec's shapes and times them with an unfloored
 wall clock. Both print the same two lines, because the trial loop branches on them
@@ -21,8 +21,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from xe_forge.config import get_config
-from xe_forge.skills import benchmark
+from x_forge.config import get_config
+from x_forge.skills import benchmark
 
 
 def _args(**overrides):
@@ -44,7 +44,7 @@ def _args(**overrides):
 
 @pytest.mark.parametrize("legacy_setting", [True, False])
 def test_comparison_always_validates_before_timing(legacy_setting):
-    from xe_forge.core.executor import KernelBenchExecutor
+    from x_forge.core.executor import KernelBenchExecutor
 
     executor = KernelBenchExecutor(device="cpu", require_correctness=legacy_setting)
     executor._check_correctness = Mock(return_value=False)
@@ -76,8 +76,8 @@ def _host_timer(us=10.0, each=None):
 def test_extracted_reference_workload_isolates_inputs_and_gates_timing(wrong, cached):
     import torch
 
-    from xe_forge.core.executor import KernelBenchExecutor
-    from xe_forge.core.reference_workload import ReferenceWorkload
+    from x_forge.core.executor import KernelBenchExecutor
+    from x_forge.core.reference_workload import ReferenceWorkload
 
     initial = torch.zeros(3)
     inputs = [torch.ones(2), 1, {"phases": torch.tensor([1 + 2j, 3 + 4j])}]
@@ -146,7 +146,7 @@ def test_extracted_reference_workload_isolates_inputs_and_gates_timing(wrong, ca
 def test_reference_models_are_offloaded_between_validation_and_timing(fail):
     import torch
 
-    from xe_forge.core.executor import KernelBenchExecutor
+    from x_forge.core.executor import KernelBenchExecutor
 
     events = []
     active = set()
@@ -204,7 +204,7 @@ def test_reference_models_are_offloaded_between_validation_and_timing(fail):
 def test_stateful_reference_resets_before_validation_and_each_timed_call(wrong_update):
     import torch
 
-    from xe_forge.core.executor import KernelBenchExecutor
+    from x_forge.core.executor import KernelBenchExecutor
 
     starts = []
 
@@ -254,7 +254,7 @@ def _no_host_command(monkeypatch):
 def test_builtin_reference_without_spec(tmp_path, monkeypatch, capsys, cached, correct):
     import torch
 
-    from xe_forge.core.executor import KernelBenchExecutor
+    from x_forge.core.executor import KernelBenchExecutor
 
     class Reference(torch.nn.Module):
         def __init__(self, initial):
@@ -307,7 +307,7 @@ def _reference_with_spec(tmp_path, monkeypatch, spec_text, scale=1.0):
     """A reference whose workload is built from spec dims; the candidate scales its output."""
     import torch
 
-    from xe_forge.core.executor import KernelBenchExecutor
+    from x_forge.core.executor import KernelBenchExecutor
 
     class Reference(torch.nn.Module):
         def __init__(self, width):
@@ -403,7 +403,7 @@ def test_spec_refuses_a_workload_the_reference_would_not_run(
 def test_float8_buffers_compare_within_one_step(steps, match):
     import torch
 
-    from xe_forge.core.reference_workload import ReferenceWorkload
+    from x_forge.core.reference_workload import ReferenceWorkload
 
     reference = torch.tensor([1.0, -2.0, 0.5]).to(torch.float8_e4m3fn)
     candidate = (torch.tensor([1.0, -2.0, 0.5]) * (1 + 0.125 * steps)).to(torch.float8_e4m3fn)
@@ -486,7 +486,7 @@ def test_a_hung_builtin_gives_up_at_the_benchmark_timeout_not_the_build_one(monk
     popen = subprocess.Popen
     monkeypatch.setattr(subprocess, "Popen", lambda cmd, **kw: popen(["sleep", "60"], **kw))
     monkeypatch.setattr(get_config().external, "timeout", 3600)
-    monkeypatch.setenv("XE_FORGE_BENCHMARK_TIMEOUT", "1")
+    monkeypatch.setenv("X_FORGE_BENCHMARK_TIMEOUT", "1")
 
     start = time.monotonic()
     assert benchmark._run_builtin_watched() == 1
@@ -535,8 +535,8 @@ def test_the_host_command_from_the_environment_still_wins(monkeypatch, _paths_no
 
 def test_the_generated_workspace_asks_for_what_it_will_get(tmp_path):
     """A builtin workspace tells the session to pass the flag; a host one does not."""
-    from xe_forge.claude.generator import generate_workspace
-    from xe_forge.config import Config
+    from x_forge.claude.generator import generate_workspace
+    from x_forge.config import Config
 
     for external, expected in (("host-bench {trial}", False), (None, True)):
         config = Config()
@@ -556,7 +556,7 @@ def test_the_generated_workspace_asks_for_what_it_will_get(tmp_path):
 def test_cached_baseline_requires_reference_correctness(
     tmp_path, monkeypatch, capsys, outputs_match, execution_success, expected_code
 ):
-    from xe_forge.core import spec_loader
+    from x_forge.core import spec_loader
 
     baseline = tmp_path / "baseline.py"
     optimized = tmp_path / "trial.py"
@@ -576,9 +576,9 @@ def test_cached_baseline_requires_reference_correctness(
     executor.execute.return_value = SimpleNamespace(
         success=execution_success, execution_time_ms=0.005, error_message="execution failed"
     )
-    executor_module = ModuleType("xe_forge.core.executor")
+    executor_module = ModuleType("x_forge.core.executor")
     executor_module.KernelBenchExecutor = Mock(return_value=executor)
-    monkeypatch.setitem(sys.modules, "xe_forge.core.executor", executor_module)
+    monkeypatch.setitem(sys.modules, "x_forge.core.executor", executor_module)
 
     result = benchmark._run_builtin(
         _args(baseline=str(baseline), optimized=str(optimized), baseline_us="10,20")
@@ -619,8 +619,8 @@ def test_cached_baseline_requires_reference_correctness(
 
 @pytest.mark.parametrize("with_spec", [False, True])
 def test_generated_commands_share_semantic_reference(tmp_path, with_spec):
-    from xe_forge.claude.generator import generate_workspace
-    from xe_forge.config import Config
+    from x_forge.claude.generator import generate_workspace
+    from x_forge.config import Config
 
     config = Config()
     config.device_config.dsl = "sycl"
@@ -642,7 +642,7 @@ def test_generated_commands_share_semantic_reference(tmp_path, with_spec):
         ".claude/agents/tool-runner.md",
     ):
         text = (workspace / path).read_text()
-        commands = [line for line in text.splitlines() if "xe-forge-skill benchmark <" in line]
+        commands = [line for line in text.splitlines() if "x-forge-skill benchmark <" in line]
         assert commands
         for command in commands:
             assert "--reference test_kernels/decode_pytorch.py" in command
@@ -660,7 +660,7 @@ def test_generated_commands_share_semantic_reference(tmp_path, with_spec):
     assert "does not isolate device kernels" in (workspace / "test_kernels/decode.cpp").read_text()
     for path in (workspace / "CLAUDE.md", workspace / ".claude/agents/tool-runner.md"):
         assert (
-            "xe-forge-skill profile <kernel_file> --reference test_kernels/decode_pytorch.py"
+            "x-forge-skill profile <kernel_file> --reference test_kernels/decode_pytorch.py"
             in path.read_text()
         )
         assert (
@@ -670,8 +670,8 @@ def test_generated_commands_share_semantic_reference(tmp_path, with_spec):
 
 
 def test_without_a_reference_the_baseline_copy_is_the_oracle(tmp_path):
-    from xe_forge.claude.generator import generate_workspace
-    from xe_forge.config import Config
+    from x_forge.claude.generator import generate_workspace
+    from x_forge.config import Config
 
     config = Config()
     config.device_config.dsl = "triton"
@@ -685,7 +685,7 @@ def test_without_a_reference_the_baseline_copy_is_the_oracle(tmp_path):
     for path in ("CLAUDE.md", ".claude/agents/tool-runner.md"):
         text = (workspace / path).read_text()
         for skill in ("benchmark <", "profile <"):
-            commands = [line for line in text.splitlines() if f"xe-forge-skill {skill}" in line]
+            commands = [line for line in text.splitlines() if f"x-forge-skill {skill}" in line]
             assert commands
             for command in commands:
                 assert "--reference test_kernels/decode.py" in command
@@ -702,8 +702,8 @@ def test_without_a_reference_the_baseline_copy_is_the_oracle(tmp_path):
 
 
 def test_spec_with_inputs_keeps_its_own_path(tmp_path):
-    from xe_forge.claude.generator import generate_workspace
-    from xe_forge.config import Config
+    from x_forge.claude.generator import generate_workspace
+    from x_forge.config import Config
 
     config = Config()
     config.device_config.dsl = "sycl"
@@ -718,12 +718,12 @@ def test_spec_with_inputs_keeps_its_own_path(tmp_path):
     )
     instructions = (workspace / "CLAUDE.md").read_text()
     assert "immutable semantic reference" not in instructions
-    assert "xe-forge-skill profile <kernel_file> --spec test_kernels/decode.yaml" in instructions
+    assert "x-forge-skill profile <kernel_file> --spec test_kernels/decode.yaml" in instructions
 
 
 def test_on_the_host_only_the_forward_is_timed(monkeypatch):
-    import xe_forge.core.topology as topology
-    from xe_forge.core.executor import KernelBenchExecutor
+    import x_forge.core.topology as topology
+    from x_forge.core.executor import KernelBenchExecutor
 
     log = []
 
@@ -747,7 +747,7 @@ def test_on_the_host_only_the_forward_is_timed(monkeypatch):
 
 
 def test_every_timed_call_reads_the_same_inputs(monkeypatch):
-    from xe_forge.core.executor import KernelBenchExecutor
+    from x_forge.core.executor import KernelBenchExecutor
 
     code = (
         "import torch\n"
@@ -783,7 +783,7 @@ def test_every_timed_call_reads_the_same_inputs(monkeypatch):
 )
 def test_a_speedup_without_both_times_is_refused(monkeypatch, capsys, times, missing):
     """A ratio the host could not back with both times prints no Performance line."""
-    import xe_forge.external as external
+    import x_forge.external as external
 
     monkeypatch.setattr(
         external,
@@ -798,8 +798,8 @@ def test_a_speedup_without_both_times_is_refused(monkeypatch, capsys, times, mis
 
 
 def test_the_generated_workspace_profiles_t0_and_ports_back_in_its_clone(tmp_path):
-    from xe_forge.claude.generator import generate_workspace
-    from xe_forge.config import Config
+    from x_forge.claude.generator import generate_workspace
+    from x_forge.config import Config
 
     config = Config()
     config.external.kernel_repo = str(tmp_path / "repo")
@@ -819,8 +819,8 @@ def test_compiler_flags_reach_the_seed_and_config_whole(tmp_path):
 
     import yaml
 
-    from xe_forge.claude.generator import generate_workspace
-    from xe_forge.config import Config
+    from x_forge.claude.generator import generate_workspace
+    from x_forge.config import Config
 
     flags = "-O3 -DNAME='hello world' -DQ=\"x\""
     config = Config()
@@ -837,8 +837,8 @@ def test_compiler_flags_reach_the_seed_and_config_whole(tmp_path):
 
 
 def test_a_relative_kernel_repo_is_rendered_absolute(tmp_path, monkeypatch):
-    from xe_forge.claude.generator import generate_workspace
-    from xe_forge.config import Config
+    from x_forge.claude.generator import generate_workspace
+    from x_forge.config import Config
 
     (tmp_path / "repo").mkdir()
     monkeypatch.chdir(tmp_path)
@@ -850,8 +850,8 @@ def test_a_relative_kernel_repo_is_rendered_absolute(tmp_path, monkeypatch):
 
 
 def test_a_second_session_does_not_reseed_the_lessons_ledger(tmp_path):
-    from xe_forge.claude.generator import generate_workspace
-    from xe_forge.config import Config
+    from x_forge.claude.generator import generate_workspace
+    from x_forge.config import Config
 
     config = Config()
     config.external.lessons = str(tmp_path / "lessons")
@@ -864,7 +864,7 @@ def test_a_second_session_does_not_reseed_the_lessons_ledger(tmp_path):
 
 def test_spec_tolerances_decide_correctness_on_the_spec_path(tmp_path, monkeypatch):
     """A variant's rtol/atol reach the executor whether or not a reference was given."""
-    from xe_forge.core import spec_loader
+    from x_forge.core import spec_loader
 
     baseline, optimized = tmp_path / "baseline.py", tmp_path / "trial.py"
     baseline.write_text("baseline source")
@@ -892,9 +892,9 @@ def test_spec_tolerances_decide_correctness_on_the_spec_path(tmp_path, monkeypat
         )
 
     executor.compare_kernels = compare_kernels
-    executor_module = ModuleType("xe_forge.core.executor")
+    executor_module = ModuleType("x_forge.core.executor")
     executor_module.KernelBenchExecutor = Mock(return_value=executor)
-    monkeypatch.setitem(sys.modules, "xe_forge.core.executor", executor_module)
+    monkeypatch.setitem(sys.modules, "x_forge.core.executor", executor_module)
 
     assert benchmark._run_builtin(_args(baseline=str(baseline), optimized=str(optimized))) == 0
     assert seen == {"rtol": 0.02, "atol": 0.03}
@@ -902,8 +902,8 @@ def test_spec_tolerances_decide_correctness_on_the_spec_path(tmp_path, monkeypat
 
 @pytest.mark.parametrize("integrated", [False, True])
 def test_every_win_ports_and_an_integration_repo_widens_what_may_change(tmp_path, integrated):
-    from xe_forge.claude.generator import generate_workspace
-    from xe_forge.config import Config
+    from x_forge.claude.generator import generate_workspace
+    from x_forge.config import Config
 
     config = Config()
     config.external.kernel_repo = str(tmp_path / "kernels")
@@ -929,8 +929,8 @@ def test_every_win_ports_and_an_integration_repo_widens_what_may_change(tmp_path
 def test_a_sycl_result_inside_the_noise_band_is_indistinguishable(
     tmp_path, monkeypatch, opt_ms, verdict
 ):
-    from xe_forge.core.sycl_executor import SyclExecutor
-    from xe_forge.models import ExecutionResult
+    from x_forge.core.sycl_executor import SyclExecutor
+    from x_forge.models import ExecutionResult
 
     monkeypatch.delenv("BENCHMARK_MIN_EFFECT", raising=False)
     ex = SyclExecutor.__new__(SyclExecutor)
@@ -944,8 +944,8 @@ def test_a_sycl_result_inside_the_noise_band_is_indistinguishable(
 def test_a_sycl_result_inside_the_noise_band_still_says_correctness_went_unchecked(
     tmp_path, monkeypatch
 ):
-    from xe_forge.core.sycl_executor import SyclExecutor
-    from xe_forge.models import ExecutionResult
+    from x_forge.core.sycl_executor import SyclExecutor
+    from x_forge.models import ExecutionResult
 
     ex = SyclExecutor.__new__(SyclExecutor)
     ex._backend = ex._build_dir = ex._cached_input_dir = None
@@ -964,8 +964,8 @@ def test_a_spec_with_its_own_inputs_is_timed_on_the_host_as_a_reference_is(tmp_p
 
     import yaml
 
-    from xe_forge.core.executor import KernelBenchExecutor
-    from xe_forge.skills import benchmark
+    from x_forge.core.executor import KernelBenchExecutor
+    from x_forge.skills import benchmark
 
     code = (
         "import torch\n"

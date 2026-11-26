@@ -1,4 +1,4 @@
-/* Example: written by an Xe-Forge session; verified in an engine against its reference. */
+/* Example: written by an X-Forge session; verified in an engine against its reference. */
 #include "xf.h"
 #include <immintrin.h>
 #include <omp.h>

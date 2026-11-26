@@ -9,7 +9,7 @@ the category directories under `examples/` link to them.
 ## Running an example
 
 ```bash
-xe-forge -i examples/gemm/14_Gemm_Divide_Sum_Scaling.py \
+x-forge -i examples/gemm/14_Gemm_Divide_Sum_Scaling.py \
          -s examples/gemm/14_Gemm_Divide_Sum_Scaling.yaml \
          -o optimized.py
 ```

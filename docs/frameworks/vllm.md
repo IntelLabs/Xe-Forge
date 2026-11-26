@@ -12,7 +12,7 @@ vLLM is an LLM inference and serving engine ([vllm-project/vllm](https://github.
 ## 3. Command
 
 ```
-xe-forge run --framework vllm --model <hub id> \
+x-forge run --framework vllm --model <hub id> \
     --framework-source https://github.com/vllm-project/vllm@<tag> \
     --batch 4 --input-len 512 --output-len 32 --prompt-file <text file> \
     --calibration <calibration.json> --kernel-repos <repos> --top 3 --prove \
@@ -53,4 +53,4 @@ under `--kernel-repos`; later kernels of the run may then be named in that clone
 
 Run end to end.
 
-Last checked: 2026-11-17, Xe-Forge 05c492a
+Last checked: 2026-11-17, X-Forge 05c492a

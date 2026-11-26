@@ -11,7 +11,7 @@ The run, `patch check` and the capture measure an engine only through this contr
 - Otherwise a new git repository under the run's `--kernel-repos`, named for the model
   (`native-<model>`). Its first commit is the skeleton: the runtime from `runtime/` brought
   into the layout below, the build, and the binding with no model in it. That commit is the
-  patch's base; the model's engine is committed on top of it, on a branch `xe-forge/<model>`,
+  patch's base; the model's engine is committed on top of it, on a branch `x-forge/<model>`,
   so HEAD is the base plus the engine. The skeleton carries a copy of `patterns.yaml` as
   `docs/patterns.yaml`, and its README points to it: the agents that later optimize the
   engine's kernels work in this repository and read it there.
@@ -98,7 +98,7 @@ timing it; the PyTorch op is also the reference the agent optimizing that kernel
   this build (through the library, its own thread team, on its own) and the reference, prints
   the largest absolute and relative difference, and exits 0 when the kernel is within the
   tolerance everywhere, 1 otherwise. `--help` exits 0.
-- The module is also imported, under a name of its own, by Xe-Forge's interpreter (torch,
+- The module is also imported, under a name of its own, by X-Forge's interpreter (torch,
   numpy and ctypes; the framework's other packages are not there), with another build's
   beside it: the package and its modules import one another relatively, never by the
   package's name, and each loads the library of its own build. It offers:
@@ -167,7 +167,7 @@ package.
   -o <out>` writes the quantized weights the engine loads, and `<out>/dequantized/` holding,
   for every tensor it quantized, the float32 values its quantized form decodes to, in the
   checkpoint's names and shapes (safetensors). Made once per scheme and model, reused.
-- generate.sh with `XE_FORGE_QUANTIZATION` set runs the engine on the quantized weights and
+- generate.sh with `X_FORGE_QUANTIZATION` set runs the engine on the quantized weights and
   writes `$OUT/dequantized.json`: `{"weights": "<out>/dequantized"}`. `patch check` loads the
   original model, puts those tensors in its place (every one must exist there with the same
   shape) and gates the quantized tokens against that model; it reports how far each tensor is

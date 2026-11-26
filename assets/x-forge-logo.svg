@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="640" viewBox="0 0 1600 640">
+  <!-- X-Forge logo. The README shows x-forge-logo.png, rendered from this file:
+       rsvg-convert -w 1600 x-forge-logo.svg -o x-forge-logo.png -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#EEF6FC"/>
+    </linearGradient>
+    <linearGradient id="deep" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0071C5"/>
+      <stop offset="1" stop-color="#004A86"/>
+    </linearGradient>
+    <linearGradient id="bright" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#00C7FD"/>
+      <stop offset="1" stop-color="#0095D9"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#0071C5" stroke-opacity="0.06" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1600" height="640" fill="url(#bg)"/>
+  <rect width="1600" height="640" fill="url(#grid)"/>
+
+  <!-- Emblem, centred at (400, 320) -->
+  <g transform="translate(400 320)">
+    <!-- traces leaving the badge -->
+    <g stroke="#0071C5" stroke-width="5" stroke-linecap="round" fill="none" opacity="0.55">
+      <path d="M-196 -60 H-250 L-275 -85 H-320"/>
+      <path d="M-196 0 H-330"/>
+      <path d="M-196 60 H-250 L-275 85 H-320"/>
+      <path d="M196 -60 H250 L275 -85 H320"/>
+      <path d="M196 0 H330"/>
+      <path d="M196 60 H250 L275 85 H320"/>
+    </g>
+    <g fill="#00C7FD">
+      <circle cx="-320" cy="-85" r="9"/><circle cx="-330" cy="0" r="9"/><circle cx="-320" cy="85" r="9"/>
+      <circle cx="320" cy="-85" r="9"/><circle cx="330" cy="0" r="9"/><circle cx="320" cy="85" r="9"/>
+    </g>
+
+    <!-- hexagon badge -->
+    <polygon points="0,-226 196,-113 196,113 0,226 -196,113 -196,-113" fill="url(#deep)"/>
+    <polygon points="0,-200 173,-100 173,100 0,200 -173,100 -173,-100"
+             fill="none" stroke="#FFFFFF" stroke-opacity="0.35" stroke-width="3"/>
+
+    <!-- the X: two bars, the bright one over the deep one -->
+    <g transform="rotate(45)">
+      <rect x="-30" y="-150" width="60" height="300" rx="10" fill="#FFFFFF"/>
+    </g>
+    <g transform="rotate(-45)">
+      <rect x="-30" y="-150" width="60" height="300" rx="10" fill="url(#bright)"/>
+    </g>
+
+    <!-- the die where they cross -->
+    <g stroke="#FFFFFF" stroke-width="6" stroke-linecap="round">
+      <path d="M-22 -62V-50M0 -62V-50M22 -62V-50"/>
+      <path d="M-22 50V62M0 50V62M22 50V62"/>
+      <path d="M-62 -22H-50M-62 0H-50M-62 22H-50"/>
+      <path d="M50 -22H62M50 0H62M50 22H62"/>
+    </g>
+    <rect x="-46" y="-46" width="92" height="92" rx="10" fill="#004A86" stroke="#FFFFFF" stroke-width="6"/>
+    <rect x="-24" y="-24" width="48" height="48" rx="4" fill="#00C7FD"/>
+  </g>
+
+  <!-- Wordmark -->
+  <text x="780" y="330" font-family="Open Sans, Noto Sans, Helvetica, Arial, sans-serif"
+        font-weight="800" font-size="168" letter-spacing="-4" fill="#0071C5">X<tspan fill="#00C7FD">-</tspan>Forge</text>
+  <rect x="786" y="370" width="628" height="6" rx="3" fill="#00C7FD"/>
+  <text x="786" y="438" font-family="Open Sans, Noto Sans, Helvetica, Arial, sans-serif"
+        font-weight="400" font-size="40" fill="#30475C">Agentic inference optimization</text>
+</svg>

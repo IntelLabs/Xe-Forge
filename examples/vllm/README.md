@@ -14,6 +14,6 @@ applied. Each `.py` holds the kernel and a `Model` class; each `.yaml` is its ke
 | `4_UnifiedAttention_MixedDtype.yaml` | A spec for `3_UnifiedAttention.py` with the KV cache in its stored dtype (`float8_e4m3fn`, `int8`) and the query in `bfloat16` | |
 
 ```bash
-xe-forge -i examples/vllm/3_UnifiedAttention.py -s examples/vllm/3_UnifiedAttention.yaml \
+x-forge -i examples/vllm/3_UnifiedAttention.py -s examples/vllm/3_UnifiedAttention.yaml \
     -n unified_attention -o unified_attention_optimized.py
 ```

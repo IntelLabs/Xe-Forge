@@ -14,11 +14,11 @@
     </style>
   </defs>
   <rect width="1000" height="540" fill="#FFFFFF"/>
-  <text class="h" x="20" y="30">What Xe-Forge works with</text>
+  <text class="h" x="20" y="30">What X-Forge works with</text>
 
   <!-- Frameworks -->
   <rect class="band" x="12" y="46" width="976" height="64" rx="8"/>
-  <text class="l" x="24" y="74">Frameworks</text><text class="ls" x="24" y="92">xe-forge run</text>
+  <text class="l" x="24" y="74">Frameworks</text><text class="ls" x="24" y="92">x-forge run</text>
   <rect class="ok" x="200" y="58" width="104" height="40" rx="5"/><text class="t" x="252" y="76">vLLM</text><text class="s" x="252" y="91">text</text>
   <rect class="ok" x="311" y="58" width="104" height="40" rx="5"/><text class="t" x="363" y="76">SGLang</text><text class="s" x="363" y="91">text</text>
   <rect class="ok" x="422" y="58" width="104" height="40" rx="5"/><text class="t" x="474" y="76">llama.cpp</text><text class="s" x="474" y="91">text</text>
@@ -61,15 +61,15 @@
   <rect class="ok"   x="200" y="354" width="185" height="80" rx="5"/>
   <text class="t" x="292" y="376">Intel GPU (xpu)</text>
   <text class="s" x="292" y="396">Triton, Gluon, SYCL, OpenCL</text>
-  <text class="s" x="292" y="414">kernels and xe-forge run</text>
+  <text class="s" x="292" y="414">kernels and x-forge run</text>
   <rect class="part" x="395" y="354" width="185" height="80" rx="5"/>
   <text class="t" x="487" y="376">NVIDIA GPU (cuda)</text>
   <text class="s" x="487" y="396">Triton, CUDA</text>
-  <text class="s" x="487" y="414">kernels; no xe-forge run</text>
+  <text class="s" x="487" y="414">kernels; no x-forge run</text>
   <rect class="ok"   x="590" y="354" width="185" height="80" rx="5"/>
   <text class="t" x="682" y="376">CPU</text>
   <text class="s" x="682" y="396">C++, SYCL</text>
-  <text class="s" x="682" y="414">kernels and xe-forge run</text>
+  <text class="s" x="682" y="414">kernels and x-forge run</text>
   <rect class="plan" x="785" y="354" width="185" height="80" rx="5"/>
   <text class="t" x="877" y="376">NPU</text>
   <text class="s" x="877" y="396">planned</text>

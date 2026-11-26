@@ -121,7 +121,7 @@ try_harder:
   decisions:
     - condition: "Speedup < 2x after Level 1"
       diagnosis: "Likely bandwidth-bound — loading fp32 and converting wastes 2x BW"
-      action: "Apply Level 2: pre-pack to bf16, add grf_mode='large'. Run 'xe-forge-skill profile' to confirm bandwidth bottleneck (look for high XVE Stalled %)."
+      action: "Apply Level 2: pre-pack to bf16, add grf_mode='large'. Run 'x-forge-skill profile' to confirm bandwidth bottleneck (look for high XVE Stalled %)."
       priority: high
 
     - condition: "Speedup 2-3x after Level 2"
@@ -136,7 +136,7 @@ try_harder:
     - condition: "Speedup 3-5x after Level 3"
       diagnosis: "Good performance — likely near hardware limits for this shape"
       action: |
-        Run 'xe-forge-skill profile' to identify remaining bottleneck.
+        Run 'x-forge-skill profile' to identify remaining bottleneck.
         If compute-bound (XVE Active > Stalled) → try larger tiles or Stream K.
         If memory-bound (XVE Stalled > Active) → check for unnecessary copies or layout transforms.
         Keep going — try a different approach if current strategy has plateaued.

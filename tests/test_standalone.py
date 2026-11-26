@@ -6,7 +6,7 @@ import itertools
 
 import pytest
 
-from xe_forge.frontend import standalone
+from x_forge.frontend import standalone
 
 _n = itertools.count()
 
@@ -54,7 +54,7 @@ def test_a_module_without_the_standalone_calls_is_refused(tmp_path):
 
 
 def test_the_slot_swap_cancels_a_slots_bias():
-    from xe_forge.core.executor import combine_swapped
+    from x_forge.core.executor import combine_swapped
 
     # b is twice as fast; the first slot reads 10% slower whatever runs in it
     ab = (2.2, 1.0, [2.2, 2.2])  # a first: a/b = 2 x 1.1
@@ -83,11 +83,11 @@ def test_a_library_that_binds_a_symbol_once_per_process_is_found(tmp_path):
 
 
 def test_a_gpu_kernel_is_warmed_up_at_least_the_minimum(monkeypatch):
-    monkeypatch.setenv("XE_FORGE_KERNEL_WARMUP", "10")
-    monkeypatch.setenv("XE_FORGE_DEVICE", "cpu")
+    monkeypatch.setenv("X_FORGE_KERNEL_WARMUP", "10")
+    monkeypatch.setenv("X_FORGE_DEVICE", "cpu")
     assert standalone._executor().warmup_iters == 10
-    monkeypatch.setenv("XE_FORGE_DEVICE", "xpu")
+    monkeypatch.setenv("X_FORGE_DEVICE", "xpu")
     ex = standalone._executor()
     assert ex.device == "xpu" and ex.warmup_iters == standalone.DEVICE_MIN_WARMUP
-    monkeypatch.setenv("XE_FORGE_KERNEL_WARMUP", "300")
+    monkeypatch.setenv("X_FORGE_KERNEL_WARMUP", "300")
     assert standalone._executor().warmup_iters == 300

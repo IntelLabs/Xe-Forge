@@ -13,10 +13,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from xe_forge.dsl_registry import get_stages_for_dsl
-from xe_forge.frontend import analyze, formula, manifest
-from xe_forge.models import DSL, OptimizationStage
-from xe_forge.skills.capture import _counters, _usable
+from x_forge.dsl_registry import get_stages_for_dsl
+from x_forge.frontend import analyze, formula, manifest
+from x_forge.models import DSL, OptimizationStage
+from x_forge.skills.capture import _counters, _usable
 
 # ── OpenCL ──────────────────────────────────────────────────────────────────
 
@@ -39,7 +39,7 @@ def test_opencl_has_no_triton_stages():
 
 
 OPENCL_KERNEL = """
-from xe_forge import opencl
+from x_forge import opencl
 
 SRC = "__kernel void k(__global float* x) { x[get_global_id(0)] += 1.0f; }"
 
@@ -84,8 +84,8 @@ class Model:
      "INVALID num_warps=3: Must be power of 2.", None),
 ])  # fmt: skip
 def test_the_dspy_optimizer_holds_only_triton_kernels_to_triton(dsl, code, says, final):
-    from xe_forge.agents.optimizer_agent import OptimizerAgent
-    from xe_forge.agents.utils import SUCCESS_MESSAGE
+    from x_forge.agents.optimizer_agent import OptimizerAgent
+    from x_forge.agents.utils import SUCCESS_MESSAGE
 
     measured = []
 
@@ -108,8 +108,8 @@ def test_the_dspy_optimizer_holds_only_triton_kernels_to_triton(dsl, code, says,
 def test_dspy_prompts_offer_a_non_triton_dsl_only_its_own_stages(device):
     import re
 
-    from xe_forge.agents.analyzer_agent import _build_issue_categories
-    from xe_forge.prompts import PromptLibrary
+    from x_forge.agents.analyzer_agent import _build_issue_categories
+    from x_forge.prompts import PromptLibrary
 
     lib = PromptLibrary("opencl", device)
     for template in ("optimization_signature", "optimization_react_signature",
@@ -152,7 +152,7 @@ def _sol(counters: dict):
 
 @pytest.mark.parametrize("known, unknown, measured", [(1, 99, False), (60, 40, True)])
 def test_a_rate_measured_over_too_little_of_a_kernel_does_not_bound_it(known, unknown, measured):
-    from xe_forge.frontend import rows
+    from x_forge.frontend import rows
 
     hit = {"us": float(known), "gb_per_s": 95.0, "util_pct": 90.0, "gb_us": float(known),
            "util_us": float(known)}  # fmt: skip
@@ -259,7 +259,7 @@ def test_unmeasured_kernel_time_is_not_claimed_at_roofline():
 
 
 def test_counters_on_part_of_a_workload_weigh_against_its_whole_bound_as_that_part():
-    from xe_forge.frontend.ir import Naming, Workload
+    from x_forge.frontend.ir import Naming, Workload
 
     # a stated cost bounds the whole at 97 us of its 100; counters cover 60 us of it, at 95%
     w = Workload(workload_id="w", family="x", dims={"M": 1}, dtypes=["float16"], layout=[],
@@ -319,7 +319,7 @@ def test_formula_caps_a_read_by_a_window():
 
 
 def _windowed(window: int, us: float):
-    from xe_forge.frontend.ir import CapturedOp, TensorArg
+    from x_forge.frontend.ir import CapturedOp, TensorArg
 
     return CapturedOp(id=f"op-{window}", framework_op="fa::fwd", args=[TensorArg([8, 128], "bfloat16"),
                       None], scalars=[None, str(window)], kernel_symbols={"fmha": us}, calls=1,
@@ -329,9 +329,9 @@ def _windowed(window: int, us: float):
 def test_every_runtime_size_at_a_token_count_reaches_the_spec(tmp_path):
     """Decode steps share a token count but not a context length: each is a variant of its
     own, and the inputs check reads each one's own calls and time."""
-    from xe_forge.frontend import canonical, ir, manifest, naming
-    from xe_forge.frontend.analyze import Entry
-    from xe_forge.skills.inputs import shares
+    from x_forge.frontend import canonical, ir, manifest, naming
+    from x_forge.frontend.analyze import Entry
+    from x_forge.skills.inputs import shares
 
     def op(tokens, ctx, us):
         return ir.CapturedOp(id=f"op-{tokens}-{ctx}", framework_op="fa::fwd",
@@ -368,7 +368,7 @@ def test_every_runtime_size_at_a_token_count_reaches_the_spec(tmp_path):
 
 def _row_capture(row, ops_us):
     """A capture at ``row``: prefill at batch x input tokens, decode at batch, ``ops_us`` each."""
-    from xe_forge.frontend import ir
+    from x_forge.frontend import ir
 
     tokens = (row["batch"] * row["input_len"], row["batch"])
     ops = [ir.CapturedOp(id=f"op{t}", framework_op="aten::gelu",
@@ -382,7 +382,7 @@ def _row_capture(row, ops_us):
 def test_rows_merge_into_one_workload_spanning_every_rows_shapes():
     """Each row's ops scaled to its weight of the anchor's time, time per call kept: the
     same op at another row's token counts is more shapes of one workload."""
-    from xe_forge.frontend import rows
+    from x_forge.frontend import rows
 
     anchor = {"batch": 8, "input_len": 64, "output_len": 4, "weight": 0.75}
     other = {"batch": 1, "input_len": 64, "output_len": 4, "weight": 0.25}
@@ -401,7 +401,7 @@ def test_rows_merge_into_one_workload_spanning_every_rows_shapes():
 def test_rows_merge_a_hosts_wall_times_at_the_rows_scales():
     """A host's wall times sum over the rows as their device times do (here at 0.75 and
     0.625), so the roofline's wall time is the merged workload's; one a row lacks is unknown."""
-    from xe_forge.frontend import rows
+    from x_forge.frontend import rows
 
     anchor = {"batch": 8, "input_len": 64, "output_len": 4, "weight": 0.75}
     other = {"batch": 1, "input_len": 64, "output_len": 4, "weight": 0.25}
@@ -418,7 +418,7 @@ def test_rows_merge_a_hosts_wall_times_at_the_rows_scales():
 
 
 def test_rows_merge_each_kernels_counters_by_its_scaled_time():
-    from xe_forge.frontend import rows
+    from x_forge.frontend import rows
 
     anchor = {"batch": 8, "input_len": 64, "output_len": 4, "weight": 0.5}
     other = {"batch": 1, "input_len": 64, "output_len": 4, "weight": 0.5}
@@ -434,7 +434,7 @@ def test_rows_merge_each_kernels_counters_by_its_scaled_time():
 
 
 def test_rows_merge_scales_each_kernels_unitrace_time_like_its_counters():
-    from xe_forge.frontend import rows
+    from x_forge.frontend import rows
 
     anchor = {"batch": 8, "input_len": 64, "output_len": 4, "weight": 0.1}
     other = {"batch": 1, "input_len": 64, "output_len": 4, "weight": 0.9}
@@ -459,7 +459,7 @@ def test_rows_merge_scales_each_kernels_unitrace_time_like_its_counters():
 def test_rows_merged_at_given_scales_move_the_total_with_any_row():
     """A later measurement merges at the run's scales: a row that got faster moves the total,
     and two arms of the same work count the same calls."""
-    from xe_forge.frontend import rows
+    from x_forge.frontend import rows
 
     anchor = {"batch": 8, "input_len": 64, "output_len": 4, "weight": 0.5}
     other = {"batch": 1, "input_len": 64, "output_len": 4, "weight": 0.5}
@@ -482,7 +482,7 @@ def test_rows_merged_at_given_scales_count_the_same_calls_in_any_op_order():
     orders; merged at given scales they still count the same calls, to the bit."""
     import random
 
-    from xe_forge.frontend import ir, rows
+    from x_forge.frontend import ir, rows
 
     plan = [{"batch": 1, "input_len": n, "output_len": 4, "weight": w}
             for n, w in ((64, 0.35), (32, 0.4), (16, 0.25))]  # fmt: skip
@@ -505,7 +505,7 @@ def test_rows_merged_at_given_scales_count_the_same_calls_in_any_op_order():
 
 
 def test_rows_schedule_alternates_the_arms_and_is_abba_for_one_row():
-    from xe_forge.frontend import rows
+    from x_forge.frontend import rows
 
     assert [a for _, _, a in rows.schedule(2, 1)] == ["A", "B", "B", "A"]
     assert list(rows.schedule(1, 2)) == [(1, 0, "A"), (1, 0, "B"), (1, 1, "B"), (1, 1, "A")]
@@ -514,7 +514,7 @@ def test_rows_schedule_alternates_the_arms_and_is_abba_for_one_row():
 
 
 def test_rows_file_puts_the_largest_row_first_and_refuses_a_bad_one(tmp_path):
-    from xe_forge.frontend import rows
+    from x_forge.frontend import rows
 
     f = tmp_path / "rows.yaml"
     f.write_text("rows:\n - {batch: 1, input_len: 4096, output_len: 8, weight: 0.2}\n"
@@ -534,8 +534,8 @@ def test_rows_file_puts_the_largest_row_first_and_refuses_a_bad_one(tmp_path):
 def test_other_rows_rerun_the_launcher_at_their_size_with_no_agent(
     tmp_path, monkeypatch, ignore_env, kept, kept_batch
 ):
-    from xe_forge.frontend import cli, ir
-    from xe_forge.skills.capture import _sha256
+    from x_forge.frontend import cli, ir
+    from x_forge.skills.capture import _sha256
 
     anchor = {"batch": 8, "input_len": 64, "output_len": 4, "weight": 0.5}
     other = {"batch": 1, "input_len": 64, "output_len": 4, "weight": 0.5}
@@ -571,7 +571,7 @@ def test_other_rows_rerun_the_launcher_at_their_size_with_no_agent(
 @pytest.mark.parametrize("config_args, n", [(None, 1), (["ARG1"], 2), (["arg1"], 2)])
 def test_config_args_make_each_value_a_workload(config_args, n):
     """A window is a scalar like a size, so only the naming agent's config_args split on it."""
-    from xe_forge.frontend import canonical, naming
+    from x_forge.frontend import canonical, naming
 
     ops = [_windowed(-1, 130.0), _windowed(255, 14.0)]
     for op in ops:
@@ -584,7 +584,7 @@ def test_config_args_make_each_value_a_workload(config_args, n):
 
 
 def test_naming_refuses_config_args_that_are_not_scalar_dims(tmp_path):
-    from xe_forge.frontend import naming
+    from x_forge.frontend import naming
 
     listing = {"op": {"args": [{"name": "q", "shape": [8, 128]}, {"name": "w", "value": "255"}],
                       "dims": {"ARG0_D0": 8, "ARG0_D1": 128, "ARG1": 255}}}  # fmt: skip
@@ -643,7 +643,7 @@ def _stub_cli(tmp_path, monkeypatch, backend: str, text: str) -> None:
     stub.write_text(text)
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.setenv("XE_FORGE_AGENT", backend)
+    monkeypatch.setenv("X_FORGE_AGENT", backend)
 
 
 def _alive(pid: int) -> bool:
@@ -658,7 +658,7 @@ def _alive(pid: int) -> bool:
 
 @pytest.mark.parametrize("backend", ["claude", "codex"])
 def test_agent_resumes_after_non_ascii_and_kills_detached_work(tmp_path, monkeypatch, backend):
-    from xe_forge.frontend import agent
+    from x_forge.frontend import agent
 
     pidfile = tmp_path / "child.pid"
     _stub_cli(tmp_path, monkeypatch, backend,
@@ -699,8 +699,8 @@ REJECT = {"claude": '{"type":"system","subtype":"api_retry","error_status":401}'
 @pytest.mark.parametrize("backend", ["claude", "codex"])
 @pytest.mark.parametrize("reject", [False, True])
 def test_oneshot_stages_inputs_and_reads_the_answer(tmp_path, monkeypatch, backend, reject):
-    from xe_forge import agent_cli as agents
-    from xe_forge.frontend import agent
+    from x_forge import agent_cli as agents
+    from x_forge.frontend import agent
 
     record = tmp_path / "argv.json"
     _stub_cli(tmp_path, monkeypatch, backend, ONESHOT_STUB.format(
@@ -718,7 +718,7 @@ def test_oneshot_stages_inputs_and_reads_the_answer(tmp_path, monkeypatch, backe
 
 
 def test_oneshot_timeout_kills_the_sessions_detached_work(tmp_path, monkeypatch):
-    from xe_forge.frontend import agent
+    from x_forge.frontend import agent
 
     pidfile = tmp_path / "child.pid"
     _stub_cli(tmp_path, monkeypatch, "claude",
@@ -737,7 +737,7 @@ def test_oneshot_timeout_kills_the_sessions_detached_work(tmp_path, monkeypatch)
 def test_tool_profiles_map_to_each_cli(tmp_path, monkeypatch):
     """Read-only is confined and shell-free on claude; on codex reads go through a
     read-only sandboxed shell with no network. Nothing beyond the profile is granted."""
-    from xe_forge import agent_cli as agents
+    from x_forge import agent_cli as agents
 
     for name in ("claude", "codex"):
         _stub_cli(tmp_path, monkeypatch, name, "#!/bin/sh\n")
@@ -760,7 +760,7 @@ def test_tool_profiles_map_to_each_cli(tmp_path, monkeypatch):
 
 
 def test_codex_reads_the_generated_workspace(tmp_path):
-    from xe_forge import agent_cli as agents
+    from x_forge import agent_cli as agents
 
     (tmp_path / ".claude" / "agents").mkdir(parents=True)
     (tmp_path / ".claude" / "commands").mkdir()
@@ -783,7 +783,7 @@ def test_codex_reads_the_generated_workspace(tmp_path):
 
 
 def test_optimize_records_the_repo_revision(tmp_path):
-    from xe_forge.frontend.cli import _git_revision
+    from x_forge.frontend.cli import _git_revision
 
     repo = tmp_path / "kernels"
     repo.mkdir()
@@ -809,7 +809,7 @@ def test_optimize_records_the_repo_revision(tmp_path):
 
 
 def test_optimize_session_finds_this_interpreter_first():
-    from xe_forge.frontend.cli import _session_env
+    from x_forge.frontend.cli import _session_env
 
     first = _session_env()["PATH"].split(os.pathsep)[0]
     assert first == str(Path(sys.executable).parent)
@@ -850,7 +850,7 @@ J
 
 
 def _tool(*argv):
-    r = subprocess.run([sys.executable, "-m", "xe_forge.skills", *argv], capture_output=True,
+    r = subprocess.run([sys.executable, "-m", "x_forge.skills", *argv], capture_output=True,
                        text=True, env=dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path)))  # fmt: skip
     return r.returncode, r.stdout + r.stderr
 
@@ -886,16 +886,16 @@ UNITRACE_STUB_STRAY = UNITRACE_STUB.replace(
     "{ printf '{\"traceEvents\": ['; ev one_off_init 0 1.0; ev gemm_kernel 1 6.0;",
 )
 
-# A launcher that ran the workload twice, honours XE_FORGE_TRACE_STEPS, and reports which
+# A launcher that ran the workload twice, honours X_FORGE_TRACE_STEPS, and reports which
 # pass it is in: $RAW_DIR differs between the two, so each pass leaves its own note.
 LAUNCHER_TWICE = """#!/bin/bash
-echo "${XE_FORGE_TRACE_STEPS:-unset}" > "$RAW_DIR/steps_seen"
+echo "${X_FORGE_TRACE_STEPS:-unset}" > "$RAW_DIR/steps_seen"
 # Beside the launcher, so it survives the instrumented pass's scratch being removed: one
 # line per pass, in order, which is the only way to see what the second pass was given.
-echo "${XE_FORGE_TRACE_STEPS:-unset}" >> "$(dirname "$0")/steps_log"
+echo "${X_FORGE_TRACE_STEPS:-unset}" >> "$(dirname "$0")/steps_log"
 cat > "$RAW_DIR/meta.json" <<J
 {"framework": "toyfw", "framework_version": "1", "model": {"name": "toy"},
- "runtime": {"batch": 1, "precision": "float16", "quantization": "float16", "steps": ${XE_FORGE_TRACE_STEPS:-50}},
+ "runtime": {"batch": 1, "precision": "float16", "quantization": "float16", "steps": ${X_FORGE_TRACE_STEPS:-50}},
  "device": {"type": "xpu"}, "repeats": 2}
 J
 cat > "$RAW_DIR/ops.json" <<'J'
@@ -960,7 +960,7 @@ def test_capture_run_trace_steps_zero_measures_the_whole_workload_twice(tmp_path
                                                                         exported):  # fmt: skip
     """0 is the whole workload under unitrace too, and it holds against an exported value."""
     if exported:
-        monkeypatch.setenv("XE_FORGE_TRACE_STEPS", exported)
+        monkeypatch.setenv("X_FORGE_TRACE_STEPS", exported)
     unitrace = _exe(tmp_path / "unitrace", UNITRACE_STUB_STRAY)
     launcher = _exe(tmp_path / "run.sh", LAUNCHER_TWICE)
     raw = tmp_path / "raw"
@@ -979,14 +979,14 @@ def test_capture_run_says_when_the_launcher_ignores_trace_steps(tmp_path):
     code, out = _tool("capture", "run", str(launcher), "-o", str(raw), "--unitrace",
                       str(unitrace), "--trace-steps", "2")  # fmt: skip
     assert code == 0, out
-    assert "does not read XE_FORGE_TRACE_STEPS" in out
+    assert "does not read X_FORGE_TRACE_STEPS" in out
     assert json.loads((raw / "run.json").read_text())["trace_steps"] is None
     _, out = _tool("capture", "parse", str(raw), "-o", str(tmp_path / "capture.json"))
     assert "step(s)" not in out, out
 
 
 def test_capture_run_keeps_an_exported_trace_steps_out_of_the_timed_pass(tmp_path, monkeypatch):
-    monkeypatch.setenv("XE_FORGE_TRACE_STEPS", "2")
+    monkeypatch.setenv("X_FORGE_TRACE_STEPS", "2")
     unitrace = _exe(tmp_path / "unitrace", UNITRACE_STUB_STRAY)
     launcher = _exe(tmp_path / "run.sh", LAUNCHER_TWICE)
     raw = tmp_path / "raw"
@@ -1057,8 +1057,8 @@ def test_bound_tool_lists_workloads_by_share(tmp_path):
 def test_bound_with_draft_names_bounds_with_their_model_facts(tmp_path, monkeypatch, capsys):
     import argparse
 
-    from xe_forge.frontend import ir
-    from xe_forge.skills import bound
+    from x_forge.frontend import ir
+    from x_forge.skills import bound
 
     cap = tmp_path / "capture.json"
     ir.dump(ir.CaptureRun(run={"total_device_us": 1.0}, ops=[]), cap)
@@ -1075,7 +1075,7 @@ def test_bound_with_draft_names_bounds_with_their_model_facts(tmp_path, monkeypa
 
 def test_a_cost_over_unknown_dims_loses_the_cost_not_the_naming(tmp_path):
     """A GEMM named right with a cost over M/N/K (not dims of the op) keeps its gemm."""
-    from xe_forge.frontend import naming
+    from x_forge.frontend import naming
 
     (tmp_path / "repo").mkdir()
     listing = {"op": {"args": [{"name": "x", "shape": [4, 8]}, {"name": "w", "shape": [16, 8]}],
@@ -1097,7 +1097,7 @@ def test_a_cost_over_unknown_dims_loses_the_cost_not_the_naming(tmp_path):
 
 def test_a_bad_config_arg_loses_the_config_args_not_the_attentions_kv_args(tmp_path):
     """A config_arg by an unknown name must not drop the attention op and its kv_args."""
-    from xe_forge.frontend import naming
+    from x_forge.frontend import naming
 
     (tmp_path / "repo").mkdir()
     listing = {"op": {"args": [{"name": "arg0", "shape": [8, 128]},
@@ -1121,8 +1121,8 @@ def test_a_bad_config_arg_loses_the_config_args_not_the_attentions_kv_args(tmp_p
 
 
 def test_a_kernel_a_library_launches_is_also_tuned_as_its_call(tmp_path):
-    from xe_forge.frontend import analyze, naming
-    from xe_forge.frontend.ir import CaptureRun, Naming, Workload
+    from x_forge.frontend import analyze, naming
+    from x_forge.frontend.ir import CaptureRun, Naming, Workload
 
     (tmp_path / "lib").mkdir()
     (tmp_path / "app").mkdir()
@@ -1149,8 +1149,8 @@ def test_a_kernel_a_library_launches_is_also_tuned_as_its_call(tmp_path):
 
 
 def test_naming_family_is_free_text_and_a_bad_gemm_spec_degrades(tmp_path):
-    from xe_forge.frontend import canonical, naming
-    from xe_forge.frontend.ir import CapturedOp, TensorArg
+    from x_forge.frontend import canonical, naming
+    from x_forge.frontend.ir import CapturedOp, TensorArg
 
     (tmp_path / "repo").mkdir()
     listing = {"op": {"args": [{"name": "x", "shape": [4, 8]}, {"name": "w", "shape": [16, 8]}],
@@ -1183,7 +1183,7 @@ J
 
 
 def test_timeline_follows_submission_not_skewed_start_times(tmp_path):
-    from xe_forge.skills.capture import _timeline
+    from x_forge.skills.capture import _timeline
 
     def ev(name, ts, i=None):
         return {"ph": "X", "cat": "gpu_op", "name": name, "ts": ts, "dur": 1.0,
@@ -1204,7 +1204,7 @@ def test_timeline_follows_submission_not_skewed_start_times(tmp_path):
     (["in0", "weight"], ["in0", "weight", "bias"], False),  # another arity: another signature
 ])  # fmt: skip
 def test_ops_json_nodes_of_one_type_name_their_arguments_by_role(w0, w1, bad):
-    from xe_forge.skills.capture import _ops_summary
+    from x_forge.skills.capture import _ops_summary
 
     def fc(names):
         return {
@@ -1341,7 +1341,7 @@ def test_patch_check_reports_the_declared_quantization_without_gating_on_it(tmp_
     # run is a reported fact.
     work, repos, fw, ref = _patch_dir(tmp_path, [[1, 2, 3, 4], [5, 6, 7, 8]])
     (work / "generate.sh").write_text(
-        "if [ -n \"$XE_FORGE_QUANTIZATION\" ]; then echo '[[1, 2, 9, 9], [5, 6, 7, 8]]' "
+        "if [ -n \"$X_FORGE_QUANTIZATION\" ]; then echo '[[1, 2, 9, 9], [5, 6, 7, 8]]' "
         '> "$OUT/tokens.json"; else echo \'[[1, 2, 3, 4], [5, 6, 7, 8]]\' > "$OUT/tokens.json"; fi\n'
     )
     code, out = _tool("patch", "check", str(work), "--repos", str(repos), "--framework-python",
@@ -1357,17 +1357,17 @@ def test_patch_check_reports_the_declared_quantization_without_gating_on_it(tmp_
 
 def _torch_python() -> str:
     """An interpreter with torch and safetensors, what a framework's reference has: this one,
-    or $XE_FORGE_TEST_TORCH_PYTHON; the test is skipped without one."""
-    for python in (sys.executable, os.environ.get("XE_FORGE_TEST_TORCH_PYTHON")):
+    or $X_FORGE_TEST_TORCH_PYTHON; the test is skipped without one."""
+    for python in (sys.executable, os.environ.get("X_FORGE_TEST_TORCH_PYTHON")):
         if python and subprocess.run([python, "-c", "import torch, safetensors"],
                                      capture_output=True).returncode == 0:  # fmt: skip
             return python
-    pytest.skip("no interpreter with torch and safetensors (XE_FORGE_TEST_TORCH_PYTHON)")
+    pytest.skip("no interpreter with torch and safetensors (X_FORGE_TEST_TORCH_PYTHON)")
 
 
 _TINY = """
 import torch
-from xe_forge.frontend.profile import Vocab
+from x_forge.frontend.profile import Vocab
 V, D = 50, 16
 class Tiny(torch.nn.Module):
     def __init__(self):
@@ -1393,9 +1393,9 @@ import json, os, sys, torch
 from pathlib import Path
 sys.path.insert(0, os.getcwd())
 from reference import Tiny, vocab
-from xe_forge.frontend import profile
+from x_forge.frontend import profile
 m, out, mode = Tiny(), Path(os.environ["OUT"]), os.environ.get("MODE", "")
-if os.environ.get("XE_FORGE_QUANTIZATION"):
+if os.environ.get("X_FORGE_QUANTIZATION"):
     with torch.no_grad():  # the engine's own format: a coarse grid
         m.head.weight.copy_((m.head.weight * 2).round() / 2)
     if mode != "no-export":
@@ -1412,7 +1412,7 @@ for p in rows:
     for _ in range(int(os.environ["OUTPUT_LEN"])):
         logits = m(torch.tensor([seq]))[0, -1]
         pick = int(logits.argmax())
-        if mode == "wrong-tokens" and os.environ.get("XE_FORGE_QUANTIZATION"):
+        if mode == "wrong-tokens" and os.environ.get("X_FORGE_QUANTIZATION"):
             pick = int(logits.argmin())
         seq.append(pick)
     got.append(seq[len(p):])
@@ -1440,7 +1440,7 @@ def test_patch_check_gates_quantized_tokens_on_the_frameworks_own_dequantized_we
     (work / "patch.json").write_text(
         json.dumps({**meta, "python": torch_python, "reference": "reference.py"})
     )
-    monkeypatch.setenv("XE_FORGE_DEVICE", "cpu")
+    monkeypatch.setenv("X_FORGE_DEVICE", "cpu")
     got, out = _tool("patch", "check", str(work), "--repos", str(repos), "--framework-python",
                      str(fw), "--reference-python", torch_python, "--model", "tiny",
                      "--batch", "2", "--input-len", "4", "--min-match", "4", "--precision",
@@ -1531,7 +1531,7 @@ def test_patch_check_excuses_only_what_the_reference_disagrees_with_itself_on(
 
 
 def test_run_establishes_a_patch_then_captures_on_it(tmp_path, monkeypatch):
-    from xe_forge.frontend import cli
+    from x_forge.frontend import cli
 
     answers = iter([{"unsupported": "model", "what": "Toy", "reason": "registry.py:1"},
                     {"notes": "patched"}, {"launcher": "launcher/run.sh"}])  # fmt: skip
@@ -1565,7 +1565,7 @@ def test_run_establishes_a_patch_then_captures_on_it(tmp_path, monkeypatch):
 def test_run_gates_the_quantized_tokens_of_a_framework_that_quantizes_itself(
     tmp_path, monkeypatch, framework, gated
 ):
-    from xe_forge.frontend import cli
+    from x_forge.frontend import cli
 
     answers = iter([{"unsupported": "model", "what": "Toy", "reason": "none"},
                     {"notes": "written"}, {"launcher": "launcher/run.sh"}])  # fmt: skip
@@ -1592,7 +1592,7 @@ def test_run_gates_the_quantized_tokens_of_a_framework_that_quantizes_itself(
 
 def test_run_stops_on_a_precision_the_device_has_no_kernel_for(tmp_path, monkeypatch):
     """A checkpoint format only emulated here is reported, never patched."""
-    from xe_forge.frontend import cli
+    from x_forge.frontend import cli
 
     steps = []
     monkeypatch.setattr(cli, "_agent", lambda step, *rest: steps.append(step) or
@@ -1611,7 +1611,7 @@ def test_run_stops_on_a_precision_the_device_has_no_kernel_for(tmp_path, monkeyp
 def test_a_capture_the_named_read_refuses_goes_back_once_to_the_capture_agent(
     tmp_path, monkeypatch, refusals, recapture, code, captures
 ):
-    from xe_forge.frontend import cli, ir
+    from x_forge.frontend import cli, ir
 
     left, seen = [refusals], []
     (tmp_path / "capture.json").write_text("{}")
@@ -1649,7 +1649,7 @@ def test_a_capture_the_named_read_refuses_goes_back_once_to_the_capture_agent(
 
 
 def test_prompt_file_gives_each_row_its_own_slice_and_repeats_too_little_text(tmp_path):
-    from xe_forge.frontend import profile
+    from x_forge.frontend import profile
 
     vocab = profile.Vocab(lambda text: [ord(c) for c in text], range(10))
     f = tmp_path / "prompts.txt"
@@ -1689,7 +1689,7 @@ def test_patch_check_scores_first_in_the_runs_declared_precision(tmp_path, given
 def test_run_gives_a_declared_float_precision_to_the_patch_check(
     tmp_path, monkeypatch, precision, passed
 ):
-    from xe_forge.frontend import cli
+    from x_forge.frontend import cli
 
     answers = iter([{"unsupported": "model", "what": "Toy", "reason": "r"}, {"notes": "patched"},
                     {"launcher": "launcher/run.sh"}])  # fmt: skip
@@ -1714,7 +1714,7 @@ def test_run_gives_a_declared_float_precision_to_the_patch_check(
 def test_patch_check_gives_generate_its_natural_text_prompt_and_shape(tmp_path):
     """Without a run prompt file the check scores on its own prose, never synthetic ids, and
     tells generate.sh the prompt, shape and the tokens it will score."""
-    from xe_forge.skills.patch import PROMPT
+    from x_forge.skills.patch import PROMPT
 
     work, repos, fw, _ = _patch_dir(tmp_path, [])
     argv = tmp_path / "ref-argv"
@@ -1731,7 +1731,7 @@ def test_patch_check_gives_generate_its_natural_text_prompt_and_shape(tmp_path):
 
 
 def test_capture_parse_refuses_inputs_that_changed_since_the_run(tmp_path):
-    from xe_forge.skills.capture import _sha256
+    from x_forge.skills.capture import _sha256
 
     prompts = tmp_path / "prompts.txt"
     prompts.write_text("some text")
@@ -1750,7 +1750,7 @@ def test_capture_parse_refuses_inputs_that_changed_since_the_run(tmp_path):
 
 
 def test_run_gives_the_prompt_file_to_the_patch_check(tmp_path, monkeypatch):
-    from xe_forge.frontend import cli
+    from x_forge.frontend import cli
 
     answers = iter([{"unsupported": "model", "what": "Toy", "reason": "r"}, {"notes": "patched"},
                     {"launcher": "launcher/run.sh"}])  # fmt: skip
@@ -1777,7 +1777,7 @@ def test_run_gives_the_prompt_file_to_the_patch_check(tmp_path, monkeypatch):
 
 def test_naming_listing_merges_identical_shapes_so_rare_ones_show():
     """Many identical decode calls must not crowd a prefill shape out of the agent's view."""
-    from xe_forge.frontend import cli
+    from x_forge.frontend import cli
 
     def op(rows, us):
         return SimpleNamespace(calls=1, device_us=us, kernel_symbols={"k": us}, framework_meta={},
@@ -1802,7 +1802,7 @@ def test_capture_parse_refuses_a_dtype_name_the_bounds_cannot_size(tmp_path):
 
 
 def test_precision_and_weights_parse_to_torch_dtypes():
-    from xe_forge.frontend.dtypes import canonical, compute_dtype, parse_quantization
+    from x_forge.frontend.dtypes import canonical, compute_dtype, parse_quantization
 
     assert canonical("bf16") == "bfloat16" and canonical("float8_e4m3fn") == "float8_e4m3fn"
     with pytest.raises(ValueError):
@@ -1823,7 +1823,7 @@ def test_a_template_variable_the_caller_did_not_pass_is_an_error():
     """A template variable the caller did not pass raises instead of rendering blank."""
     from jinja2 import UndefinedError
 
-    from xe_forge.claude.generator import render
+    from x_forge.claude.generator import render
 
     assert "captured.json" in render("frontend-resume.md.j2", answer="captured.json")
     with pytest.raises(UndefinedError):
@@ -1833,7 +1833,7 @@ def test_a_template_variable_the_caller_did_not_pass_is_an_error():
 def test_an_fp8_model_computes_in_bf16_and_its_gemms_in_fp8():
     """Block-scaled fp8 GEMMs (fp8 operands, fp32 scales) count as fp8, not as their scales;
     the model's compute dtype is still the bf16 the rest runs in."""
-    from xe_forge.frontend.dtypes import compute_dtype, observed
+    from x_forge.frontend.dtypes import compute_dtype, observed
 
     def op(us, *dtypes):
         return SimpleNamespace(device_us=us, args=[None if d is None else
@@ -1878,7 +1878,7 @@ def test_capture_parse_checks_the_declared_precision(tmp_path, declared, code):
     ("int8", None, True),  # before naming no GEMM's weight is known yet
 ])  # fmt: skip
 def test_declared_weights_are_checked_against_bytes_per_weight_element(weights, w_bytes, ok):
-    from xe_forge.skills.capture import _precision_problems
+    from x_forge.skills.capture import _precision_problems
 
     run = {"runtime": {"precision": "bf16", "quantization": weights},
            "precision": {"compute": "bfloat16", "dtypes": {"bfloat16": 1.0}, "w_bytes": w_bytes}}  # fmt: skip
@@ -1895,8 +1895,8 @@ def test_declared_weights_are_checked_against_bytes_per_weight_element(weights, 
     ("aten::linear", 1.0, False),
 ])  # fmt: skip
 def test_weights_widened_on_the_fly_are_the_namers_claim_the_tool_verifies(claim, w_bytes, ok):
-    from xe_forge.frontend.ir import CapturedOp, TensorArg
-    from xe_forge.skills.capture import _precision_problems
+    from x_forge.frontend.ir import CapturedOp, TensorArg
+    from x_forge.skills.capture import _precision_problems
 
     def op(name, dtype):
         return CapturedOp(id=name, framework_op=name, args=[TensorArg([16, 8], dtype)],
@@ -1911,7 +1911,7 @@ def test_weights_widened_on_the_fly_are_the_namers_claim_the_tool_verifies(claim
 
 @pytest.mark.parametrize("weights, ok", [("int8", False), ("Q4_K_M", False), (None, False)])
 def test_named_capture_with_declared_weights_no_gemm_read_is_a_problem(weights, ok):
-    from xe_forge.skills.capture import _precision_problems
+    from x_forge.skills.capture import _precision_problems
 
     run = {"runtime": {"precision": "bfloat16", "quantization": weights},
            "precision": {"compute": "bfloat16", "dtypes": {"bfloat16": 1.0}, "w_bytes": None}}  # fmt: skip
@@ -1919,7 +1919,7 @@ def test_named_capture_with_declared_weights_no_gemm_read_is_a_problem(weights, 
 
 
 def test_naming_checks_a_cost_on_shapes_beyond_the_ones_listed():
-    from xe_forge.frontend import cli, naming
+    from x_forge.frontend import cli, naming
 
     def op(rows, us):
         return SimpleNamespace(calls=1, device_us=us, kernel_symbols={"k": us}, framework_meta={},
@@ -1934,7 +1934,7 @@ def test_naming_checks_a_cost_on_shapes_beyond_the_ones_listed():
 
 
 def test_summary_states_the_declared_precision_and_what_ran(tmp_path):
-    from xe_forge.frontend import collect
+    from x_forge.frontend import collect
 
     run = {"runtime": {"precision": "bfloat16", "quantization": "fp8:float8_e4m3fn"},
            "precision": {"compute": "bfloat16", "w_bytes": 2.0}}  # fmt: skip
@@ -1949,8 +1949,8 @@ def test_summary_states_the_declared_precision_and_what_ran(tmp_path):
 def test_the_whole_model_is_put_against_its_roofline(tmp_path):
     """Each bounded workload's bound summed over all the device time; an unbounded one adds
     time and no bound, so the efficiency is never overstated."""
-    from xe_forge.frontend import analyze as an
-    from xe_forge.frontend import collect
+    from x_forge.frontend import analyze as an
+    from x_forge.frontend import collect
 
     def d(wid, us, eff):
         return an.Decision(wid, True, 0.0, 0.0, calls=2, mean_us=us, eff=eff)
@@ -1979,8 +1979,8 @@ def test_the_whole_model_is_put_against_its_roofline(tmp_path):
 )
 def test_collect_offers_only_a_win_for_merge(tmp_path, monkeypatch, speedup, outcome, mergeable):
     """A trial at parity changes nothing worth merging, even when its port passes."""
-    from xe_forge.core.trial_manager import TrialManager
-    from xe_forge.frontend import collect
+    from x_forge.core.trial_manager import TrialManager
+    from x_forge.frontend import collect
 
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -2001,8 +2001,8 @@ def test_collect_offers_only_a_win_for_merge(tmp_path, monkeypatch, speedup, out
 
 
 def test_a_port_failing_its_stack_check_leaves_nothing_submit_ready(tmp_path):
-    from xe_forge.core.trial_manager import TrialManager
-    from xe_forge.frontend import collect
+    from x_forge.core.trial_manager import TrialManager
+    from x_forge.frontend import collect
 
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -2028,7 +2028,7 @@ def test_a_port_failing_its_stack_check_leaves_nothing_submit_ready(tmp_path):
 def test_prove_tells_a_refused_parse_from_a_model_that_does_not_run(tmp_path, monkeypatch,
                                                                    code_b, says):  # fmt: skip
     """Arm B running with a capture the launcher cannot attribute is not a broken patch."""
-    from xe_forge.frontend import agent, prove
+    from x_forge.frontend import agent, prove
 
     res = tmp_path / "results" / "k__v"
     (res / "output").mkdir(parents=True)
@@ -2059,7 +2059,7 @@ def test_prove_tells_a_refused_parse_from_a_model_that_does_not_run(tmp_path, mo
 
 
 def test_a_patch_that_breaks_the_model_is_found_and_the_rest_still_proved(tmp_path, monkeypatch):
-    from xe_forge.frontend import agent, compare, prove
+    from x_forge.frontend import agent, compare, prove
 
     rows, table = [], ["# Results", "", "| kernel | repo | variant | decision | outcome | "
                        "speedup | trial | kind | stack | mergeable | patches |", "|---|"]  # fmt: skip
@@ -2155,7 +2155,7 @@ def _prove_with_scores(tmp_path, monkeypatch, scores, repeat=2, check=None):
     """prove on one winner over a patched framework; ``scores[arm]``: the record ``patch
     score`` writes for that arm, with its exit, or None for none written; ``check``: the
     patch's check.json."""
-    from xe_forge.frontend import agent, cli, compare, prove
+    from x_forge.frontend import agent, cli, compare, prove
 
     work = _one_winner(tmp_path)
     if check is not None:
@@ -2251,7 +2251,7 @@ def test_prove_reports_the_quantized_tokens_beside_the_checks(tmp_path, monkeypa
 
 
 def test_prove_says_when_a_patched_frameworks_tokens_were_not_scored_again(tmp_path, monkeypatch):
-    from xe_forge.frontend import agent, compare, prove
+    from x_forge.frontend import agent, compare, prove
 
     work = _one_winner(tmp_path)
     (work / "check-args.json").unlink()
@@ -2275,7 +2275,7 @@ def test_prove_says_when_a_patched_frameworks_tokens_were_not_scored_again(tmp_p
 
 def _fusion_capture():
     """A norm (op-0, named rms) and a mul (op-1, aten) that follows it, at 4 and 512 tokens."""
-    from xe_forge.frontend.ir import CapturedOp, CaptureRun, Naming, Workload
+    from x_forge.frontend.ir import CapturedOp, CaptureRun, Naming, Workload
 
     def w(wid, op, name, us):
         return Workload(workload_id=wid, family="norm", dims={"T": "var", "H": 64},
@@ -2314,7 +2314,7 @@ def _fusion(tmp_path, **over):
 
 
 def test_fuse_check_ranks_a_chain_by_its_time_after_the_kernels_wins(tmp_path):
-    from xe_forge.skills import fuse
+    from x_forge.skills import fuse
 
     problems, passed = fuse.check(_fusion(tmp_path), _fusion_capture(), {"rms": 4.0}, tmp_path)
     assert problems == []
@@ -2326,7 +2326,7 @@ def test_fuse_check_over_several_rows_wants_the_chain_in_every_row(tmp_path):
     """A chain named in one row of a merged capture would rank on that row's time alone."""
     import copy
 
-    from xe_forge.skills import fuse
+    from x_forge.skills import fuse
 
     cap = _fusion_capture()
     for o in cap.ops:
@@ -2345,7 +2345,7 @@ def test_fuse_check_over_several_rows_wants_the_chain_in_every_row(tmp_path):
 def _two_rows():
     import copy
 
-    from xe_forge.frontend.ir import CapturedOp
+    from x_forge.frontend.ir import CapturedOp
 
     cap = _fusion_capture()
     for o in cap.ops:
@@ -2364,14 +2364,14 @@ def _two_rows():
     (["op-0", "op-1", "op-2", "r02:op-0", "r02:op-1"], "different numbers of ops"),
 ])  # fmt: skip
 def test_fuse_check_wants_one_chain_of_two_or_more_ops_in_every_row(tmp_path, ops, says):
-    from xe_forge.skills import fuse
+    from x_forge.skills import fuse
 
     problems, passed = fuse.check(_fusion(tmp_path, ops=ops), _two_rows(), {}, tmp_path)
     assert passed == [] and any(says in p for p in problems), problems
 
 
 def test_fuse_check_gives_an_op_to_one_fusion_only(tmp_path):
-    from xe_forge.skills import fuse
+    from x_forge.skills import fuse
 
     answer = _fusion(tmp_path)
     answer["fusions"].append({**answer["fusions"][0], "name": "again"})
@@ -2381,8 +2381,8 @@ def test_fuse_check_gives_an_op_to_one_fusion_only(tmp_path):
 
 
 def test_fusion_ranking_counts_only_wins_the_stack_carries(tmp_path):
-    from xe_forge.frontend import prove
-    from xe_forge.skills import fuse
+    from x_forge.frontend import prove
+    from x_forge.skills import fuse
 
     (tmp_path / "summary.json").write_text(json.dumps([
         {"kernel": "rms", "outcome": "win", "speedup": 4.0, "patches": ["output/a.patch"],
@@ -2407,7 +2407,7 @@ def test_fusion_ranking_counts_only_wins_the_stack_carries(tmp_path):
     ({"ops": ["op-0", "op-0"]}, "listed twice"),
 ])  # fmt: skip
 def test_fuse_check_refuses_a_fusion_the_pipeline_cannot_build(tmp_path, over, says):
-    from xe_forge.skills import fuse
+    from x_forge.skills import fuse
 
     problems, passed = fuse.check(_fusion(tmp_path, **over), _fusion_capture(), {}, tmp_path)
     assert passed == [] and any(says in p for p in problems), problems
@@ -2418,8 +2418,8 @@ def test_fuse_check_refuses_a_fusion_the_pipeline_cannot_build(tmp_path, over, s
                                         ({"fusions": None, "why": "x"}, False),
                                         ({"why": "x"}, False)])  # fmt: skip
 def test_fuse_check_passes_no_fusion_proposed_with_a_reason(tmp_path, answer, ok):
-    from xe_forge.frontend import ir
-    from xe_forge.skills import fuse
+    from x_forge.frontend import ir
+    from x_forge.skills import fuse
 
     problems, passed = fuse.check(answer, _fusion_capture(), {}, tmp_path)
     assert passed == [] and (problems == []) is ok, problems
@@ -2454,7 +2454,7 @@ def _winning_patch(results: Path, name: str, repo: Path, base: str, old: str, ne
 
 
 def test_fusions_build_on_the_kernels_winning_patches_applied_in_order(tmp_path):
-    from xe_forge.frontend import fuse
+    from x_forge.frontend import fuse
 
     base = _git_repo(tmp_path / "origin")
     p1 = _winning_patch(tmp_path / "results", "k1", tmp_path / "origin", base, "a", "b")
@@ -2468,7 +2468,7 @@ def test_fusions_build_on_the_kernels_winning_patches_applied_in_order(tmp_path)
 
 
 def test_a_rebuilt_stack_keeps_the_commit_clones_of_it_borrow(tmp_path):
-    from xe_forge.frontend import fuse
+    from x_forge.frontend import fuse
 
     def git(*a):
         return subprocess.run(["git", *a], capture_output=True, text=True)
@@ -2497,7 +2497,7 @@ def test_a_rebuilt_stack_keeps_the_commit_clones_of_it_borrow(tmp_path):
 
 
 def test_fusions_stack_repositories_with_spaced_paths_and_shared_basenames(tmp_path):
-    from xe_forge.frontend import fuse
+    from x_forge.frontend import fuse
 
     one, two = tmp_path / "my repos" / "one" / "src", tmp_path / "my repos" / "two" / "src"
     one.parent.mkdir(parents=True)
@@ -2513,7 +2513,7 @@ def test_fusions_stack_repositories_with_spaced_paths_and_shared_basenames(tmp_p
 
 
 def test_prove_applies_fusions_after_the_kernels_and_names_their_stack(tmp_path, monkeypatch):
-    from xe_forge.frontend import agent, prove
+    from x_forge.frontend import agent, prove
 
     rows = {}
     for where in ("results", "fuse/results"):
@@ -2540,20 +2540,20 @@ def test_prove_applies_fusions_after_the_kernels_and_names_their_stack(tmp_path,
 
 
 def test_a_fusion_workspace_gets_its_chain_reference_and_integration_repos(tmp_path):
-    from xe_forge.frontend.cli import xe_forge_command
+    from x_forge.frontend.cli import x_forge_command
 
     entry = {"name": "f", "dsl": "sycl", "spec": "s.yaml", "reference": "/r/f_pytorch.py",
              "integration_repos": ["/i/vllm"]}  # fmt: skip
     opts = SimpleNamespace(engine="claude", device="xpu", max_turns=5, compiler_flags=None,
                            passthrough=[])  # fmt: skip
-    cmd = xe_forge_command(entry, "bench", tmp_path, tmp_path / "ws", opts)
+    cmd = x_forge_command(entry, "bench", tmp_path, tmp_path / "ws", opts)
     assert cmd[cmd.index("--reference") + 1] == "/r/f_pytorch.py"
     assert cmd[cmd.index("--integration-repo") + 1] == "/i/vllm"
     assert "--unitrace" in cmd  # every workspace profiles; a passed-through --no-unitrace wins
 
 
 def test_optimize_refuses_without_unitrace_unless_disabled(tmp_path, monkeypatch):
-    from xe_forge.frontend import cli
+    from x_forge.frontend import cli
 
     (tmp_path / "kernels.yaml").write_text(json.dumps({"kernels": []}))
     monkeypatch.setenv("UNITRACE_BIN", str(tmp_path / "missing-unitrace"))
@@ -2567,7 +2567,7 @@ def test_optimize_refuses_without_unitrace_unless_disabled(tmp_path, monkeypatch
 
 
 def test_optimize_keeps_a_workspace_that_finished(tmp_path, monkeypatch):
-    from xe_forge.frontend import cli
+    from x_forge.frontend import cli
 
     ws = tmp_path / "workspaces" / "k__bench"
     ws.mkdir(parents=True)
@@ -2582,7 +2582,7 @@ def test_optimize_keeps_a_workspace_that_finished(tmp_path, monkeypatch):
 
 
 def test_a_dtype_without_a_measured_peak_has_no_compute_bound_and_is_noted():
-    from xe_forge.frontend.calibrate import peak_of, unpeaked_note
+    from x_forge.frontend.calibrate import peak_of, unpeaked_note
 
     tflops, ctx = {"bfloat16": 150.0, "int8": 280.0}, {}
     assert peak_of(tflops, "bfloat16", ctx) == 150.0 and ctx == {}
@@ -2603,7 +2603,7 @@ def _stub_measure(seen):
 
 
 def test_calibration_measures_only_the_dtypes_it_lacks():
-    from xe_forge.frontend import calibrate
+    from x_forge.frontend import calibrate
 
     calib = {"bandwidth_gbs": 500.0, "matmul_tflops": {"float32": 10.0, "bfloat16": 100.0},
              "unmeasured": {}}  # fmt: skip
@@ -2627,14 +2627,14 @@ def test_calibration_measures_only_the_dtypes_it_lacks():
     {"matmul_tflops": {"float16": None}, "unmeasured": {}},    # no reason of its own
 ])  # fmt: skip
 def test_a_failure_without_a_reason_of_its_own_is_tried_again(rec):
-    from xe_forge.frontend import calibrate
+    from x_forge.frontend import calibrate
 
     calib = {"bandwidth_gbs": 500.0, "matmul_tflops": {"float32": 10.0}}
     assert calibrate.complete(calib, {"float16"}, lambda ds: rec) is calib
 
 
 def test_a_measured_peak_clears_its_old_failure():
-    from xe_forge.frontend import calibrate
+    from x_forge.frontend import calibrate
 
     calib = {"matmul_tflops": {"float32": 10.0}, "unmeasured": {"matmul_tflops.float16": "x"}}
     got = calibrate.complete(calib, {"float16"},
@@ -2643,7 +2643,7 @@ def test_a_measured_peak_clears_its_old_failure():
 
 
 def test_a_peak_measured_on_another_device_is_not_merged(capsys):
-    from xe_forge.frontend import calibrate
+    from x_forge.frontend import calibrate
 
     calib = {"device": {"type": "xpu", "name": "a", "torch": "1"},
              "matmul_tflops": {"float32": 10.0}}  # fmt: skip
@@ -2656,7 +2656,7 @@ def test_a_peak_measured_on_another_device_is_not_merged(capsys):
 
 
 def test_peak_dtypes_are_every_measurable_dtype_the_capture_ran():
-    from xe_forge.frontend.ir import CapturedOp, CaptureRun, TensorArg
+    from x_forge.frontend.ir import CapturedOp, CaptureRun, TensorArg
 
     args = [TensorArg([4], d) for d in ("float32", "int8", "bfloat16", "int64")]
     cap = CaptureRun(run={}, ops=[CapturedOp(id="o", framework_op="f", args=[*args, None])])
@@ -2664,7 +2664,7 @@ def test_peak_dtypes_are_every_measurable_dtype_the_capture_ran():
 
 
 def _gemm(dtype, us, route="library"):
-    from xe_forge.frontend.ir import Naming, Workload
+    from x_forge.frontend.ir import Naming, Workload
 
     return Workload(workload_id=f"g/{dtype}", family="gemm", dims={"M": 4, "N": 1000, "K": 1000},
                     dtypes=[dtype], layout=[], attrs={"w_bytes": 2}, var_axes={}, calls=1,
@@ -2673,7 +2673,7 @@ def _gemm(dtype, us, route="library"):
 
 
 def _calib_cap(tmp_path):
-    from xe_forge.frontend.ir import CapturedOp, CaptureRun, TensorArg
+    from x_forge.frontend.ir import CapturedOp, CaptureRun, TensorArg
 
     path = tmp_path / "calibration.json"
     path.write_text(json.dumps({"bandwidth_gbs": 500.0, "matmul_tflops": {"float32": 10.0}}))
@@ -2682,7 +2682,7 @@ def _calib_cap(tmp_path):
 
 
 def test_run_writes_back_the_peaks_the_capture_needs(tmp_path, monkeypatch):
-    import xe_forge.frontend.cli as fcli
+    import x_forge.frontend.cli as fcli
 
     path, cap = _calib_cap(tmp_path)
     asked = []
@@ -2704,7 +2704,7 @@ def test_run_writes_back_the_peaks_the_capture_needs(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("fail", ["timeout", "no output"])
 def test_a_calibration_that_did_not_finish_leaves_the_file_alone(tmp_path, monkeypatch, fail):
-    import xe_forge.frontend.cli as fcli
+    import x_forge.frontend.cli as fcli
 
     path, cap = _calib_cap(tmp_path)
     before = path.read_text()
@@ -2720,7 +2720,7 @@ def test_a_calibration_that_did_not_finish_leaves_the_file_alone(tmp_path, monke
 
 
 def test_a_calibration_that_cannot_be_written_back_is_kept_in_the_run(tmp_path, monkeypatch):
-    import xe_forge.frontend.cli as fcli
+    import x_forge.frontend.cli as fcli
 
     path, cap = _calib_cap(tmp_path)
     before = path.read_text()
@@ -2748,7 +2748,7 @@ def test_a_calibration_that_cannot_be_written_back_is_kept_in_the_run(tmp_path, 
 
 
 def test_a_cost_with_flops_and_no_dtype_is_noted_unpeaked():
-    from xe_forge.frontend.ir import Naming, Workload
+    from x_forge.frontend.ir import Naming, Workload
 
     w = Workload(workload_id="c", family="other", dims={}, dtypes=["int32"], layout=[],
                  attrs={"cost": {"bytes": "1000", "flops": "1000"}}, var_axes={}, calls=1,
@@ -2759,7 +2759,7 @@ def test_a_cost_with_flops_and_no_dtype_is_noted_unpeaked():
 
 
 def test_a_cost_is_not_refuted_by_another_dtypes_peak():
-    from xe_forge.frontend import naming
+    from x_forge.frontend import naming
 
     calib = {"bandwidth_gbs": 1000.0, "matmul_tflops": {"float32": 10.0}}
     names = {"ops": {"K": {"cost": {"bytes": "1000000", "flops": "1000000000"}}}}
@@ -2773,7 +2773,7 @@ def test_a_cost_is_not_refuted_by_another_dtypes_peak():
 
 
 def _cost_workload(cost):
-    from xe_forge.frontend.ir import Naming, Workload
+    from x_forge.frontend.ir import Naming, Workload
 
     return Workload(workload_id="c", family="other", dims={}, dtypes=["float32", "uint8"],
                     layout=[], attrs={"cost": cost}, var_axes={}, calls=1, device_us=100.0,
@@ -2796,8 +2796,8 @@ def test_a_declared_compute_dtype_without_a_peak_is_noted_unpeaked():
 
 
 def test_a_declared_compute_dtype_is_calibrated_and_refutes_with_its_peak():
-    from xe_forge.frontend import naming
-    from xe_forge.frontend.ir import CaptureRun
+    from x_forge.frontend import naming
+    from x_forge.frontend.ir import CaptureRun
 
     w = _cost_workload({"bytes": "1", "flops": "1", "compute": "int8"})
     assert "int8" in analyze.peak_dtypes(CaptureRun(run={}, ops=[], workloads=[w]))
@@ -2809,7 +2809,7 @@ def test_a_declared_compute_dtype_is_calibrated_and_refutes_with_its_peak():
 
 
 def test_an_unknown_compute_dtype_is_a_naming_problem(tmp_path):
-    from xe_forge.frontend import naming
+    from x_forge.frontend import naming
 
     names = {"ops": {"K": {"route": "aten", "cost": {"bytes": "1", "compute": "nope"}}}}
     problems = naming.validate(names, {"K": {"dims": {}}}, tmp_path)
@@ -2820,7 +2820,7 @@ def test_an_unknown_compute_dtype_is_a_naming_problem(tmp_path):
 
 @pytest.mark.parametrize("route", ["library", "kernel"])
 def test_an_unpeaked_gemm_is_not_stopped_at_roofline(route):
-    from xe_forge.frontend.ir import CaptureRun
+    from x_forge.frontend.ir import CaptureRun
 
     calib = {"bandwidth_gbs": 1000.0, "matmul_tflops": {"float32": 10.0}}
     # bytes / bandwidth is ~2 us of the 2.2 us measured: 0.9 of the bandwidth's bound
@@ -2837,7 +2837,7 @@ def test_an_unpeaked_gemm_is_not_stopped_at_roofline(route):
 
 
 def test_a_matmul_dtype_held_exactly_in_a_faster_one_takes_its_peak():
-    from xe_forge.frontend.calibrate import peaks
+    from x_forge.frontend.calibrate import peaks
 
     calib = {"bandwidth_gbs": 500, "matmul_tflops": {"bfloat16": 156.2, "float16": 145.5,
                                                      "int8": 285.6, "float8_e4m3fn": 68.1}}  # fmt: skip
@@ -2848,7 +2848,7 @@ def test_a_matmul_dtype_held_exactly_in_a_faster_one_takes_its_peak():
 
 
 def test_rows_replace_batch_and_lengths(tmp_path):
-    from xe_forge.frontend import cli
+    from x_forge.frontend import cli
 
     f = tmp_path / "rows.yaml"
     f.write_text("rows:\n - {batch: 1, input_len: 8, output_len: 8, weight: 1}\n")
@@ -2869,7 +2869,7 @@ def test_rows_replace_batch_and_lengths(tmp_path):
     ["--framework-source", "https://x/y@v1"],                # the setup agent's, not a given venv's
 ])  # fmt: skip
 def test_run_refuses_the_flags_of_the_other_workload(tmp_path, extra):
-    from xe_forge.frontend import cli
+    from x_forge.frontend import cli
 
     with pytest.raises(SystemExit):
         cli.main(["run", "-o", str(tmp_path), "--framework", "x", "--model", "m",
@@ -2879,8 +2879,8 @@ def test_run_refuses_the_flags_of_the_other_workload(tmp_path, extra):
 def test_a_vision_prompt_is_the_captures_identity_and_reaches_its_agents():
     from types import SimpleNamespace
 
-    from xe_forge.claude.generator import render
-    from xe_forge.frontend import cli
+    from x_forge.claude.generator import render
+    from x_forge.frontend import cli
 
     a = SimpleNamespace(workload="vision", batch=1, steps=4, height=64, width=64, frames=1,
                         input_image=[], prompt="a cat", negative_prompt=None)  # fmt: skip
@@ -2899,7 +2899,7 @@ def test_a_vision_prompt_is_the_captures_identity_and_reaches_its_agents():
 
 
 def _kv_op(dtype, kv_args=("cache",)):
-    from xe_forge.frontend.ir import CapturedOp, TensorArg
+    from x_forge.frontend.ir import CapturedOp, TensorArg
 
     return CapturedOp("op-0", "attn", [TensorArg([4, 64], "bfloat16"), TensorArg([9, 64], dtype)],
                       framework_meta={"arg_names": ["q", "cache"],
@@ -2921,14 +2921,14 @@ def _kv_op(dtype, kv_args=("cache",)):
     ("bfloat16", "uint8", ("cache",), True),               # a byte cannot hold two
 ])  # fmt: skip
 def test_declared_kv_cache_against_the_named_cache_arguments(declared, held, kv_args, bad):
-    from xe_forge.skills.capture import _kv_problems
+    from x_forge.skills.capture import _kv_problems
 
     got = _kv_problems({"runtime": {"kv_cache": declared}}, [_kv_op(held, kv_args)])
     assert bool(got) == bad, got
 
 
 def test_sub_byte_dtypes_are_dtypes_at_bits_over_eight():
-    from xe_forge.frontend.dtypes import canonical, parse_quantization, storage_bytes, tensor_bytes
+    from x_forge.frontend.dtypes import canonical, parse_quantization, storage_bytes, tensor_bytes
 
     for s in ("", "u"):
         for b in range(1, 8):
@@ -2949,7 +2949,7 @@ def test_sub_byte_dtypes_are_dtypes_at_bits_over_eight():
     ("int8", 1.25, True), ("int8", 1.3, False),
 ])  # fmt: skip
 def test_sub_byte_weights_allow_their_scales_and_not_a_wider_format(weights, w_bytes, ok):
-    from xe_forge.skills.capture import _precision_problems
+    from x_forge.skills.capture import _precision_problems
 
     run = {"runtime": {"precision": "bf16", "quantization": weights},
            "precision": {"compute": "bfloat16", "dtypes": {"bfloat16": 1.0}, "w_bytes": w_bytes}}  # fmt: skip
@@ -2959,7 +2959,7 @@ def test_sub_byte_weights_allow_their_scales_and_not_a_wider_format(weights, w_b
 def test_a_generic_store_writing_other_state_too_holds_the_cache_in_some_call():
     """aten::index_put_ writes the fp8 cache and a bf16 conv state: the call order (time)
     decides nothing; a launcher whose every call holds bf16 still fails."""
-    from xe_forge.skills.capture import _kv_problems
+    from x_forge.skills.capture import _kv_problems
 
     run = {"runtime": {"kv_cache": "float8_e4m3fn"}}
     assert _kv_problems(run, [_kv_op("bfloat16"), _kv_op("uint8")]) == []
@@ -2967,7 +2967,7 @@ def test_a_generic_store_writing_other_state_too_holds_the_cache_in_some_call():
 
 
 def test_kv_args_must_name_the_ops_arguments(tmp_path):
-    from xe_forge.frontend import naming
+    from x_forge.frontend import naming
 
     (tmp_path / "repo").mkdir()
     listing = {"op": {"args": [{"name": "q"}, {"name": "cache"}], "dims": {}}}
@@ -2984,7 +2984,7 @@ def test_kv_args_must_name_the_ops_arguments(tmp_path):
     ({}, "(not checked: no op names it)")])  # fmt: skip
 def test_summary_states_the_declared_kv_cache_and_whether_it_was_checked(tmp_path, kv_args,
                                                                           says):  # fmt: skip
-    from xe_forge.frontend import collect
+    from x_forge.frontend import collect
 
     run = {"runtime": {"precision": "bfloat16", "quantization": "auto", "kv_cache": "float8_e4m3fn"},
            "precision": {"compute": "bfloat16", "w_bytes": 2.0, "kv_args": kv_args}}  # fmt: skip
@@ -2993,8 +2993,8 @@ def test_summary_states_the_declared_kv_cache_and_whether_it_was_checked(tmp_pat
 
 
 def test_capture_prompt_carries_the_kv_cache_and_run_refuses_a_bad_one(tmp_path):
-    from xe_forge.claude.generator import render
-    from xe_forge.frontend import cli
+    from x_forge.claude.generator import render
+    from x_forge.frontend import cli
 
     text = render("frontend-capture.md.j2", model="m", framework="fw", python="py", batch=1,
                   workload="text", runtime_keys=cli.WORKLOADS["text"], framework_notes=[],
@@ -3021,7 +3021,7 @@ def _latent(d: Path, arr) -> Path:
 def test_quality_passes_byte_identical_arms(tmp_path):
     import numpy as np
 
-    from xe_forge.frontend import quality
+    from x_forge.frontend import quality
 
     x = np.arange(16, dtype=np.float32)
     rec = quality.quality(
@@ -3038,7 +3038,7 @@ def test_quality_passes_byte_identical_arms(tmp_path):
 def test_quality_judges_the_gate_against_a_float32_reference(tmp_path, scale, verdict):
     import numpy as np
 
-    from xe_forge.frontend import quality
+    from x_forge.frontend import quality
 
     rng = np.random.default_rng(0)
     ref = rng.standard_normal((4, 16)).astype(np.float32)
@@ -3055,7 +3055,7 @@ def test_quality_without_a_reference_uses_the_absolute_convention(tmp_path):
     """No reference: A against B, judged by the stage's documented limits, and said to be so."""
     import numpy as np
 
-    from xe_forge.frontend import quality
+    from x_forge.frontend import quality
 
     base = np.ones((8, 8), dtype=np.float32)
     a = _latent(tmp_path / "a", base)
@@ -3071,7 +3071,7 @@ def test_quality_lets_the_worst_gate_stage_decide(tmp_path):
     """A byte-identical prompt embedding must not cover a bad step-1 latent."""
     import numpy as np
 
-    from xe_forge.frontend import quality
+    from x_forge.frontend import quality
 
     a, b = tmp_path / "a", tmp_path / "b"
     for d in (a, b):
@@ -3090,7 +3090,7 @@ def test_a_guard_fails_the_verdict_only_on_a_catastrophe(tmp_path, nan, verdict)
     """The gate holds; a guard further from the reference warns, a NaN in it fails."""
     import numpy as np
 
-    from xe_forge.frontend import quality
+    from x_forge.frontend import quality
 
     rng = np.random.default_rng(0)
     ref = rng.standard_normal((4, 16)).astype(np.float32)
@@ -3109,8 +3109,8 @@ def test_a_guard_fails_the_verdict_only_on_a_catastrophe(tmp_path, nan, verdict)
 
 
 def test_patch_check_judges_vision_against_the_native_path(tmp_path):
-    """No tokens: the reference is generate.sh under XE_FORGE_NATIVE, and the op gain is timed."""
-    from xe_forge.skills import patch
+    """No tokens: the reference is generate.sh under X_FORGE_NATIVE, and the op gain is timed."""
+    from x_forge.skills import patch
 
     work = tmp_path / "patch-1"
     work.mkdir()
@@ -3119,7 +3119,7 @@ def test_patch_check_judges_vision_against_the_native_path(tmp_path):
         'python3 -I -c "\n'
         "import os, numpy as np\n"
         "out = os.environ['OUT']\n"
-        "native = os.environ.get('XE_FORGE_NATIVE') == '1'\n"
+        "native = os.environ.get('X_FORGE_NATIVE') == '1'\n"
         "bad = native and os.environ.get('BREAK') == '1'\n"
         "np.save(out + '/prompt_embeds.npy', np.ones((2, 4), dtype=np.float32))\n"
         "np.save(out + '/latent_step1.npy', np.full((4, 4), 3.0 if bad else 1.0, np.float32))\n"
@@ -3151,8 +3151,8 @@ def test_patch_check_judges_vision_against_the_native_path(tmp_path):
 def test_every_claude_session_lifts_the_background_ceiling(monkeypatch):
     # Headless claude's own background ceiling must not stop a benchmark before its watchdog
     # can print a verdict; frontend and kernel sessions share the lifted ceiling.
-    from xe_forge.engines.claude_engine import claude_env
-    from xe_forge.frontend.agent import TIMEOUT
+    from x_forge.engines.claude_engine import claude_env
+    from x_forge.frontend.agent import TIMEOUT
 
     config = SimpleNamespace(llm=SimpleNamespace(api_base=None, api_key=None, model=None))
     monkeypatch.delenv("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", raising=False)
@@ -3162,8 +3162,8 @@ def test_every_claude_session_lifts_the_background_ceiling(monkeypatch):
 
 
 def test_a_port_back_is_its_commits_with_a_pr_carrying_the_measured_numbers(tmp_path, monkeypatch):
-    from xe_forge.core.trial_manager import TrialManager
-    from xe_forge.skills import upstream
+    from x_forge.core.trial_manager import TrialManager
+    from x_forge.skills import upstream
 
     repo = tmp_path / "kernels"
     _git_repo(repo)
@@ -3216,7 +3216,7 @@ def test_vision_run_reaches_its_first_check(tmp_path):
     and no model, which is what makes it usable as the probe.
     """
     out = subprocess.run(
-        [sys.executable, "-m", "xe_forge.cli", "run", "--framework", "vllm-omni",
+        [sys.executable, "-m", "x_forge.cli", "run", "--framework", "vllm-omni",
          "--workload", "vision", "--model", "X", "--framework-python", "/bin/false",
          "-o", str(tmp_path / "run"), "--steps", "20", "--height", "1024", "--width", "1024",
          "--frames", "1", "--batch", "1", "--input-image", str(tmp_path / "absent.png")],
@@ -3229,7 +3229,7 @@ def test_vision_run_reaches_its_first_check(tmp_path):
 
 def test_no_prompt_is_the_same_whether_none_or_empty():
     """A capture is not a different workload because it recorded '' where the CLI held None."""
-    from xe_forge.frontend.cli import _same_workload
+    from x_forge.frontend.cli import _same_workload
 
     want = {"framework": "vllm-omni", "steps": 20, "prompt": "a fox", "negative_prompt": None}
     assert _same_workload(want, {**want, "negative_prompt": ""})
@@ -3241,8 +3241,8 @@ def test_no_prompt_is_the_same_whether_none_or_empty():
 
 
 def test_an_action_run_is_a_policy_on_what_it_sees_and_its_agents_save_the_actions(tmp_path):
-    from xe_forge.claude.generator import render
-    from xe_forge.frontend import cli
+    from x_forge.claude.generator import render
+    from x_forge.frontend import cli
 
     a = SimpleNamespace(workload="action", batch=1, steps=None, calls=8, prompt="open it",
                         input_image=[str(tmp_path / "b.png"), str(tmp_path / "a.png")],
@@ -3265,13 +3265,13 @@ def test_an_action_run_is_a_policy_on_what_it_sees_and_its_agents_save_the_actio
     assert "denoising its actions over" not in capture  # no step count given: the policy's own
     patch = render("frontend-patch.md.j2", **{**ctx, "steps": 4})
     assert "call the policy m" in patch and "4 denoising steps" in patch
-    assert "`actions.npy`" in patch and "XE_FORGE_NATIVE=1" in patch and "--input-len" not in patch
+    assert "`actions.npy`" in patch and "X_FORGE_NATIVE=1" in patch and "--input-len" not in patch
 
 
 def test_a_policys_actions_are_compared_when_nothing_else_was_saved(tmp_path):
     import numpy as np
 
-    from xe_forge.frontend import quality
+    from x_forge.frontend import quality
 
     for arm, v in (("A", 1.0), ("B", 1.0 + 1e-5)):
         (tmp_path / arm).mkdir()
@@ -3283,7 +3283,7 @@ def test_a_policys_actions_are_compared_when_nothing_else_was_saved(tmp_path):
 
 
 def test_a_framework_source_is_a_repository_and_maybe_a_ref():
-    from xe_forge.frontend import cli
+    from x_forge.frontend import cli
 
     assert cli._source("https://github.com/o/r@v1.1.0") == ("https://github.com/o/r", "v1.1.0")
     assert cli._source("https://github.com/o/r") == ("https://github.com/o/r", None)
@@ -3320,7 +3320,7 @@ def _fake_build(tmp_path, calls, sees=True, python=None, commit="c1"):
 
 
 def test_a_framework_the_setup_agent_built_is_reused_with_its_env_and_notes(tmp_path, monkeypatch):
-    from xe_forge.frontend import cli
+    from x_forge.frontend import cli
 
     calls: list = []
     monkeypatch.setattr(cli, "_agent", _fake_build(tmp_path, calls))
@@ -3331,7 +3331,7 @@ def test_a_framework_the_setup_agent_built_is_reused_with_its_env_and_notes(tmp_
     _, template, context = calls[0]
     assert template == "frontend-setup.md.j2" and context["ref"] == "v2"
     assert os.environ["XF_TEST_SETUP_ATTN"] == "sdpa" and a.framework_note == ["given", "two views"]
-    record = json.loads((tmp_path / "venv" / "xe-forge-setup.json").read_text())
+    record = json.loads((tmp_path / "venv" / "x-forge-setup.json").read_text())
     assert record["asked"] == {"framework": "fw", "source": "https://x/fw@v2"}
     monkeypatch.delenv("XF_TEST_SETUP_ATTN")
     b = _setup_args(tmp_path)
@@ -3345,14 +3345,14 @@ def test_a_framework_the_setup_agent_built_is_reused_with_its_env_and_notes(tmp_
 
 
 def test_a_capture_made_on_another_build_of_the_framework_is_refused(tmp_path, monkeypatch):
-    from xe_forge.frontend import cli
+    from x_forge.frontend import cli
 
     calls: list = []
     monkeypatch.setattr(cli, "_agent", _fake_build(tmp_path, calls, commit="c1"))
     run = tmp_path / "run"
     assert cli.setup(_setup_args(tmp_path), run, 5)
     (run / "capture.json").write_text("{}")
-    (tmp_path / "venv" / "xe-forge-setup.json").unlink()  # the venv rebuilt, at another commit
+    (tmp_path / "venv" / "x-forge-setup.json").unlink()  # the venv rebuilt, at another commit
     monkeypatch.setattr(cli, "_agent", _fake_build(tmp_path, calls, commit="c2"))
     assert cli.setup(_setup_args(tmp_path), run, 5) is None
     monkeypatch.delenv("XF_TEST_SETUP_ATTN", raising=False)
@@ -3361,18 +3361,18 @@ def test_a_capture_made_on_another_build_of_the_framework_is_refused(tmp_path, m
 @pytest.mark.parametrize("bad", ["outside", "blind"])
 def test_a_framework_build_is_kept_only_in_its_venv_and_seeing_the_device(tmp_path, monkeypatch,
                                                                           bad):  # fmt: skip
-    from xe_forge.frontend import cli
+    from x_forge.frontend import cli
 
     calls: list = []
     build = (_fake_build(tmp_path, calls, python=tmp_path / "elsewhere" / "python")
              if bad == "outside" else _fake_build(tmp_path, calls, sees=False))  # fmt: skip
     monkeypatch.setattr(cli, "_agent", build)
     assert cli.setup(_setup_args(tmp_path), tmp_path / "run", 5) is None
-    assert not (tmp_path / "venv" / "xe-forge-setup.json").exists()
+    assert not (tmp_path / "venv" / "x-forge-setup.json").exists()
 
 
 def test_the_setup_agent_builds_the_venv_and_only_it():
-    from xe_forge.claude.generator import render
+    from x_forge.claude.generator import render
 
     ctx = {
         "framework": "fw",
@@ -3398,7 +3398,7 @@ def test_the_setup_agent_builds_the_venv_and_only_it():
 @pytest.mark.parametrize("workload", ["vision", "action"])
 def test_a_valid_non_text_run_gets_past_its_flags_to_the_framework(tmp_path, monkeypatch,
                                                                    workload):  # fmt: skip
-    from xe_forge.frontend import cli
+    from x_forge.frontend import cli
 
     image, state = tmp_path / "v.png", tmp_path / "s.npy"
     image.write_bytes(b"png"), state.write_bytes(b"npy")
@@ -3430,7 +3430,7 @@ def test_patch_check_of_a_run_without_tokens_needs_no_input_len(tmp_path):
 
 
 def test_a_build_only_adds_to_the_environment_it_runs_in(tmp_path, monkeypatch):
-    from xe_forge.frontend import cli
+    from x_forge.frontend import cli
 
     venv = tmp_path / "venv"
     monkeypatch.setenv("XF_TEST_LIBS", "/node/lib")
@@ -3445,7 +3445,7 @@ def test_a_build_only_adds_to_the_environment_it_runs_in(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_agent", _fake_build(tmp_path, calls))
     monkeypatch.delenv("XF_TEST_SETUP_ATTN", raising=False)
     assert cli.setup(_setup_args(tmp_path), tmp_path / "run", 5) and len(calls) == 1
-    record = venv / "xe-forge-setup.json"
+    record = venv / "x-forge-setup.json"
     old = json.loads(record.read_text())
     record.write_text(json.dumps({**old, "env": {"XF_TEST_LIBS": "/snapshot"}}))
     assert cli.setup(_setup_args(tmp_path), tmp_path / "run", 5) and len(calls) == 2
@@ -3454,8 +3454,8 @@ def test_a_build_only_adds_to_the_environment_it_runs_in(tmp_path, monkeypatch):
     monkeypatch.delenv("XF_TEST_SETUP_ATTN", raising=False)
 
 
-def test_the_frameworks_environment_stays_out_of_xe_forges_own_sessions(tmp_path, monkeypatch):
-    from xe_forge.frontend import cli
+def test_the_frameworks_environment_stays_out_of_x_forges_own_sessions(tmp_path, monkeypatch):
+    from x_forge.frontend import cli
 
     monkeypatch.setattr(cli, "_NODE_ENV", {})
     monkeypatch.setenv("XF_TEST_LIBS", "/node/lib")
@@ -3480,14 +3480,14 @@ def test_no_framework_or_model_is_named_in_the_frontend_templates_or_help(capsys
     # every other framework toward one framework's options.
     import re
 
-    from xe_forge.frontend import cli
+    from x_forge.frontend import cli
 
     names = re.compile(
         r"\b(vllm|openvino|sglang|llama|ltx|flux|natten|rldx|qwen|wan2?|"
         r"onednn|onemkl|cutlass|ocloc|grf)\b",
         re.I,
     )
-    templates = Path(cli.SRC_DIR) / "xe_forge" / "claude" / "templates"
+    templates = Path(cli.SRC_DIR) / "x_forge" / "claude" / "templates"
     files = [*sorted(templates.glob("frontend-*.j2")), templates / "kernel-locator.md.j2"]
     found = [f"{f.name}:{i}: {line.strip()}" for f in files
              for i, line in enumerate(f.read_text().splitlines(), 1) if names.search(line)]  # fmt: skip
@@ -3499,7 +3499,7 @@ def test_no_framework_or_model_is_named_in_the_frontend_templates_or_help(capsys
 
 
 def test_a_resume_checks_a_finished_patch_again_rather_than_redoing_it(tmp_path, monkeypatch):
-    from xe_forge.frontend import cli
+    from x_forge.frontend import cli
 
     seen, verdicts = [], iter([1, 0])  # the first check fails, the resumed one passes
 
@@ -3548,8 +3548,8 @@ def test_a_resume_checks_a_finished_patch_again_rather_than_redoing_it(tmp_path,
 
 
 def render_patch_redo():
-    from xe_forge.claude.generator import render
-    from xe_forge.frontend import cli
+    from x_forge.claude.generator import render
+    from x_forge.frontend import cli
 
     want = {"batch": 1, "steps": None, "calls": 8, "input_images": ["/a"], "state": None,
             "prompt": "go"}  # fmt: skip
@@ -3563,7 +3563,7 @@ def render_patch_redo():
 def test_a_launcher_that_misrecords_the_run_it_was_asked_for_goes_back_to_its_agent(
     tmp_path, monkeypatch
 ):
-    from xe_forge.frontend import cli, ir
+    from x_forge.frontend import cli, ir
 
     image, state, run = tmp_path / "v.png", tmp_path / "s.npy", tmp_path / "run"
     image.write_bytes(b"png"), state.write_bytes(b"npy")
@@ -3617,8 +3617,8 @@ def test_a_launcher_that_misrecords_the_run_it_was_asked_for_goes_back_to_its_ag
 
 @pytest.mark.parametrize("b_calls", [[100, 50, 50], [100, 100, None]])
 def test_compare_reads_calls_that_differ_across_an_arms_captures_as_calls_differ(tmp_path, b_calls):
-    from xe_forge.frontend import compare, ir
-    from xe_forge.frontend.ir import CaptureRun, Naming, Workload
+    from x_forge.frontend import compare, ir
+    from x_forge.frontend.ir import CaptureRun, Naming, Workload
 
     def cap(name, calls):
         ws = [] if calls is None else [
@@ -3637,8 +3637,8 @@ def test_compare_reads_calls_that_differ_across_an_arms_captures_as_calls_differ
 
 
 def _compare_cap(path: Path, config: dict, runtime: dict, total: float) -> Path:
-    from xe_forge.frontend import ir
-    from xe_forge.frontend.ir import CaptureRun
+    from x_forge.frontend import ir
+    from x_forge.frontend.ir import CaptureRun
 
     run = {"framework": "f", "model": {"name": "m", "config": config}, "runtime": runtime,
            "total_device_us": total}  # fmt: skip
@@ -3659,7 +3659,7 @@ def _compare_cap(path: Path, config: dict, runtime: dict, total: float) -> Path:
       ({}, {"inputs": {"p": {"file": "/y/q.txt"}}}), False)],
 )  # fmt: skip
 def test_compare_keys_arms_by_config_and_input_content(tmp_path, a, b, same):
-    from xe_forge.frontend import compare
+    from x_forge.frontend import compare
 
     pa = [_compare_cap(tmp_path / "a.json", *a, 200.0)]
     pb = [_compare_cap(tmp_path / "b.json", *b, 100.0)]
@@ -3678,8 +3678,8 @@ def test_compare_keys_arms_by_config_and_input_content(tmp_path, a, b, same):
 def test_prove_claims_a_total_only_beyond_the_noise_on_the_same_work(
     tmp_path, monkeypatch, us_b, calls_b, says
 ):
-    from xe_forge.frontend import ir, prove
-    from xe_forge.frontend.ir import CaptureRun, Naming, Workload
+    from x_forge.frontend import ir, prove
+    from x_forge.frontend.ir import CaptureRun, Naming, Workload
 
     monkeypatch.delenv("BENCHMARK_MIN_EFFECT", raising=False)
     monkeypatch.setattr(prove, "_build_arms", lambda *a, **k: {"A": "a", "B": "b"})
@@ -3709,7 +3709,7 @@ def test_prove_claims_a_total_only_beyond_the_noise_on_the_same_work(
     ("rel", 1e-4, 1.2e-4, "fail"),
 ])  # fmt: skip
 def test_the_quality_margin_means_one_thing_for_rel_and_psnr(metric, a, b, verdict):
-    from xe_forge.frontend import quality
+    from x_forge.frontend import quality
 
     def run(value):
         return {"sha256": str(value), "ref": {metric: value}}
@@ -3721,7 +3721,7 @@ def test_the_quality_margin_means_one_thing_for_rel_and_psnr(metric, a, b, verdi
 
 
 def test_a_calibration_of_another_device_than_the_capture_is_noted():
-    from xe_forge.frontend.calibrate import other_device
+    from x_forge.frontend.calibrate import other_device
 
     calib = {"device": {"type": "xpu", "name": "card-a"}}
     assert "card-a" in other_device(calib, {"device": {"type": "xpu", "name": "card-b"}})
@@ -3735,7 +3735,7 @@ def test_a_calibration_of_another_device_than_the_capture_is_noted():
 
 
 def test_a_compute_dtype_without_a_matmul_to_measure_is_a_naming_problem(tmp_path):
-    from xe_forge.frontend import naming
+    from x_forge.frontend import naming
 
     names = {"ops": {"K": {"route": "aten", "cost": {"bytes": "1", "compute": "uint8"}}}}
     problems = naming.validate(names, {"K": {"dims": {}}}, tmp_path)
@@ -3743,7 +3743,7 @@ def test_a_compute_dtype_without_a_matmul_to_measure_is_a_naming_problem(tmp_pat
 
 
 def test_the_declared_compute_dtypes_are_those_of_costs_with_flops():
-    from xe_forge.frontend import naming
+    from x_forge.frontend import naming
 
     names = {"ops": {
         "A": {"cost": {"bytes": "1", "flops": "1", "compute": "int8"}},
@@ -3754,7 +3754,7 @@ def test_the_declared_compute_dtypes_are_those_of_costs_with_flops():
 
 
 def test_calibration_measures_the_declared_compute_dtypes_too(tmp_path, monkeypatch):
-    import xe_forge.frontend.cli as fcli
+    import x_forge.frontend.cli as fcli
 
     path, cap = _calib_cap(tmp_path)
     asked = []
@@ -3771,8 +3771,8 @@ def test_calibration_measures_the_declared_compute_dtypes_too(tmp_path, monkeypa
 
 
 def test_naming_checks_a_declared_compute_cost_at_the_peak_it_measures(tmp_path, monkeypatch):
-    from xe_forge.frontend import cli
-    from xe_forge.frontend.ir import CapturedOp, CaptureRun, TensorArg
+    from x_forge.frontend import cli
+    from x_forge.frontend.ir import CapturedOp, CaptureRun, TensorArg
 
     calib = tmp_path / "calibration.json"
     calib.write_text(json.dumps({"bandwidth_gbs": 1000.0, "matmul_tflops": {"float32": 10.0}}))
@@ -3797,7 +3797,7 @@ def test_naming_checks_a_declared_compute_cost_at_the_peak_it_measures(tmp_path,
 
 
 def _prove_rows(tmp_path, monkeypatch, crash=False):
-    from xe_forge.frontend import agent, cli, compare, ir, prove, rows
+    from x_forge.frontend import agent, cli, compare, ir, prove, rows
 
     _one_winner(tmp_path)
     b = str(_exe(tmp_path / "b-python", "#!/bin/bash\n"))

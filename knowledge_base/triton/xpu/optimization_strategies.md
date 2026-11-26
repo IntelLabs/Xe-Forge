@@ -74,5 +74,5 @@ When transforming PyTorch -> Triton:
 - [ ] Model class compatible with ai-bench (standard nn.Module with nn.Linear)
 - [ ] Matched `get_inputs()`, `get_init_inputs()`, module-level constants from *_pytorch.py
 - [ ] Triton file name matches base kernel name (for spec YAML auto-detection)
-- [ ] Validated with `xe-forge-skill validate <triton_file> --dsl triton`
-- [ ] Benchmarked with `xe-forge-skill benchmark <pytorch_file> <triton_file> --spec <spec.yaml>`
+- [ ] Validated with `x-forge-skill validate <triton_file> --dsl triton`
+- [ ] Benchmarked with `x-forge-skill benchmark <pytorch_file> <triton_file> --spec <spec.yaml>`

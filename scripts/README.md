@@ -2,7 +2,7 @@
 
 Standalone tools for turning kernel measurements (or just problem shapes) into
 [roofline plots](https://en.wikipedia.org/wiki/Roofline_model). None of them
-import the `xe_forge` package, so you can copy a results CSV off an XPU box and
+import the `x_forge` package, so you can copy a results CSV off an XPU box and
 plot it anywhere.
 
 Each script is a [PEP 723](https://peps.python.org/pep-0723/) single-file script
@@ -70,14 +70,14 @@ Example (`sample_roofline.csv`) — paired baseline/optimized points linked by `
 ### The roof
 
 The roof is the device's peak half-precision throughput and DRAM bandwidth as
-`xe-forge calibrate` measured them (`--calibration calibration.json`), or given
+`x-forge calibrate` measured them (`--calibration calibration.json`), or given
 with `--peak-tflops` / `--peak-bandwidth` (which also override the calibration).
 
 ### Options
 
 | Flag | Effect |
 |------|--------|
-| `--calibration <file>` | the roof `xe-forge calibrate` measured on the device |
+| `--calibration <file>` | the roof `x-forge calibrate` measured on the device |
 | `--peak-tflops` / `--peak-bandwidth` | give the roof explicitly (or override part of the calibration) |
 | `--connect` | draw a baseline → optimized arrow between points sharing a `pair` id |
 | `--annotate` | label each point inline (best for a handful of points) |

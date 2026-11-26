@@ -12,7 +12,7 @@ SGLang is a serving framework for language models ([sgl-project/sglang](https://
 ## 3. Command
 
 ```
-xe-forge run --framework sglang --model <hub id> \
+x-forge run --framework sglang --model <hub id> \
     --framework-source https://github.com/sgl-project/sglang@<tag> \
     --batch 4 --input-len 512 --output-len 32 --prompt-file <text file> \
     --calibration <calibration.json> --kernel-repos <repos> --top 3 --prove \
@@ -52,4 +52,4 @@ A patch for a missing architecture is made in a clone of `sglang` under `--kerne
 
 Run end to end.
 
-Last checked: 2026-11-17, Xe-Forge 05c492a
+Last checked: 2026-11-17, X-Forge 05c492a

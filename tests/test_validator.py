@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from xe_forge.core.validator import KernelValidator
+from x_forge.core.validator import KernelValidator
 
 VALID_1D_SWIZZLED_GRID = """\
 import triton

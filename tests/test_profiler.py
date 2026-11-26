@@ -8,14 +8,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from xe_forge.core.profiler import ProfileMetrics, ProfileResult, UnitraceXPUProfiler, XPUProfiler
-from xe_forge.core.profiler import _run_tree as real_run_tree  # before the fixture swaps it
+from x_forge.core.profiler import ProfileMetrics, ProfileResult, UnitraceXPUProfiler, XPUProfiler
+from x_forge.core.profiler import _run_tree as real_run_tree  # before the fixture swaps it
 
 
 @pytest.fixture(autouse=True)
 def _a_gpu_run(monkeypatch):
     """These are GPU profiles; the host's are in test_cpu.py."""
-    monkeypatch.setenv("XE_FORGE_DEVICE", "xpu")
+    monkeypatch.setenv("X_FORGE_DEVICE", "xpu")
 
 
 @pytest.fixture(autouse=True)
@@ -23,7 +23,7 @@ def _collection_via_run(monkeypatch):
     """Route the collector's process-group runner through subprocess.run, which tests fake."""
     import subprocess
 
-    from xe_forge.core import profiler
+    from x_forge.core import profiler
 
     def run_tree(command, *, stdout, stderr, env, timeout):
         try:
@@ -132,7 +132,7 @@ BLOCK_HEAD = (
 @pytest.mark.parametrize("missing", ["empty", "text", "short"])
 @pytest.mark.parametrize("layout", ["flat", "block"])
 def test_a_sample_with_every_value_missing_is_a_sample_not_a_header(layout, missing):
-    from xe_forge.core.compute_metrics import summarize_compute_metrics
+    from x_forge.core.compute_metrics import summarize_compute_metrics
 
     if layout == "flat":
         bad = {"empty": "gemm_kernel, , , , ,", "text": "gemm_kernel, , unknown, -, -, -",
@@ -159,7 +159,7 @@ def test_a_sample_with_every_value_missing_is_a_sample_not_a_header(layout, miss
 
 
 def test_metric_rows_reads_headers_by_position():
-    from xe_forge.core.compute_metrics import metric_rows, summarize_compute_metrics
+    from x_forge.core.compute_metrics import metric_rows, summarize_compute_metrics
 
     # A repeated header is not a sample; a row longer than the header has no placeable value.
     flat = FLAT_HEAD + "a, 1, 10, 1, 1, 1\n" + FLAT_HEAD + "a, 2, 10, 1, 1, 1, 9\n"
@@ -174,7 +174,7 @@ def test_metric_rows_reads_headers_by_position():
 
 
 def test_a_kernel_named_kernel_under_a_flat_header_is_a_sample():
-    from xe_forge.core.compute_metrics import summarize_compute_metrics
+    from x_forge.core.compute_metrics import summarize_compute_metrics
 
     report = FLAT_HEAD + "Kernel, 1, 100, 200, 10, 20\nb, 2, 50, 100, 5, 10\nc, 3, 50, 100, 5, 10\n"
     records = summarize_compute_metrics(report.splitlines())["records"]
@@ -194,7 +194,7 @@ def test_a_stall_sample_missing_an_event_count_is_left_out_and_counted():
 
 
 def test_a_launch_block_whose_header_names_the_kernel_keeps_its_identity_rows():
-    from xe_forge.core.compute_metrics import summarize_compute_metrics
+    from x_forge.core.compute_metrics import summarize_compute_metrics
 
     report = ("Kernel, GlobalInstanceId\nb, 1\nKernel, GpuTime[ns]\nb, 30\n"
               "Kernel, GlobalInstanceId\nc, 2\nKernel, GpuTime[ns]\nc, 40\n")  # fmt: skip
@@ -204,7 +204,7 @@ def test_a_launch_block_whose_header_names_the_kernel_keeps_its_identity_rows():
 
 
 def test_both_unitrace_layouts_give_the_same_metrics():
-    from xe_forge.core.compute_metrics import summarize_compute_metrics
+    from x_forge.core.compute_metrics import summarize_compute_metrics
 
     flat, block = (summarize_compute_metrics(r.splitlines())["records"]
                    for r in (COMPUTE_REPORT, BLOCK_COMPUTE_REPORT))  # fmt: skip
@@ -304,7 +304,7 @@ def test_run_tree_kills_a_session_still_running_at_the_deadline(tmp_path):
 
 @pytest.mark.parametrize("separator", ["\n", "\n\n"])
 def test_compute_metrics_keeps_amount_rate_and_unknown_separate(separator):
-    from xe_forge.core.compute_metrics import summarize_compute_metrics
+    from x_forge.core.compute_metrics import summarize_compute_metrics
 
     report = COMPUTE_REPORT.replace("\n", separator)
     summary = summarize_compute_metrics(report.splitlines())
@@ -322,7 +322,7 @@ def test_compute_metrics_keeps_amount_rate_and_unknown_separate(separator):
 
 
 def test_compute_metrics_does_not_merge_kernels_or_devices():
-    from xe_forge.core.compute_metrics import summarize_compute_metrics
+    from x_forge.core.compute_metrics import summarize_compute_metrics
 
     report = COMPUTE_REPORT + COMPUTE_REPORT.replace("#0", "#1")
     report += COMPUTE_REPORT.replace('"gemm_kernel"', '"wrapper<gemm_kernel>"')
@@ -335,7 +335,7 @@ def test_compute_metrics_does_not_merge_kernels_or_devices():
     "duration_column", ["GpuTime[ns]", "GPU_TIME[ns]", "Time[ns]", "GpuDuration[ns]"]
 )
 def test_compute_metrics_missing_launch_id_keeps_per_launch_amount_unknown(duration_column):
-    from xe_forge.core.compute_metrics import summarize_compute_metrics
+    from x_forge.core.compute_metrics import summarize_compute_metrics
 
     report = COMPUTE_REPORT.replace("GpuTime[ns]", duration_column).replace("1, 300", ", 300")
     record = summarize_compute_metrics(report.splitlines())["records"][0]
@@ -412,7 +412,7 @@ def test_build_provenance_observes_without_changing_loader(tmp_path, monkeypatch
 
     from torch.utils import cpp_extension
 
-    from xe_forge.core import resource_feedback
+    from x_forge.core import resource_feedback
 
     build_dir = tmp_path / "extension"
     build_dir.mkdir()
@@ -468,7 +468,7 @@ def test_build_provenance_observes_without_changing_loader(tmp_path, monkeypatch
 def test_resource_comparison_requires_matching_evidence(mismatch):
     import copy
 
-    from xe_forge.core.resource_feedback import compare_resources
+    from x_forge.core.resource_feedback import compare_resources
 
     parent = {
         "collection_context": {"variant": "small", "spec_sha256": "spec", "iters": 20},
@@ -538,8 +538,8 @@ def test_parent_profile_comparison_is_persisted(tmp_path, monkeypatch):
 def test_profile_cli_forwards_parent_profile(monkeypatch, interval, metric_group):
     import sys
 
-    from xe_forge.core import profiler as profiler_module
-    from xe_forge.skills import main
+    from x_forge.core import profiler as profiler_module
+    from x_forge.skills import main
 
     received = []
     profile_arguments = []
@@ -558,7 +558,7 @@ def test_profile_cli_forwards_parent_profile(monkeypatch, interval, metric_group
         sys,
         "argv",
         [
-            "xe-forge-skill",
+            "x-forge-skill",
             "profile",
             "kernel.cpp",
             "--tool",
@@ -583,10 +583,10 @@ def test_profile_cli_forwards_parent_profile(monkeypatch, interval, metric_group
             "parent_profile": "parent-artifacts",
             "capture_assembly": False,
             # Omitting the flag no longer means "unset": the default is 25 us, or
-            # XE_FORGE_SAMPLING_INTERVAL_US.
+            # X_FORGE_SAMPLING_INTERVAL_US.
             "sampling_interval_us": interval
             if interval is not None
-            else int(os.environ.get("XE_FORGE_SAMPLING_INTERVAL_US", 25)),
+            else int(os.environ.get("X_FORGE_SAMPLING_INTERVAL_US", 25)),
             "metric_group": metric_group,
             "device": "xpu:1",  # one GPU of several is profiled on that GPU
         }
@@ -636,7 +636,7 @@ def test_unitrace_discovers_compute_basic_before_workload(
 
 @pytest.mark.parametrize("available", [True, False])
 def test_profile_cli_exits_nonzero_on_failure(monkeypatch, available):
-    from xe_forge.skills.profile import run
+    from x_forge.skills.profile import run
 
     monkeypatch.setattr(UnitraceXPUProfiler, "available", lambda self: available)
     monkeypatch.setattr(
@@ -661,8 +661,8 @@ def test_profile_cli_exits_nonzero_on_failure(monkeypatch, available):
 def test_resource_knowledge_base_reaches_generated_workspace(tmp_path):
     import yaml
 
-    from xe_forge.claude.generator import generate_workspace
-    from xe_forge.config import Config
+    from x_forge.claude.generator import generate_workspace
+    from x_forge.config import Config
 
     config = Config()
     config.device_config.dsl = "sycl"
@@ -702,8 +702,8 @@ def test_resource_knowledge_base_reaches_generated_workspace(tmp_path):
 
 @pytest.mark.parametrize("available", [True, False])
 def test_profile_all_records_trial_attempts_once(tmp_path, monkeypatch, available):
-    from xe_forge.core.trial_manager import TrialManager
-    from xe_forge.skills.profile import run
+    from x_forge.core.trial_manager import TrialManager
+    from x_forge.skills.profile import run
 
     manager = TrialManager(tmp_path / "trials")
     source = tmp_path / "kernel.cpp"
@@ -763,7 +763,7 @@ def test_profile_all_records_trial_attempts_once(tmp_path, monkeypatch, availabl
 
 @pytest.mark.parametrize("failed_group", [None, "ComputeBasic", "EuStallSampling"])
 def test_profile_all_collects_both_groups(monkeypatch, capsys, failed_group):
-    from xe_forge.skills.profile import run
+    from x_forge.skills.profile import run
 
     collected = []
     monkeypatch.setattr(UnitraceXPUProfiler, "available", lambda self: True)
@@ -1008,8 +1008,8 @@ def test_parse_stall_csv_handles_kernel_column_padding(tmp_path, monkeypatch):
 def test_unitrace_drains_completions_while_paused(monkeypatch):
     import os
 
-    from xe_forge.core import profile_runner
-    from xe_forge.core.reference_workload import PreparedCall
+    from x_forge.core import profile_runner
+    from x_forge.core.reference_workload import PreparedCall
 
     events = []
 
@@ -1037,7 +1037,7 @@ def test_unitrace_drains_completions_while_paused(monkeypatch):
 
 
 def test_shared_preparation_preserves_model_inputs_and_init_args():
-    from xe_forge.core.executor import KernelBenchExecutor
+    from x_forge.core.executor import KernelBenchExecutor
 
     class Model(torch.nn.Module):
         def __init__(self, width):
@@ -1078,7 +1078,7 @@ def test_shared_preparation_preserves_model_inputs_and_init_args():
 
 
 def test_execute_uses_shared_preparation(monkeypatch):
-    from xe_forge.core.executor import KernelBenchExecutor
+    from x_forge.core.executor import KernelBenchExecutor
 
     executor = KernelBenchExecutor(device="cpu")
     module = SimpleNamespace()
@@ -1117,8 +1117,8 @@ def test_profiler_runner_matches_benchmark_preparation(
 ):
     import subprocess
 
-    from xe_forge.core.executor import KernelBenchExecutor
-    from xe_forge.core.spec_loader import load_spec
+    from x_forge.core.executor import KernelBenchExecutor
+    from x_forge.core.spec_loader import load_spec
 
     source = """\
 import torch
@@ -1193,7 +1193,7 @@ large:
 
 
 def test_profiler_rejects_unknown_variant(tmp_path):
-    from xe_forge.core.profile_runner import prepare_call
+    from x_forge.core.profile_runner import prepare_call
 
     spec_path = tmp_path / "spec.yaml"
     spec_path.write_text("inputs: {}\n")
@@ -1202,7 +1202,7 @@ def test_profiler_rejects_unknown_variant(tmp_path):
 
 
 def test_profiler_builds_the_reference_workload_from_the_spec_variant(tmp_path):
-    from xe_forge.core.profile_runner import prepare_call
+    from x_forge.core.profile_runner import prepare_call
 
     source = """\
 import torch
@@ -1339,9 +1339,9 @@ def test_cli_defers_variant_default_to_spec(monkeypatch, skill, variant):
     import importlib
     import sys
 
-    from xe_forge.skills import main
+    from x_forge.skills import main
 
-    arguments = ["xe-forge-skill", skill]
+    arguments = ["x-forge-skill", skill]
     if skill == "benchmark":
         arguments.append("baseline.py")
     arguments.extend(["trial.py", "--spec", "spec.yaml"])
@@ -1349,7 +1349,7 @@ def test_cli_defers_variant_default_to_spec(monkeypatch, skill, variant):
         arguments.extend(["--variant", variant])
     received = []
     monkeypatch.setattr(sys, "argv", arguments)
-    monkeypatch.setattr(importlib.import_module(f"xe_forge.skills.{skill}"), "run", received.append)
+    monkeypatch.setattr(importlib.import_module(f"x_forge.skills.{skill}"), "run", received.append)
     main()
     assert len(received) == 1
     assert received[0].variant == variant

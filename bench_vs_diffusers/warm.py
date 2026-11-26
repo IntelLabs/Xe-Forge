@@ -132,7 +132,7 @@ def _run(model: dict, arm: str, work: Path) -> tuple[list[float], str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "OPENAI_"))}
     env.update(model["env"], WARM_GENS=str(GENS), WARM_JSON=str(jsonf),
                FRAMEWORK_PYTHON=python, OUT=str(work / "out"),
-               GEN_SCHEDULE_STEPS=str(STEPS), XE_FORGE_CHECK_STEPS=str(STEPS),
+               GEN_SCHEDULE_STEPS=str(STEPS), X_FORGE_CHECK_STEPS=str(STEPS),
                PYTHONPATH=os.pathsep.join(x for x in (str(src.parent), env.get("PYTHONPATH")) if x))  # fmt: skip
     (work / "out").mkdir(parents=True, exist_ok=True)
     p = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=TIMEOUT)

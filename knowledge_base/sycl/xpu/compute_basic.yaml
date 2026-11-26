@@ -3,7 +3,7 @@ patterns:
     name: Discover counters before collecting ComputeBasic
     applies_to: [sycl, xpu, unitrace, profiling]
     description: |
-      Xe-Forge defaults to ComputeBasic. Request --metric-group EuStallSampling
+      X-Forge defaults to ComputeBasic. Request --metric-group EuStallSampling
       for a separate stall-event collection when investigating a stall hypothesis.
       EU event shares are not elapsed-time utilization or occupancy. Sampled IPs
       require verified ISA mapping before instruction or source attribution.

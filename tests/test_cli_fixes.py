@@ -11,11 +11,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from xe_forge.claude.generator import render
+from x_forge.claude.generator import render
 
 
 def test_an_override_reaches_a_section_whose_name_holds_an_underscore():
-    from xe_forge.config import ConfigManager
+    from x_forge.config import ConfigManager
 
     c = ConfigManager().override(
         device_config_default_num_warps=8, device_config_preferred_tile_m=64,
@@ -26,7 +26,7 @@ def test_an_override_reaches_a_section_whose_name_holds_an_underscore():
 
 
 def test_the_specs_default_variant_wins_over_the_dsls_family(tmp_path):
-    from xe_forge.core.spec_loader import load_spec
+    from x_forge.core.spec_loader import load_spec
 
     spec = tmp_path / "s.yaml"
     spec.write_text(yaml.safe_dump({"default_variant": "dec", "dec": [{"dims": {"N": 1}}]}))
@@ -38,7 +38,7 @@ def test_the_specs_default_variant_wins_over_the_dsls_family(tmp_path):
 
 
 def test_dotenv_in_the_working_directory_is_loaded_and_the_shell_wins(tmp_path, monkeypatch):
-    from xe_forge import load_env
+    from x_forge import load_env
 
     (tmp_path / ".env").write_text("XF_TEST_ENV_A=from-file\nXF_TEST_ENV_B=from-file\n")
     monkeypatch.chdir(tmp_path)
@@ -54,7 +54,7 @@ def test_dotenv_in_the_working_directory_is_loaded_and_the_shell_wins(tmp_path, 
 @pytest.mark.parametrize("name, says", [("claude", "claude /optimize-kernel k"),
                                         ("codex", 'codex "Follow .claude/commands')])  # fmt: skip
 def test_each_agent_names_its_own_launch_command(name, says):
-    from xe_forge import agent_cli
+    from x_forge import agent_cli
 
     assert agent_cli.get(name).interactive("k").startswith(says)
 
@@ -63,9 +63,9 @@ def test_each_agent_names_its_own_launch_command(name, says):
                                                    (False, True, "XPUProfiler"),
                                                    (False, False, None)])  # fmt: skip
 def test_the_dspy_engine_profiles_with_what_was_asked(monkeypatch, unitrace, vtune, kind):
-    from xe_forge.config import ConfigManager
-    from xe_forge.core import profiler
-    from xe_forge.engines.dspy_engine import DSPyEngine
+    from x_forge.config import ConfigManager
+    from x_forge.core import profiler
+    from x_forge.engines.dspy_engine import DSPyEngine
 
     monkeypatch.setattr(profiler.UnitraceXPUProfiler, "available", lambda self: True)
     monkeypatch.setattr(profiler.XPUProfiler, "available", lambda self: True)
@@ -76,7 +76,7 @@ def test_the_dspy_engine_profiles_with_what_was_asked(monkeypatch, unitrace, vtu
 
 
 def test_a_one_shape_run_is_held_to_the_captured_kernel_too(tmp_path, capsys):
-    from xe_forge.skills import benchmark
+    from x_forge.skills import benchmark
 
     spec = tmp_path / "s.yaml"
     spec.write_text(yaml.safe_dump({"default_variant": "dec", "captured_us": {"dec": 10.0},
@@ -100,13 +100,13 @@ def test_a_one_shape_run_is_held_to_the_captured_kernel_too(tmp_path, capsys):
 def test_the_device_asked_for_wins_over_what_torch_sees(monkeypatch):
     import argparse
 
-    from xe_forge.frontend import cli, profile
+    from x_forge.frontend import cli, profile
 
-    monkeypatch.setenv("XE_FORGE_DEVICE", "cuda:1")
+    monkeypatch.setenv("X_FORGE_DEVICE", "cuda:1")
     assert profile.device_type() == "cuda"
     a = argparse.Namespace(device="cpu")
     cli._use_device(a)
-    assert a.device == "cpu" and os.environ["XE_FORGE_DEVICE"] == "cpu"
+    assert a.device == "cpu" and os.environ["X_FORGE_DEVICE"] == "cpu"
     a = argparse.Namespace(device=None)
     cli._use_device(a)
     assert a.device == "cpu"  # the exported choice carries on
@@ -115,9 +115,9 @@ def test_the_device_asked_for_wins_over_what_torch_sees(monkeypatch):
 def test_the_device_index_asked_for_reaches_naming_and_calibration(monkeypatch):
     import torch
 
-    from xe_forge.frontend import calibrate, cli, profile
+    from x_forge.frontend import calibrate, cli, profile
 
-    monkeypatch.setenv("XE_FORGE_DEVICE", "xpu:1")
+    monkeypatch.setenv("X_FORGE_DEVICE", "xpu:1")
     assert profile.device() == "xpu:1" and profile.device_type() == "xpu"
     a = argparse.Namespace(device=None)
     cli._use_device(a)
@@ -132,27 +132,27 @@ def test_the_device_index_asked_for_reaches_naming_and_calibration(monkeypatch):
 
 @pytest.mark.parametrize("given", ["xpu", "xpu:1", "cuda:0", "cpu"])
 def test_the_optimize_cli_takes_a_device_with_its_index(monkeypatch, given):
-    from xe_forge import cli
+    from x_forge import cli
 
-    monkeypatch.setattr(sys, "argv", ["xe-forge", "--device", given])
+    monkeypatch.setattr(sys, "argv", ["x-forge", "--device", given])
     assert cli._parse_args()[1].device == given
 
 
 @pytest.mark.parametrize("given", ["npu", "xpu:", "xpu:a", "gpu:1"])
 def test_the_optimize_cli_refuses_a_device_it_cannot_run(monkeypatch, capsys, given):
-    from xe_forge import cli
+    from x_forge import cli
 
-    monkeypatch.setattr(sys, "argv", ["xe-forge", "--device", given])
+    monkeypatch.setattr(sys, "argv", ["x-forge", "--device", given])
     with pytest.raises(SystemExit):
         cli._parse_args()
     assert "optionally :<index>" in capsys.readouterr().err
 
 
 def test_an_indexed_device_is_its_type_where_the_type_decides(monkeypatch):
-    from xe_forge.config import ConfigManager, CUDAConfig, device_index, device_kind
-    from xe_forge.core import device_query
-    from xe_forge.knowledge.loader import load_knowledge_base
-    from xe_forge.prompts import PromptLibrary, render_signature_instructions
+    from x_forge.config import ConfigManager, CUDAConfig, device_index, device_kind
+    from x_forge.core import device_query
+    from x_forge.knowledge.loader import load_knowledge_base
+    from x_forge.prompts import PromptLibrary, render_signature_instructions
 
     assert (device_kind("xpu:1"), device_index("xpu:1"), device_index("xpu", 3)) == ("xpu", 1, 3)
     monkeypatch.setenv("DEVICE_TYPE", "cuda:1")
@@ -169,12 +169,12 @@ def test_an_indexed_device_is_its_type_where_the_type_decides(monkeypatch):
         load_knowledge_base(kb, "triton", "xpu").summary()
     )
     seen = []
-    monkeypatch.setattr("xe_forge.core.xpu_query.get_xpu_config", lambda i: seen.append(i) or i)
+    monkeypatch.setattr("x_forge.core.xpu_query.get_xpu_config", lambda i: seen.append(i) or i)
     assert device_query.query_device("xpu:1") == 1 and device_query.query_device("xpu", 2) == 2
 
 
 def test_one_gpu_of_several_is_profiled_on_that_gpu(tmp_path):
-    from xe_forge.claude import generator
+    from x_forge.claude import generator
 
     assert generator._profile_device_args("xpu:1") == ["--device", "xpu:1"]
     assert generator._profile_device_args("cpu") == ["--device", "cpu"]
@@ -182,8 +182,8 @@ def test_one_gpu_of_several_is_profiled_on_that_gpu(tmp_path):
 
 
 def test_the_gpu_profilers_run_the_kernel_on_the_device_asked_for():
-    from xe_forge.core.profiler import UnitraceXPUProfiler, XPUProfiler
-    from xe_forge.skills.profile import _gpu_profilers
+    from x_forge.core.profiler import UnitraceXPUProfiler, XPUProfiler
+    from x_forge.skills.profile import _gpu_profilers
 
     args = argparse.Namespace(tool="auto", unitrace_bin="u", vtune_bin="v")
     made = _gpu_profilers(args, "ComputeBasic", "xpu:1")
@@ -198,7 +198,7 @@ def test_the_gpu_profilers_run_the_kernel_on_the_device_asked_for():
 def test_the_hardware_query_describes_the_device_asked_for(monkeypatch):
     import torch
 
-    from xe_forge.core import xpu_query
+    from x_forge.core import xpu_query
 
     monkeypatch.setattr(torch.xpu, "is_available", lambda: True)
     monkeypatch.setattr(torch.xpu, "device_count", lambda: 2)
@@ -217,7 +217,7 @@ def test_the_sycl_target_is_the_named_xpus_and_otherwise_the_current_one(monkeyp
                                                                         named):  # fmt: skip
     import torch
 
-    from xe_forge.core.sycl_executor import _detect_device_target
+    from x_forge.core.sycl_executor import _detect_device_target
 
     seen = []
     monkeypatch.setattr(torch.xpu, "is_available", lambda: True)
@@ -227,7 +227,7 @@ def test_the_sycl_target_is_the_named_xpus_and_otherwise_the_current_one(monkeyp
 
 
 def test_a_given_reference_is_never_the_locators_to_write():
-    from xe_forge.claude.generator import _render
+    from x_forge.claude.generator import _render
 
     def text(given):
         return _render("kernel-locator.md.j2", kernel_name="k", kernel_repo="/r",
@@ -239,7 +239,7 @@ def test_a_given_reference_is_never_the_locators_to_write():
 
 
 def test_a_variant_with_several_entries_is_warned_about(tmp_path, caplog):
-    from xe_forge.core.spec_loader import load_spec
+    from x_forge.core.spec_loader import load_spec
 
     spec = tmp_path / "s.yaml"
     spec.write_text(yaml.safe_dump({"bench-gpu": [{"dims": {"N": 1}}, {"dims": {"N": 2}}]}))
@@ -250,7 +250,7 @@ def test_a_variant_with_several_entries_is_warned_about(tmp_path, caplog):
 def test_the_tools_take_their_limits_and_binaries_as_flags(monkeypatch):
     import sys
 
-    from xe_forge import skills
+    from x_forge import skills
 
     monkeypatch.setenv("UNITRACE_BIN", "/opt/u/unitrace")
     seen = {}
@@ -289,7 +289,7 @@ def test_the_agents_own_reference_runner_scores_the_tokens(tmp_path, dev):
 
     (tmp_path / "ref.py").write_text(
         "import torch\n"
-        "from xe_forge.frontend.profile import Vocab\n"
+        "from x_forge.frontend.profile import Vocab\n"
         "class M(torch.nn.Module):\n"
         "    def __init__(self):\n"
         "        super().__init__()\n"
@@ -306,7 +306,7 @@ def test_the_agents_own_reference_runner_scores_the_tokens(tmp_path, dev):
     import torch
 
     m, vocab = ref.load("m", torch.float32, "cpu")
-    from xe_forge.frontend import profile
+    from x_forge.frontend import profile
 
     prompt = profile.token_ids(vocab, 1, 4)[0]
     ids, got = list(prompt), []
@@ -318,7 +318,7 @@ def test_the_agents_own_reference_runner_scores_the_tokens(tmp_path, dev):
     out = subprocess.run([sys.executable, "-c", render("patch-reference.py.j2"), "m", "1", "4", "3", "0",
                           str(tmp_path / "got.json"), "", "float32", "", "2",
                           str(tmp_path / "ref.py")],
-                         capture_output=True, text=True, env={**os.environ, "XE_FORGE_DEVICE": dev})  # fmt: skip
+                         capture_output=True, text=True, env={**os.environ, "X_FORGE_DEVICE": dev})  # fmt: skip
     assert out.returncode == 0, out.stderr[-500:]
     res = json.loads(out.stdout.strip().splitlines()[-1])
     assert res["transformers"][0].endswith("ref.py") and res["device"] == dev
@@ -328,8 +328,8 @@ def test_the_agents_own_reference_runner_scores_the_tokens(tmp_path, dev):
 @pytest.mark.parametrize("active, experts_read", [(None, 2), (16, 16)])
 def test_a_grouped_gemm_is_bounded_without_a_routing_model(active, experts_read):
     """Top-k experts are certain; more only when measured (or stated by the naming agent)."""
-    from xe_forge.frontend import analyze
-    from xe_forge.frontend.ir import Naming, Workload
+    from x_forge.frontend import analyze
+    from x_forge.frontend.ir import Naming, Workload
 
     n = k = 1024
     attrs = {"parts": [{"N": n, "K": k, "E": 64, "grouped": True, "rows": "token",
@@ -351,8 +351,8 @@ def test_a_grouped_gemm_is_bounded_without_a_routing_model(active, experts_read)
                                                    (1.10, "PERFORMANCE REGRESSION", True),
                                                    (0.80, "SUCCESS", False)])  # fmt: skip
 def test_a_difference_inside_the_noise_band_is_no_regression(monkeypatch, opt_ms, says, slower):
-    from xe_forge.core.executor import KernelBenchExecutor
-    from xe_forge.models import ExecutionResult
+    from x_forge.core.executor import KernelBenchExecutor
+    from x_forge.models import ExecutionResult
 
     ex = KernelBenchExecutor(device="xpu", min_effect=0.02)  # timed one arm after the other
     times = iter([1.0, opt_ms])
@@ -367,9 +367,9 @@ def test_a_difference_inside_the_noise_band_is_no_regression(monkeypatch, opt_ms
 @pytest.mark.parametrize("original_ms, slower, inside", [(0.98, True, False), (1.02, False, False),
                                                        (0.99, False, True)])  # fmt: skip
 def test_the_noise_band_edges_are_changes(monkeypatch, original_ms, slower, inside):
-    from xe_forge.core.executor import KernelBenchExecutor
-    from xe_forge.core.sycl_executor import SyclExecutor
-    from xe_forge.models import ExecutionResult
+    from x_forge.core.executor import KernelBenchExecutor
+    from x_forge.core.sycl_executor import SyclExecutor
+    from x_forge.models import ExecutionResult
 
     ex = KernelBenchExecutor(device="xpu", min_effect=0.02)  # timed one arm after the other
     times = iter([original_ms, 1.0])
@@ -391,8 +391,8 @@ def test_the_noise_band_edges_are_changes(monkeypatch, original_ms, slower, insi
 
 @pytest.mark.parametrize("band", ["0", "-0.01", "nan", "inf"])
 def test_a_noise_band_that_is_not_finite_and_positive_is_refused(monkeypatch, band):
-    from xe_forge.config import noise_band
-    from xe_forge.core.executor import KernelBenchExecutor
+    from x_forge.config import noise_band
+    from x_forge.core.executor import KernelBenchExecutor
 
     monkeypatch.setenv("BENCHMARK_MIN_EFFECT", band)
     with pytest.raises(ValueError, match="finite and above 0"):
@@ -405,9 +405,9 @@ def test_a_noise_band_that_is_not_finite_and_positive_is_refused(monkeypatch, ba
 def test_a_bad_noise_band_is_refused_before_anything_is_timed(monkeypatch, capsys, band, says):
     import argparse
 
-    from xe_forge.core.sycl_executor import SyclExecutor
-    from xe_forge.frontend import cli
-    from xe_forge.skills import benchmark
+    from x_forge.core.sycl_executor import SyclExecutor
+    from x_forge.frontend import cli
+    from x_forge.skills import benchmark
 
     monkeypatch.setenv("BENCHMARK_MIN_EFFECT", band)
     assert cli.main(["run", "launcher.sh"]) == 2
@@ -424,21 +424,21 @@ def test_a_bad_noise_band_is_refused_before_anything_is_timed(monkeypatch, capsy
 def test_the_profile_tool_and_the_dspy_cli_refuse_a_bad_noise_band(monkeypatch, capsys):
     import sys
 
-    from xe_forge import cli, skills
+    from x_forge import cli, skills
 
     monkeypatch.setenv("BENCHMARK_MIN_EFFECT", "0")
-    monkeypatch.setattr(sys, "argv", ["xe-forge-skill", "profile", "kernel.py"])
+    monkeypatch.setattr(sys, "argv", ["x-forge-skill", "profile", "kernel.py"])
     assert skills.main() == 2
-    monkeypatch.setattr(sys, "argv", ["xe-forge"])
+    monkeypatch.setattr(sys, "argv", ["x-forge"])
     monkeypatch.setattr(cli, "_parse_args", lambda: (None, argparse.Namespace()))
     assert cli.main() == 2
     assert capsys.readouterr().err.count("finite and above 0") == 2
 
 
 def test_the_builtin_skill_prints_no_ratio_inside_the_noise_band(tmp_path, monkeypatch, capsys):
-    from xe_forge.core.executor import KernelBenchExecutor
-    from xe_forge.models import ExecutionResult
-    from xe_forge.skills import benchmark
+    from x_forge.core.executor import KernelBenchExecutor
+    from x_forge.models import ExecutionResult
+    from x_forge.skills import benchmark
 
     spec = tmp_path / "s.yaml"
     spec.write_text(yaml.safe_dump({"weights": {"dec": 0.5, "pre": 0.5},
@@ -476,7 +476,7 @@ def test_the_reference_refuses_the_host_when_a_gpu_run_asked_for_one(tmp_path):
     import sys
 
     (tmp_path / "got.json").write_text("[[1]]")
-    env = {k: v for k, v in os.environ.items() if k != "XE_FORGE_DEVICE"}
+    env = {k: v for k, v in os.environ.items() if k != "X_FORGE_DEVICE"}
     out = subprocess.run([sys.executable, "-c", render("patch-reference.py.j2"), "m", "1", "4", "1", "0",
                           str(tmp_path / "got.json"), "", "float32", "", "1"],
                          capture_output=True, text=True, env=env)  # fmt: skip
@@ -498,7 +498,7 @@ def test_a_framework_interpreter_renders_the_build_check_without_the_pipeline(tm
         "    def find_spec(self, name, *a):\n"
         "        if name.split('.')[0] == 'ai_bench': raise ImportError(name)\n"
         "sys.meta_path.insert(0, Block())\n"
-        "from xe_forge.frontend import inmodel\n"
+        "from x_forge.frontend import inmodel\n"
         "t = Path(sys.argv[1])\n"
         "facts = {'patch': t, 'meta': {'build': 'build.sh', 'package': 'json'}}\n"
         "print(inmodel._build(facts, t, t / 'venv', t / 'build.log'))\n"
@@ -509,3 +509,22 @@ def test_a_framework_interpreter_renders_the_build_check_without_the_pipeline(tm
                          env=env)  # fmt: skip
     assert out.returncode == 0, out.stderr
     assert "cannot import" not in out.stdout
+
+
+def test_a_clone_with_its_base_under_the_old_ref_is_refused_not_ported_empty(tmp_path):
+    import subprocess
+
+    from x_forge.skills import upstream
+
+    def git(*a):
+        return subprocess.run(["git", "-C", str(tmp_path), *a], check=True,
+                              capture_output=True, text=True).stdout.strip()  # fmt: skip
+
+    git("init", "-q")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base")
+    git("update-ref", upstream.OLD_BASE_REF, "HEAD")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "port")
+    with pytest.raises(SystemExit, match=f"update-ref {upstream.BASE_REF} {upstream.OLD_BASE_REF}"):
+        upstream._base(tmp_path)
+    git("update-ref", upstream.BASE_REF, upstream.OLD_BASE_REF)
+    assert upstream._base(tmp_path) == git("rev-parse", "HEAD~1")

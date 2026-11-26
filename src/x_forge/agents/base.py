@@ -1,0 +1,26 @@
+from abc import ABC, abstractmethod
+
+from x_forge import OptimizationStage
+from x_forge.models import KernelAnalysis, StageResult
+
+
+class Optimizer(ABC):
+    @abstractmethod
+    def optimize_stage(
+        self,
+        code: str,
+        stage: OptimizationStage,
+        analysis: KernelAnalysis,
+        xpu_config: dict,
+        kernel_name: str | None = None,
+        input_shapes: list[tuple[int, ...]] | None = None,
+        spec_dims: dict[str, int] | None = None,
+        flop: float | None = None,
+        dtype=None,
+        pytorch_code: str = "",
+        init_args: list | None = None,
+        vtune_report: str = "",
+        perf_context: dict | None = None,
+    ) -> StageResult:
+        """Apply optimization stage to kernel code."""
+        ...

@@ -1,11 +1,14 @@
 <p align="center">
-  <img src="assets/xe-forge-logo.png" alt="Xe Forge" width="1000"/>
+  <img src="assets/x-forge-logo.png" alt="X-Forge" width="1000"/>
 </p>
 
-# Xe Forge
+# X-Forge
 
-Agentic kernel optimization for GPUs. Point Xe-Forge at a model in the framework that serves
-it, or at a single kernel: LLM agents profile it, find where the time goes, and rewrite the
+Formerly Xe-Forge.
+
+Agentic inference optimization for GPUs and CPUs. Point X-Forge at a model in the framework
+that serves it, at a single kernel, or at a model to write a native inference engine for: LLM
+agents profile it, find where the time goes, and rewrite the
 kernels and library calls behind it, and every change is verified and measured before it
 becomes a patch for the upstream project.
 
@@ -15,13 +18,13 @@ In active development: interfaces change without notice, and it is not meant for
 
 ## What it does
 
-- **`xe-forge`** takes one kernel and returns an optimized kernel, or a patch to the
+- **`x-forge`** takes one kernel and returns an optimized kernel, or a patch to the
   repository the kernel lives in.
-- **`xe-forge run`** takes a model in the framework that serves it and returns a patch per
+- **`x-forge run`** takes a model in the framework that serves it and returns a patch per
   kernel worth optimizing, and a summary of every kernel the model ran.
 
 <p align="center">
-  <img src="assets/how-it-works.svg" alt="How Xe-Forge works: the xe-forge run steps above, the per-kernel trial loop below; agents in blue, code checks in green" width="900"/>
+  <img src="assets/how-it-works.svg" alt="How X-Forge works: the x-forge run steps above, the per-kernel trial loop below; agents in blue, code checks in green" width="900"/>
 </p>
 
 Blue steps are agents and green steps are code: agents do the framework-, model- and
@@ -39,11 +42,11 @@ cp .env.example .env         # the LLM endpoint and engine
 
 ```sh
 # One kernel
-xe-forge -i examples/gemm/14_Gemm_Divide_Sum_Scaling.py \
+x-forge -i examples/gemm/14_Gemm_Divide_Sum_Scaling.py \
          -s examples/gemm/14_Gemm_Divide_Sum_Scaling.yaml -o optimized.py
 
 # A model in its framework
-xe-forge run --framework <name> --model <hub id or path> \
+x-forge run --framework <name> --model <hub id or path> \
     --batch 4 --input-len 512 --output-len 32 --kernel-repos <repos> -o runs/<name>
 ```
 
@@ -75,7 +78,7 @@ Agents do the framework-, model- and hardware-specific work; code measures and c
 4. **name**: an agent finds each op's kernel source, or the library call that runs it.
 5. **analyze**: code bounds each kernel and ranks them by recoverable device time.
 6. **inputs**: an agent chooses the shapes each kernel is timed at, and their weights.
-7. **optimize**: Xe-Forge works on each chosen kernel, and on the call that launches it.
+7. **optimize**: X-Forge works on each chosen kernel, and on the call that launches it.
 8. **fuse** (`--fuse`): chains of ops one kernel could replace.
 9. **prove** (`--prove`): the patches measured together in the model.
 
@@ -85,14 +88,14 @@ See [docs/FRAMEWORK.md](docs/FRAMEWORK.md) and the [per-framework pages](docs/fr
 
 ## Tools
 
-`xe-forge-skill` holds the tools the agents call, each usable on its own:
+`x-forge-skill` holds the tools the agents call, each usable on its own:
 `analyze`, `validate`, `benchmark`, `trial`, `profile`, `upstream`, `capture`, `patch`,
 `bound`, `inputs`, `fuse`. See [docs/REFERENCE.md](docs/REFERENCE.md).
 
 ## What it works with
 
 <p align="center">
-  <img src="assets/support.svg" alt="Frameworks, engines, kernel languages, measurement and devices Xe-Forge works with; Intel GPU works, NVIDIA GPU for kernels only, CPU works, NPU planned" width="900"/>
+  <img src="assets/support.svg" alt="Frameworks, engines, kernel languages, measurement and devices X-Forge works with; Intel GPU works, NVIDIA GPU for kernels only, CPU works, NPU planned" width="900"/>
 </p>
 
 The per-framework pages are in [docs/frameworks/](docs/frameworks/README.md).
@@ -102,7 +105,7 @@ The per-framework pages are in [docs/frameworks/](docs/frameworks/README.md).
 - Python 3.11 or newer.
 - A GPU with its driver and the matching PyTorch build.
 - An LLM endpoint (`dspy`, `dspy-agent`), or the `claude` or `codex` CLI (those engines).
-- For `xe-forge run`: the `claude` or `codex` CLI, unitrace, and for counters the metrics library
+- For `x-forge run`: the `claude` or `codex` CLI, unitrace, and for counters the metrics library
   ([docs/PROFILING.md](docs/PROFILING.md)).
 
 ## Documentation
@@ -110,7 +113,7 @@ The per-framework pages are in [docs/frameworks/](docs/frameworks/README.md).
 | Page | For |
 |---|---|
 | [KERNEL.md](docs/KERNEL.md) | optimizing one kernel: inputs, spec, engines, correctness, port-back |
-| [FRAMEWORK.md](docs/FRAMEWORK.md) | `xe-forge run`: steps, workloads, the launcher contract, resuming |
+| [FRAMEWORK.md](docs/FRAMEWORK.md) | `x-forge run`: steps, workloads, the launcher contract, resuming |
 | [frameworks/](docs/frameworks/README.md) | the command and notes for each framework |
 | [REFERENCE.md](docs/REFERENCE.md) | every flag and environment variable |
 | [PROFILING.md](docs/PROFILING.md) | unitrace, counters, VTune |

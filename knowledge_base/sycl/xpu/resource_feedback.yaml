@@ -55,7 +55,7 @@ patterns:
     name: Compare a candidate with a retained parent profile
     applies_to: [sycl, xpu, unitrace, trial_search]
     description: |
-      Use xe-forge-skill profile <trial> --spec <spec> --tool unitrace
+      Use x-forge-skill profile <trial> --spec <spec> --tool unitrace
       --parent-profile <parent-artifact-directory>. Keep variant, device and
       collection settings matched. Automatic deltas require the same kernel name
       and one property record per profile. Renamed kernels or changed hot spots
@@ -81,7 +81,7 @@ patterns:
       Workgroup dimensions, exact GRF counts, and dynamic spill/fill traffic are
       unknown unless independently captured; unitrace's property table does not
       provide all of them. No assembly extraction is implied by a resource report.
-      With --assembly, Xe-Forge requests IGC shader dumps in the retained assembly
+      With --assembly, X-Forge requests IGC shader dumps in the retained assembly
       directory, disables persistent JIT caches for collection, and writes a hashed
       assembly_manifest.json. Inspect its captured/unavailable status; a request
       does not guarantee the installed compiler/runtime emitted assembly.

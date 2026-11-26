@@ -95,7 +95,7 @@ def _env(model: dict, steps: int) -> dict:
     env.update(model["env"])
     # Both arms: a <steps>-step schedule run to completion, matching each capture's 20 steps.
     env["GEN_SCHEDULE_STEPS"] = str(steps)
-    env["XE_FORGE_CHECK_STEPS"] = str(steps)
+    env["X_FORGE_CHECK_STEPS"] = str(steps)
     return env
 
 
