@@ -1,0 +1,7 @@
+Reading code and logs: everything a command prints stays in this session and is read again on
+every later step, so print what the question at hand needs. Locate first (`grep -n`, `rg`,
+`git grep`), then read the lines that matter: Read with an offset and a limit, or a narrow
+`sed -n` range. Read a whole file, diff or log only when these instructions ask for it, or
+when the part you need is most of it. A `session.log`, this session's or another step's, is a
+machine transcript: never read it. Read X-Forge's own source only where these instructions or
+a tool's output point you to it; its commands describe themselves in `--help`.

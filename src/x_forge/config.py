@@ -51,6 +51,9 @@ class LLMConfig:
     """LLM configuration"""
 
     model: str = "openai/gpt-4o"
+    # The model of the agents that do mechanical work (running a tool, finding code); None:
+    # the main model. Named as the provider names it, like ``model``.
+    fast_model: str | None = None
     temperature: float = 0.1
     max_tokens: int = 8192
     api_base: str | None = None
@@ -299,6 +302,7 @@ class ConfigManager:
         # LLM Configuration
         llm = LLMConfig(
             model=self._get_env("LLM_MODEL", "openai/gpt-4o"),
+            fast_model=self._get_env("LLM_FAST_MODEL") or None,
             temperature=self._get_env("LLM_TEMPERATURE", 0.1, float),  # GPT need 1.0
             max_tokens=self._get_env("LLM_MAX_TOKENS", 8192, int),  # 16k for gpt
             api_base=self._get_env("OPENAI_API_BASE"),

@@ -9,3 +9,10 @@ with the ANTHROPIC_* and OPENAI_* variables unset, so no log carries them, and n
 the environment or any credential. Long builds and exports are expected: this session ends
 when you stop and anything still running is killed, so wait for all of it, and stop only
 once {{ answer }} is written.
+
+{% include "read-rules.md.j2" %}
+To find where something lives in a codebase you have not read (the framework's or the
+model's: the closest existing implementation, where one is registered, the docs and tests a
+change touches), ask the code-explorer agent first, then start from the ranges it names and
+read further where the task needs it. Where you cannot dispatch an agent, do that search
+yourself, by the rules above.
