@@ -169,7 +169,10 @@ the tree. `trial finalize --require-measured` keeps only results the tool record
 - **Baseline against captured time.** For every shape run, weighted or one `--variant`,
   when `captured_us` names it and the baseline runs there more than `X_FORGE_BASELINE_SLACK` times
   slower than the captured time, `benchmark` fails with
-  `VERDICT: BASELINE_NOT_CAPTURED_KERNEL` and prints both times. The baseline is then not
+  `VERDICT: BASELINE_NOT_CAPTURED_KERNEL` and prints both times. The capture timed the
+  kernel alone, while the built-in timer's time also holds the timer's own cost: `benchmark`
+  measures that cost (`Timer floor:`, what the timer reports for a call that runs nothing)
+  and takes it off the baseline before comparing. The baseline is then not
   the kernel the model ran, and every trial would be scored against the wrong thing; make
   the baseline run that kernel, through the library's own call where part of it cannot be
   built from source.

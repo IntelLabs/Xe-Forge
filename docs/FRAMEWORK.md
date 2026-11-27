@@ -67,7 +67,7 @@ a kernel is ranked by its whole share of device time.
 **Optimize.** `benchmark` times every weighted shape of the spec: every shape must be correct,
 none slower, and the score is the time-weighted total. The spec records each shape's time per
 call in the model (`captured_us`). A baseline more than `X_FORGE_BASELINE_SLACK` times
-slower than that is refused: it is not the kernel the model ran, and a gain over it is
+slower than that, once the timer's own cost (`Timer floor:`) is taken off, is refused: it is not the kernel the model ran, and a gain over it is
 not one over that kernel.
 
 **Prove.** When the patches together fail in the model, each is proved alone; one that fails

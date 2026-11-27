@@ -198,6 +198,46 @@ def test_a_baseline_far_slower_than_the_captured_kernel_is_refused(tmp_path, cap
         assert code == 0 and out["correctness"] == "pass" and "verdict" not in out
 
 
+def test_the_timers_own_cost_is_taken_off_the_baseline_before_the_gate(tmp_path, capsys,
+                                                                       monkeypatch):  # fmt: skip
+    """A 2 us kernel the timer reads as 9 us, 7 of them the timer's: the kernel the model ran."""
+    monkeypatch.setitem(SPEC, "captured_us", {"dec": 2.0, "pre": 100.0})
+
+    def with_floor(floor):
+        inner = _shape({"dec": (True, 9.0, 8.0, None), "pre": (True, 100, 50, None)})
+
+        def single(args):
+            code = inner(args)
+            print(f"Timer floor: {floor:.2f} us (what this timer reports for a call that "
+                  "runs nothing; part of every time above)")  # fmt: skip
+            return code
+
+        return single
+
+    for floor, refused in ((7.0, False), (0.5, True)):
+        args = _args(tmp_path)
+        code = benchmark._weighted(args, lambda f=floor, a=args: with_floor(f)(a))
+        text = capsys.readouterr().out
+        out = benchmark.parse_outcome(text)
+        if refused:  # 8.5 us of kernel against 2 us captured: not that kernel
+            assert out["verdict"] == "BASELINE_NOT_CAPTURED_KERNEL"
+            assert "without the timer's own 0.50 us" in text and "4.2x slower" in text
+        else:
+            assert code == 0 and out["correctness"] == "pass" and "verdict" not in out
+
+
+def test_the_timer_floor_is_what_it_reports_for_a_call_that_runs_nothing():
+    from x_forge.core.executor import KernelBenchExecutor
+
+    ex = KernelBenchExecutor(device="cpu", benchmark_iters=5)
+    floor = ex.timer_floor_us()
+    assert floor is not None and 0 <= floor < 1000 and ex.timer_floor_us() == floor
+    assert KernelBenchExecutor(device="meta").timer_floor_us() is None
+    text = "Correctness: PASSED\nPerformance: baseline_us=9.00, kernel_us=8.00, speedup=1.12x\n"
+    assert "timer_floor_us" not in benchmark.parse_outcome(text)
+    assert benchmark.parse_outcome(text + "Timer floor: 7.25 us (x)\n")["timer_floor_us"] == 7.25
+
+
 def test_one_variant_asked_for_is_one_shape(tmp_path, capsys):
     args = _args(tmp_path)
     args.variant = "pre"
@@ -395,3 +435,21 @@ def test_a_host_verdict_beside_its_ratio_still_counts(tmp_path, capsys, factor, 
     assert out["speedup"] == pytest.approx(speedup)
     # what the host measured, weighted: 0.75 x dec + 0.25 x pre
     assert out["triton_us"] == pytest.approx((0.75 * 10 + 0.25 * 100) * factor)
+
+
+def test_the_floor_is_measured_only_for_a_shape_held_to_a_captured_time(tmp_path, capsys,
+                                                                         monkeypatch):  # fmt: skip
+    from types import SimpleNamespace
+
+    calls = []
+    ex = SimpleNamespace(timer_floor_us=lambda: calls.append(1) or 7.0)
+    monkeypatch.setitem(SPEC, "captured_us", {"dec": 2.0})
+    args = _args(tmp_path)
+    for variant, measured in (("dec", True), ("pre", False)):
+        args.variant = variant
+        benchmark._say_floor(ex, args)
+        assert ("Timer floor: 7.00 us" in capsys.readouterr().out) is measured
+    assert len(calls) == 1
+    args.spec = None
+    benchmark._say_floor(ex, args)
+    assert len(calls) == 1

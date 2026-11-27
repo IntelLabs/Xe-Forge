@@ -372,7 +372,7 @@ Bedrock credentials (`AWS_BEARER_TOKEN_BEDROCK`, or `AWS_ACCESS_KEY_ID` +
 | `MAX_TRIALS` | 10 | `--max-trials` | `x-forge` |
 | `BENCHMARK_MIN_EFFECT` | 0.02 | Relative difference below which two timings count as equal; a finite number above 0 | `x-forge`, `benchmark` |
 | `X_FORGE_BUILTIN_BENCHMARK` | off | `1`/`true`/`yes`/`on` = `benchmark --builtin-benchmark` | `benchmark` |
-| `X_FORGE_BASELINE_SLACK` | 1.5 | How much slower than the captured kernel a baseline may run before it is not that kernel | `benchmark` |
+| `X_FORGE_BASELINE_SLACK` | 1.5 | How much slower than the captured kernel a baseline may run before it is not that kernel, once the timer's own cost (`Timer floor:`) is taken off | `benchmark` |
 | `X_FORGE_KERNEL_WARMUP` | the executor's (200) | Warm-up calls per arm of a trial's kernel timed on its own; on a GPU never fewer than 100 | `inmodel` |
 | `X_FORGE_KERNEL_ITERS` | the executor's (200) | Timed calls per arm, split over the rounds | `inmodel` |
 | `X_FORGE_KERNEL_ROUNDS` | the executor's (10) | Alternating rounds per slot order | `inmodel` |
