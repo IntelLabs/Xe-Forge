@@ -99,3 +99,25 @@ def test_codex_is_told_its_agents_before_the_prompt_and_before_resume(tmp_path, 
     assert resume.index(extra[1]) < resume.index("resume")
     assert codex.agent_args(tmp_path / "nowhere") == []
     assert agent_cli.BACKENDS["claude"].agent_args(tmp_path) == []
+
+
+def test_a_session_gets_the_tools_its_profile_allows_and_no_others(monkeypatch):
+    claude = agent_cli.BACKENDS["claude"]
+    monkeypatch.setattr(claude, "path", lambda: "claude")
+
+    def tools(argv):
+        return argv[argv.index("--tools") + 1].split(",")
+
+    frontend = claude.start("p", 5, None, (), agent_cli.SESSION)
+    kernel = claude.start("/optimize-kernel k", 5, None, (), agent_cli.KERNEL_SESSION)
+    for argv in (frontend, kernel):
+        assert {"Bash", "Read", "Edit", "Write", "Task", "Monitor", "TaskStop"} <= set(tools(argv))
+        assert "--strict-mcp-config" in argv
+    assert "--disable-slash-commands" in frontend and "Skill" not in tools(frontend)
+    assert "--disable-slash-commands" not in kernel and "Skill" in tools(kernel)
+    assert "--tools" not in claude.start("p", 5)  # no profile: the CLI's own set, as before
+    resumed = claude.resume("sid", "go on", 5, None, (), agent_cli.SESSION)
+    assert tools(resumed) == tools(frontend)
+    codex = agent_cli.BACKENDS["codex"]
+    monkeypatch.setattr(codex, "path", lambda: "codex")
+    assert codex.start("p", 5, None, (), agent_cli.SESSION)[-1] == "p"

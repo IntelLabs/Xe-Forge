@@ -36,7 +36,7 @@ def run(template: str, context: dict, cwd: Path, answer: str, python: str, max_t
     )
     (cwd / "prompt.md").write_text(prompt)
     log_path, deadline = cwd / "session.log", time.monotonic() + TIMEOUT
-    cmd = backend.start(prompt, max_turns, config, extra)
+    cmd = backend.start(prompt, max_turns, config, extra, agents.SESSION)
     groups: list[int] = []  # every session's process group, for the work it detached
     try:
         for _ in range(1 + RESUMES):
@@ -64,7 +64,7 @@ def run(template: str, context: dict, cwd: Path, answer: str, python: str, max_t
             if failed or not session:
                 raise RuntimeError(f"agent stopped: {why[:300]} (see {log_path})")
             resume = render("frontend-resume.md.j2", answer=answer)
-            cmd = backend.resume(session, resume, max_turns, config, extra)
+            cmd = backend.resume(session, resume, max_turns, config, extra, agents.SESSION)
     finally:
         # Detached work must outlive a resume, but not the step: left running, an export or
         # build holds the device memory the capture that follows needs.

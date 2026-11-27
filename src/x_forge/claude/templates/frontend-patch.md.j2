@@ -1,7 +1,13 @@
 {% set dev = "the host" if on_host | default(false) else "the GPU" %}{% set facts = framework_facts | default({}) or {} %}{% set generated = facts.upstream is defined and not facts.upstream %}{% set dequantized = facts.quantized_gate | default(none) == "dequantized" %}{{ framework }} cannot run {{ model }} on this machine's {% if on_host | default(false) %}CPUs{% else %}GPU{% endif %} as it is: {{ what }} -- {{ reason }}.
 Establish the patch that makes it run, correctly, before anything is measured. The framework's
 interpreter is {{ python }}.
-{% if framework_kb | default(none) %}
+{% if where | default([]) %}
+The agent that found the gap noted where a patch would start; verify each before relying on
+it, and look further where these do not cover what the patch needs:
+{% for w in where %}
+ - {{ w }}
+{% endfor %}
+{% endif %}{% if framework_kb | default(none) %}
 {{ framework }} has its own knowledge base, {{ framework_kb }}: read {{ (facts.read_first | default(["README.md"])) | join(", ") }} there first. Where
 it and the steps below differ on how this framework is built, delivered or run, it holds.
 {% endif %}{% if framework_notes | default([]) %}

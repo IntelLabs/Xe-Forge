@@ -202,7 +202,7 @@ class ClaudeEngine(BaseEngine):
         max_turns = self.config.engine.max_turns
         log_path = workspace / self.log_name
         cmd = backend.start(backend.task(workspace, kernel_name), max_turns, self.config,
-                            backend.agent_args(workspace))  # fmt: skip
+                            backend.agent_args(workspace), agents.KERNEL_SESSION)  # fmt: skip
 
         print(f"\nLaunching {backend.name} in {workspace} (max {max_turns} turns)...")
         print(f"  session log: {log_path}")

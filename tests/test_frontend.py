@@ -1569,6 +1569,35 @@ def test_run_establishes_a_patch_then_captures_on_it(tmp_path, monkeypatch):
     assert saved == list(checks[0][3:]) and saved[0] == "--repos"
 
 
+def test_the_places_capture_found_reach_the_patch_agent_as_hints(tmp_path, monkeypatch):
+    from x_forge.claude.render import render
+    from x_forge.frontend import cli
+
+    where = ["models/llama.py:40 -- closest model", "registry.py:12 -- where models register"]
+    answers = iter([{"unsupported": "model", "what": "Toy", "reason": "registry.py:1",
+                     "where": where}, {"notes": "patched"}, {"launcher": "launcher/run.sh"}])  # fmt: skip
+    contexts = {}
+
+    def agent(step, template, ctx, cwd, answer, python, turns):
+        contexts.setdefault(step, ctx)
+        if step == "patch":
+            cwd.mkdir(parents=True, exist_ok=True)
+            (cwd / "patch.json").write_text('{"python": "/patched/python"}')
+        return next(answers)
+
+    monkeypatch.setattr(cli, "_agent", agent)
+    monkeypatch.setattr(cli, "_tool", lambda py, *argv, **env: 0)
+    a = SimpleNamespace(model="m", framework="fw", workload="text", batch=1, input_len=4,
+                        output_len=2, reference_python="/ref/python")  # fmt: skip
+    cli.capture(a, "/fw/python", tmp_path, 5, tmp_path / "repos")
+    assert contexts["patch"]["where"] == where
+    assert json.loads((tmp_path / "patch-1/request.json").read_text())["where"] == where
+    ctx = {**contexts["patch"], "python": "py", "answer": "patched.json"}
+    text = render("frontend-patch.md.j2", **ctx)
+    assert all(f" - {w}" in text for w in where) and "verify each" in text
+    assert "verify each" not in render("frontend-patch.md.j2", **{**ctx, "where": []})
+
+
 @pytest.mark.parametrize("framework, gated", [("native", True), ("fw", False)])
 def test_run_gates_the_quantized_tokens_of_a_framework_that_quantizes_itself(
     tmp_path, monkeypatch, framework, gated

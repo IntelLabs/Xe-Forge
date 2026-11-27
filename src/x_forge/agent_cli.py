@@ -25,6 +25,13 @@ import shutil
 from pathlib import Path
 
 READ_ONLY = {"read": True, "write": False, "shell": False, "network": False}
+# A session's tools, by what they allow, as a one-shot call's are: ``agents`` dispatches helper
+# agents, ``background`` runs and waits on long commands, ``commands`` runs slash commands
+# (a kernel session starts with one). Whatever a backend offers beyond these stays out of the
+# session, and of the context every one of its calls reads again.
+SESSION = {"read": True, "write": True, "shell": True, "network": True, "agents": True,
+           "background": True, "commands": False}  # fmt: skip
+KERNEL_SESSION = {**SESSION, "commands": True}
 
 
 class AgentError(RuntimeError):
@@ -67,13 +74,32 @@ class Claude:
         return ["--dangerously-skip-permissions", "--max-turns", str(max_turns),
                 "--output-format", "stream-json", "--verbose"]  # fmt: skip
 
-    def start(self, prompt: str, max_turns: int, config=None, agents=()) -> list[str]:
-        return [self.path(), "-p", prompt, *self._stream(max_turns), *agents]
+    @staticmethod
+    def _tools(profile: dict) -> list[str]:
+        """Claude's tools for a profile (:data:`READ_ONLY`, :data:`SESSION`)."""
+        return ((["Read", "Glob", "Grep"] if profile.get("read") else [])
+                + (["Write", "Edit"] if profile.get("write") else [])
+                + (["Bash"] if profile.get("shell") else [])
+                + (["WebFetch", "WebSearch"] if profile.get("network") else [])
+                + (["Task", "SendMessage"] if profile.get("agents") else [])
+                + (["Monitor", "TaskStop"] if profile.get("background") else [])
+                + (["Skill"] if profile.get("commands") else []))  # fmt: skip
+
+    def _session(self, profile: dict | None) -> list[str]:
+        if profile is None:
+            return []
+        out = ["--tools", ",".join(self._tools(profile)), "--strict-mcp-config"]
+        return out + ([] if profile.get("commands") else ["--disable-slash-commands"])
+
+    def start(self, prompt: str, max_turns: int, config=None, agents=(),
+              profile: dict | None = None) -> list[str]:  # fmt: skip
+        return [self.path(), "-p", prompt, *self._stream(max_turns), *self._session(profile),
+                *agents]  # fmt: skip
 
     def resume(self, session: str, prompt: str, max_turns: int, config=None,
-               agents=()) -> list[str]:  # fmt: skip
+               agents=(), profile: dict | None = None) -> list[str]:  # fmt: skip
         return [self.path(), "--resume", session, "-p", prompt, *self._stream(max_turns),
-                *agents]  # fmt: skip
+                *self._session(profile), *agents]  # fmt: skip
 
     def interactive(self, kernel_name: str) -> str:
         """The command a person runs in the workspace to start the loop."""
@@ -108,10 +134,7 @@ class Claude:
         return ["--agents", str(path)]
 
     def oneshot(self, prompt: str, schema: Path, answer: Path, profile: dict, config=None):
-        tools = (["Read", "Glob", "Grep"] if profile.get("read") else []) + (
-            ["Write", "Edit"] if profile.get("write") else []) + (
-            ["Bash"] if profile.get("shell") else []) + (
-            ["WebFetch", "WebSearch"] if profile.get("network") else [])  # fmt: skip
+        tools = self._tools(profile)
         # --restricted confines file tools to the working directory; dontAsk refuses
         # anything not listed instead of waiting for a person.
         argv = [self.path(), "-p", prompt, "--restricted", "--strict-mcp-config",
@@ -179,12 +202,14 @@ class Codex(Claude):
             out += ["-m", bare(llm.model)]
         return out
 
-    def start(self, prompt: str, max_turns: int, config=None, agents=()) -> list[str]:
+    def start(self, prompt: str, max_turns: int, config=None, agents=(),
+              profile: dict | None = None) -> list[str]:  # fmt: skip
+        """``profile`` is not mapped: codex exec offers its own fixed tool set."""
         return [self.path(), "exec", *self._EXEC, "--dangerously-bypass-approvals-and-sandbox",
                 *self._endpoint(config), *agents, prompt]  # fmt: skip
 
     def resume(self, session: str, prompt: str, max_turns: int, config=None,
-               agents=()) -> list[str]:  # fmt: skip
+               agents=(), profile: dict | None = None) -> list[str]:  # fmt: skip
         return [self.path(), "exec", *self._EXEC, "--dangerously-bypass-approvals-and-sandbox",
                 *self._endpoint(config), *agents, "resume", session, prompt]  # fmt: skip
 

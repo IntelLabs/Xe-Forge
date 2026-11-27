@@ -508,7 +508,8 @@ def capture(
             return _tool(python, "capture", "parse", raw, "-o", out), python
         print(f"capture: {a.framework} lacks {got['unsupported']} {got.get('what')} "
               f"({got.get('reason')}); a patch first", flush=True)  # fmt: skip
-        ctx = {**context, "what": got.get("what"), "reason": got.get("reason"), "repos": repos}
+        ctx = {**context, "what": got.get("what"), "reason": got.get("reason"),
+               "where": [str(w) for w in got.get("where") or []], "repos": repos}  # fmt: skip
         # Finished before (patched.json exists only once the agent answered): checked again,
         # not redone. A patch is the agent's hours; its check is minutes.
         done = kept is not None and all(
@@ -516,7 +517,7 @@ def capture(
         )
         if not done:
             work.mkdir(parents=True, exist_ok=True)
-            request = {k: got.get(k) for k in ("unsupported", "what", "reason")}
+            request = {k: got.get(k) for k in ("unsupported", "what", "reason", "where")}
             (work / "request.json").write_text(json.dumps(
                 {**request, "python": python, "model": a.model, "workload": workload(a)},
                 indent=1) + "\n")  # fmt: skip

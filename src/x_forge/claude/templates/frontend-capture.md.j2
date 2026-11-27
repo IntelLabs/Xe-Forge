@@ -145,8 +145,12 @@ fallback backend is none), or an op the model needs fails, {% if on_host %}falls
 framework marks as unoptimized,{% else %}runs on
 the CPU,{% endif %} or is emulated in plain torch in place of a kernel (a portable Triton kernel is a
 kernel), do not work around it: write {"unsupported": "model" or "op", "what": "<the
-architecture or op>", "reason": "<file:line where the framework shows it>"} as {{ answer }}
-and stop. A patch that adds it is established first, and you are run again on it. When
+architecture or op>", "reason": "<file:line where the framework shows it>", "where": [...]}
+as {{ answer }} and stop. "where" lists, as "<path>:<line> -- <what is there>", the places you
+found that a patch adding it would start from: the closest implementation the framework
+already has, where one is registered, the docs or tests a change of this kind touches. Leave
+it empty rather than guess. A patch that adds it is established first, and you are run again
+on it. When
 what is missing is a number format -- the checkpoint's own or a declared one (compute,
 weights, KV cache): no kernel for it on this device
 in the framework or its upstream, only an emulation (a format made for another vendor's
