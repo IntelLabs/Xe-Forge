@@ -361,7 +361,8 @@ call is what is optimized. The library itself is never edited and no new kernel 
   it makes the library's own call, as the model made it, so it runs the binary the model
   ran. A re-implementation of that part is a trial, never the baseline.{% if has_spec %}
   `benchmark` refuses a baseline slower than the kernel ran in the model by more than its
-  allowance (`VERDICT: BASELINE_NOT_CAPTURED_KERNEL`, with both times).{% endif %}
+  allowance (`VERDICT: BASELINE_NOT_CAPTURED_KERNEL`, with both times), once the timer's
+  own cost (`Timer floor:`) is taken off.{% endif %}
 {%- if reference_workload and not baseline_oracle %} When the reference covers a chain of
   ops (its docstring names each), the op is all of them: copy each one's kernels, in the
   order the model calls them, and a trial may run the chain as fewer kernels.

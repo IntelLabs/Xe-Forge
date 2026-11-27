@@ -183,6 +183,7 @@ def _run_builtin(args) -> int:
             f"Performance: baseline_us={result.original_time_us:.2f}, "
             f"kernel_us={result.optimized_time_us:.2f}, speedup={ratio}"
         )
+        _say_floor(executor, args)
         if result.verdict:
             print(f"VERDICT: {result.verdict}")
         rates = []
@@ -289,6 +290,7 @@ def _run_builtin(args) -> int:
                 f"Performance: baseline_us={result.original_time_us:.2f}, "
                 f"kernel_us={result.optimized_time_us:.2f}, speedup={ratio}"
             )
+            _say_floor(executor, args)
             if result.verdict:
                 print(f"VERDICT: {result.verdict}")
         if result.feedback_message:
@@ -310,6 +312,22 @@ def _say_timer(kind: str) -> None:
         from x_forge.frontend.profile import host_placement
 
         print(f"PLACEMENT: {json.dumps(host_placement())}")
+
+
+def _say_floor(executor, args) -> None:
+    """The ``Timer floor:`` line, what this timer reports for a call that runs nothing, for
+    a shape whose captured time the baseline is held to (the gate takes it off)."""
+    from x_forge.core.spec_loader import load_spec
+
+    if not (args.spec and Path(args.spec).is_file()):
+        return
+    spec = load_spec(args.spec)
+    if not spec.captured_us.get(args.variant or spec.default_variant):
+        return
+    floor = executor.timer_floor_us()
+    if floor is not None:
+        print(f"Timer floor: {floor:.2f} us (what this timer reports for a call that runs "
+              "nothing; part of every time above)")  # fmt: skip
 
 
 def _builtin_opted_in(args) -> bool:
@@ -355,6 +373,9 @@ def parse_outcome(text: str) -> dict | None:
         match = re.search(rf"\bspeedup={_NUMBER}x", line)
         if match:
             outcome["speedup"] = float(match.group(1))
+    floor = re.search(rf"^Timer floor: {_NUMBER} us", text, re.M)
+    if floor is not None:
+        outcome["timer_floor_us"] = float(floor.group(1))
     verdict = re.search(r"^VERDICT: (\S+)\s*$", text, re.M)
     if verdict is not None and verdict.group(1) != "UNSPECIFIED":
         outcome["verdict"] = verdict.group(1)
@@ -455,16 +476,23 @@ def _weights(args) -> dict[str, float]:
 BASELINE_SLACK = float(os.environ.get("X_FORGE_BASELINE_SLACK", "1.5"))
 
 
-def _not_the_captured_kernel(args, name: str, baseline_us) -> str | None:
-    """Why the baseline measured at ``name`` is not the kernel the capture timed, or None."""
+def _not_the_captured_kernel(args, name: str, baseline_us, floor_us=None) -> str | None:
+    """Why the baseline measured at ``name`` is not the kernel the capture timed, or None.
+    The capture timed the kernel alone; the benchmark's time also holds its timer's own
+    cost (``floor_us``, its ``Timer floor:``), which is taken off before they are compared."""
     from x_forge.core.spec_loader import load_spec
 
     captured = load_spec(args.spec).captured_us.get(name)
-    if not captured or baseline_us is None or baseline_us <= BASELINE_SLACK * captured:
+    if not captured or baseline_us is None:
         return None
-    return (f"the baseline ran {baseline_us:.2f} us at {name}; the kernel it copies ran "
+    floor = floor_us or 0.0
+    kernel_us = max(baseline_us - floor, 0.0)
+    if kernel_us <= BASELINE_SLACK * captured:
+        return None
+    timer = f", {kernel_us:.2f} us without the timer's own {floor:.2f} us" if floor else ""
+    return (f"the baseline ran {baseline_us:.2f} us at {name}{timer}; the kernel it copies ran "
             f"{captured:.2f} us per call there in the model (captured_us), "
-            f"{baseline_us / captured:.1f}x slower, over the {BASELINE_SLACK}x allowed. A trial "
+            f"{kernel_us / captured:.1f}x slower, over the {BASELINE_SLACK}x allowed. A trial "
             "would be scored against this copy, not the kernel: make the baseline run the "
             "kernel the model ran -- where part of it cannot be built from source, through "
             "the library's own call")  # fmt: skip
@@ -484,7 +512,7 @@ def _one_shape(args, single) -> int:
         code = single()
     out = parse_outcome(buf.getvalue()) or {}
     why = out.get("correctness") == "pass" and _not_the_captured_kernel(
-        args, name, out.get("baseline_us"))  # fmt: skip
+        args, name, out.get("baseline_us"), out.get("timer_floor_us"))  # fmt: skip
     if why:
         print(f"Correctness: FAILED\nVERDICT: BASELINE_NOT_CAPTURED_KERNEL\nError: {why}")
         return 1
@@ -523,7 +551,8 @@ def _weighted(args, single) -> int:
             if out["correctness"] != "pass":
                 print(f"Variant: {name}\n{text.rstrip()}")
                 return code or 1
-            why = _not_the_captured_kernel(args, name, out.get("baseline_us"))
+            why = _not_the_captured_kernel(args, name, out.get("baseline_us"),
+                                           out.get("timer_floor_us"))  # fmt: skip
             if why:
                 print(f"Correctness: FAILED\nVERDICT: BASELINE_NOT_CAPTURED_KERNEL\nError: {why}")
                 return 1

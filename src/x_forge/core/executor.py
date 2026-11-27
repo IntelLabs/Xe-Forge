@@ -29,6 +29,20 @@ from x_forge.models import ExecutionResult
 logger = logging.getLogger(__name__)
 
 
+class _Nothing:
+    """A prepared call with nothing to restore and nothing to run: what the timer measures
+    of itself."""
+
+    def reset(self) -> None:
+        pass
+
+    def forward(self, *args) -> None:
+        pass
+
+
+_NOTHING = _Nothing()
+
+
 def _has_callable_attr(obj, attr_name):
     """Check if object has a callable attribute with the given name."""
     return hasattr(obj, attr_name) and callable(getattr(obj, attr_name))
@@ -167,6 +181,20 @@ class KernelBenchExecutor:
         if len(times) >= 10:
             times = times[1:-1]
         return sum(times) / len(times)
+
+    def timer_floor_us(self) -> float | None:
+        """What :meth:`time_forward` reports for a call that runs nothing: the timer's own
+        cost per sample, in microseconds (the median of as many samples as a timing takes).
+        A call measured near it is measured mostly as the timer; None where
+        :meth:`time_forward` falls back to :meth:`time`."""
+        if torch.device(self.device).type not in ("xpu", "cuda", "cpu"):
+            return None
+        if getattr(self, "_floor_us", None) is None:
+            from statistics import median
+
+            samples = self._forward_samples(_NOTHING, (), self.benchmark_iters)
+            self._floor_us = median(samples)
+        return self._floor_us
 
     def _forward_samples(self, call, args: tuple, iters: int) -> list[float]:
         """*iters* device timings of ``call.forward`` in microseconds.
